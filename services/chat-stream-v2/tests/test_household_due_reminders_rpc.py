@@ -65,6 +65,9 @@ def test_exact_cli_auth_publication_replay_rebind_and_blocker(tmp_path, monkeypa
                 "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": seats[first]["session_generation"],
             }))
             await composite.load_binding(); await composite.ensure_projection()
+            await store.admit_assistant_composite_input(stream_id=chat, input_identity='fixture-request',
+                input_request_id='fixture-request', body='Set up reminders', attachments=[],
+                reply_to_message_id=None, reply_to_question_id=None, actor_stream_id='operator:fixture')
             # Seed the existing named binding as production already does after handoff.
             def seed_binding(db):
                 db.execute("INSERT INTO v2_assistant_direct_binding VALUES(?,?,?,?,?)",
@@ -88,7 +91,8 @@ def test_exact_cli_auth_publication_replay_rebind_and_blocker(tmp_path, monkeypa
             cli.write_text("from agent_orch.cli import main\nraise SystemExit(main())\n")
             config = {"agent_orch": [sys.executable, str(cli)], "ws_url": f"ws://127.0.0.1:{port}",
                       "host_id": host, "seat_cwd": str(tmp_path), "composite_stream_id": chat,
-                      "sessions_db": str(tmp_path / "sessions.db"), "binding_name": "assistant"}
+                      "sessions_db": str(tmp_path / "sessions.db"), "binding_name": "assistant",
+                      "operator_request_ref": "message:fixture-request"}
             wrapper = tool.Publisher(config)
             wrapper.base_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "agent-orch") + ":" + str(Path(__file__).resolve().parents[2])
             key = "household-due:2026-11-12"; text = "Due today · Thu, Nov 12\n• Synthetic filter"
@@ -111,6 +115,7 @@ def test_exact_cli_auth_publication_replay_rebind_and_blocker(tmp_path, monkeypa
             assert rebind_replay["duplicate"] and rebind_replay["event_id"] == first_reply["event_id"]
             events = [event for event in await store.fetch_session_event_tail(chat, limit=50) if event["kind"] == "ASSIST_TEXT"]
             assert len(events) == 1 and events[0]["text"] == text
+            assert events[0]['note_type'] == 'reminder' and events[0]['ref'] == 'message:fixture-request'
             assert len(pushed) == 1
             receipt = await asyncio.to_thread(wrapper.tell, "household-due:blocker:fixture", "BLOCKER Synthetic Cosmo failure")
             assert receipt["type"] == "tell.ok" and len(sink.calls) == 1

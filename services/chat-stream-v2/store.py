@@ -1604,6 +1604,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # carries its own mirror; empty keeps every non-direct
         # deployment unchanged.  Tuple: (composite_stream_id, source_stream_id,
         # source_generation, enabled_default, name).
+        self._assistant_strict_publication: dict[str, bool] = {}
         self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
         self._init_routing_integrity_state()
 
@@ -1865,6 +1866,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_event "
+                         "ON v2_assistant_composite_publications(event_id)")
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
             conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)
@@ -2176,10 +2179,14 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     async def configure_assistant_mirror(
         self, *, composite_stream_id: str, source_stream_id: str,
         source_generation: str, enabled_default: bool, name: str | None = None,
+        strict_publication_default: bool | None = None,
     ) -> None:
         name = name or primary_assistant_name()
         """Install one named assistant's trusted direct-primary mirror binding."""
         def _op(_conn: sqlite3.Connection) -> None:
+            self._assistant_strict_publication[composite_stream_id] = (
+                name == primary_assistant_name() if strict_publication_default is None else strict_publication_default
+            )
             self._assistant_mirror_binding[composite_stream_id] = (
                 composite_stream_id, source_stream_id, source_generation, enabled_default, name,
             )
@@ -2191,6 +2198,23 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # (daff) get their own per-name override key.
         return ("assistant.mirror.enabled" if name == primary_assistant_name()
                 else f"assistant.mirror.{name}.enabled")
+
+    def _strict_publication_state_conn(self, conn, composite_stream_id):
+        binding = self._assistant_mirror_binding.get(composite_stream_id)
+        if binding is None:
+            return {"enabled": False, "source": "unbound"}
+        name = binding[4]
+        key = ("assistant.strict_publication.enabled" if name == primary_assistant_name()
+               else f"assistant.strict_publication.{name}.enabled")
+        override = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+        if override is None:
+            return {"enabled": self._assistant_strict_publication[composite_stream_id], "source": "env"}
+        normalized = str(override[0]).strip().lower()
+        return {"enabled": normalized in {"1", "true", "on"},
+                "source": "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"}
+
+    async def strict_publication_state(self, composite_stream_id):
+        return await self.submit(lambda conn: self._strict_publication_state_conn(conn, composite_stream_id))
 
     def _effective_mirror_source_conn(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str] | None,
@@ -2437,6 +2461,94 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return key
         return None
 
+    @staticmethod
+    def _assistant_turn_boundary_conn(conn, source_stream_id, created_at, event_id, transcript, record):
+        """Fence unclassified prior assistant rows and exclude this provider record."""
+        return conn.execute(
+            "SELECT event_id FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id<? AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
+            "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
+            "AND NOT ((COALESCE(json_extract(event_json,'$.raw.transport'),'')='claude-jsonl' "
+            "AND COALESCE(json_extract(event_json,'$.raw.stop_reason'),'')='tool_use') "
+            "OR (COALESCE(json_extract(event_json,'$.raw.transport'),'')='codex-rollout' "
+            "AND COALESCE(json_extract(event_json,'$.raw.phase'),'')='commentary')) "
+            "ORDER BY event_id DESC LIMIT 1",
+            (source_stream_id, created_at, event_id, transcript, record)).fetchone()
+
+    def _notice_unanswered_turn_conn(self, conn, composite_stream_id, source_stream_id,
+                                     generation, event, event_id):
+        """Persist a missing-reply notice atomically with the structured turn end."""
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        transcript, record = raw.get("source_session_identity"), raw.get("jsonl_record_uuid")
+        if (event.get("kind") != "ASSIST_TEXT" or raw.get("is_sidechain")
+                or not isinstance(transcript, str) or not transcript
+                or not isinstance(record, str) or not record
+                or not (raw.get("transport") == "claude-jsonl" and raw.get("stop_reason") == "end_turn"
+                        or raw.get("transport") == "codex-rollout" and raw.get("phase") == "final_answer")):
+            return
+        host, _, name = source_stream_id.partition(":")
+        source = conn.execute(
+            "SELECT s.created_at FROM sessions s JOIN v2_session_generations g "
+            "ON g.host=s.host AND g.session_name=s.session_name "
+            "WHERE s.host=? AND s.session_name=? AND s.status='open' AND g.generation=?",
+            (host, name, generation)).fetchone()
+        if source is None:
+            return
+        # Preserve the mirror's conservative legacy/commentary boundary: an
+        # unclassified older assistant row must not lend its input to this turn.
+        boundary = self._assistant_turn_boundary_conn(conn, source_stream_id, source["created_at"],
+                                                      event_id, transcript, record)
+        from tell_proof import delivery_wire, input_origin, operator_dispatch
+        for candidate in self._assistant_turn_inputs_conn(conn, source_stream_id, source["created_at"],
+                                                          event_id, transcript,
+                                                          boundary["event_id"] if boundary else 0):
+            item = json.loads(candidate["event_json"])
+            wire = delivery_wire(item)
+            if not str(wire or "").strip():
+                continue
+            origin = input_origin(conn, item, candidate["event_id"])
+            if origin["kind"] in {"peer", "service"} and origin["verified"]:
+                continue
+            if origin["kind"] != "operator":
+                return
+            dispatch = operator_dispatch(conn, source_stream_id, wire, generation)
+            if dispatch is None:
+                return
+            route = conn.execute(
+                "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND dispatch_id=? "
+                "AND routing_state='resolved' AND delivery_state='landed'",
+                (composite_stream_id, dispatch["dispatch_id"])).fetchone()
+            if route is None or json.loads(route["route_json"] or "{}").get("desk_dispatch"):
+                return
+            dispatch_id = route["dispatch_id"]
+            notice_id = "dispatch_no_reply:" + dispatch_id
+            if conn.execute("SELECT 1 FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone():
+                return
+            if conn.execute("SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=? LIMIT 1",
+                            (composite_stream_id, dispatch_id)).fetchone():
+                return
+            import shlex
+            from outbound_notices import ensure_notice_marker
+            from store_routing import _insert_outbound_notice_conn
+            args = (f"--composite-stream-id {shlex.quote(composite_stream_id)} "
+                    f"--dispatch-id {shlex.quote(dispatch_id)} "
+                    f"--reply-to-message-id {shlex.quote(route['input_identity'])} ")
+            question = route["reply_to_question_id"]
+            if question:
+                args += f"--reply-to-question-id {shlex.quote(question)} "
+            ack = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id + ':ack')} "
+                   f"{args}--publish-kind status --response-state acknowledged --message 'I received your message.'")
+            final = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id)} "
+                     f"{args}--publish-kind prose --response-state final --message '<final answer>'")
+            body = (f"No reply was published for dispatch {dispatch_id}.\n"
+                    f"Message: {str(route['body'] or '')[:80]}\nAcknowledgment: {ack}\nFinal: {final}")
+            _insert_outbound_notice_conn(conn, notice_id=notice_id, kind="dispatch_no_reply",
+                                         dedupe_key=notice_id, recipient_stream_id=source_stream_id,
+                                         tell_id=notice_id, body=ensure_notice_marker(notice_id, body))
+            return
+
     def _mirror_source_event_for_binding(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
         source_stream_id: str, source_event: dict[str, Any], source_event_id: int,
@@ -2448,6 +2560,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             return
         effective_source_stream_id, source_generation, _source_binding = effective
         if source_stream_id != effective_source_stream_id:
+            return
+        if self._strict_publication_state_conn(conn, binding[0])["enabled"]:
+            self._notice_unanswered_turn_conn(conn, binding[0], source_stream_id,
+                                               source_generation, source_event, source_event_id)
             return
         if not self._assistant_mirror_state_conn(conn, binding[0])["enabled"]:
             return
@@ -2503,20 +2619,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             # can precede even its USER row. A sibling block in this same provider
             # record is not a previous turn. Unknown legacy assistant rows fence
             # the search too, preventing old dispatches crossing a metadata upgrade.
-            boundary = conn.execute(
-                "SELECT event_id FROM session_event_tail WHERE stream_id=? "
-                "AND session_created_at=? AND event_id<? "
-                "AND json_extract(event_json,'$.raw.source_session_identity')=? "
-                "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
-                "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
-                "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
-                "AND NOT ((COALESCE(json_extract(event_json,'$.raw.transport'),'')='claude-jsonl' "
-                "AND COALESCE(json_extract(event_json,'$.raw.stop_reason'),'')='tool_use') "
-                "OR (COALESCE(json_extract(event_json,'$.raw.transport'),'')='codex-rollout' "
-                "AND COALESCE(json_extract(event_json,'$.raw.phase'),'')='commentary')) "
-                "ORDER BY event_id DESC LIMIT 1",
-                (source_stream_id, source["created_at"], source_event_id, transcript, record),
-            ).fetchone()
+            boundary = self._assistant_turn_boundary_conn(conn, source_stream_id, source["created_at"],
+                                                          source_event_id, transcript, record)
             if self._project_dispatch_turn_final_conn(
                 conn, binding[0], composite_created_at=composite["created_at"],
                 source_stream_id=source_stream_id, source_generation=source_generation,

@@ -1797,6 +1797,12 @@ def _assistant_call(args: argparse.Namespace, payload: dict[str, object]) -> int
     return 0 if str(response.get("type") or "").endswith(".ok") else 1
 
 
+def _publication_ref(value: str) -> str:
+    if not re.fullmatch(r"(?:message|lane|report|wake|tell):\S+", value):
+        raise argparse.ArgumentTypeError("expected <message|lane|report|wake|tell>:<id>")
+    return value
+
+
 def assistant_publish(args: argparse.Namespace) -> int:
     attachment_ids: object = []
     evidence_refs: object = []
@@ -1842,6 +1848,9 @@ def assistant_publish(args: argparse.Namespace) -> int:
         payload["reply_to_message_ids"] = reply_ids
     if getattr(args, "response_state", None) is not None:
         payload["response_state"] = args.response_state
+    for field in ("note_type", "ref"):
+        if getattr(args, field, None) is not None:
+            payload[field] = getattr(args, field)
     return _assistant_call(args, payload)
 
 
@@ -5071,6 +5080,11 @@ def _print_inspect_pretty(response: dict[str, object], *, max_text: int | None =
         ):
             if key in close_audit:
                 print(f"  {key}: {close_audit.get(key)}")
+    guidelines = inspect.get("assistant_guidelines")
+    if isinstance(guidelines, dict):
+        print("assistant_guidelines:")
+        for key in ("seat", "identity", "delivered_at", "delivery_status", "matches_current"):
+            print(f"  {key}: {guidelines.get(key)}")
     deferred = inspect.get("deferred_reap")
     if isinstance(deferred, dict):
         print("deferred_reap:")
@@ -5697,6 +5711,8 @@ def build_parser() -> argparse.ArgumentParser:
     send_file_parser.add_argument("--to", help="Target assistant composite for authorized publication")
     send_file_parser.add_argument("--proactive", action="store_true",
         help="With --to: publish prose/status without dispatch/reply IDs from the current direct-primary binding; request ID defaults to send-file:<upload-id>")
+    send_file_parser.add_argument("--note-type", choices=("result", "problem", "reminder", "relay"))
+    send_file_parser.add_argument("--ref", type=_publication_ref)
     send_file_parser.add_argument("--dispatch-id")
     send_file_parser.add_argument("--reply-to-message-id")
     send_file_parser.add_argument("--reply-to-question-id")
@@ -5775,6 +5791,8 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_publish_parser.add_argument("--request-id", required=True)
     assistant_publish_parser.add_argument("--composite-stream-id", required=True)
     assistant_publish_parser.add_argument("--proactive", action="store_true", help="publish prose/status, optionally with attachments, from the current direct-primary binding")
+    assistant_publish_parser.add_argument("--note-type", choices=("result", "problem", "reminder", "relay"))
+    assistant_publish_parser.add_argument("--ref", type=_publication_ref)
     assistant_publish_parser.add_argument("--dispatch-id")
     assistant_publish_parser.add_argument("--reply-to-message-id")
     assistant_publish_parser.add_argument(

@@ -66,11 +66,12 @@ def verify_front_desk(*, command=_command):
     except Exception: raise AccountError("account_control_unauthorized") from None
 
 
-def publish_url(url, operation_id, *, command=_command, verify=verify_front_desk):
+def publish_url(url, operation_id, ref, *, command=_command, verify=verify_front_desk):
     authorization_url(url)
     composite = verify()
     published = command(["assistant", "publish", "--proactive", "--request-id", operation_id + "-url",
-        "--composite-stream-id", composite, "--publish-kind", "prose", "--message", url])
+        "--composite-stream-id", composite, "--publish-kind", "prose", "--note-type", "problem",
+        "--ref", ref, "--message", url])
     if published.get("type") != "assistant.publish.ok" or not published.get("publication_key"):
         raise AccountError("operator_delivery_failed")
     prompt = command(["prompt", "ask", "--title", "Complete Codex authorization",
@@ -87,7 +88,7 @@ def publish_url(url, operation_id, *, command=_command, verify=verify_front_desk
     return dict(publication_id=published["publication_key"], question_id=question_id)
 
 
-def relay(argv, operation_id, *, publish=publish_url, popen=subprocess.Popen, timeout=320):
+def relay(argv, operation_id, ref, *, publish=publish_url, popen=subprocess.Popen, timeout=320):
     """Own the SSH child and bounded in-memory pipes until native completion."""
     process = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=True, close_fds=True)
@@ -118,7 +119,7 @@ def relay(argv, operation_id, *, publish=publish_url, popen=subprocess.Popen, ti
                         raise AccountError("account_browser_url_invalid")
                     try: url = authorization_url(url_bytes[:-1].decode("ascii"))
                     except (UnicodeError, ValueError): raise AccountError("account_browser_url_invalid") from None
-                    result = publish(url, operation_id)
+                    result = publish(url, operation_id, ref)
                     sent = True
                     url_bytes.clear()
         code = process.wait(timeout=max(.01, deadline - time.monotonic()))
@@ -187,13 +188,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("policy", "host", "provider", "account", "login-generation", "new-generation", "operation-id"):
         parser.add_argument("--" + name, required=True)
+    def reference(value):
+        import re
+        if not re.fullmatch(r"(?:message|report|tell):\S+", value):
+            raise argparse.ArgumentTypeError("expected message, report, or tell reference")
+        return value
+    parser.add_argument("--ref", required=True, type=reference)
     for name in ("expected-version","expected-executable-sha256","reason"):parser.add_argument("--"+name)
     args = parser.parse_args(argv)
     try:
         verify_front_desk()
         prepared=coordinator(args,prepare=True)
         command = enrollment_command(args, load_policy(args.policy), load_machines(),clearance=prepared)
-        result = relay(command, args.operation_id)
+        result = relay(command, args.operation_id, args.ref)
         coordinator(args,prepare=False,prepared=prepared)
         print(json.dumps(result))
         return 0

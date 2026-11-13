@@ -4068,7 +4068,8 @@ class Server:
             )
         session = with_bootstrap_state(session, event_seen=bootstrap_event)
         if self._composite_for(stream_id) is not None:
-            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state(stream_id)}
+            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state(stream_id),
+                       "assistant_strict_publication": await self.store.strict_publication_state(stream_id)}
         if report_id is not None:
             existing_report = await self.store.get_report(report_id)
             if existing_report is not None and existing_report.get("from_stream_id") != stream_id:
@@ -4110,6 +4111,8 @@ class Server:
                 stream_id == self.assistant_composite.config.direct_primary_stream_id) else None,
             "deferred_reap": await self.store.get_deferred_reap(stream_id),
             "usage_provenance": usage_provenance,
+            **({"assistant_guidelines": await self.guidelines.inspect(stream_id)}
+               if getattr(getattr(self, "guidelines", None), "enabled", False) else {}),
         }
 
     async def _on_rename(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -4482,6 +4485,13 @@ class Server:
         """
         delivered = 0
         for row in await self.store.claim_composite_tells(name=composite.config.name):
+            if row['from_stream_id'] == 'daemon:guidelines' and row['body'] == 'guidelines:refresh':
+                guidelines = getattr(self, 'guidelines', None)
+                if guidelines is not None and guidelines.enabled:
+                    await guidelines.front_desk()
+                await self.store.delete_composite_tell(seq=row['seq'])
+                delivered += 1
+                continue
             try:
                 result = await self._deliver_composite_tell(
                     composite, composite.config.stream_id, row["from_stream_id"],
@@ -4619,7 +4629,9 @@ class Server:
         from provider_accounts import AccountError, reject_overrides
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
+        original_msg = msg
         msg = desk_stamp.stamp_message(msg)
+        desk_dispatch = msg is not original_msg
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
@@ -4665,6 +4677,7 @@ class Server:
                 accepted = await composite.accept_input(
                     {**msg, "attachments": attachments},
                     operator_principal=str(auth.get("operator_principal") or "") or None,
+                    desk_dispatch=desk_dispatch,
                 )
             except ValueError as exc:
                 raise VerbError(str(exc), str(exc)) from exc
@@ -5010,7 +5023,7 @@ class Server:
                 "assistant_direct_actor_unverified", "assistant_direct_dispatch_unverified",
             }:
                 raise VerbError("publish_not_authorized", "file publication requires an authorized current publisher") from exc
-            raise VerbError(str(exc), str(exc)) from exc
+            raise VerbError(str(exc).split(":", 1)[0], str(exc)) from exc
 
     async def _assistant_question_operation(self, operation: str, msg: dict[str, Any]) -> dict[str, Any]:
         if self.notify is None:

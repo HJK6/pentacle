@@ -21,6 +21,7 @@ ROOT = "fixture-root:visible"
 def _config(generation: str) -> AssistantCompositeConfig:
     return AssistantCompositeConfig.from_env({
         "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+        "PENTACLE_ASSISTANT_STRICT_PUBLICATION": "0",
         "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": ROOT,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": generation,

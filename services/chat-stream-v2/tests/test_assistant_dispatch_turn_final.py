@@ -6,6 +6,7 @@ operator saw no reply.  The daemon projects that prose as an acknowledgment.
 """
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -88,7 +89,7 @@ class Harness:
         return (await self.store.assistant_composite_activity(stream_id=ASSISTANT))[input_id]
 
 
-def run(body):
+def run(body, *, strict=False):
     async def go():
         store = Store(":memory:")
         store.start()
@@ -97,7 +98,8 @@ def run(body):
             root = await store.open_session("fixture-root", "visible", provider="claude", pane_pid="4242")
             async def dispatch(_route):
                 return {"delivery": "landed"}
-            composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+            config = replace(_config(root["session_generation"]), strict_publication_default=strict)
+            composite = AssistantComposite(store, config=config, dispatch=dispatch)
             await composite.ensure_projection()
             await body(Harness(store, composite, root["session_generation"]))
         finally:
