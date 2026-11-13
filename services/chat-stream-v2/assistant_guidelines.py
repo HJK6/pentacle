@@ -137,7 +137,7 @@ class AssistantGuidelines:
             return False
         return (binding.get('stream_id'), binding.get('generation')) == (stream, generation)
 
-    async def front_desk(self, *, stream=None, generation=None, previous=None, current=None):
+    async def front_desk(self, *, stream=None, generation=None, previous=None, current=None, on_incomplete=None):
         if not self.enabled:
             return
         async with self._fd_lock:
@@ -188,6 +188,8 @@ class AssistantGuidelines:
                                        status=reply['delivery_status'])
                     return reply['delivery_status'] == 'delivered'
             except Exception:
+                if on_incomplete is not None:
+                    on_incomplete('guideline_delivery')
                 log.exception('front desk guidelines delivery failed target=%s', target)
 
     async def advisor_for_target(self, target):

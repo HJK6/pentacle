@@ -725,3 +725,67 @@ def test_no_progress_restores_context_on_early_return_or_failure(tmp_path, provi
     finally:
         child.close()
 
+
+
+@pytest.mark.parametrize("provider,tuple_style", [("claude", "missing"), ("claude", "repeated"),
+                                                 ("claude", "changed"), ("codex", "missing")])
+@pytest.mark.parametrize("mode", ["failure", "success", "disabled", "non_target", "cooldown", "pending", "noop"])
+def test_real_guideline_delivery_failure_holds_frontier(tmp_path, provider, tuple_style, mode):
+    path = tmp_path / "transcript.jsonl"
+    root = tmp_path / "db"
+
+    def context_record(index, tokens):
+        if provider == "claude":
+            item = records(provider, index + 1)[-1]
+            if tuple_style != "missing":
+                item["effort"] = "medium" if tuple_style == "changed" and index == 2 else "high"
+            item["message"].update(model="claude-opus-5-5", usage={
+                "input_tokens": tokens, "output_tokens": 0,
+                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0})
+            return item
+        return {"type": "event_msg", "timestamp": "2026-10-01T00:00:00Z",
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"total_tokens": tokens}, "model_context_window": 200000}}}
+
+    prefix = records(provider, 1) + [context_record(1, 100000)]
+    write(path, prefix)
+    child = IntakeProcess(root, path, provider)
+    try:
+        assert not child.command("pass")["checkpoint_hold"]
+        saved = child.command("position")
+        assert json.loads(saved["position_json"])["offset"] == path.stat().st_size
+        if tuple_style != "missing":
+            assert child.command("snapshot")["continuation"]["routing_tuple"][1] == ["claude-opus-5-5", "high"]
+        child.command("guidelines", mode=mode)
+        tail = [context_record(2, 90000 if mode == "noop" else 10000)] + records(provider, 4)[-1:]
+        write(path, prefix + tail)
+        result = child.command("pass")
+        assert result["failures"] == 0
+        assert result["injected"] == (["guideline_tell"] if mode in {"failure", "success"} else [])
+        if mode == "failure":
+            assert result["checkpoint_hold"] == "guideline_delivery", result
+            assert child.command("position") == saved
+            child.command("guidelines", mode="success")
+            write(path, prefix + tail + records(provider, 5)[-1:])
+            later = child.command("pass")
+            assert later["appended"] == 1 and later["failures"] == 0
+            assert later["checkpoint_hold"] == "guideline_delivery"
+            assert child.command("position") == saved
+            assert (root / "child.stderr").read_text().count("ingest_position_held") == 1
+        else:
+            assert not result["checkpoint_hold"]
+            assert json.loads(child.command("position")["position_json"])["offset"] == path.stat().st_size
+    finally:
+        child.close()
+    if mode == "failure":
+        child = IntakeProcess(root, path, provider)
+        try:
+            child.command("guidelines", mode="success")
+            result = child.command("pass")
+            assert result["resume_reason"] == "resumed"
+            assert result["appended"] == 0
+            assert prefix_bindings(result) == (3 if provider == "claude" else 2), result
+            assert not result["checkpoint_hold"]
+            assert json.loads(child.command("position")["position_json"])["offset"] == path.stat().st_size
+        finally:
+            child.close()

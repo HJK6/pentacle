@@ -999,7 +999,7 @@ class Ingest:
                 if reading is None:
                     continue
                 try:
-                    await self.routing_integrity.observe_context(
+                    observation = await self.routing_integrity.observe_context(
                         host,
                         name,
                         provider="codex",
@@ -1007,6 +1007,8 @@ class Ingest:
                         observed_at=str(record.get("timestamp") or "") or None,
                         expected_generation=str(row.get("created_at") or "") or None,
                     )
+                    if isinstance(observation, dict) and observation.get("incomplete_effect"):
+                        self._hold_position(sid, st, observation["incomplete_effect"])
                 except Exception as exc:  # noqa: BLE001 - event ingest remains available
                     self._hold_position(sid, st, "context_observation")
                     log.warning("routing-integrity Codex context observation failed sid=%s: %s", sid, exc)

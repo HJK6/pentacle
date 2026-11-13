@@ -82,6 +82,38 @@ async def main():
             op = command["op"]
             if op == "close":
                 break
+            if op == "guidelines":
+                from assistant_guidelines import AssistantGuidelines
+                from test_assistant_guidelines import Store as GuidelineStore, Composite, Rulings
+                mode = command.get("mode", "failure")
+                memory = root / "guideline-memory"
+                (memory / "agents").mkdir(parents=True, exist_ok=True)
+                (memory / "agents/assistant_baseline.md").write_text("Fixture role baseline\n")
+                os.environ["AGENT_ORCH_MEMORY_REPO"] = str(memory)
+                composite = Composite()
+                composite.current = {"stream_id": SID if mode != "non_target" else "fixture:other",
+                                     "generation": "fixed-generation"}
+
+                class GuidelineComms:
+                    async def tell(self, message):
+                        injected.append("guideline_tell")
+                        if mode == "failure":
+                            raise RuntimeError("injected guideline delivery failure")
+                        return {"delivery_status": "delivered"}
+
+                # Guideline metadata alone uses the synthetic KV adapter. The
+                # real routing, intake and checkpoint Store stay under the
+                # permanent no-KV-read guard; no live application data is read.
+                service = AssistantGuidelines(GuidelineStore(), composite, Rulings(), GuidelineComms(),
+                    env={"PENTACLE_ASSISTANT_GUIDELINES_ENABLED": "0" if mode == "disabled" else "1"})
+                await service._write_record("front_desk", {
+                    "stream_id": SID, "generation": "fixed-generation", "identity": service.load("front_desk")[0],
+                    "delivered_at": time.time() if mode == "cooldown" else 0,
+                    "delivery_status": "committed_pending_proof" if mode == "pending" else "delivered",
+                    "pending": False})
+                routing.guidelines = service
+                print('{}', flush=True)
+                continue
             if op == "unavailable_history":
                 provenance.history = None
                 print('{}', flush=True)
