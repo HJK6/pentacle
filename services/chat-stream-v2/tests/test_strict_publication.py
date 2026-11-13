@@ -171,6 +171,8 @@ def test_published_reply_prevents_notice_and_marker(state, kind, suffix):
 def test_unanswered_marker_at_300_seconds_once():
     async def body(h):
         from dataclasses import replace
+        # Binding loads rebuild config from env_config, so the title must live there.
+        h.composite.env_config = replace(h.composite.env_config, title="Fixture Assistant")
         h.composite.config = replace(h.composite.config, title="Fixture Assistant")
         route = await h.route("marker-input")
         stamp = json.loads(route["route_json"])["timings"]["landed_at"]
