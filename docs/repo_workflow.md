@@ -133,6 +133,32 @@ Install the pre-push guard once per clone with an absolute `core.hooksPath`
 refuses pushes that carry foreign history, omit the refspec, or aim a remote
 named `public` at the wrong repository. A refusal is a finding to resolve before retrying.
 
+## Stable releases
+
+`releases/manifest.json` is the authoritative map from stable versions to already
+merged commits on public `main`. The first stable version is 2.0.0. Versions use
+MAJOR.MINOR.PATCH: patches contain fixes, minors add compatible features, and
+majors require a manual user step. CHANGELOG.md remains the authored notes.
+
+The release owner cuts a stable release on request, or weekly when `main` has
+user-visible changes. The commit must have run in the fleet for at least 24 hours
+including a passing nightly check. Run the documented upgrade journey directly
+from every listed starting point, including the previous stable release, and
+retain its evidence file. A chain of tested hops does not prove a direct jump.
+
+Append the entry with `python3 tools/release_manifest.py add --version VERSION
+--commit COMMIT --changelog-section YYYY-MM-DD --tested-update-from PREVIOUS
+--evidence JOURNEY.json`. Repeat the section and tested-start flags as needed.
+Use `--required-action 'Plain sentence.'` for necessary user steps. The tool
+hashes the evidence; the owner verifies the dwell and nightly prerequisites.
+Land the appended manifest through the normal reviewed PR route. Existing
+entries never change. Correct a wrong entry with a higher version. A fleet
+release alone does not create a stable release.
+
+Public checks verifies the manifest with full Git history against the PR base
+or previous push commit. Locally run `python3 tools/release_manifest.py verify
+--ref HEAD --base origin/main` after committing an entry.
+
 ## Hosted instances follow `main`
 
 A persistent web host ([hosted profile instances](ARCHITECTURE.md#hosted-profile-instances))

@@ -285,6 +285,8 @@ jobs:
     timeout-minutes: 50
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
     - uses: actions/setup-node@v4
       with:
         node-version: '22'
@@ -292,6 +294,12 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.13'
+    - name: Stable release manifest
+      env:
+        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: |
+        python3 tools/release_manifest.py verify --ref HEAD --base "$RELEASE_BASE"
+        python3 -m unittest discover -s tools/pentacle/tests
     - name: System packages
       timeout-minutes: 5
       run: |

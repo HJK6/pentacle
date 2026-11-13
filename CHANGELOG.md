@@ -1,17 +1,17 @@
 # Changelog
 
-User-visible changes to Pentacle, newest release first. Each dated section is one
-promoted release. Its heading date is the UTC date the section was cut on the
-candidate branch; a later cut on the same date adds ` (2)`, ` (3)`. The exact
-commit is the annotated `v2-gate/<sha>` tag that promotion created for that
-candidate, the same SHA shown as the build and runtime SHA in Settings. List
-them with `git for-each-ref --sort=-creatordate refs/tags/v2-gate/`. A release
+User-visible changes to Pentacle, newest dated section first. A heading date is
+the UTC date the section was cut; a later section on the same date adds
+` (2)`, ` (3)`. Stable versions and their exact commits are recorded in
+`releases/manifest.json`, with the dated sections first included by each version. A section
 with no user-visible change carries the single bullet `Internal changes only.`
 
 This file starts at the release that introduced it; earlier history is not
 backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
+
+- Add stable release records and tools for checking and updating a single-user install.
 
 ## 2026-11-13
 
