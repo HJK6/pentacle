@@ -334,6 +334,7 @@ def _spec_catalog(sessions: Sessions) -> object | None:
 
 
 async def run(args: argparse.Namespace) -> int:
+    daemon_started_monotonic = time.monotonic()
     # A malformed value fails startup before anything is opened.
     from assistant_restore import parse_auto_restore_flag
     auto_restore_enabled = parse_auto_restore_flag(os.environ)
@@ -1113,7 +1114,8 @@ async def run(args: argparse.Namespace) -> int:
                         local_host=args.local_host, recent_limit=RECENT_LIMIT, config=icfg,
                         routing_integrity=routing_integrity,
                         inventory_emitter=inventory_emitter,
-                        provenance=provenance_sink, alerts=alerts)
+                        provenance=provenance_sink, alerts=alerts,
+                        started_monotonic=daemon_started_monotonic)
         tasks.append(asyncio.create_task(ingest.run_forever(), name="ingest"))
         log.info("ingest: every %.1fs, cap %d events/pass", icfg.interval_s, icfg.max_events_per_pass)
 

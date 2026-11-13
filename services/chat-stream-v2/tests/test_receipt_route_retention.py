@@ -897,6 +897,7 @@ def test_batch_archive_migration_preserves_read_gap_without_altering_it(tmp_path
             if defect == "foreign_pair":
                 conn.execute("UPDATE v2_receipt_route_archive SET pair_id='foreign-pair'")
             elif defect == "receipt_schema":
+                conn.execute("DROP INDEX IF EXISTS idx_archive_receipt_proof_wire")
                 conn.execute(f"ALTER TABLE {r.RECEIPT_TABLE} DROP COLUMN meta_json")
             before = conn.execute(f"SELECT * FROM {r.ROUTE_TABLE}").fetchall()
             schema = conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})").fetchall()

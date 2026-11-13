@@ -143,6 +143,9 @@ class _StreamIngest:
     identity_grace: _IdentityGrace | None = None
     # Coalesce entry/late refusals; eligibility advances only at attempt completion.
     identity_refusal: tuple[dict, dict] | None = None
+    replay_boundary: int | None = None
+    replay_complete: bool = False
+    replay_pending: bool = False
 
 
 def _jsonl_event_identity(payload: dict) -> tuple:
@@ -317,6 +320,7 @@ class Ingest:
         inventory_emitter: Any = None,
         provenance: Any = None,
         alerts: Any = None,
+        started_monotonic: float | None = None,
     ) -> None:
         self.store = store
         self.sessions = sessions
@@ -333,6 +337,24 @@ class Ingest:
         self._streams: dict[str, _StreamIngest] = {}
         self._last_visited_sid: str | None = None
         self._previous_inventory: tuple[str, ...] = ()
+        self._started_monotonic = monotonic() if started_monotonic is None else started_monotonic
+
+    def _replay_backlog(self) -> bool:
+        now = monotonic()
+        return any(st.replay_pending and not st.replay_complete and st.replay_boundary is not None
+                   and st.offset < st.replay_boundary and now >= st.next_attempt_monotonic
+                   for st in self._streams.values())
+
+    def _complete_replay(self, sid, st, *, disposition="consumed") -> None:
+        if st.replay_complete or st.replay_boundary is None:
+            return
+        st.replay_complete = True
+        log.info("ingest_replay_complete %s", json.dumps({
+            "stream_id": sid, "generation": st.generation,
+            "elapsed_s": round(monotonic() - self._started_monotonic, 6),
+            "boundary": st.replay_boundary, "offset": st.offset,
+            "disposition": disposition,
+        }, separators=(",", ":")))
 
     async def _record_provenance(self, sid: str, provider: str, records: list[dict], st: _StreamIngest) -> None:
         """Thoth-local provenance through the same sink as satellites; best effort."""
@@ -374,7 +396,8 @@ class Ingest:
             try:
                 await self.run_pass()
                 failures = 0
-                delay = cfg.interval_s
+                # sleep(0) still yields between bounded round-robin passes.
+                delay = 0 if self._replay_backlog() else cfg.interval_s
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - one bad pass never kills the pump
@@ -456,7 +479,10 @@ class Ingest:
 
     async def _ingest_stream(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
         st.identity_refusal = None
+        previous_offset = st.offset
+        st.replay_pending = False
         appended = await self._ingest_stream_events(row, st, budget)
+        st.replay_pending = st.offset > previous_offset
         # A strict discovery/pre-append check can fail after entry was proven.
         # Surface that refusal at this pass's end, without consuming any bytes
         # after a late recovery; ordinary replay resumes on the next pass.
@@ -487,6 +513,8 @@ class Ingest:
             await self._record_identity_blocked(failed_row, st, observation, completed_attempt=True)
         else:
             st.identity_grace = None
+        if st.replay_boundary is not None and st.offset >= st.replay_boundary:
+            self._complete_replay(row["stream_id"], st)
         return appended
 
     async def _ingest_stream_events(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
@@ -579,6 +607,7 @@ class Ingest:
         if st.file_id is None:
             st.file_id = file_id
         elif st.file_id != file_id:
+            self._complete_replay(sid, st, disposition="rotated")
             # The bound path now names a DIFFERENT file. A size check alone
             # misses this whenever the replacement is larger: the stale offset
             # would land mid-file, the span would carry no session header, and
@@ -662,6 +691,9 @@ class Ingest:
             # Rotation/truncation in place: replay from the start; dedup keeps
             # it exact.
             st.offset = 0
+            self._complete_replay(sid, st, disposition="rotated")
+        if st.replay_boundary is None:
+            st.replay_boundary = await asyncio.to_thread(_complete_record_boundary, st.fd, size)
         if size == st.offset:
             if provider == "codex" and st.session_id:
                 current_session_id = await asyncio.to_thread(
@@ -1224,6 +1256,19 @@ def _provider_command_matches(command: str, expected: str, cursor: dict | None =
         return True
     return bool(len(tokens) >= 2 and os.path.basename(tokens[0]).lower() in
                 {"python", "python3", "node", "bash", "sh", "zsh"} and matches(tokens[1]))
+
+
+def _complete_record_boundary(fd: int, size: int) -> int:
+    """Capture the last newline at first bind without consuming a partial line."""
+    end = size
+    while end > 0:
+        start = max(0, end - 65536)
+        chunk = os.pread(fd, end - start, start)
+        newline = chunk.rfind(b"\n")
+        if newline >= 0:
+            return start + newline + 1
+        end = start
+    return 0
 
 
 def _native_session_identity_from_fd(fd: int, provider: str) -> str:

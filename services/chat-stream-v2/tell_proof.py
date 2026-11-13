@@ -8,7 +8,7 @@ import sqlite3
 from bisect import bisect_right
 
 from submission_events import EventProof, provider_text_digest
-from retention import history_query
+from retention import history_query, RECEIPT_PROOF_PREDICATE, RECEIPT_PROOF_WIRE
 from message_envelopes import strip_peer_delivery
 
 
@@ -465,8 +465,8 @@ def send_proofs(conn, target, text):
     no_input = set()
     rows = history_query(conn,
         "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
-        "AND json_type(meta_json,'$._input_proof')='object' "
-        "AND instr(?,json_extract(meta_json,'$._input_proof.wire_text'))>0 ORDER BY rowid LIMIT 513",
+        f"AND {RECEIPT_PROOF_PREDICATE} "
+        f"AND instr(?,{RECEIPT_PROOF_WIRE})>0 ORDER BY rowid LIMIT 513",
         (target, text)).fetchall()
     if len(rows) > 512:
         return  # Unbounded/ambiguous history is never an origin grant.

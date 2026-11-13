@@ -99,6 +99,22 @@ def _sequence(conn):
     return conn.execute("SELECT * FROM v2_send_receipt_sequence WHERE singleton=1").fetchone()
 
 
+# Keep these expressions identical in the index and its reader. CASE also
+# protects receipt writes whose caller supplied malformed metadata strings.
+RECEIPT_PROOF_PREDICATE = (
+    "CASE WHEN json_valid(meta_json) THEN json_type(meta_json,'$._input_proof') END='object'"
+)
+RECEIPT_PROOF_WIRE = (
+    "CASE WHEN json_valid(meta_json) THEN json_extract(meta_json,'$._input_proof.wire_text') END"
+)
+
+
+def _receipt_proof_index(conn, prefix):
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{prefix}_receipt_proof_wire "
+                 f"ON {RECEIPT_TABLE}(to_stream_id,{RECEIPT_PROOF_WIRE}) "
+                 f"WHERE {RECEIPT_PROOF_PREDICATE}")
+
+
 def prepare_history_schema(conn, *, fresh: bool, archive_path: Path | None) -> None:
     """Additive migration only; an existing missing archive is never bootstrapped."""
     import uuid
@@ -123,6 +139,7 @@ def prepare_history_schema(conn, *, fresh: bool, archive_path: Path | None) -> N
     )
     for table, name, columns in indexes:
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_history_{name} ON {table}({columns})")
+    _receipt_proof_index(conn, "history")
     if fresh and _sequence(conn) is None:
         conn.execute("INSERT INTO v2_send_receipt_sequence VALUES(1,0,?,?,?)",
                      (uuid.uuid4().hex, str(archive_path or ""), int(archive_path is None)))
@@ -195,13 +212,14 @@ def _archive_schema(conn, archive, *, initialize: bool, pair_id: str, migrate_ro
         archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_receipt_key ON {RECEIPT_TABLE}(to_stream_id,request_id,receipt_rowid)")
         archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_receipt_request ON {RECEIPT_TABLE}(request_id)")
         archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_receipt_optimistic ON {RECEIPT_TABLE}(to_stream_id,optimistic_id)")
+        _receipt_proof_index(archive, "archive")
         archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_route_request ON {ROUTE_TABLE}(input_request_id)")
         archive.commit()
 
 
 
 def migrate_route_batch_archive(conn) -> None:
-    """Extend a matched pre-batching archive after the hot migration commits."""
+    """Extend matched archives and index receipt proofs after hot migration."""
     path = getattr(conn, "history_archive_path", None)
     row = _sequence(conn)
     if path is None or row is None or not row["archive_ready"] or not Path(path).exists():
@@ -216,9 +234,14 @@ def migrate_route_batch_archive(conn) -> None:
         names = {column[0] for column in actual}
         missing = [(name, ddl) for name, ddl in _ROUTE_BATCH_COLUMNS if name not in names]
         missing_names = {name for name, _ in missing}
-        if (not missing or actual != [column for column in expected if column[0] not in missing_names]
-                or not all((name, ddl, 0, None, 0) in expected for name, ddl in missing)):
+        migratable = (missing and actual == [column for column in expected if column[0] not in missing_names]
+                      and all((name, ddl, 0, None, 0) in expected for name, ddl in missing))
+        if actual != expected and not migratable:
             return  # Other schemas retain the existing strict read-time refusal.
+        indexed = archive.execute("SELECT 1 FROM sqlite_master WHERE type='index' "
+                                  "AND name='idx_archive_receipt_proof_wire'").fetchone()
+        if not missing and indexed:
+            return
     except sqlite3.Error:
         return  # A corrupt archive remains a strict read gap, not a new archive.
     finally:
@@ -229,6 +252,7 @@ def migrate_route_batch_archive(conn) -> None:
         archive.execute("BEGIN IMMEDIATE")
         _archive_schema(conn, archive, initialize=False, pair_id=row["pair_id"],
                         migrate_route_batch=True)
+        _receipt_proof_index(archive, "archive")
         archive.commit()
     except (RetentionError, sqlite3.Error):
         return  # Unavailable/unsupported archives remain strict read-time gaps.
