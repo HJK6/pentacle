@@ -512,7 +512,8 @@ async function main(argv = process.argv.slice(2)) {
     }
     if (urlPath === '/api/health') {
       res.writeHead(200, { 'content-type': CONTENT_TYPES['.json'] })
-        .end(JSON.stringify({ ok: true, connections: bridge.connections.size }));
+        .end(JSON.stringify({ ok: true, connections: bridge.connections.size,
+          build_id: frozen.buildId, build_commit: frozen.buildCommit }));
       return;
     }
     if (designs.handle(req, res, urlPath)) return;

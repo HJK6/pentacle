@@ -72,3 +72,20 @@ test('non-manifest churn (source map, icon) does not change the id', () => {
 test('an unbuilt (empty/missing) dist yields a null id', () => {
   assert.equal(freezeWebDist(path.join(os.tmpdir(), 'pentacle-does-not-exist-xyz')).buildId, null);
 });
+
+test('source commit is frozen with the served files, independent of later disk changes', () => {
+  const first = 'a'.repeat(40), later = 'b'.repeat(40);
+  const dir = makeDist({ 'build-commit.json': JSON.stringify({ schema_version: 1, build_commit: first }) });
+  const frozen = freezeWebDist(dir);
+  fs.writeFileSync(path.join(dir, 'build-commit.json'), JSON.stringify({ schema_version: 1, build_commit: later }));
+  assert.equal(frozen.buildCommit, first);
+  assert.equal(freezeWebDist(dir).buildCommit, later);
+});
+
+test('missing or invalid build metadata does not invent a commit', () => {
+  for (const metadata of ['broken', JSON.stringify({ schema_version: 1, build_commit: 'secret-marker' }),
+    JSON.stringify({ schema_version: 2, build_commit: 'a'.repeat(40) })]) {
+    assert.equal(freezeWebDist(makeDist({ 'build-commit.json': metadata })).buildCommit, null);
+  }
+  assert.equal(freezeWebDist(makeDist()).buildCommit, null);
+});

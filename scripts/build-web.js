@@ -13,10 +13,23 @@
 const fs = require('fs');
 const path = require('path');
 const esbuild = require('esbuild');
+const { execFileSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 const RENDERER = path.join(ROOT, 'renderer');
 const OUT = path.join(RENDERER, 'dist', 'web');
+
+function sourceCommit() {
+  try {
+    const sha = execFileSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (/^[0-9a-f]{40}$/.test(sha)) return sha;
+  } catch (_) { /* An exported release carries build-sha.txt instead. */ }
+  try {
+    const sha = fs.readFileSync(path.join(ROOT, 'build-sha.txt'), 'utf8').trim();
+    if (/^[0-9a-f]{40}$/.test(sha)) return sha;
+  } catch (_) { /* An unversioned copy has no source identity. */ }
+  return null;
+}
 
 // Stylesheets index.html pulls from outside renderer/ are copied in beside the
 // bundle; the rest are copied from renderer/ under the same relative name.
@@ -210,6 +223,10 @@ async function build({ minify = false } = {}) {
     const from = path.join(RENDERER, dir);
     if (fs.existsSync(from)) fs.cpSync(from, path.join(OUT, dir), { recursive: true });
   }
+
+  const metadata = path.join(OUT, 'build-commit.json');
+  fs.writeFileSync(metadata + '.tmp', JSON.stringify({ schema_version: 1, build_commit: sourceCommit() }) + '\n');
+  fs.renameSync(metadata + '.tmp', metadata);
 
   console.log(`[build:web] wrote ${path.relative(ROOT, OUT)}`);
 }

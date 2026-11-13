@@ -62,7 +62,12 @@ function freezeWebDist(distDir) {
     .filter(isManifestFile)
     .sort()
     .map((rel) => ({ path: rel, sha256: crypto.createHash('sha256').update(files.get(rel)).digest('hex') }));
-  return { files, manifest, buildId: computeBuildId(manifest) };
+  let buildCommit = null;
+  try {
+    const metadata = JSON.parse(files.get('build-commit.json').toString());
+    if (metadata.schema_version === 1 && /^[0-9a-f]{40}$/.test(metadata.build_commit)) buildCommit = metadata.build_commit;
+  } catch (_) { /* Old or unbuilt dist has no source commit. */ }
+  return { files, manifest, buildId: computeBuildId(manifest), buildCommit };
 }
 
 module.exports = { freezeWebDist, computeBuildId, isManifestFile };
