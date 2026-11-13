@@ -1391,12 +1391,52 @@ class WindowSchedule:
             ).fetchone())
         return await self.store.submit(op)
 
-    async def _recurring_target(self, msg: dict[str, Any], kind: str, actor: str) -> dict[str, Any]:
-        row = await self._recurring_row(str(msg.get("recurring_id") or ""))
-        # A seat reaches only the rules it created; absence and ownership look the same.
-        if row is None or (kind == "seat" and row.get("created_by_stream_id") != actor):
+    @staticmethod
+    def _retirement_creators_tx(conn: sqlite3.Connection, msg: dict[str, Any], actor: str) -> set[str]:
+        """Historical creators eligible for retirement by the exact current primary FD.
+
+        History only identifies targets. Authority comes from the generation-bound,
+        open, unretired current binding and its enabled lifecycle policy, in this
+        transaction. An unavailable proof never weakens ordinary creator access.
+        """
+        auth = msg.get("_auth_context") or {}
+        if not auth.get("token_verified") or auth.get("stream_id") != actor or not auth.get("session_generation"):
+            return set()
+        try:
+            import store_lifecycle_authority as authority
+            from store_assistant_binding import front_desk_aliases_conn
+            primary = authority.configured(conn)
+            # holder_is also supports legacy grants; this exception does not.
+            if not primary or not authority.holder_is(conn, actor, auth["session_generation"]):
+                return set()
+            return front_desk_aliases_conn(conn, primary)
+        except Exception:
+            log.warning("recurring retirement authority unavailable")
+            return set()
+
+    def _recurring_target_tx(
+        self, conn: sqlite3.Connection, msg: dict[str, Any], kind: str, actor: str, *, retirement: bool = False,
+    ) -> dict[str, Any]:
+        row = _row(conn.execute(
+            _RECURRING_SELECT + "WHERE r.recurring_id=?", (str(msg.get("recurring_id") or ""),),
+        ).fetchone())
+        if row is None or (kind == "seat" and row.get("created_by_stream_id") != actor
+                           and (not retirement or not row.get("created_by_stream_id")
+                                or row["created_by_stream_id"] not in self._retirement_creators_tx(conn, msg, actor))):
             raise VerbError("not_found", "recurring schedule not found")
         return row
+
+    async def _recurring_target(
+        self, msg: dict[str, Any], kind: str, actor: str, *, retirement: bool = False,
+    ) -> dict[str, Any]:
+        def op(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute("BEGIN")
+            try:
+                return self._recurring_target_tx(conn, msg, kind, actor, retirement=retirement)
+            finally:
+                conn.rollback()
+        async with self.store.front_desk_fence():
+            return await self.store.submit(op)
 
     async def _broadcast_recurring(
         self, event: str, recurring_id: str, *, row: dict[str, Any] | None = None,
@@ -1678,21 +1718,29 @@ class WindowSchedule:
 
     async def recurring_list(self, msg: dict[str, Any]) -> dict[str, Any]:
         kind, actor, _ = await self._actor(msg)
-        rows = await self.recurring_inventory()
-        return {"type": "schedule.recurring.list.ok", "recurring": [
-            row for row in rows
-            if kind != "seat" or row.get("created_by_stream_id") == actor
-        ]}
+        def op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            conn.execute("BEGIN")
+            try:
+                creators = {actor} | self._retirement_creators_tx(conn, msg, actor) if kind == "seat" else set()
+                rows = conn.execute(_RECURRING_SELECT + "ORDER BY r.created_at,r.recurring_id").fetchall()
+                return [_project_recurring(dict(row)) or {} for row in rows
+                        if kind != "seat" or row["created_by_stream_id"] in creators]
+            finally:
+                conn.rollback()
+        async with self.store.front_desk_fence():
+            rows = await self.store.submit(op)
+        return {"type": "schedule.recurring.list.ok", "recurring": rows}
 
     async def recurring_get(self, msg: dict[str, Any]) -> dict[str, Any]:
         kind, actor, _ = await self._actor(msg)
-        row = await self._recurring_target(msg, kind, actor)
+        row = await self._recurring_target(msg, kind, actor, retirement=True)
         return {"type": "schedule.recurring.get.ok", "recurring": _project_recurring(row, include_prompt=True)}
 
     async def _recurring_write(
         self, rule_row: dict[str, Any], assignments: dict[str, Any], *, expected_generation: Any,
         recompute: dict[str, Any] | None = None,
         recovery_proof: dict[str, Any] | None = None,
+        retirement_auth: tuple[dict[str, Any], str, str] | None = None,
     ) -> dict[str, Any]:
         """One CAS-guarded UPDATE: bumps ``generation`` and, with ``recompute``, re-arms from now."""
         recurring_id = str(rule_row["recurring_id"])
@@ -1705,6 +1753,8 @@ class WindowSchedule:
                 ).fetchone())
                 if current is None:
                     raise VerbError("not_found", "recurring schedule not found")
+                if retirement_auth is not None:
+                    self._recurring_target_tx(conn, *retirement_auth, retirement=True)
                 if expected_generation is not None and int(expected_generation) != int(current["generation"]):
                     raise VerbError("generation_conflict", "recurring schedule changed; re-read and retry")
                 if recovery_proof is not None and current["generation"] != rule_row["generation"]:
@@ -1735,7 +1785,8 @@ class WindowSchedule:
                 conn.rollback()
                 raise
 
-        await self.store.submit(op)
+        async with self.store.front_desk_fence():
+            await self.store.submit(op)
         return await self._recurring_row(recurring_id) or {}
 
     async def recurring_update(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -1798,11 +1849,12 @@ class WindowSchedule:
 
     async def recurring_pause(self, msg: dict[str, Any]) -> dict[str, Any]:
         kind, actor, _ = await self._actor(msg)
-        row = await self._recurring_target(msg, kind, actor)
+        row = await self._recurring_target(msg, kind, actor, retirement=True)
         if row["state"] == "paused":
             return {"type": "schedule.recurring.pause.ok", "recurring": _project_recurring(row)}
         updated = await self._recurring_write(
             row, {"state": "paused"}, expected_generation=msg.get("expected_generation"),
+            retirement_auth=(msg, kind, actor),
         )
         await self._broadcast_recurring("recurring_paused", str(row["recurring_id"]))
         return {"type": "schedule.recurring.pause.ok", "recurring": _project_recurring(updated)}
@@ -1822,14 +1874,21 @@ class WindowSchedule:
 
     async def recurring_delete(self, msg: dict[str, Any]) -> dict[str, Any]:
         kind, actor, _ = await self._actor(msg)
-        row = await self._recurring_target(msg, kind, actor)
-        recurring_id = str(row["recurring_id"])
+        recurring_id = str(msg.get("recurring_id") or "")
 
-        def op(conn: sqlite3.Connection) -> None:
-            conn.execute("DELETE FROM v2_recurring_schedules WHERE recurring_id=?", (recurring_id,))
-            conn.commit()
+        def op(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._recurring_target_tx(conn, msg, kind, actor, retirement=True)
+                conn.execute("DELETE FROM v2_recurring_schedules WHERE recurring_id=?", (recurring_id,))
+                conn.commit()
+                return row
+            except Exception:
+                conn.rollback()
+                raise
 
-        await self.store.submit(op)
+        async with self.store.front_desk_fence():
+            row = await self.store.submit(op)
         await self._broadcast_recurring("recurring_deleted", recurring_id, row=row)
         return {"type": "schedule.recurring.delete.ok", "recurring_id": recurring_id}
 
