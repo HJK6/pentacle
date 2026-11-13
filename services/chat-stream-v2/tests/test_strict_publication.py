@@ -170,6 +170,8 @@ def test_published_reply_prevents_notice_and_marker(state, kind, suffix):
 
 def test_unanswered_marker_at_300_seconds_once():
     async def body(h):
+        from dataclasses import replace
+        h.composite.config = replace(h.composite.config, title="Fixture Assistant")
         route = await h.route("marker-input")
         stamp = json.loads(route["route_json"])["timings"]["landed_at"]
         landed = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
@@ -183,7 +185,7 @@ def test_unanswered_marker_at_300_seconds_once():
         assert len(answers) == 1
         assert answers[0]["publish_kind"] == "unanswered"
         assert answers[0]["reply_to_message_id"] == "marker-input"
-        assert answers[0]["text"] == "No reply from Bart yet to this message."
+        assert answers[0]["text"] == "No reply from Fixture Assistant yet to this message."
     run(body, strict=True)
 
 

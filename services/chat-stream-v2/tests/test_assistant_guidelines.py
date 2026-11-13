@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +24,7 @@ class Store:
 
 
 class Composite:
-    config = SimpleNamespace(name='bart')
+    config = SimpleNamespace(name='primary')
     def __init__(self):
         self.current = {'stream_id': 'host:desk', 'generation': 'g1'}
     async def binding(self):
@@ -50,20 +51,22 @@ def files(tmp_path, monkeypatch):
     (tmp_path / 'agents').mkdir()
     (tmp_path / 'docs/reference').mkdir(parents=True)
     (tmp_path / 'agents/assistant_baseline.md').write_text('---\ntitle: one\n---\n\nfirst\n')
-    (tmp_path / 'docs/reference/assistant_bart_context.md').write_text('second\n')
+    (tmp_path / 'docs/reference/assistant_context.md').write_text('second\n')
     (tmp_path / 'agents/assistant_authority_baseline.md').write_text('advisor one\n')
 
 
 def test_identity_ignores_frontmatter_and_refuses_escape(tmp_path, monkeypatch, caplog):
     files(tmp_path, monkeypatch)
-    first = ag.read_set(ag.DEFAULT_FRONT_DESK)
+    assert ag.DEFAULT_FRONT_DESK == ('agents/assistant_baseline.md',)
+    configured = ('agents/assistant_baseline.md', 'docs/reference/assistant_context.md')
+    first = ag.read_set(configured)
     (tmp_path / 'agents/assistant_baseline.md').write_text('---\ntitle: changed\n---\n\nfirst\n')
-    assert ag.read_set(ag.DEFAULT_FRONT_DESK) == first
+    assert ag.read_set(configured) == first
     (tmp_path / 'agents/assistant_baseline.md').write_text('first changed\n')
-    assert ag.read_set(ag.DEFAULT_FRONT_DESK)[0] != first[0]
+    assert ag.read_set(configured)[0] != first[0]
     (tmp_path / 'agents/assistant_baseline.md').write_text('first\n')
-    (tmp_path / 'docs/reference/assistant_bart_context.md').write_text('changed\n')
-    assert ag.read_set(ag.DEFAULT_FRONT_DESK)[0] != first[0]
+    (tmp_path / 'docs/reference/assistant_context.md').write_text('changed\n')
+    assert ag.read_set(configured)[0] != first[0]
     assert ag.read_set(('../outside',)) is None
     assert '../outside' in caplog.text
 
@@ -74,7 +77,10 @@ def test_front_desk_triggers_rate_limit_missing_and_switch(tmp_path, monkeypatch
     monkeypatch.setattr(ag.time, 'time', lambda: now[0])
     async def go():
         store, comp, comms = Store(), Composite(), RecordingComms()
-        service = ag.AssistantGuidelines(store, comp, Rulings(), comms, env={'PENTACLE_ASSISTANT_GUIDELINES_ENABLED': 'on'})
+        service = ag.AssistantGuidelines(store, comp, Rulings(), comms, env={
+            'PENTACLE_ASSISTANT_GUIDELINES_ENABLED': 'on',
+            'PENTACLE_ASSISTANT_GUIDELINES_FRONT_DESK_FILES': os.pathsep.join(
+                ('agents/assistant_baseline.md', 'docs/reference/assistant_context.md'))})
         await service.front_desk()
         assert len(comms.sent) == 1
         assert comms.sent[0]['text'].startswith('[role baseline: assistant]\nguidelines ')
@@ -86,7 +92,7 @@ def test_front_desk_triggers_rate_limit_missing_and_switch(tmp_path, monkeypatch
         now[0] += 600
         await service.front_desk(stream='host:desk', generation='g1', previous=60000, current=59000)
         assert len(comms.sent) == 2
-        (tmp_path / 'docs/reference/assistant_bart_context.md').write_text('new content')
+        (tmp_path / 'docs/reference/assistant_context.md').write_text('new content')
         now[0] += 600
         await service.front_desk(stream='host:desk', generation='g1', previous=59000, current=58000)
         assert len(comms.sent) == 3 and 'new content' in comms.sent[-1]['text']

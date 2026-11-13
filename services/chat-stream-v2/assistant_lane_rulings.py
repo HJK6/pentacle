@@ -1714,7 +1714,7 @@ class AssistantLaneRulings:
                         continue
                     timestamp = datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")
                     event = {"stream_id": stream_id, "provider": "composite", "kind": "ASSIST_TEXT",
-                             "text": "No reply from Bart yet to this message.", "publish_kind": "unanswered",
+                             "text": f"No reply from {composite.config.title} yet to this message.", "publish_kind": "unanswered",
                              "reply_to_message_id": row["input_identity"], "timestamp": timestamp,
                              "attachments": [], "raw": {"assistant_composite": True,
                              "dispatch_id": row["dispatch_id"], "publish_kind": "unanswered"}}

@@ -482,10 +482,11 @@ agent-orch's existing `AGENT_ORCH_MEMORY_REPO` or `memory_repo_path` configurati
 `PENTACLE_ASSISTANT_GUIDELINES_FRONT_DESK_FILES` and
 `PENTACLE_ASSISTANT_GUIDELINES_ADVISOR_FILES` optionally override the ordered,
 colon-separated paths relative to that repository. The defaults are
-`agents/assistant_baseline.md:docs/reference/assistant_bart_context.md` for the
-front desk and `agents/assistant_authority_baseline.md` for the advisor. Paths
-outside the repository are refused. Front matter is stripped before the text is
-hashed and delivered; the stamp includes the first 12 characters of the hash.
+`agents/assistant_baseline.md` for the front desk and
+`agents/assistant_authority_baseline.md` for the advisor. At activation, use
+`PENTACLE_ASSISTANT_GUIDELINES_FRONT_DESK_FILES` to include any private context
+file alongside the baseline. Paths outside the repository are refused. Front
+matter is stripped before the text is hashed and delivered; the stamp includes the first 12 characters of the hash.
 
 The bound front desk receives a stamped tell on a new binding, after a context
 reading drops below half its previous reading, and at the next reading after the

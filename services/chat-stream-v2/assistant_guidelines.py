@@ -21,7 +21,7 @@ from agent_orch.role_baseline import resolve_memory_repo_path, _strip_front_matt
 from agent_orch.config import load_config
 
 log = logging.getLogger('chat_streamd_v2.assistant_guidelines')
-DEFAULT_FRONT_DESK = ('agents/assistant_baseline.md', 'docs/reference/assistant_bart_context.md')
+DEFAULT_FRONT_DESK = ('agents/assistant_baseline.md',)
 DEFAULT_ADVISOR = ('agents/assistant_authority_baseline.md',)
 DELIVERY_TOKEN = object()
 
