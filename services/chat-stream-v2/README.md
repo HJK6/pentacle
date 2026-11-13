@@ -352,6 +352,21 @@ reconnect and refetch.
 
 `v2_recurring_schedules` holds durable recurring rules (additive `CREATE TABLE IF NOT EXISTS`; a rollback to older code leaves it inert). `recurrence.py` is the pure next-occurrence math (`daily`, `weekdays`, `weekly`, an IANA zone, DST per the agent-orch README). `WindowSchedule` serves `schedule.recurring.create|list|get|update|pause|resume|run|delete`; admission mirrors `schedule.insert` and runs at create/update only. The `materialise_due_recurring()` pass runs inside `run_forever` before the one-shot due scan, and `recover()` applies the same evaluation to every due active rule. Missed (`late`, grace `RECURRING_LATE_FIRE_GRACE_S = 900`), overlap and unbound-parent policies are described under "Recurring" in the agent-orch README.
 
+The authenticated current primary front desk may also list, get, pause and delete
+rules whose creators are proved by the daemon's primary FD binding history,
+including open predecessors and earlier seat generations. This is a retirement
+exception: update, resume, run and one-shot access retain their existing scope.
+Creator identity, template and already-materialised occurrences remain unchanged.
+Parent mode alone never makes a rule eligible. Other named assistants are excluded.
+The exception requires the exact open, unretired bound generation and an enabled
+lifecycle policy; missing binding/history proof denies it without affecting normal
+creator or existing operator/service/nexus access. Reads use a durable snapshot;
+pause/delete recheck authority in their mutation transaction under the FD fence,
+so a superseded FD cannot mutate after a rebind. Repeated pause stays paused;
+delete after a lost successful response returns the usual `not_found`. Retirement
+prevents future materialisation across recovery; it does not cancel an occurrence
+that was already materialised.
+
 Frames reach authenticated operator clients only, like every `schedule.*` frame:
 
 - The hello snapshot carries `recurring: [rule, ...]` beside `schedules`.
