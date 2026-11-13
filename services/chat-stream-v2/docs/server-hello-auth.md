@@ -79,6 +79,15 @@ the rows honor `max_examples`. `failure_count`, `failures`, `kinds` and `outcome
 continue to describe the non-excluded failures. Authentication failures remain
 diagnostics and still fail required authentication or restoration probes.
 
+The classifier also excludes an unauthenticated idle keepalive lapse when every
+observed close for that connection reports `auth_state="never"`, close code
+1011, reason `keepalive_ping_timeout`, and integer zero queue depth and peak,
+with no `auth_ok` in the window. Stronger overflow or peer-liveness evidence
+still fails. These exclusions are reported separately in
+`excluded_unauthenticated_keepalive_count`,
+`excluded_unauthenticated_keepalive_conn_ids` and
+`excluded_unauthenticated_keepalives`; the rows honor `max_examples`.
+
 Replaying a historical window is a control, not candidate certification. A
 legacy close without the new field continues to count, even if its old bucket
 counters look like a handshake-only exchange.

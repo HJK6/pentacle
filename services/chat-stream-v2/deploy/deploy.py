@@ -27,6 +27,9 @@ from websockets.sync.client import connect
 # This process switches its own checkout during activation. Load every local
 # dependency first, including when invoked directly with deploy/ on sys.path.
 _SERVICE_DIR = str(Path(__file__).resolve().parent.parent)
+_SERVICES_DIR = str(Path(_SERVICE_DIR).parent)
+if _SERVICES_DIR not in sys.path:
+    sys.path.insert(0, _SERVICES_DIR)
 if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
 from deploy.packet.log_scan import AttributionAmbiguous, freeze, generation_ranges, lines_many
@@ -1161,7 +1164,7 @@ def classify_slow_consumer_log(
 
 
 def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=None):
-    """Count failures, excluding only connection-proven handshake-only auth failures."""
+    """Count failures with explicit exclusions for authentication and idle lapses."""
     def handshake_only(record):
         count = record.get("non_handshake_tx")
         if record.get("auth_state") != "failed" or type(count) is not int or count != 0:
@@ -1210,11 +1213,12 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
     auth_failed: set[str] = set()
     auth_accepted: set[str] = set()
     handshake_only_closes: dict[str, bool] = {}
+    idle_keepalive_closes: dict[str, bool] = {}
     for raw_line in lines:
         raw_line = raw_line.rstrip("\r\n")
         if (len(connection_failures) + len(peer_4000_connections) + len(failures)
                 + len(keepalive_connections) + len(auth_failed) + len(auth_accepted)
-                + len(handshake_only_closes)) > 100000:
+                + len(handshake_only_closes) + len(idle_keepalive_closes)) > 100000:
             raise ValueError("diagnostic identity resource limit")
         line = raw_line.strip()
         if "conn_diag " in raw_line:
@@ -1246,6 +1250,12 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
                 # copies of a close cannot become proof through a later zero row.
                 proven = bool(conn_id) and handshake_only(record)
                 handshake_only_closes[conn_id] = handshake_only_closes.get(conn_id, True) and proven
+                idle = (bool(conn_id) and record.get("auth_state") == "never"
+                        and record.get("close_code") == 1011
+                        and record.get("close_reason") == "keepalive_ping_timeout"
+                        and all(type(record.get(field)) is int and record[field] == 0
+                                for field in ("queue_depth", "queue_peak")))
+                idle_keepalive_closes[conn_id] = idle_keepalive_closes.get(conn_id, True) and idle
             if event == "slow_consumer" and record.get("phase") == "enter":
                 queue_depth_warnings += 1
             kind: str | None = None
@@ -1325,6 +1335,7 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
     # may occur later or in a different selected log sink. Sticky rejection is
     # deliberately not evidence; pre-rejection frames still count as access.
     excluded = []
+    excluded_keepalive = []
     retained = []
     for index, row in enumerate(failures):
         conn_id = row["client"]
@@ -1333,6 +1344,11 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
                 and conn_id in auth_failed and conn_id not in auth_accepted
                 and handshake_only_closes.get(conn_id, False)):
             excluded.append(row)
+        elif (row["kind"] == "keepalive_timeout"
+              and connection_failures.get(conn_id) == index
+              and conn_id not in auth_accepted
+              and idle_keepalive_closes.get(conn_id, False)):
+            excluded_keepalive.append(row)
         else:
             retained.append(row)
     failures = retained
@@ -1353,6 +1369,9 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
         "excluded_auth_failure_count": len(excluded),
         "excluded_auth_failure_conn_ids": [row["client"] for row in excluded],
         "excluded_auth_failures": excluded if max_examples is None else excluded[:max_examples],
+        "excluded_unauthenticated_keepalive_count": len(excluded_keepalive),
+        "excluded_unauthenticated_keepalive_conn_ids": [row["client"] for row in excluded_keepalive],
+        "excluded_unauthenticated_keepalives": excluded_keepalive if max_examples is None else excluded_keepalive[:max_examples],
     }
 
 
