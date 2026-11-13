@@ -1,4 +1,4 @@
-"""RED tests for spec_pentacle__assistant_duplicate_reply_sources_2026_10.
+"""Rollback-mode coverage for spec_pentacle__assistant_duplicate_reply_sources_2026_10.
 
 Two operator-visible duplicate sources on the canonical assistant chat:
 
@@ -12,11 +12,17 @@ Two operator-visible duplicate sources on the canonical assistant chat:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 
 from assistant_composite import AssistantComposite, direct_dispatch_envelope
 from store import Store
-from test_assistant_prose_mirror import ASSISTANT, ROOT, _answer_rows, _config, _normalized_turn_event, _operator_trigger
+from test_assistant_prose_mirror import ASSISTANT, ROOT, _answer_rows, _config as _mirror_config, _normalized_turn_event, _operator_trigger
+
+
+def _config(generation):
+    # These tests exercise the retained mirror in rollback mode.
+    return replace(_mirror_config(generation), strict_publication_default=False)
 
 
 def _proactive(generation: str, key: str, text: str) -> dict:
@@ -91,10 +97,14 @@ def test_direct_dispatch_envelope_carries_the_batched_dispatch_rule():
     route = {"input_identity": "optimistic-1", "reply_to_question_id": None,
              "body": "pause wmi runs", "attachments_json": "[]"}
     envelope = direct_dispatch_envelope(config, route, dispatch_id="assistant-direct-1",
-                                        target=ROOT, generation="generation-1")
+                                        target=ROOT, generation="generation-1", strict_publication=True)
     wire = envelope["wire_body"]
     assert "Several inputs in one batch" in wire and "--reply-to-message-ids" in wire
     assert "never publish the same body twice" in wire
+    assert "Only a publish reaches the operator; turn text is never delivered." in wire
+    assert "publish:assistant-direct-1:ack" in wire
+    assert "publish:assistant-direct-1 for the final" in wire
+    assert "End the turn with the single word done." in wire
     # The rule is part of the trusted root instruction, above the untrusted input.
     assert wire.index("never publish the same body twice") < wire.index("<assistant-original-input-json>")
 
@@ -237,7 +247,7 @@ def test_batch_member_not_declared_by_the_publication_stays_open_without_a_secon
     asyncio.run(_go())
 
 
-def test_novel_proactive_with_no_open_dispatch_is_always_delivered():
+def test_novel_proactive_with_no_open_dispatch_is_delivered_with_strict_off():
     """Regression guard (operator 2026-10-14, dispatch b0223cd9): unprompted updates must never be
     blocked. A brand-new proactive update with no open dispatch goes through immediately, including
     on a seat that has never received an operator dispatch (the earlier bug: the front desk could

@@ -172,6 +172,18 @@ def test_assistant_proactive_publish_omits_dispatch(monkeypatch):
     monkeypatch.setattr(cli, '_assistant_call', lambda args, payload: captured.update(payload) or 0)
     assert args.func(args) == 0
     assert 'dispatch_id' not in captured and 'reply_to_message_id' not in captured
+    assert 'note_type' not in captured and 'ref' not in captured
+
+
+def test_assistant_proactive_note_flags_are_forwarded(monkeypatch):
+    args = cli.build_parser().parse_args([
+        'assistant', 'publish', '--proactive', '--request-id', 'note',
+        '--composite-stream-id', 'fixture:assistant', '--publish-kind', 'status', '--message', 'progress',
+        '--note-type', 'relay', '--ref', 'tell:one:two'])
+    captured = {}
+    monkeypatch.setattr(cli, '_assistant_call', lambda args, payload: captured.update(payload) or 0)
+    assert args.func(args) == 0
+    assert captured['note_type'] == 'relay' and captured['ref'] == 'tell:one:two'
 
 
 def test_assistant_publish_requires_dispatch_or_proactive(monkeypatch):

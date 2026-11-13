@@ -19,7 +19,7 @@ def _elapsed(start, end):
         return None
 
 
-def project_input(route, publications, lanes):
+def project_input(route, publications, lanes, *, strict_publication=False):
     accepted = route["created_at"]
     first = publications[0]["created_at"] if publications else None
     final = None
@@ -63,6 +63,9 @@ def project_input(route, publications, lanes):
         state = "waiting_for_dependency"
     else:
         state = "awaiting_reply"
+    if (strict_publication and json.loads(route["route_json"] or "{}").get("desk_dispatch")
+            and state in AWAITING_RESPONSE):
+        state = "reply_not_required"
     # Response completion is independent of project completion. No lane means
     # unknown global work, including coordination through existing owners.
     if not phases:

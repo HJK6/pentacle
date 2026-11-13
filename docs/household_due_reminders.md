@@ -19,6 +19,7 @@ The config must be an owned regular file with mode `0600`; state directories use
   "cosmo_token_file": "/private/config/household.token",
   "self_person": "owner",
   "composite_stream_id": "home:assistant",
+  "operator_request_ref": "message:operator-request-id",
   "host_id": "home",
   "seat_cwd": "/private/agent-workspace",
   "sessions_db": "/private/state/sessions.db",
@@ -45,7 +46,10 @@ credential loading. No operator authority, credential minting/copying, worker
 borrowing or generic identity selection is used. This path is specific to this
 FD-installed reminder job.
 
-After agreement, the verified current seat can run `assistant publish --proactive
+Set `operator_request_ref` to the existing operator dispatch or message that
+authorized these reminders. The job refuses missing or malformed values before
+publishing and sends that reference with `--note-type reminder`. After agreement,
+the verified current seat can run `assistant publish --proactive
 --publish-kind prose --response-state final` or `tell assistant`. The daemon also
 checks the current binding at publication. If no valid current local seat can
 authenticate, the job sends nothing and retains a durable unacknowledged BLOCKER
@@ -60,8 +64,8 @@ absolute interpreter/tool/config/log paths. Retain prior plist/config and hashes
 install the tool from accepted public source at an immutable path, and use
 `launchctl bootstrap gui/<uid> <plist>`. `RunAtLoad` and `StartInterval=300` wake a
 short process; the process applies Chicago time, DST, the activation date and the
-08:00–11:59 delivery window. No daemon deployment is needed to run this tool with
-the existing CLI/API protocol.
+08:00–11:59 delivery window. Install a CLI and daemon that support the proactive
+note type and reference fields before running this version of the tool.
 
 Start with `enabled: false`. Rehearse live reads and one real FD-only delivery:
 

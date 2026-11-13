@@ -589,6 +589,11 @@ async def run(args: argparse.Namespace) -> int:
                 return result
         return None
 
+    from assistant_guidelines import AssistantGuidelines
+    guidelines = AssistantGuidelines(store, assistant_composite, server.lane_rulings, comms)
+    assistant_composite.guidelines = guidelines
+    comms.guidelines = guidelines
+    server.guidelines = guidelines
     comms.assistant_ingress_policy = _assistant_ingress_policy
     comms.front_desk_digest = assistant_composite.front_desk_digest
     outbound.front_desk_digest = assistant_composite.front_desk_digest
@@ -721,6 +726,7 @@ async def run(args: argparse.Namespace) -> int:
         notify=notify,
         broadcast=server.broadcast,
         inventory_emitter=inventory_emitter,
+        guidelines=guidelines,
         assistant_backend_binding=(
             lambda stream_id, generation: assistant_composite.config.enabled and bool(generation) and stream_id in {
                 assistant_composite.config.astra_stream_id,

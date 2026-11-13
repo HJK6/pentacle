@@ -323,6 +323,7 @@ The reviewed receiver checkout supplies the one private URL relay:
 python services/chat-stream-v2/tools/provider_account_operator_login.py \
   --policy /absolute/private-policy.json --host host-a --provider codex --account primary \
   --login-generation login-one --new-generation login-two --operation-id upgrade-one \
+  --ref message:operator-request-id \
   --expected-version 'codex-cli PINNED_VERSION' --expected-executable-sha256 "$NATIVE_SHA256" \
   --reason approved_bound_executable_upgrade
 ```
@@ -335,7 +336,8 @@ clearance guard, the real hold must remain valid, and no repin may be unresolved
 The coordinator supplies the immutable current pin and host clearance; missing
 clearance or coordinator reachability refuses before sign-in. The relay emits
 exactly one validated HTTPS authorization URL to the authenticated binding's
-private composite, then creates a separate Done / Not yet action prompt. Only
+private composite as a `problem` note referencing the message, report, or tell
+that started the enrollment, then creates a separate Done / Not yet action prompt. Only
 publication/prompt IDs and the safe native outcome reach stdout. Done is not
 login proof: native completion, subscription identity and the minimal turn must
 all succeed. No automated browser broker is used in this mode.
