@@ -26,6 +26,7 @@ import wmi_brief_producer
 
 import asyncio
 import screen_monitor_principal
+import screen_acquisitions_principal
 import errno
 import functools
 import hmac
@@ -2400,12 +2401,13 @@ class Server:
                 self._client_identities[websocket] = client
         handler = self.handlers.get(verb)
         report_actor = self._report_producer_id()
-        # Restricted report and bot producers get their typed verb refusal
+        # Restricted producers get their typed verb refusal
         # below, even for a verb this daemon does not implement.
         if handler is None and not (
             websocket is not None
             and (self._client_system_producers.get(websocket) == BOT_MESSAGING_PRODUCER_STREAM_ID
                  or self._client_system_producers.get(websocket) == WORK_REPORT_READER
+                 or self._client_system_producers.get(websocket) == screen_acquisitions_principal.ACTOR
                  or wmi_brief_producer.is_actor(self._client_system_producers.get(websocket))
                  or (report_actor is not None
                      and self._client_system_producers.get(websocket) == report_actor))
@@ -2450,6 +2452,11 @@ class Server:
                       and self.account_runtime.watcher_authorized(service_auth, msg.get("host"))
                       and msg.get("action") in {"probe", "observe-failure", "observation"}):
                     pass  # Typed payload and generation checks are in AccountRuntime.
+                elif service_auth["service_actor"] == screen_acquisitions_principal.ACTOR:
+                    if verb not in screen_acquisitions_principal.VERBS:
+                        return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
+                    if not screen_acquisitions_principal.valid_request(msg):
+                        return [self._auth_error_frame(verb, request_id, "system_producer_payload_invalid")]
                 elif service_auth["service_actor"] == screen_monitor_principal.ACTOR:
                     if verb=='tell':
                         target=screen_monitor_principal.composite()
@@ -2969,6 +2976,7 @@ class Server:
         re-read on every RPC (removal/rotation revokes bound sockets too)."""
         sources = {
             screen_monitor_principal.ACTOR: os.environ.get(screen_monitor_principal.TOKEN_FILE_ENV),
+            screen_acquisitions_principal.ACTOR: os.environ.get(screen_acquisitions_principal.TOKEN_FILE_ENV),
             WORK_REPORT_READER: os.environ.get(WORK_REPORT_READER_TOKEN_FILE_ENV),
             WMI_BACKUP_PRODUCER_STREAM_ID: os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV),
             BOT_MESSAGING_PRODUCER_STREAM_ID: os.environ.get(BOT_MESSAGING_STREAM_TOKEN_FILE_ENV),

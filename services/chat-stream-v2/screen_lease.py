@@ -3,6 +3,7 @@
 import logging
 import hashlib
 import screen_monitor_principal
+import screen_acquisitions_principal
 import time
 
 log = logging.getLogger("chat_streamd_v2.screen_lease")
@@ -28,12 +29,18 @@ class ScreenLease:
         auth = message.get("_auth_context") or {}
         actor = auth.get("stream_id")
         service = None
-        if auth.get('service_authenticated') and auth.get('service_actor')==screen_monitor_principal.ACTOR:
+        principal = None
+        if auth.get('service_authenticated'):
+            if auth.get('service_actor') == screen_monitor_principal.ACTOR:
+                principal = screen_monitor_principal
+            elif auth.get('service_actor') == screen_acquisitions_principal.ACTOR:
+                principal = screen_acquisitions_principal
+        if principal is not None:
             clean={k:v for k,v in message.items() if not k.startswith('_')}
-            if not screen_monitor_principal.valid_request(clean):
+            if not principal.valid_request(clean):
                 return {'type':f'screen.lease.{verb}.error','ok':False,'error_code':'system_producer_payload_invalid'}
-            actor=screen_monitor_principal.ACTOR
-            service={'actor':actor,'host':screen_monitor_principal.host(),
+            actor=principal.ACTOR
+            service={'actor':actor,'host':principal.host(),
                      'token_hash':hashlib.sha256(str(message.get('stream_token','')).encode()).hexdigest()}
             message={**message}
             if verb in ('acquire','renew'):message.setdefault('ttl',120)
