@@ -3,6 +3,7 @@
 import hashlib
 import json
 import uuid
+import screen_acquisitions_principal
 
 from store_assistant_binding import _binding_conn
 from store_routing import _assistant_actor_conn, _insert_outbound_notice_conn
@@ -193,7 +194,8 @@ class ScreenLeaseStoreMixin:
                         "renewed": True,
                     }
                 lid = "lease-" + uuid.uuid4().hex
-                label = 'Codex reset monitor' if service is not None else (seat["title"] or actor)
+                label = (('Altum acquisitions browser' if actor == screen_acquisitions_principal.ACTOR
+                          else 'Codex reset monitor') if service is not None else (seat["title"] or actor))
                 conn.execute(
                     "INSERT INTO v2_screen_leases (lease_id,host,holder_stream_id,holder_label,reason,acquired_at,expires_at) VALUES (?,?,?,?,?,?,?)",
                     (lid, host, actor, label, message["reason"], now, now + ttl),

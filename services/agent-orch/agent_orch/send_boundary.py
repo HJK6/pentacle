@@ -17,6 +17,7 @@ from collections.abc import Mapping as MappingABC
 from .config import Config, is_loopback_endpoint, local_admin_token
 
 FIXED_SERVICE_IDENTITIES = {
+    "altum-acquisitions-browser": ("file", "AGENT_ORCH_STREAM_TOKEN_FILE"),
     "codex-reset-monitor": ("file", "AGENT_ORCH_STREAM_TOKEN_FILE"),
     "altum-bot-cd": ("file", "AGENT_ORCH_STREAM_TOKEN_FILE"),
     "amaterasu:wmi-pg-dailybackup": ("file", "AGENT_ORCH_STREAM_TOKEN_FILE"),
