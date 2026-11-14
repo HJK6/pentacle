@@ -15,6 +15,8 @@ from server import Server
 from sessions import Sessions
 from store import Store, STREAM_TOKEN_HASH_VERSION
 from tmux_transport import Tmux
+from _shared.work_goals import derive_lane_id
+from test_work_lanes import seed_pending_goal
 
 HOST = "fixture-fd"
 FD = HOST + ":front-desk"
@@ -53,9 +55,11 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
             saved_lane = None
             if protected:
                 await composite.ensure_projection()
+                # A lane cannot be created without an observed goal charter naming it.
+                await seed_pending_goal(store, "epic_fdclose", derive_lane_id(HOST + ":assistant", "stream:target"))
                 payload = {"adoption_key": "stream:target", "title": "Disposable operator lane",
                     "summary": "Synthetic protected close fixture", "owner_kind": "operator",
-                    "work_state": "paused", "no_spec_reason": "Isolated acceptance",
+                    "work_state": "paused", "no_spec_reason": "Isolated acceptance", "goals": ["epic_fdclose"],
                     "visible_chat": {"stream_id": HOST + ":target", "generation": target["session_generation"]}}
                 if protected == "lead":
                     await sessions.set_role(HOST, "target", "lead", auth_context={"operator_authenticated": True})
