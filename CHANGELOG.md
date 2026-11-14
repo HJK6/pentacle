@@ -13,6 +13,10 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-11-14
+
+- Let agents request their own context compaction with `agent-orch compact`, submitting immediately through ordinary provider input without interrupting the current turn.
+
 ## 2026-11-13
 
 - Reduce idle transcript identity probes while retaining fresh checks before reads and appends, with an opt-out switch and minute intake timing summaries.
