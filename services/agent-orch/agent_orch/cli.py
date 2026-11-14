@@ -5267,6 +5267,12 @@ def ssh_passthrough(ssh_args: list[str]) -> int:
     return 1
 
 
+def compact(args: argparse.Namespace) -> int:
+    request_id = args.request_id or f"compact-{uuid.uuid4()}"
+    print(f"compact request: {request_id}", file=sys.stderr)
+    return _coordination_request(args, {"type": "compact", "request_id": request_id})
+
+
 def watch_wake(args: argparse.Namespace) -> int:
     kind = args.watch_wake_kind
     target = args.watch_wake_target
@@ -5358,6 +5364,11 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("--workspace", help=argparse.SUPPRESS)
     stop_parser.add_argument("--kill-children", action="store_true", help=argparse.SUPPRESS)
     stop_parser.set_defaults(func=stop)
+
+    compact_parser = subparsers.add_parser("compact", help="Request context compaction for this seat now.")
+    compact_parser.add_argument("--request-id", help="Reuse this ID when retrying the same request.")
+    compact_parser.add_argument("--timeout", type=float, default=30.0)
+    compact_parser.set_defaults(func=compact)
 
     for kind in ("wake", "watch"):
         timer_parser = subparsers.add_parser(kind)

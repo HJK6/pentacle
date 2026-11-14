@@ -726,7 +726,7 @@ def _is_send_frame(raw: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return isinstance(msg, dict) and str(msg.get("type") or "") in {
-        "send", "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
+        "send", "compact", "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
         "voice_answer.answer",
     }
 
@@ -1034,6 +1034,7 @@ class Server:
             "close": self._on_close,
             "tell": self._on_tell,
             "send": self._on_send,
+            "compact": self._on_compact,
             "transcribe_blob": self._on_transcribe_blob,
             "assistant.publish": self._on_assistant_publish,
             "assistant.operation": self._on_assistant_operation,
@@ -4632,6 +4633,37 @@ class Server:
         if isinstance(msg.get("inbox"), dict):
             physical["inbox"] = {**msg["inbox"], "to": target}
         return await self._on_send(physical)
+
+    async def _on_compact(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """A seat chooses when to submit its own ordinary compact command."""
+        from ledger import CONTEXT_COMPACT_COMMAND
+
+        auth = msg.get("_auth_context") or {}
+        caller = str(auth.get("stream_id") or "")
+        if auth.get("token_verified") is not True or not caller:
+            raise VerbError("compact_self_only", "compact requires the calling seat's token")
+        host, name = self.sessions.split(caller)
+        # Authorization boundary: a wire target must never select another seat.
+        for key, expected in (("stream_id", caller), ("to_stream_id", caller),
+                              ("host", host), ("session_name", name)):
+            if key in msg and msg[key] != expected:
+                raise VerbError("compact_self_only", "compact acts only on the calling seat")
+        request_id = str(msg.get("request_id") or "").strip()
+        if not request_id:
+            raise VerbError("bad_request", "request_id is required")
+        row = await self.store.fetch_session(host, name) or {}
+        send_request_id = f"compact:{request_id}"
+        result = await self.comms.send({
+            "stream_id": caller,
+            "request_id": send_request_id,
+            "text": CONTEXT_COMPACT_COMMAND if row.get("provider") == "claude" else "/compact",
+            "_self_compact_stream_id": caller,
+            # Preserve the trusted actor in receipts, without a peer-message
+            # sender field that would wrap the slash command in an envelope.
+            "_auth_context": auth,
+        })
+        return {**result, "type": "compact.error" if result.get("delivery") == "not_landed" else "compact.ok",
+                "request_id": request_id, "send_request_id": send_request_id}
 
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
         from provider_accounts import AccountError, reject_overrides

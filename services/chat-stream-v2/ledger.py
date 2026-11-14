@@ -1927,7 +1927,7 @@ class NudgeJob:
                         crossing = basis["crossing"]
                         action = (
                             "Compact at your next safe point: finish the current step, "
-                            "write your checkpoint, carry the Operator directives register verbatim, then run /compact. "
+                            "write your checkpoint, carry the Operator directives register verbatim, then run agent-orch compact. "
                             "The daemon will submit /compact at the compact threshold if needed."
                         )
                         if target != sid:

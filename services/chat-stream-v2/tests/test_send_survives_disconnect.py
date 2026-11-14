@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from server import Server
 
 
@@ -60,10 +62,10 @@ async def _join_owned(tasks: list[asyncio.Task]) -> None:
     assert not [o for o in outcomes if isinstance(o, Exception)], outcomes
 
 
-def _send_frame(index: int) -> str:
+def _send_frame(index: int, verb: str = "send") -> str:
     return json.dumps(
         {
-            "type": "send",
+            "type": verb,
             "request_id": f"r{index}",
             "host": "hosta",
             "session_name": "codex-target",
@@ -72,7 +74,8 @@ def _send_frame(index: int) -> str:
     )
 
 
-def test_send_survives_submitter_disconnect_v2() -> None:
+@pytest.mark.parametrize("verb", ["send", "compact"])
+def test_send_survives_submitter_disconnect_v2(verb) -> None:
     """Several accepted sends complete after the client disconnects."""
 
     async def go() -> None:
@@ -95,8 +98,8 @@ def test_send_survives_submitter_disconnect_v2() -> None:
                 "delivery": "landed",
             }
 
-        server.handlers["send"] = fake_send
-        ws = _FakeWebSocket([_send_frame(i) for i in range(3)], hold=disconnect)
+        server.handlers[verb] = fake_send
+        ws = _FakeWebSocket([_send_frame(i, verb) for i in range(3)], hold=disconnect)
         client = asyncio.create_task(server._handle_client(ws))
         try:
             await asyncio.wait_for(entered.wait(), 2)
