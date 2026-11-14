@@ -98,6 +98,8 @@ def _mac_args(pid: int):
         cursor = end + 1
     env = {}
     for chunk in raw[cursor:].split(b"\0"):
+        if not chunk:
+            break  # Environment terminator; kernel auxiliary strings follow.
         if b"=" in chunk:
             key, value = os.fsdecode(chunk).split("=", 1)
             env[key] = value

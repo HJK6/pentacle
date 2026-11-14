@@ -30,9 +30,14 @@ async def run(mode, stream, marker):
             payload.update(operator_confirm=True, force=True, reason="fixture_cleanup")
         else:
             payload["text"] = marker
+            payload["optimistic_id"] = uuid.uuid4().hex
         result = await _operator_envelope_rpc(config, payload, caller=None, prefix=mode, timeout=30)
-        if result.get("type") != mode + ".ok":
-            raise RuntimeError("Fixture operation was refused: " + str(result.get("error_code")))
+        accepted = (result.get("type") == "close.ok" if mode == "close" else
+                    result.get("type") == "send.result" and bool(result.get("receipt_id"))
+                    and result.get("delivery") in {"accepted", "landed", "committed_pending_proof", "persisted"})
+        if not accepted:
+            fields = {key: result.get(key) for key in ("type", "error_code", "state", "delivery", "reason")}
+            raise RuntimeError("Fixture operation was refused: " + json.dumps(fields))
         if mode == "close":
             return {"stream": stream, "closed": True}
     deadline = time.monotonic() + 120

@@ -6,6 +6,7 @@ import os
 import plistlib
 import socket
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
@@ -19,6 +20,21 @@ from pentacle import discovery as d
 
 
 class DiscoveryTest(unittest.TestCase):
+    def test_macos_environment_stops_before_kernel_auxiliary_strings(self):
+        import ctypes
+        from types import SimpleNamespace
+        raw = (struct.pack("i", 3) + b"/bin/python\0\0/bin/python\0arg with spaces\0\0"
+               b"PATH=/bin\0__PYVENV_LAUNCHER__=/install space/.venv/bin/python\0\0"
+               b"executable_cdhash=NOT_AN_ENVIRONMENT_VALUE\0ptr_munge=NOT_AN_ENVIRONMENT_VALUE\0")
+        def sysctl(mib, count, buffer, size, new, length):
+            ctypes.memmove(buffer, raw, len(raw))
+            size._obj.value = len(raw)
+            return 0
+        with patch.object(d.ctypes, "CDLL", return_value=SimpleNamespace(sysctl=sysctl)):
+            argv, env = d._mac_args(123)
+        self.assertEqual(argv, ["/bin/python", "arg with spaces", ""])
+        self.assertEqual(env, {"PATH": "/bin", "__PYVENV_LAUNCHER__": "/install space/.venv/bin/python"})
+
     def test_installed_daemon_unit_is_checked_even_with_hand_started_process(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
@@ -70,6 +86,7 @@ server=http.server.HTTPServer(('127.0.0.1',0),Handler)
 print(server.server_port,flush=True);server.serve_forever()
 ''')
             child = subprocess.Popen([sys.executable, str(script), str(db), "argument with spaces"], cwd=root,
+                                     env={"PATH": os.environ.get("PATH", os.defpath), "HOME": str(root), "FIXTURE_ENV_MARKER": "present"},
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 port = int(child.stdout.readline())
@@ -79,6 +96,8 @@ print(server.server_port,flush=True);server.serve_forever()
                 self.assertEqual(found.pid, child.pid)
                 self.assertEqual(found.argv[1:], [str(script), str(db), "argument with spaces"])
                 self.assertEqual(found.cwd.resolve(), root.resolve())
+                self.assertEqual(found.env["FIXTURE_ENV_MARKER"], "present")
+                self.assertTrue(set(found.env) <= {"PATH", "HOME", "FIXTURE_ENV_MARKER", "LC_CTYPE", "__CF_USER_TEXT_ENCODING", "__PYVENV_LAUNCHER__"})
                 self.assertEqual(d.open_stores(found), [db.resolve()])
                 self.assertEqual(d.health(url)["build_commit"], "a" * 40)
             finally:

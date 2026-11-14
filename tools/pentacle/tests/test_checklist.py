@@ -29,7 +29,8 @@ class ChecklistTest(unittest.TestCase):
         self.git("config", "user.name", "Example Agent")
         self.git("config", "user.email", "agent@example.invalid")
         (self.root / "tracked").write_text("first")
-        self.git("add", "tracked"); self.git("commit", "-qm", "First")
+        (self.root / "CHANGELOG.md").write_text("# Changes\n\n## 2026-11-01\n\n- Fixture release notes.\n")
+        self.git("add", "tracked", "CHANGELOG.md"); self.git("commit", "-qm", "First")
         self.previous = self.git("rev-parse", "HEAD")
         (self.root / "tracked").write_text("second")
         self.git("commit", "-qam", "Second")
@@ -64,7 +65,41 @@ class ChecklistTest(unittest.TestCase):
         return subprocess.run(["git", "-C", str(self.root), *args], check=True, capture_output=True, text=True).stdout.strip()
 
     def entry(self, commit, version, actions):
-        return {"commit": commit, "version": version, "tested_update_from": [self.previous], "required_actions": actions, "changelog_sections": []}
+        return {"commit": commit, "version": version, "tested_update_from": [self.previous], "required_actions": actions, "changelog_sections": ["2026-11-01"]}
+
+    def test_release_check_reports_two_behind_latest_divergent_and_direct_testing(self):
+        self.args.check, self.args.prepare, self.args.json = True, False, True
+        code, out, err = self.run_update()
+        self.assertEqual(code, 0, err)
+        value = json.loads(out)
+        self.assertEqual(value["behind_releases"], 2)
+        self.assertTrue(value["tested_start"])
+        self.assertEqual(value["install"]["release_remote"], "custom")
+        # A tested intermediate hop does not establish a directly tested start.
+        self.entries[-1]["tested_update_from"] = ["2.0.0"]
+        self.assertFalse(json.loads(self.run_update()[1])["tested_start"])
+        self.git("checkout", "--detach", self.target)
+        value = json.loads(self.run_update()[1])
+        self.assertEqual(value["install"]["version"], "2.1.0")
+        self.assertEqual(value["behind_releases"], 0)
+        self.git("checkout", "--detach", self.previous)
+        (self.root / "tracked").write_text("divergent")
+        self.git("commit", "-qam", "Divergent")
+        value = json.loads(self.run_update()[1])
+        self.assertIsNone(value["behind_releases"])
+        self.assertFalse(value["tested_start"])
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
+
+    def test_release_check_prints_notes_all_actions_and_cache_age(self):
+        self.args.check, self.args.prepare = True, False
+        self.manifest.update(source="cache", fetched_at="2020-01-01T00:00:00+00:00")
+        code, out, err = self.run_update()
+        self.assertEqual(code, 0, err)
+        for value in ("Fixture release notes.", "first action", "target action", "Cached manifest age:", "online release status unknown"):
+            self.assertIn(value, out)
+        self.assertNotIn("up to date", out)
+        self.manifest["data"] = None
+        self.assertEqual(self.run_update()[0], 2)
 
     def run_update(self):
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:

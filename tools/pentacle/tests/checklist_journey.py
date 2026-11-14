@@ -57,6 +57,14 @@ class Journey:
         self.blocks = re.findall(r"```bash\n(.*?)\n\s*```", (SOURCE / "UPGRADE.md").read_text(), flags=re.S)
         self.blocks = ["\n".join(line[3:] if line.startswith("   ") else line for line in block.splitlines()) + "\n" for block in self.blocks]
         assert len(self.blocks) == 9, "The reviewed checklist has exactly nine fenced Bash blocks"
+        harness = self.evidence / "harness"; harness.mkdir()
+        hashes = {}
+        for name in ("tools/pentacle/tests/checklist_journey.py", "tools/pentacle/tests/journey_client.py",
+                     "services/chat-stream-v2/tests/smoke/ingest_provider_stub.py", "UPGRADE.md"):
+            data = (SOURCE / name).read_bytes()
+            (harness / Path(name).name).write_bytes(data)
+            hashes[name] = hashlib.sha256(data).hexdigest()
+        atomic_json(harness / "hashes.json", hashes)
         atomic_json(self.evidence / "identity.json", {"candidate": self.candidate, "baseline": BASELINE,
                     "platform": sys.platform, "python": sys.version, "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     "checklist_sha256": hashlib.sha256((SOURCE / "UPGRADE.md").read_bytes()).hexdigest(), "fixture": str(self.root)})
@@ -86,7 +94,10 @@ class Journey:
         self.git("remote", "set-url", "origin", "https://github.com/HJK6/pentacle.git")
         self.run([sys.executable, "-m", "venv", self.python.parent.parent])
         self.install_and_build()
-        provider = self.root / "OUTSIDE_DIRECTORY_SEED"
+        # Existing provider identity parsing accepts an executable path without
+        # spaces. Only the provider lives here; the reviewed install, config,
+        # state and venv paths all retain spaces.
+        provider = self.socket_root / "OUTSIDE_DIRECTORY_SEED"
         provider.mkdir()
         shutil.copyfile(SOURCE / "services/chat-stream-v2/tests/smoke/ingest_provider_stub.py", provider / "ingest_provider_stub.py")
         self.provider = provider / "claude"
@@ -103,6 +114,7 @@ class Journey:
         self.tmux.write_text("#!/bin/sh\nexec " + shlex.join([shutil.which("tmux"), "-S", str(self.socket_root / "socket")]) + ' "$@"\n')
         self.tmux.chmod(0o700)
         (self.home / "workspace").mkdir()
+        (self.home / "state space").mkdir(mode=0o700)
         self.process_env = {**self.env, "PENTACLE_CONFIG": str(self.config), "CHAT_STREAM_STUB_ROOT": str(self.home / ".claude/projects")}
         self.commands = {
             "daemon": [self.python, self.checkout / "services/chat-stream-v2/main.py", "--host", "127.0.0.1",
@@ -222,6 +234,7 @@ os.execv({real_git!r},[{real_git!r},*args])
         original_config = self.config.read_bytes()
         self.seed_stores()
         self.client("spawn", "REHEARSAL_BEFORE_UPGRADE")
+        self.client("send", "REHEARSAL_BEFORE_UPGRADE_SECOND")
         original_sessions = self.run([self.tmux, "list-sessions", "-F", "#{session_name}"]).stdout
         self.block(0, prepare_env=True)
         refused = self.block(1, expected=2, prepare_env=True)
@@ -233,14 +246,22 @@ os.execv({real_git!r},[{real_git!r},*args])
         self.block(2, prepare_env=True)
         self.plan = Path((self.checkout / ".pentacle-deploy/upgrade-current").read_text().strip())
         plan = d.read_json(self.plan / "plan.json")
-        assert set(plan["stores"]) == set(map(str, self.stores))
-        assert plan["daemon"]["argv"][0] == str(self.python)
+        atomic_json(self.evidence / "prepared-plan.json", plan)
+        atomic_json(self.evidence / "prepare-expectations.json", {"stores": list(map(str, self.stores)), "python": str(self.python)})
+        plan_stores = list(map(Path, plan["stores"]))
+        # A real conversation lazily opens sessions_archive.db as well. The
+        # three seeded application stores must be present, and every additional
+        # discovered database must also be copied and restored.
+        assert set(self.stores) <= set(plan_stores), "A seeded real store is absent from the plan"
+        assert plan["daemon"]["argv"][0] == str(self.python), "Prepared interpreter differs from the fixture invocation"
         self.block(3, expected=2)
         assert self.block(4, expected=None).returncode != 0
         self.stop()
         self.block(3)
-        copies = [self.plan / f"store-{i}.db" for i in range(3)]
-        self.read_seeds(copies)
+        copies = [self.plan / f"store-{i}.db" for i in range(len(plan_stores))]
+        self.read_seeds([copy for path, copy in zip(plan_stores, copies) if path in self.stores])
+        from pentacle.stores import verified
+        assert all(verified(path) for path in copies)
         hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in copies]
         for index in (4, 5, 6):
             self.block(index)
@@ -258,7 +279,9 @@ os.execv({real_git!r},[{real_git!r},*args])
             proc = d.listener(self.daemon_url if kind == "daemon" else self.web_url)
             assert proc is not None
             assert "CHAT_STREAM_STUB_ROOT" in proc.env
-            allowed = set(plan[kind]["environment"]) | {"__PYVENV_LAUNCHER__", "LC_CTYPE", "_", "SHLVL", "PWD"}
+            allowed = set(plan[kind]["environment"]) | {"__PYVENV_LAUNCHER__", "__CF_USER_TEXT_ENCODING", "LC_CTYPE", "_", "SHLVL", "PWD"}
+            atomic_json(self.evidence / (kind + "-environment-names.json"), {"recorded": plan[kind]["environment"],
+                        "observed": sorted(proc.env), "runtime_synthesized": sorted(set(proc.env) - set(plan[kind]["environment"]))})
             assert set(proc.env) <= allowed, "Launcher inherited an unapproved environment name"
         self.stop()
         self.block(8)
@@ -273,8 +296,8 @@ os.execv({real_git!r},[{real_git!r},*args])
                 db.execute("INSERT INTO doctor_rehearsal VALUES ('after-copy')")
         self.stop()
         self.run([self.plan / "restore-stores.sh"])
-        assert [path.read_bytes() for path in self.stores] == [path.read_bytes() for path in copies]
-        assert all(not Path(str(path) + suffix).exists() for path in self.stores for suffix in ("-wal", "-shm"))
+        assert [path.read_bytes() for path in plan_stores] == [path.read_bytes() for path in copies]
+        assert all(not Path(str(path) + suffix).exists() for path in plan_stores for suffix in ("-wal", "-shm"))
         # These prepare refusals must invalidate the old successful plan too.
         with (self.checkout / "README.md").open("a") as target:
             target.write("\nOwned refusal fixture\n")
@@ -288,7 +311,7 @@ os.execv({real_git!r},[{real_git!r},*args])
         self.block(2, expected=2, prepare_env=True)
         assert not (self.checkout / ".pentacle-deploy/upgrade-current").exists()
         atomic_json(self.evidence / "rehearsal.json", {"status": "passed", "candidate": self.candidate,
-                    "stores": 3, "copy_hashes": hashes, "exact_bash_blocks": len(self.blocks), "upgrade_reply": True,
+                    "stores": len(plan_stores), "seeded_stores": 3, "copy_hashes": hashes, "exact_bash_blocks": len(self.blocks), "upgrade_reply": True,
                     "rollback_reply": True, "retained_history": True, "explicit_restore": True})
 
     def install(self):
@@ -355,7 +378,7 @@ os.execv({real_git!r},[{real_git!r},*args])
         self.stop_one("daemon"); self.commands["daemon"] = first_command
         self.start_one("daemon"); self.wait_ready()
         self.stop_one("web")
-        build = self.checkout / "dist/build-commit.json"; original_build = build.read_bytes()
+        build = self.checkout / "renderer/dist/web/build-commit.json"; original_build = build.read_bytes()
         build.write_text(json.dumps({"schema_version": 1, "build_commit": BASELINE}))
         self.start_one("web"); self.wait_ready()
         check("stale web build", {"web.commit": "fail"})
@@ -468,6 +491,8 @@ def main():
             journey.doctor(live=True)
         return 0
     except Exception as error:
+        import traceback
+        (journey.evidence / "failure-traceback.log").write_text(traceback.format_exc())
         atomic_json(journey.evidence / "failure.json", {"classification": "unclassified", "type": type(error).__name__, "message": str(error)})
         print("Journey failed; inspect the evidence directory.", file=sys.stderr)
         return 1
