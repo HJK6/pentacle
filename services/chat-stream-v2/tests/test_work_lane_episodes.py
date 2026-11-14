@@ -100,13 +100,17 @@ class RecordingSink:
 
 async def seed_observations(store, members, *, available=True):
     def write(conn):
+        from store_work_index import _state_conn
         conn.execute("BEGIN IMMEDIATE")
         for item in members:
             conn.execute("INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
                          (item["spec_id"], json.dumps({"member": item})))
-        conn.execute("INSERT OR REPLACE INTO v2_work_index_state VALUES (1,?)", (json.dumps({
-            "available": available, "root_configured": True, "snapshot_at": OLD,
-            "last_sweep_at": OLD, "error": None}),))
+        # Preserve any accepted goal observations so a lane adopted with its
+        # required goal keeps that goal (an empty goal keeps the lane open).
+        state = _state_conn(conn)
+        state.update(available=available, root_configured=True, snapshot_at=OLD,
+                     last_sweep_at=OLD, error=None)
+        conn.execute("INSERT OR REPLACE INTO v2_work_index_state VALUES (1,?)", (json.dumps(state),))
         conn.commit()
     await store.submit(write)
 

@@ -79,6 +79,11 @@ def parse_goal_facts(text: str) -> dict:
     return result
 
 
+def derive_lane_id(composite_stream_id: str, adoption_key: str) -> str:
+    """The one id a new adopted lane gets, shared by adopt, preview and the command."""
+    return 'wl-' + hashlib.sha256((composite_stream_id + '\x00' + adoption_key).encode()).hexdigest()[:24]
+
+
 def advance_goals(previous: dict, scan: dict, known_lanes: set[str]) -> dict:
     """Persist last-good charter facts in the existing work-index snapshot."""
     candidates = scan.get('goal_candidates', {})
@@ -87,6 +92,7 @@ def advance_goals(previous: dict, scan: dict, known_lanes: set[str]) -> dict:
         prior = copy.deepcopy(previous.get(identity) or {})
         current = candidates.get(identity, [])
         quality, error, accepted = 'missing', 'work_goal_file_missing', None
+        pending = None
         if not scan['available'] or not scan.get('goals_available', True):
             quality, error = 'stale', scan.get('goal_error') or scan.get('error') or 'work_goal_root_unavailable'
         elif len(current) > 1:
@@ -98,6 +104,14 @@ def advance_goals(previous: dict, scan: dict, known_lanes: set[str]) -> dict:
                 lane = item['facts']['lane_id']
                 if lane is not None and lane not in known_lanes:
                     quality, error = 'error', 'work_goal_lane_unknown'
+                    # The scan read a valid, unique charter that names a lane the
+                    # daemon does not know yet. Keep its parsed facts so adopt can
+                    # accept it the moment that lane is created or promoted. Only
+                    # adopt reads this key; it is dropped on acceptance, lane
+                    # change or disappearance. Invalid or duplicated charters
+                    # never reach here, so they carry no pending facts.
+                    pending = {'facts': item['facts'], 'source_hash': item['source_hash'],
+                               'path': item['path']}
                 else:
                     accepted = item
         elif prior.get('path') in scan.get('goal_errors', {}):
@@ -106,6 +120,10 @@ def advance_goals(previous: dict, scan: dict, known_lanes: set[str]) -> dict:
         if accepted is not None:
             prior.update(facts=accepted['facts'], source_hash=accepted['source_hash'], path=accepted['path'])
         prior.update(quality=quality, error=error)
+        if pending is not None:
+            prior['pending'] = pending
+        else:
+            prior.pop('pending', None)
         result[identity] = prior
     return result
 
@@ -146,6 +164,31 @@ def goal_progress(members: list[dict], *, certain: bool = True) -> dict:
              else 'not_started' if fresh and all(status(member) == 'backlog' for member in included)
              else 'in_progress')
     return {'state': state, 'done': done, 'total': total}
+
+
+def lane_work_status(goals: dict, members: list[dict], index_available: bool) -> str:
+    """'finished' | 'unfinished' | 'uncertain' for one lane under the open rule.
+
+    A lane has unfinished work when at least one of its goals is not done or at
+    least one open unplaced item remains; an empty goal counts as not done. The
+    daemon acts only when it is certain: the work index is available, every goal
+    record scoped to the lane is fresh and every member observation is fresh.
+    """
+    if not index_available:
+        return 'uncertain'
+    if any((record or {}).get('quality') != 'fresh' for record in goals.values()):
+        return 'uncertain'
+    if any((member.get('observation') or {}).get('quality') != 'fresh' for member in members):
+        return 'uncertain'
+    for identity in goals:
+        wire = goal_id(identity)
+        owned = [member for member in members if member.get('goal_id') == wire]
+        if goal_progress(owned, certain=True)['state'] != 'done':
+            return 'unfinished'
+    if any(not member.get('goal_id') and _status(member) not in ('completed', 'deprecated')
+           for member in members):
+        return 'unfinished'
+    return 'finished'
 
 
 def goal_class(members: list[dict], working_ids: set[str]) -> str:

@@ -61,11 +61,15 @@ async def _journey(tmp_path, *, delivered, comment, refusal=None, transport="pro
             return proc.returncode, json.loads(stdout)
 
         async def adopt(key):
+            from test_work_lanes import seed_pending_goal, synthetic_epic
+            from _shared.work_goals import derive_lane_id
+            epic = synthetic_epic(key)
+            await seed_pending_goal(store, epic, derive_lane_id(ASSISTANT, key))
             result = await composite.operation({"type": "assistant.operation", "request_id": "adopt:" + key,
                 "composite_stream_id": ASSISTANT, "dispatch_id": "none", "operation": "work_lane.adopt",
                 "payload": {"adoption_key": key, "title": "Confirmation lane", "summary": "Synthetic work",
                             "owner_kind": "operator", "work_state": "paused", "visible_chat": {"stream_id": ASSISTANT},
-                            "no_spec_reason": "Disposable confirmation fixture."},
+                            "goals": [epic], "no_spec_reason": "Disposable confirmation fixture."},
                 "_auth_context": {"token_verified": True, "stream_id": producer,
                                   "session_generation": row["session_generation"]}}, actor_stream_id=producer)
             return result["lane"]

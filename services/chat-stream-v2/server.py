@@ -1044,6 +1044,7 @@ class Server:
             "work_lanes.list": self._on_work_lanes_list,
             "work_lanes.show": self._on_work_lanes_show,
             "work_lanes.adopt_preview": self._on_work_lanes_adopt_preview,
+            "work_lanes.lane_id": self._on_work_lanes_lane_id,
             "assistant.binding": self._on_assistant_binding,
             "assistant.restore": self._on_assistant_restore,
             "assistant.rebind": self._on_assistant_rebind,
@@ -5297,6 +5298,20 @@ class Server:
         candidates = await self.store.work_lane_preview_conflicts(
             composite_stream_id=composite.config.stream_id, candidates=candidates)
         return {"type": "work_lanes.adopt_preview.ok", "candidates": candidates}
+
+    async def _on_work_lanes_lane_id(self, msg: dict[str, Any]) -> dict[str, Any]:
+        self._work_lanes_reader(msg)
+        composite = self._composite_for_message(msg)
+        if composite is None:
+            raise VerbError("assistant_composite_unavailable", "no assistant composite")
+        key = msg.get("adoption_key")
+        if not isinstance(key, str) or not key.strip():
+            raise VerbError("work_lane_adoption_key_invalid", "adoption_key must be a string")
+        try:
+            lane_id = await self.store.lane_id_for(key, composite.config.stream_id)
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from None
+        return {"type": "work_lanes.lane_id.ok", "adoption_key": key, "lane_id": lane_id}
 
     async def _on_assistant_binding(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)

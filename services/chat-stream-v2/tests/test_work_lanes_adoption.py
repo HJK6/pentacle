@@ -124,13 +124,19 @@ def test_preview_titles_are_readable_within_bound():
 @pytest.mark.parametrize("state", ["active", "paused", "blocked"])
 def test_adopt_member_conflict_is_atomic(routing, state):
     from test_work_lane_progress import A, a1_holder, a1_snapshot
+    from test_work_lanes import derive_lane_id, seed_pending_goal
     async def body(env):
         holder = await a1_holder(env, state)
         payload = {"adoption_key": "request:collision", "title": "Collision candidate", "owner_kind": "operator",
-                   "work_state": "paused", "visible_chat": {"stream_id": ASSISTANT}, "members": [A], "emit_started": True}
+                   "work_state": "paused", "visible_chat": {"stream_id": ASSISTANT}, "members": [A],
+                   "goals": ["epic_fixture_collision"], "emit_started": True}
         if routing:
             await _admit_routing_lane(env, "routing-candidate", "Candidate route", "routing-request")
             payload["lane_id"] = "routing-candidate"
+        # Seed the goal before the snapshot: a member-conflict refusal must leave
+        # the already-observed goal and every table unchanged.
+        await seed_pending_goal(env.store, "epic_fixture_collision",
+                                payload.get("lane_id") or derive_lane_id(ASSISTANT, "request:collision"))
         before = await a1_snapshot(env)
         with pytest.raises(ValueError, match="work_lane_member_conflict") as error:
             await env.op("adopt", payload)

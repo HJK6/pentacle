@@ -430,10 +430,34 @@ async def run_drill(state_dir: Path, *, composite_stream: str, binding_name: str
                 announce=False)
             seeded.append("report")
         if not expected["lanes"]:
+            # A lane cannot be created without an observed goal that names it.
+            # Seed the charter observation for the derived lane id, then adopt.
+            from _shared.work_goals import derive_lane_id
+            drill_lane_id = derive_lane_id(composite_stream, "request:drill-fixture")
+            def _seed_goal(conn):
+                from store_work_index import _state_conn, ensure_work_index_schema
+                ensure_work_index_schema(conn)
+                goal_state = _state_conn(conn)
+                goal_state.setdefault("available", True)
+                goal_state["available"] = True
+                goal_state.setdefault("root_configured", True)
+                observations = dict(goal_state.get("goal_observations", {}))
+                observations["epic_drill_fixture"] = {"quality": "error", "error": "work_goal_lane_unknown",
+                    "pending": {"facts": {"epic_id": "epic_drill_fixture", "title": "Recovery fixture goal",
+                                          "lane_id": drill_lane_id, "rank": 1000,
+                                          "_detail": {"summary_text": "Recovery fixture goal.", "summary_text_truncated": False,
+                                                      "summary_line": None, "goal_text": "Fixture.", "goal_text_truncated": False}},
+                                "source_hash": "drill-fixture", "path": "epics/epic_drill_fixture.md"}}
+                goal_state["goal_observations"] = observations
+                conn.execute("INSERT INTO v2_work_index_state(singleton,state_json) VALUES (1,?) "
+                             "ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",
+                             (json.dumps(goal_state, separators=(",", ":")),))
+                conn.commit()
+            await store.submit(_seed_goal)
             await composite.operation({"composite_stream_id": composite_stream, "operation": "work_lane.adopt", "request_id": "drill-fixture-lane",
                 "payload": {"adoption_key": "request:drill-fixture", "title": "Recovery fixture", "summary": "Fixture",
                     "work_state": "paused", "owner_kind": "operator", "visible_chat": {"stream_id": composite_stream},
-                    "no_spec_reason": "Isolated recovery fixture"},
+                    "goals": ["epic_drill_fixture"], "no_spec_reason": "Isolated recovery fixture"},
                 "_auth_context": {"token_verified": True, "stream_id": holder, "session_generation": generation}},
                 actor_stream_id=holder)
             seeded.append("lane")

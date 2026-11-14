@@ -8,6 +8,8 @@ Keep one lane per product area. A product area is a durable user-facing capabili
 
 For work in an existing area, add the spec as a member of that area's lane, or track the seat under the area lane when there is no spec to add. Apply this rule at lane creation and adoption.
 
+A lane cannot be created without a goal. Every `work_lane.adopt` names 1–16 observed goal charters (`goals`) whose `lane_id` is the lane being created or promoted; read the new lane's id with `agent-orch work-lane lane-id --adoption-key <key>` (or a new-lane preview candidate's `new_lane_id`), publish the goal charter naming that id, then adopt. A lane whose goals are all done and that has no open unplaced item is completed by the daemon at the next refresh and leaves the open inventory; it stays stored and reopens by itself when new work (a new goal, a new open item, or an open unplaced item) is added. See [work-lanes.md](../services/chat-stream-v2/docs/work-lanes.md#nonempty-lanes-goal-required-creation-automatic-completion-and-reopening). On the web, the lane's row and the open-lane count leave the sidebar lanes section when it completes; an already-open lane chat or read-only history slot stays readable.
+
 ## Status: the sidebar view is off
 
 The sidebar lanes view (the header lane count and the **Lanes (N)** section) is switched off by default, pending a rebuild. The renderer still ingests lane frames and the daemon, wire contract and lane-update cards are unchanged; nothing in the sidebar shows lanes, so the tap routes below are unreachable. `workLanesSidebarEnabled()` in `renderer/app.js` turns the view on only when `window.__PENTACLE_WORK_LANES_SIDEBAR__ === true`, which the tests set. The rest of this page describes the view when it is on.

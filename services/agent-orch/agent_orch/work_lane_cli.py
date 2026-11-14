@@ -382,8 +382,9 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     if not isinstance(entries, list):
         print("agent-orch work-lane adopt: --apply file must be a list (or {candidates:[...]})", file=sys.stderr)
         return 2
+    # `new_lane_id` is display-only in a preview candidate and is dropped here.
     allowed = {"adoption_key", "title", "summary", "owner_kind", "work_state", "blocker", "lead",
-               "visible_chat", "lane_id", "emit_started", "members", "no_spec_reason"}
+               "visible_chat", "lane_id", "emit_started", "members", "no_spec_reason", "goals"}
     failures = 0
     for entry in entries:
         if not isinstance(entry, dict):
@@ -404,6 +405,25 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         if not str(response.get("type") or "").endswith(".ok"):
             failures += 1
     return 0 if failures == 0 else 1
+
+
+def cmd_lane_id(args: argparse.Namespace) -> int:
+    try:
+        response = _call(args, {"type": "work_lanes.lane_id",
+                                "composite_stream_id": args.composite_stream_id,
+                                "adoption_key": args.adoption_key})
+    except ServiceCredentialUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(f"agent-orch work-lane lane-id: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        return _finish(response)
+    if str(response.get("type") or "").endswith(".ok"):
+        print(response.get("lane_id"))
+        return 0
+    print(json.dumps(response, separators=(",", ":"), default=str), file=sys.stderr)
+    return 1
 
 
 def cmd_request_confirmation(args: argparse.Namespace) -> int:
@@ -533,6 +553,12 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--epic", help="expand this epic once in the preview")
     common(p)
     p.set_defaults(func=cmd_adopt)
+
+    p = sub.add_parser("lane-id", help="print the lane id a new adopt of an adoption key would assign")
+    p.add_argument("--adoption-key", required=True)
+    p.add_argument("--json", action="store_true")
+    common(p)
+    p.set_defaults(func=cmd_lane_id)
 
     p = mutator("set-state", "FD: set active|paused|blocked|done")
     p.add_argument("--to", required=True, choices=("active", "paused", "blocked", "done"))

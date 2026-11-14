@@ -81,3 +81,56 @@ def test_offline_65_manifest_checks_full_count_and_uniqueness(monkeypatch, tmp_p
     assert result['errors'] == [] and result['lanes'][0]['open_estimate_h'] == {'p25': 65, 'p75': 130, 'median': 97.5}
     assert run_manifest({**lane, 'members': ids[:-1]}) == 2
     assert run_manifest({**lane, 'members': ids[:-1] + [ids[0]]}) == 2
+
+
+# ---------------------------------------------------------------------------
+# V8: the command passes goals, drops the display-only new_lane_id, and lane-id.
+# ---------------------------------------------------------------------------
+
+def test_v8_adopt_apply_passes_goals_and_drops_new_lane_id(monkeypatch, tmp_path, capsys):
+    sent = _wire(monkeypatch, lambda req: {"type": "assistant.operation.ok", "lane": {"lane_id": "wl-made"},
+                                           "duplicate": False})
+    apply = tmp_path / "apply.json"
+    apply.write_text(json.dumps([{"adoption_key": "stream:new", "title": "New", "owner_kind": "fd",
+        "work_state": "paused", "visible_chat": {"stream_id": "home:assistant"},
+        "goals": ["epic_one"], "new_lane_id": "wl-display-only", "no_spec_reason": "Fixture"}]))
+    assert _run(["work-lane", "adopt", "--apply", str(apply), "--composite-stream-id", "home:assistant"]) == 0
+    payload = sent[-1]["payload"]
+    assert payload["goals"] == ["epic_one"]
+    assert "new_lane_id" not in payload
+
+
+def test_v8_lane_id_prints_daemon_assigned_id(monkeypatch, capsys):
+    from agent_orch_lane_id_helper import expected
+    assigned = expected("home:assistant", "stream:thing")
+    sent = _wire(monkeypatch, lambda req: {"type": "work_lanes.lane_id.ok",
+                                           "adoption_key": req["adoption_key"], "lane_id": assigned})
+    assert _run(["work-lane", "lane-id", "--adoption-key", "stream:thing",
+                 "--composite-stream-id", "home:assistant"]) == 0
+    assert sent[-1] == {"type": "work_lanes.lane_id", "composite_stream_id": "home:assistant",
+                        "adoption_key": "stream:thing"}
+    assert capsys.readouterr().out.strip() == assigned
+
+
+def test_v8_preview_to_apply_round_trips_both_shapes(monkeypatch, capsys):
+    # A new-lane candidate carries new_lane_id and no lane_id; a routing-row
+    # candidate carries lane_id. Apply sends goals through and preserves the shape.
+    seen = []
+    sent = _wire(monkeypatch, lambda req: seen.append(req) or {"type": "assistant.operation.ok",
+                                                              "lane": {"lane_id": req["payload"].get("lane_id", "wl-new")},
+                                                              "duplicate": False})
+    import tempfile
+    from pathlib import Path
+    apply = Path(tempfile.mkdtemp()) / "apply.json"
+    apply.write_text(json.dumps([
+        {"adoption_key": "stream:newlane", "title": "New lane", "owner_kind": "fd", "work_state": "paused",
+         "visible_chat": {"stream_id": "home:assistant"}, "goals": ["epic_newlane"],
+         "new_lane_id": "wl-newid", "no_spec_reason": "Fixture"},
+        {"adoption_key": "request:rrow", "title": "Routing row", "owner_kind": "fd", "work_state": "paused",
+         "visible_chat": {"stream_id": "home:assistant"}, "lane_id": "wl-rrow", "goals": ["epic_rrow"],
+         "summary": "s"}]))
+    assert _run(["work-lane", "adopt", "--apply", str(apply), "--composite-stream-id", "home:assistant"]) == 0
+    new_payload = seen[0]["payload"]
+    assert new_payload["goals"] == ["epic_newlane"] and "lane_id" not in new_payload and "new_lane_id" not in new_payload
+    row_payload = seen[1]["payload"]
+    assert row_payload["lane_id"] == "wl-rrow" and row_payload["goals"] == ["epic_rrow"]

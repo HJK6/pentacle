@@ -232,3 +232,334 @@ def test_lane_cancel_after_enqueue_has_unknown_outcome_until_readback(tmp_path, 
         print('CANCELLATION_RECEIPT', json.dumps({'route': 'lane', 'stage': 'after_enqueue',
               'reported': 'CancelledError; outcome unknown until durable readback', 'readback': 'done', 'enqueues': len(calls)}))
     run(body)
+
+
+# ---------------------------------------------------------------------------
+# V3-V7: automatic completion, certainty, stored history, option-A reopening.
+# ---------------------------------------------------------------------------
+from _shared.work_goals import derive_lane_id
+from test_work_lane_goals import write_goal, write_item, scanner, reconcile
+from test_work_lane_episodes import RecordingSink, member, seed_observations
+from test_work_lanes import lane_updates
+from work_lanes_projection import build_frame
+
+
+async def build_lane(env, root, *, key, goal='g', items=(), extra_goals=(), state='paused',
+                     owner='operator', **kw):
+    """Real flow: observe the charter(s), adopt with them, then resolve items."""
+    (root / 'work').mkdir(parents=True, exist_ok=True)
+    lane_id = derive_lane_id(ASSISTANT, key)
+    write_goal(root, lane_id, goal)
+    for extra in extra_goals:
+        write_goal(root, lane_id, extra)
+    for name, status in items:
+        write_item(root, name, status=status, epic='epic_' + goal)
+    await reconcile(env.store, scanner(root))
+    payload = {'adoption_key': key, 'title': 'L', 'summary': 'g', 'owner_kind': owner,
+               'work_state': state, 'visible_chat': {'stream_id': ASSISTANT},
+               'goals': ['epic_' + goal, *('epic_' + name for name in extra_goals)],
+               'no_spec_reason': 'Fixture', **kw}
+    lane = (await env.op('adopt', payload, request_id='adopt:' + key, inject_goals=False))['lane']
+    await reconcile(env.store, scanner(root))
+    return lane
+
+
+async def lifecycle(env):
+    return await env.store.reconcile_lane_lifecycle()
+
+
+async def lane_now(env, lane_id):
+    return (await env.store.get_work_lane(lane_id))['lane']
+
+
+async def lane_lifecycle_events(env, lane_id):
+    shown = await env.store.get_work_lane(lane_id)
+    return [e for e in shown['events'] if e['actor_stream_id'] == 'daemon:reconciler'
+            and e['payload'].get('auto')]
+
+
+async def frame_has(env, lane_id):
+    rows, index = await env.store.work_lane_snapshot(include_done=False) if False else (
+        await env.store.work_lane_rows(), await env.store.work_index_status())
+    frame = build_frame(rows, {}, work_index=index)
+    return any(l['lane_id'] == lane_id for l in frame['lanes']), frame['counts']['open']
+
+
+def test_v4_auto_completion_no_confirmation_event_episode_and_frame(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v4', goal='g', items=[('i1', 'completed')])
+        lid = lane['lane_id']
+        present, open_before = await frame_has(env, lid)
+        assert present
+        result = await lifecycle(env)
+        assert lid in result['completed']
+        st = await lane_now(env, lid)
+        assert st['work_state'] == 'done' and st['work_state_reason'] == 'goals_done' and st['done_at']
+        events = await lane_lifecycle_events(env, lid)
+        assert len(events) == 1
+        assert events[0]['payload'] == {'to': 'done', 'auto': 'goals_done', 'goals': ['epic_g']}
+        # The completed episode drives exactly one alert; no lane_update is published.
+        sink = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(sink)
+        assert sum(c['kind'] == 'completed' for c in sink.calls) == 1
+        updates = [u for u in await lane_updates(env.store) if u['raw']['lane_update']['lane_id'] == lid]
+        assert updates == []
+        present, open_after = await frame_has(env, lid)
+        assert not present and open_after == open_before - 1
+        # A second refresh opens no new completed episode.
+        await lifecycle(env)
+        again = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(again)
+        assert sum(c['kind'] == 'completed' for c in again.calls) == 0
+    run(body, str(tmp_path / 'v4.db'))
+
+
+def test_v4_stays_open_when_goal_not_done(tmp_path):
+    root = tmp_path / 'memory'
+    async def case(env, key, items, *, db):
+        lane = await build_lane(env, root, key=key, goal=key.split(':')[1], items=items)
+        await lifecycle(env)
+        return (await lane_now(env, lane['lane_id']))['work_state']
+    async def body(env):
+        # Empty goal, all-deprecated goal, and all-done-plus-open-unplaced all stay open.
+        assert await case(env, 'stream:empty', [], db='a') == 'paused'
+        assert await case(env, 'stream:dep', [('d1', 'deprecated')], db='b') == 'paused'
+    run(body, str(tmp_path / 'v4b.db'))
+
+
+def test_v4_open_unplaced_item_keeps_lane_open(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:unplaced'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        write_goal(root, lane_id, 'g')
+        write_item(root, 'done1', status='completed', epic='epic_g')
+        write_item(root, 'loose', status='in_progress', epic=None)
+        await reconcile(env.store, scanner(root))
+        await env.op('adopt', {'adoption_key': key, 'title': 'L', 'summary': 'g', 'owner_kind': 'operator',
+            'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT}, 'goals': ['epic_g'],
+            'members': ['spec_demo__loose']}, request_id='adopt:' + key, inject_goals=False)
+        await reconcile(env.store, scanner(root))
+        await lifecycle(env)
+        assert (await lane_now(env, lane_id))['work_state'] == 'paused'
+    run(body, str(tmp_path / 'v4c.db'))
+
+
+def test_v4_parked_and_blocked_lanes_complete(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        parked = await build_lane(env, root, key='stream:parked', goal='p', items=[('p1', 'completed')])
+        await env.op('set_state', {'to': 'paused', 'parked': True, 'reason': 'Parked fixture'},
+                     lane=parked['lane_id'], version=parked['version'])
+        blocked = await build_lane(env, root, key='stream:blk', goal='b', items=[('b1', 'completed')],
+                                   state='blocked', blocker='dep')
+        await lifecycle(env)
+        assert (await lane_now(env, parked['lane_id']))['work_state'] == 'done'
+        assert (await lane_now(env, blocked['lane_id']))['work_state'] == 'done'
+    run(body, str(tmp_path / 'v4d.db'))
+
+
+def test_v5_uncertainty_never_completes(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v5', goal='g', items=[('i1', 'completed')])
+        lid = lane['lane_id']
+        # Index unavailable leaves the otherwise-complete lane open.
+        await env.store.mark_work_index_pending()
+        await lifecycle(env)
+        assert (await lane_now(env, lid))['work_state'] == 'paused'
+        # A stale member (charter made invalid after acceptance) also blocks completion.
+        path = root / 'epics' / 'g.md'
+        path.write_text('---\nnot: valid\n---\n')
+        await reconcile(env.store, scanner(root))
+        await lifecycle(env)
+        assert (await lane_now(env, lid))['work_state'] == 'paused'
+    run(body, str(tmp_path / 'v5.db'))
+
+
+def test_v3_manual_reopen_requires_certain_unfinished_work(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v3', goal='g', items=[('i1', 'completed')])
+        lid = lane['lane_id']
+        await lifecycle(env)  # auto-completes
+        assert (await lane_now(env, lid))['work_state'] == 'done'
+        version = (await lane_now(env, lid))['version']
+        # Reopen refused with goal_required while it has no unfinished work.
+        with pytest.raises(ValueError, match='work_lane_goal_required'):
+            await env.op('set_state', {'to': 'paused', 'reason': 'Reopen', 'next_action': 'Resume now'},
+                         lane=lid, version=version)
+        # Uncertain data refuses with goal_unresolved.
+        await env.store.mark_work_index_pending()
+        with pytest.raises(ValueError, match='work_lane_goal_unresolved'):
+            await env.op('set_state', {'to': 'paused', 'reason': 'Reopen', 'next_action': 'Resume now'},
+                         lane=lid, version=version)
+        # A new open item under the goal makes reopen certain and accepted.
+        write_item(root, 'i2', status='in_progress', epic='epic_g')
+        await reconcile(env.store, scanner(root))
+        reopened = await env.op('set_state', {'to': 'paused', 'reason': 'Reopen', 'next_action': 'Resume now'},
+                                lane=lid, version=version)
+        assert reopened['lane']['work_state'] == 'paused'
+    run(body, str(tmp_path / 'v3.db'))
+
+
+def test_v6_completed_lane_history_reads_back(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v6', goal='g', items=[('i1', 'completed')])
+        lid, title = lane['lane_id'], lane['title']
+        await lifecycle(env)
+        shown = await env.store.get_work_lane(lid)
+        assert shown['lane']['work_state'] == 'done' and shown['lane']['title'] == title
+        assert shown['events'] and any(m['spec_id'] == 'spec_demo__i1' for m in shown['members'])
+        listed = await env.store.work_lane_rows(include_done=True)
+        assert any(r['lane_id'] == lid for r in listed)
+        assert not any(r['lane_id'] == lid for r in await env.store.work_lane_rows())
+    run(body, str(tmp_path / 'v6.db'))
+
+
+def test_v7a_completed_lane_auto_reopens_on_new_work(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v7a', goal='g', items=[('i1', 'completed')])
+        lid = lane['lane_id']
+        await lifecycle(env)
+        assert (await lane_now(env, lid))['work_state'] == 'done'
+        before_updates = len([u for u in await lane_updates(env.store)
+                              if u['raw']['lane_update']['lane_id'] == lid])
+        # A new open item under the done goal reopens the lane to paused/reopened.
+        write_item(root, 'i2', status='in_progress', epic='epic_g')
+        await reconcile(env.store, scanner(root))
+        result = await lifecycle(env)
+        assert lid in result['reopened']
+        st = await lane_now(env, lid)
+        assert st['work_state'] == 'paused' and st['work_state_reason'] == 'reopened'
+        events = await lane_lifecycle_events(env, lid)
+        assert events[-1]['payload'] == {'to': 'paused', 'auto': 'work_added'}
+        # Reopen publishes nothing.
+        after_updates = len([u for u in await lane_updates(env.store)
+                             if u['raw']['lane_update']['lane_id'] == lid])
+        assert after_updates == before_updates
+    run(body, str(tmp_path / 'v7a.db'))
+
+
+def test_v7a_new_empty_goal_reopens(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v7g', goal='g', items=[('i1', 'completed')])
+        lid = lane['lane_id']
+        await lifecycle(env)
+        assert (await lane_now(env, lid))['work_state'] == 'done'
+        # A brand-new goal with no items yet reopens the settled lane.
+        write_goal(root, lid, 'later')
+        await reconcile(env.store, scanner(root))
+        await lifecycle(env)
+        assert (await lane_now(env, lid))['work_state'] == 'paused'
+    run(body, str(tmp_path / 'v7g.db'))
+
+
+def test_v7c_hand_closed_lane_settles_then_reopens(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        # A lane closed by hand while a goal is still unfinished is not settled.
+        lane = await build_lane(env, root, key='stream:v7c', goal='g', items=[('i1', 'in_progress')])
+        lid = lane['lane_id']
+        closed = await env.op('set_state', {'to': 'done', 'outcome': 'Closed early', 'reason': 'FD closes early'},
+                              lane=lid, version=lane['version'])
+        assert closed['lane']['work_state_reason'] == 'fd'
+        await lifecycle(env)  # still has unfinished goal → stays hand-closed, not settled
+        assert (await lane_now(env, lid))['work_state_reason'] != 'goals_done'
+        # Finish the goal: the next refresh marks it settled, silently, no alert.
+        (root / 'work' / 'in_progress' / 'demo__i1').rename(root / 'work' / 'completed' / 'demo__i1'
+            if (root / 'work' / 'completed').exists() else root / 'work' / 'completed_tmp')
+        import shutil
+        done_dir = root / 'work' / 'completed'
+        done_dir.mkdir(parents=True, exist_ok=True)
+        src = root / 'work' / 'completed_tmp'
+        if src.exists():
+            shutil.move(str(src), str(done_dir / 'demo__i1'))
+        await reconcile(env.store, scanner(root))
+        sink = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(sink)
+        result = await lifecycle(env)
+        assert lid in result['settled']
+        st = await lane_now(env, lid)
+        assert st['work_state'] == 'done' and st['work_state_reason'] == 'goals_done'
+        settle_events = [e for e in (await env.store.get_work_lane(lid))['events']
+                         if e['payload'].get('auto') == 'settled']
+        assert len(settle_events) == 1
+        # Now a new open item reopens it.
+        write_item(root, 'i2', status='in_progress', epic='epic_g')
+        await reconcile(env.store, scanner(root))
+        await lifecycle(env)
+        assert (await lane_now(env, lid))['work_state'] == 'paused'
+    run(body, str(tmp_path / 'v7c.db'))
+
+
+def test_v7b_hand_closed_with_unfinished_goal_stays_done(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v7b', goal='g', items=[('i1', 'in_progress')])
+        lid = lane['lane_id']
+        closed = await env.op('set_state', {'to': 'done', 'outcome': 'Closed', 'reason': 'FD closes'},
+                              lane=lid, version=lane['version'])
+        assert closed['lane']['work_state_reason'] == 'fd'
+        # Adding another goal and another item leaves it hand-closed, not reopened.
+        write_goal(root, lid, 'extra')
+        write_item(root, 'i2', status='in_progress', epic='epic_g')
+        await reconcile(env.store, scanner(root))
+        result = await lifecycle(env)
+        assert lid not in result['reopened'] and lid not in result['settled']
+        st = await lane_now(env, lid)
+        assert st['work_state'] == 'done' and st['work_state_reason'] == 'fd'
+    run(body, str(tmp_path / 'v7b.db'))
+
+
+def test_v7d_pre_release_done_lane_settles_and_reopens(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        # A done lane with no unfinished work (closed by hand before the rule shipped)
+        # is settled at the first certain refresh, then reopens on a new goal.
+        lane = await build_lane(env, root, key='stream:v7d', goal='g', items=[('i1', 'completed')])
+        lid = lane['lane_id']
+        closed = await env.op('set_state', {'to': 'done', 'outcome': 'Closed', 'reason': 'FD closes'},
+                              lane=lid, version=lane['version'])
+        assert closed['lane']['work_state_reason'] == 'fd'
+        result = await lifecycle(env)
+        assert lid in result['settled']
+        assert (await lane_now(env, lid))['work_state_reason'] == 'goals_done'
+        write_goal(root, lid, 'again')
+        await reconcile(env.store, scanner(root))
+        await lifecycle(env)
+        assert (await lane_now(env, lid))['work_state'] == 'paused'
+    run(body, str(tmp_path / 'v7d.db'))
+
+
+def test_v7e_member_conflict_leaves_settled_lane_done(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        # A settled lane whose explicit member is held by another open lane stays done.
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        lid = derive_lane_id(ASSISTANT, 'stream:v7e1')
+        write_goal(root, lid, 'g')
+        write_item(root, 'i1', status='completed', epic='epic_g')
+        write_item(root, 'loose', status='completed', epic=None)
+        await reconcile(env.store, scanner(root))
+        await env.op('adopt', {'adoption_key': 'stream:v7e1', 'title': 'L', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'goals': ['epic_g'], 'members': ['spec_demo__loose']}, request_id='adopt:v7e1', inject_goals=False)
+        await reconcile(env.store, scanner(root))
+        await lifecycle(env)  # all work done → settled (goals_done)
+        assert (await lane_now(env, lid))['work_state'] == 'done'
+        # Another open lane holds the same explicit member; the done lane is excluded
+        # from the conflict check, so this adoption is allowed.
+        await env.adopt('stream:v7e2', state='paused', owner='operator', members=['spec_demo__loose'])
+        # New unfinished work on the settled lane, but its member now conflicts.
+        write_goal(root, lid, 'reopen')
+        await reconcile(env.store, scanner(root))
+        result = await lifecycle(env)
+        assert lid not in result['reopened']
+        assert (await lane_now(env, lid))['work_state'] == 'done'
+    run(body, str(tmp_path / 'v7e.db'))

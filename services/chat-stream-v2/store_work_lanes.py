@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import time
 import uuid
 from typing import Any, Callable
 
+log = logging.getLogger(__name__)
+
 from work_lane_members import validate_members, validate_title
 from _shared.lane_icons import validate_icon
+from _shared.work_goals import EPIC_ID, derive_lane_id, goal_id, lane_work_status
 from work_lane_progress import lane_lead_lost, members_working, seat_live, seat_working
 from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
                               effective_membership_conn, effective_membership_ids_conn,
@@ -95,6 +99,68 @@ UPDATE_TEXT_MAX = 280
 LANE_FRAME_CAP = 64
 LIST_LIMIT_MAX = 200
 DAEMON_ACTOR = "daemon:reconciler"
+
+
+class WorkLaneGoalUnresolved(ValueError):
+    """The first named epic the daemon has not observed as a goal of this lane."""
+    code = "work_lane_goal_unresolved"
+
+    def __init__(self, epic_id: str):
+        self.epic_id = epic_id
+        super().__init__(f"{self.code}: {epic_id}")
+
+
+MAX_GOALS = 16
+
+
+def _validate_goal_ids(payload: dict[str, Any]) -> list[str]:
+    """1 to 16 distinct epic ids. Missing or empty is required; any other bad shape invalid."""
+    goals = payload.get("goals")
+    if goals is None or (isinstance(goals, list) and not goals):
+        raise ValueError("work_lane_goal_required")
+    if (not isinstance(goals, list) or len(goals) > MAX_GOALS or len(set(goals)) != len(goals)
+            or any(not isinstance(epic, str) or not EPIC_ID.fullmatch(epic) for epic in goals)):
+        raise ValueError("work_lane_payload_invalid")
+    return goals
+
+
+def _require_pending_goals_conn(conn, goals: list[str], target_lane_id: str) -> None:
+    """Every named epic must sit in the work index as a valid, unique charter naming this lane.
+
+    A charter the scan read as valid and unique but whose lane is not yet known
+    is kept under the ``pending`` key (``advance_goals``). Index unavailability,
+    an invalid or duplicated charter and a charter naming another lane all leave
+    no matching pending facts, so adopt refuses them with the first offender.
+    """
+    state = _state_conn(conn)
+    observations = state.get("goal_observations", {})
+    for epic in goals:
+        # The index being unavailable makes every pending record uncertain, so a
+        # lingering pending entry never admits a lane while the scan is down.
+        pending = (observations.get(epic) or {}).get("pending") if state.get("available") else None
+        if not pending or (pending.get("facts") or {}).get("lane_id") != target_lane_id:
+            raise WorkLaneGoalUnresolved(epic)
+
+
+def _accept_goals_conn(conn, goals: list[str], lane_id: str, stamp: str) -> None:
+    """Mark the named charters accepted for ``lane_id`` in the same adopt transaction.
+
+    This changes the stored work-index state, so any index pass prepared before
+    the adoption is recomputed against it by ``reconcile_work_observations``'s
+    changed-base check and cannot overwrite the acceptance.
+    """
+    state = _state_conn(conn)
+    observations = dict(state.get("goal_observations", {}))
+    for epic in goals:
+        record = dict(observations.get(epic) or {})
+        pending = record.pop("pending", None) or {}
+        record.update(facts=pending.get("facts"), source_hash=pending.get("source_hash"),
+                      path=pending.get("path"), quality="fresh", error=None)
+        observations[epic] = record
+    state["goal_observations"] = observations
+    conn.execute("INSERT INTO v2_work_index_state(singleton,state_json) VALUES (1,?) "
+                 "ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",
+                 (json.dumps(state, separators=(",", ":")),))
 
 
 class WorkLaneMemberConflict(ValueError):
@@ -731,6 +797,31 @@ class _WorkLanesStoreMixin:
             return _adopt_preview_conn(conn, composite_stream_id, env_binding)
         return await self.submit(_op)
 
+    async def reconcile_lane_lifecycle(self) -> dict[str, Any]:
+        """Complete, settle and reopen lanes from their goals (spec §2 and §3, option A).
+
+        Runs after the work index is reconciled and before the inventory frame is
+        built. Every transition is certain: an uncertain lane is never completed
+        or reopened in either direction.
+        """
+        def _op(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                result = _reconcile_lane_lifecycle_conn(conn)
+                conn.commit()
+                return result
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def lane_id_for(self, adoption_key: str, composite_stream_id: str) -> str:
+        """The lane id a new adopt of ``adoption_key`` would assign; writes nothing."""
+        key = _text(adoption_key, 300, "work_lane_adoption_key_invalid", required=True)
+        if not key.startswith(("spec:", "stream:", "request:")):
+            raise ValueError("work_lane_adoption_key_invalid")
+        return derive_lane_id(composite_stream_id, key)
+
 
 def _insert_event(conn, *, event_id, lane, operation, source_id, actor, generation, prior, nxt,
                   expected, payload, stamp, digest=None, update_kind=None, update_id=None,
@@ -807,6 +898,15 @@ def _override_audit(actor: str, generation: str, action: str, prior: str, nxt: s
             "reason": reason}
 
 
+def _lane_work_status_conn(conn, lane_id: str) -> str:
+    """'finished' | 'unfinished' | 'uncertain' for one enriched lane row."""
+    row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id)), None)
+    if row is None:
+        return "uncertain"
+    return lane_work_status(row.get("_goals") or {}, row.get("_members") or [],
+                            bool(row.get("_work_index_available")))
+
+
 def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, payload, actor, generation,
                 binding_name, env_binding, confirmation, digest, fault, live_sessions=()) -> dict[str, Any]:
     from store_assistant_binding import _binding_conn
@@ -853,6 +953,15 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if set(payload) - allowed or payload.get("to") not in WORK_STATES:
                 raise ValueError("work_lane_payload_invalid")
             to = payload["to"]
+            # Manual reopening is the only other way into the open inventory. It
+            # refuses unless the lane certainly has unfinished work, and reports
+            # uncertainty rather than opening a lane on stale data.
+            if prior_state == "done" and to in OPEN_WORK_STATES:
+                reopen_status = _lane_work_status_conn(conn, lane["lane_id"])
+                if reopen_status == "finished":
+                    raise ValueError("work_lane_goal_required")
+                if reopen_status == "uncertain":
+                    raise ValueError("work_lane_goal_unresolved")
             parking = _parking_reason(payload)
             was_parked = prior_state == "paused" and bool(lane.get("parked_at"))
             park_changed = to == "paused" and was_parked != (parking is not None)
@@ -1061,7 +1170,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
 
 def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_binding, stamp):
     allowed = {"adoption_key", "title", "summary", "owner_kind", "work_state", "blocker", "lead",
-               "visible_chat", "lane_id", "emit_started", "evidence", "members", "no_spec_reason"}
+               "visible_chat", "lane_id", "emit_started", "evidence", "members", "no_spec_reason", "goals"}
     if set(payload) - allowed:
         raise ValueError("work_lane_payload_invalid")
     key = _text(payload.get("adoption_key"), 300, "work_lane_adoption_key_invalid", required=True)
@@ -1105,6 +1214,11 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
         raise ValueError("work_lane_payload_invalid")
     members, reason = validate_members(payload.get("members", []), payload.get("no_spec_reason"))
     target_id = payload.get("lane_id")
+    # The lane id the charter must name: the existing routing row for a promotion,
+    # the derived id for a new lane. Both are checked before any write.
+    target_lane_id = str(target_id) if target_id is not None else derive_lane_id(stream_id, key)
+    goals = _validate_goal_ids(payload)
+    _require_pending_goals_conn(conn, goals, target_lane_id)
     columns = {"work_state": state, "work_state_reason": "fd", "blocker": blocker, "owner_kind": owner,
                "title": title, "visible_chat_stream_id": chat, "visible_chat_generation": chat_gen,
                "adoption_key": key, "first_admitted_at": stamp, "updated_at": stamp,
@@ -1129,12 +1243,15 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
         if state == "active":
             _require_qualifying_lead(columns, conn)
         member_conflicts_conn(conn, stream_id, members, refuse=True)
-        lane_id = "wl-" + hashlib.sha256((stream_id + "\x00" + key).encode()).hexdigest()[:24]
+        lane_id = target_lane_id
         columns.update(lane_id=lane_id, stream_id=stream_id, phase="discussion", summary=summary,
                        version=1, created_at=stamp)
         names = ",".join(columns)
         conn.execute(f"INSERT INTO v2_assistant_composite_lanes({names}) VALUES ({','.join('?' for _ in columns)})",
                      tuple(columns.values()))
+    # Accept the named charters for this lane inside the one adopt transaction,
+    # so `work-lane show` returns the goals from the moment the lane exists.
+    _accept_goals_conn(conn, goals, lane_id, stamp)
     lane = lane_row_conn(conn, lane_id)
     if state == "active":
         _require_qualifying_lead(lane, conn)
@@ -1205,6 +1322,9 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             provenance = []
         out.append({
             "adoption_key": key, "title": _readable_title(row.get("title") or row.get("objective"), sid),
+            # Display-only: the id a new-lane adopt would assign. `adopt --apply`
+            # never sends it, and a new-lane entry carries no `lane_id`.
+            "new_lane_id": derive_lane_id(composite_stream_id, key),
             "lead": {"stream_id": sid, "generation": row.get("session_generation")},
             "visible_chat": {"stream_id": sid, "generation": row.get("session_generation")},
             "owner_kind": None,
@@ -1258,6 +1378,131 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
         candidate["member_conflicts"] = member_conflicts_conn(
             conn, composite_stream_id, candidate["members"], candidate.get("lane_id"))
     return out
+
+
+def _open_completed_episode_conn(conn, lane_id: str, stamp: str) -> None:
+    """Open one ``completed`` episode so the FD gets the existing alert once.
+
+    An uncleared ``completed`` episode opened under today's rule before the
+    release is kept; no second one is opened while the lane stays done."""
+    if conn.execute("SELECT 1 FROM v2_work_lane_episodes WHERE lane_id=? AND kind='completed' "
+                    "AND cleared_at IS NULL", (lane_id,)).fetchone():
+        return
+    sequence = conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM v2_work_lane_episodes "
+                            "WHERE lane_id=? AND kind='completed'", (lane_id,)).fetchone()[0]
+    episode_id = f"{lane_id}:completed:{sequence}"
+    fact = {"lane_id": lane_id, "kind": "completed", "episode_id": episode_id, "opened_at": stamp,
+            "family": "work_lane.v1", "principal": "daemon:work-lanes", "condition": "active"}
+    conn.execute("INSERT INTO v2_work_lane_episodes "
+                 "(episode_id,lane_id,kind,sequence,opened_at,emitted_ref,fact_json) VALUES (?,?,?,?,?,NULL,?)",
+                 (episode_id, lane_id, "completed", sequence, stamp,
+                  json.dumps(fact, sort_keys=True, separators=(",", ":"))))
+
+
+def _complete_lane_conn(conn, lane: dict[str, Any], stamp: str) -> None:
+    """An open lane with no unfinished work becomes done, no confirmation, no publication."""
+    new_version = int(lane["version"]) + 1
+    goals = sorted((lane.get("_goals") or {}).keys())
+    cur = conn.execute(
+        "UPDATE v2_assistant_composite_lanes SET work_state='done', work_state_reason='goals_done',"
+        " done_at=?, blocker=NULL, parked_at=NULL, parked_reason=NULL, version=?, updated_at=? "
+        "WHERE lane_id=? AND version=?", (stamp, new_version, stamp, lane["lane_id"], lane["version"]))
+    if cur.rowcount != 1:
+        raise ValueError("assistant_lane_version_conflict")
+    event_id = f"lifecycle:done:{lane['lane_id']}:{new_version}"
+    _insert_event(conn, event_id=event_id, lane=lane, operation="set_state", source_id=event_id,
+                  actor=DAEMON_ACTOR, generation=None, prior=lane["work_state"], nxt="done",
+                  expected=None, payload={"to": "done", "auto": "goals_done", "goals": goals}, stamp=stamp)
+    _open_completed_episode_conn(conn, lane["lane_id"], stamp)
+    repair_hues_conn(conn)
+
+
+def _settle_lane_conn(conn, lane: dict[str, Any], stamp: str) -> None:
+    """A hand-closed lane with no unfinished work is marked settled; state and done_at stay."""
+    new_version = int(lane["version"]) + 1
+    cur = conn.execute(
+        "UPDATE v2_assistant_composite_lanes SET work_state_reason='goals_done', version=? "
+        "WHERE lane_id=? AND version=?", (new_version, lane["lane_id"], lane["version"]))
+    if cur.rowcount != 1:
+        raise ValueError("assistant_lane_version_conflict")
+    event_id = f"lifecycle:settled:{lane['lane_id']}:{new_version}"
+    _insert_event(conn, event_id=event_id, lane=lane, operation="set_state", source_id=event_id,
+                  actor=DAEMON_ACTOR, generation=None, prior="done", nxt="done",
+                  expected=None, payload={"to": "done", "auto": "settled"}, stamp=stamp)
+
+
+def _reopen_lane_conn(conn, lane: dict[str, Any], stamp: str) -> bool:
+    """A settled lane with unfinished work moves done to paused; never active or parked.
+
+    A member conflict leaves the lane done and is logged for the front desk."""
+    members = [member["spec_id"] for member in lane.get("_members") or []]
+    conflicts = member_conflicts_conn(conn, lane["stream_id"], members, lane["lane_id"])
+    if conflicts:
+        log.info("work lane reopen deferred lane_id=%s member_conflict=%s", lane["lane_id"], conflicts[0])
+        return False
+    new_version = int(lane["version"]) + 1
+    cur = conn.execute(
+        "UPDATE v2_assistant_composite_lanes SET work_state='paused', work_state_reason='reopened',"
+        " blocker=NULL, version=?, updated_at=? WHERE lane_id=? AND version=?",
+        (new_version, stamp, lane["lane_id"], lane["version"]))
+    if cur.rowcount != 1:
+        raise ValueError("assistant_lane_version_conflict")
+    event_id = f"lifecycle:reopen:{lane['lane_id']}:{new_version}"
+    _insert_event(conn, event_id=event_id, lane=lane, operation="set_state", source_id=event_id,
+                  actor=DAEMON_ACTOR, generation=None, prior="done", nxt="paused",
+                  expected=None, payload={"to": "paused", "auto": "work_added"}, stamp=stamp)
+    enter_open_conn(conn, lane["lane_id"])
+    prepare_hues_conn(conn, [lane["lane_id"]])
+    repair_hues_conn(conn)
+    return True
+
+
+def _lifecycle_lane_rows_conn(conn) -> list[dict[str, Any]]:
+    """Every product lane with just the inputs the lifecycle rule needs.
+
+    Lighter than ``work_lane_rows_conn``: only membership, goals and index
+    availability, never the lead, chat, hue, episode or trail projection."""
+    ids_snapshot = effective_membership_ids_conn(conn)
+    index_available = bool(ids_snapshot["state"]["available"])
+    lanes = [dict(row) for row in conn.execute(
+        "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL")]
+    named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
+    snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
+    for lane in lanes:
+        lane.pop("hue_open_order", None)
+        lane["_members"] = members_conn(conn, lane, snapshot)
+        enrich_goals_conn(conn, lane, snapshot)
+        lane["_work_index_available"] = index_available
+    return lanes
+
+
+def _reconcile_lane_lifecycle_conn(conn) -> dict[str, Any]:
+    stamp = _now()
+    completed: list[str] = []
+    settled: list[str] = []
+    reopened: list[str] = []
+    for lane in _lifecycle_lane_rows_conn(conn):
+        # Spec F's reversible archive mark is skipped by settling and reopening.
+        if lane.get("archived_at"):
+            continue
+        status = lane_work_status(lane.get("_goals") or {}, lane.get("_members") or [],
+                                  bool(lane.get("_work_index_available")))
+        state = lane["work_state"]
+        if state in OPEN_WORK_STATES:
+            if status == "finished":
+                _complete_lane_conn(conn, lane, stamp)
+                completed.append(lane["lane_id"])
+        elif state == "done":
+            if lane.get("work_state_reason") != "goals_done":
+                # Hand-closed: settle once it certainly has no unfinished work.
+                if status == "finished":
+                    _settle_lane_conn(conn, lane, stamp)
+                    settled.append(lane["lane_id"])
+            elif status == "unfinished":
+                # Settled: reopen the moment it certainly has unfinished work.
+                if _reopen_lane_conn(conn, lane, stamp):
+                    reopened.append(lane["lane_id"])
+    return {"completed": completed, "settled": settled, "reopened": reopened}
 
 
 def new_request_id(prefix: str = "wl") -> str:

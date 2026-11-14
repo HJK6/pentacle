@@ -75,9 +75,15 @@ async def adopt(s, *, kind="completed", members=None):
     if kind == "stale":
         row = await s.server.sessions.open("fixture", "v2-lead", provider="codex", role="lead", visibility="visible")
         lead = {"stream_id": "fixture:v2-lead", "generation": row["session_generation"]}
+    from test_work_lanes import seed_pending_goal, synthetic_epic
+    from _shared.work_goals import derive_lane_id
+    epic = synthetic_epic("stream:synthetic-lane")
+    # An empty goal keeps the lane open, so the existing completion/stale/estimate
+    # episode machinery this file exercises is unchanged by auto-completion.
+    await seed_pending_goal(s.store, epic, derive_lane_id("fixture:assistant", "stream:synthetic-lane"))
     payload = {"adoption_key": "stream:synthetic-lane", "title": "Build paper bridges",
                "owner_kind": "operator", "work_state": "active" if lead else "paused",
-               "visible_chat": {"stream_id": "fixture:assistant"},
+               "visible_chat": {"stream_id": "fixture:assistant"}, "goals": [epic],
                "members": members or ["spec_demo__span"]}
     if lead:
         payload["lead"] = lead
