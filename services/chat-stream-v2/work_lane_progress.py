@@ -52,7 +52,7 @@ def lane_estimate_missing(lane: dict[str, Any], *, index_available: bool | None 
     """Internal episode predicate; preserve the existing lane wire projection."""
     members = lane.get("_members") or []
     available = lane.get("_work_index_available", False) if index_available is None else index_available
-    if lane.get("work_state") == "done":
+    if lane.get("work_state") == "done" or (lane.get("work_state") == "paused" and lane.get("parked_at")):
         return False
     if not available or any(m.get("observation", {}).get("quality") != "fresh"
                             or m.get("status") in ("missing", "ambiguous") for m in members):

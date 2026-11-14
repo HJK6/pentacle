@@ -221,3 +221,20 @@ test('a v1 lane without progress facts normalizes progress to null; malformed me
   assert.equal(lane.progress!.members[0].terminal, null);
   assert.equal(lane.progress!.members[0].estimate, null);
 });
+
+test('park record is additive and malformed values never drop a lane', () => {
+  for (const [raw, expected] of [
+    [{ at: '2026-01-01T00:00:00Z', reason: 'Later' }, { at: '2026-01-01T00:00:00Z', reason: 'Later' }],
+    [{ at: null, reason: '' }, { at: null, reason: null }],
+    ['parked', undefined], [undefined, undefined],
+  ]) {
+    const frame = { lanes: [{ lane_id: 'parked', state: 'paused', parked: raw }] };
+    const lane = normalizeWorkLanesInventory(frame)!.lanes[0];
+    assert.equal(lane.state, 'paused');
+    assert.deepEqual(lane.parked, expected);
+    assert.equal(Object.hasOwn(lane, 'parked'), expected !== undefined);
+  }
+  const cell = fixture.parked_v1;
+  assert.deepEqual(normalizeWorkLanesInventory(cell.inventory_frame)!.lanes[0].parked,
+    cell.inventory_frame.lanes[0].parked);
+});

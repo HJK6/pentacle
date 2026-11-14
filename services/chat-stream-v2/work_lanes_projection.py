@@ -197,6 +197,8 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
         "icon": resolve_icon(lane.get("icon"), lane.get("title")),
         "hue": resolve_hue(lane.get("hue")),
         "state": state, "state_reason": reason, "blocker": lane.get("blocker"),
+        **({"parked": {"at": lane["parked_at"][:19] + "Z", "reason": lane["parked_reason"]}}
+           if state == "paused" and lane.get("parked_at") else {}),
         "owner_kind": lane.get("owner_kind"), "version": int(lane["version"]),
         "updated_at": lane.get("updated_at"), "first_admitted_at": lane.get("first_admitted_at"),
         "done_at": lane.get("done_at"),

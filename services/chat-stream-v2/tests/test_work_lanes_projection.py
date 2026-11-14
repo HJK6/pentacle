@@ -338,3 +338,44 @@ def test_member_owner_precedes_history_but_fresh_terminal_does_not_activate(stor
     _assert_working(result)  # residual terminal/unresolved activity remains observable
     assert result["state"] == stored
     assert result["stale"] is False
+
+
+def test_parked_lane_wire_keeps_paused_state_and_whole_reason():
+    from work_lanes_projection import project_lane
+    row = {"lane_id": "parked", "version": 1, "work_state": "paused", "parked_at": "2026-01-02T03:04:05.123Z",
+           "parked_reason": "🌱" * 160}
+    wire = project_lane(row, None, "2026-01-03T00:00:00Z")
+    assert wire["state"] == "paused"
+    assert wire["parked"] == {"at": "2026-01-02T03:04:05Z", "reason": "🌱" * 160}
+    assert "parked" not in project_lane({**row, "parked_at": None}, None, "2026-01-03T00:00:00Z")
+
+
+def test_parked_frame_list_and_show_share_projection():
+    from work_lanes_projection import project_lane
+    async def body(env):
+        lane = (await env.adopt(state="paused", owner="operator"))["lane"]
+        lid = lane["lane_id"]
+        before = (await env.store.get_work_lane(lid))["_projection_row"]["_state_at"]
+        await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later"}, lane=lid, version=1)
+        rows = await env.store.work_lane_rows()
+        shown = await env.store.get_work_lane(lid)
+        now = "2030-01-01T00:00:00Z"
+        frame = build_frame(rows, {}, now_iso=now)
+        listed = project_lanes(rows, {}, now)
+        detail = project_lane(shown["_projection_row"], None, now, all_members=True)
+        assert frame["counts"] == {"open": 1, "paused": 1, "active": 0, "blocked": 0}
+        assert frame["lanes"][0]["parked"] == listed[0]["parked"] == detail["parked"]
+        assert detail["state_at"] == before
+        assert detail["parked"]["at"] == shown["lane"]["parked_at"][:19] + "Z"
+    run(body)
+
+
+def test_parked_shared_fixture_and_order():
+    fixture = json.loads(FIXTURE.read_text())["parked_v1"]
+    parked = fixture["row"]
+    assert build_frame([parked], {}, now_iso=fixture["inventory_frame"]["generated_at"]) == fixture["inventory_frame"]
+    rows = [{**parked, "lane_id": state, "work_state": state, "_qualifies": True,
+             "updated_at": "2026-01-01T00:00:00Z", "parked_at": None} for state in ["paused", "active", "blocked"]]
+    rows.append({**parked, "updated_at": "2026-01-02T00:00:00Z"})
+    projected = project_lanes(rows, {}, "2026-01-03T00:00:00Z")
+    assert [row["lane_id"] for row in projected] == ["blocked", "active", parked["lane_id"], "paused"]

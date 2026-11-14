@@ -351,3 +351,47 @@ def test_add_member_explicit_request_id_survives_conflict(monkeypatch):
     sent = _wire(monkeypatch, reply)
     assert _run(["work-lane", "add-member", "wl-1", "spec_demo__new", "--request-id", "caller-id"]) == 0
     assert len(sent) == 4
+
+
+def test_parked_flag_and_usage_rejection(monkeypatch):
+    sent = _wire(monkeypatch, {"type": "assistant.operation.ok"})
+    base = ["work-lane", "set-state", "wl-1", "--parked", "--reason", "Later", "--expected-version", "3", "--request-id", "park"]
+    assert _run(base + ["--to", "paused"]) == 0
+    assert sent[-1]["payload"] == {"to": "paused", "parked": True, "reason": "Later"}
+    for target in ("active", "blocked", "done"):
+        assert _run(base + ["--to", target]) == 2
+    assert len(sent) == 1
+
+
+def test_parked_printed_in_list_and_show(monkeypatch, capsys):
+    lane = {"lane_id": "wl-1", "state": "paused", "parked": {"at": "2026-01-01T00:00:00Z", "reason": "Later"}}
+    _wire(monkeypatch, {"type": "work_lanes.list.ok", "lanes": [lane]})
+    assert _run(["work-lane", "list"]) == 0
+    assert "PARKED since 2026-01-01T00:00:00Z: Later" in capsys.readouterr().out
+    _wire(monkeypatch, {"type": "work_lanes.show.ok", "projection": lane, "lane": lane})
+    assert _run(["work-lane", "show", "wl-1"]) == 0
+    assert "PARKED since 2026-01-01T00:00:00Z: Later" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('flags,payload', [
+    (['--icon', 'briefcase'], {'icon': 'briefcase'}),
+    (['--icon', 'film', '--title', 'Studio'], {'icon': 'film', 'title': 'Studio'}),
+    (['--clear-icon'], {'icon': None}),
+    (['--clear-icon', '--summary', 'New summary'], {'icon': None, 'summary': 'New summary'}),
+])
+def test_set_text_icon_flags(monkeypatch, flags, payload):
+    sent = _wire(monkeypatch, {'type': 'assistant.operation.ok'})
+    assert _run(['work-lane', 'set-text', 'wl-1', '--expected-version', '3', '--request-id', 'icon', *flags]) == 0
+    assert sent[-1]['payload'] == payload
+    assert sent[-1]['expected_lane_version'] == 3 and sent[-1]['request_id'] == 'icon'
+
+
+def test_set_text_icon_usage_and_daemon_refusal(monkeypatch, capsys):
+    sent = _wire(monkeypatch, {'type': 'assistant.operation.error', 'error': 'work_lane_icon_invalid'})
+    base = ['work-lane', 'set-text', 'wl-1', '--expected-version', '3', '--request-id', 'icon']
+    assert _run(base) == 2
+    with pytest.raises(SystemExit) as error:
+        _run(base + ['--icon', 'film', '--clear-icon'])
+    assert error.value.code == 2 and sent == []
+    assert _run(base + ['--icon', 'unknown']) == 1
+    assert 'work_lane_icon_invalid' in capsys.readouterr().out

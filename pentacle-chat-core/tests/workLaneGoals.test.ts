@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { normalizeWorkLanesInventory, LANE_HUE_KEYS, workLaneGoalClasses } from '../src/services/workLanes.ts';
+import { normalizeWorkLanesInventory, LANE_HUE_KEYS, workLaneGoalClasses, workLaneGoalRoad } from '../src/services/workLanes.ts';
 
 const goal = { goal_id: 'g_' + 'a'.repeat(24), title: 'Finish the fixture', state: 'in_progress',
   done: 1, total: 2, rank: 17, icon: 'cube', target_date: '2026-11-30' };
@@ -129,5 +129,50 @@ test('shared daemon fixture classes decode on both surfaces', () => {
     assert.equal(Object.keys(classes.goals).length, raw.goals.length);
     assert.deepEqual(value.goal_counts, { moving: raw.goal_counts[0], blocked: raw.goal_counts[1],
       queued: raw.goal_counts[2], done: raw.goal_counts[3] });
+  }
+});
+
+
+test('goal road aligns positions and decodes all named classes', () => {
+  const value = lane({ ...raw, goals: [{ ...goal, pos: 4 }], goals_total: 5, goal_road: 'dwmbq' });
+  assert.equal(value.goal_road, 'dwmbq');
+  assert.equal(value.goals![0].pos, 4);
+  assert.deepEqual(workLaneGoalRoad(value), ['done', 'working', 'moving', 'blocked', 'queued']);
+  assert.deepEqual(workLaneGoalRoad(lane({ ...raw, goals: [], goals_total: 0, goal_road: '' })), []);
+  assert.equal(workLaneGoalRoad(lane(raw)), null);
+});
+
+test('invalid road or positions discard only road alignment', () => {
+  const second = { ...goal, goal_id: 'g_' + 'c'.repeat(24) };
+  const good = { ...raw, goals: [{ ...goal, pos: 0 }, { ...second, pos: 1 }], goals_total: 2, goal_road: 'wq' };
+  for (const patch of [
+    { goal_road: 'w' }, { goal_road: 'w\n' }, { goal_road: 'wx' }, { goal_road: null }, { goal_road: 2 },
+    { goals: [goal, { ...second, pos: 1 }] },
+    { goals: [{ ...goal, pos: 1 }, { ...second, pos: 1 }] },
+    { goals: [{ ...goal, pos: 2 }, { ...second, pos: 1 }] },
+    { goals: [{ ...goal, pos: -1 }, { ...second, pos: 1 }] },
+    { goals: [{ ...goal, pos: 0.5 }, { ...second, pos: 1 }] },
+    { goals: [{ ...goal, pos: true }, { ...second, pos: 1 }] },
+  ]) {
+    const value = lane({ ...good, ...patch });
+    assert.equal(value.goal_road, null);
+    assert.equal(value.goals!.length, 2);
+    assert.ok(value.goals!.every((g) => !Object.hasOwn(g, 'pos')));
+  }
+  // Validation uses every raw record, even a goal dropped for unrelated bad fields.
+  const dropped = lane({ ...good, goals: [{ ...goal, done: -1, pos: 0 }, { ...second, pos: 1 }] });
+  assert.equal(dropped.goal_road, 'wq');
+  assert.equal(dropped.goals![0].pos, 1);
+  const invalidDropped = lane({ ...good, goals: [{ ...goal, done: -1 }, { ...second, pos: 1 }] });
+  assert.equal(invalidDropped.goal_road, null);
+});
+
+test('ten-goal shared fixture preserves complete road with eight selected records', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/work-lanes-inventory.json', import.meta.url), 'utf8')).goal_road_v1;
+  for (const raw of [fixture.inventory_frame.lanes[0], fixture.show_projection]) {
+    const value = lane(raw);
+    assert.equal(value.goal_road!.length, 10);
+    assert.deepEqual(value.goals, raw.goals);
+    assert.equal(workLaneGoalRoad(value)!.length, 10);
   }
 });

@@ -55,7 +55,7 @@ def test_65_members_override_stale_explicit_lanes_and_preserve_execution(tmp_pat
         assert {member['goal_id'] for member in shown['members']} == {goal_id('epic_fixture')}
         assert projected(shown)['goals'][0] == {'goal_id': goal_id('epic_fixture'), 'title': 'Finish the fixture',
                                               'state': 'not_started', 'done': 0, 'total': 65, 'rank': 1000, 'icon': 'cube',
-                                              'moving': 0, 'blocked': 0, 'working': False, 'left_h': None, 'progress_at': None}
+                                              'moving': 0, 'blocked': 0, 'working': False, 'left_h': None, 'progress_at': None, 'pos': 0}
         assert shown['lane']['version'] == 1 and shown['lane']['work_state'] == 'paused'
         assert len(await env.store.open_lanes_for_spec('spec_demo__n00')) == 1
         with pytest.raises(ValueError, match='source_epic_required'):
@@ -246,10 +246,11 @@ def test_colliding_projected_goal_ids_fail_typed_without_dropping_goal(monkeypat
                                              for name in ('epic_one', 'epic_two')}})
 
 
-def test_shared_goals_fixture_matches_inventory_and_show():
+@pytest.mark.parametrize('cell_name', ['goals_v1', 'goal_road_v1'])
+def test_shared_goals_fixture_matches_inventory_and_show(cell_name):
     from work_lanes_projection import build_frame
     cell = json.loads((Path(__file__).resolve().parents[3] /
-                       'pentacle-chat-core/tests/fixtures/work-lanes-inventory.json').read_text())['goals_v1']
+                       'pentacle-chat-core/tests/fixtures/work-lanes-inventory.json').read_text())[cell_name]
     assert build_frame([cell['lane']], cell['sessions'], now_iso=cell['now_iso'],
                        worked_by_spec=cell['worked_by_spec']) == cell['inventory_frame']
     assert project_lane(cell['lane'], None, cell['now_iso'], all_members=True,
@@ -261,12 +262,14 @@ def test_maximum_goal_envelope_and_correlated_full_frame_budgets():
     from test_work_lane_spec_fields import _budget_frame
     maximum = {'goal_id': 'g_' + 'f' * 24, 'title': wire_title(('😀\\\"\n' * 100)),
                'state': 'in_progress', 'done': 2147483647, 'total': 2147483647,
-               'rank': 2147483647, 'target_date': '9999-12-31', 'icon': 'pentacle'}
+               'rank': 2147483647, 'pos': 63, 'target_date': '9999-12-31', 'icon': 'briefcase'}
     envelope = {'goals': [maximum] * 8, 'goals_total': 2147483647,
                 'default_goal': {'state': 'in_progress', 'done': 2147483647, 'total': 2147483647},
                 'detail_revision': 'f' * 64}
     compact_size = lambda value: len(json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode())
-    assert compact_size(envelope) <= 2560
+    assert compact_size(envelope) <= 2624
+    road = {'goal_road': 'w' * 64}
+    assert compact_size(road) - compact_size({}) + 1 <= 79
     # The four progress keys sit on the lane record, outside the goal envelope.
     lane_keys = {'goal_classes': 'w' * 9, 'goal_counts': [2147483647] * 4,
                  'progress_at': '9999-12-31T23:59:59Z', 'state_at': '9999-12-31T23:59:59Z'}
@@ -280,7 +283,9 @@ def test_maximum_goal_envelope_and_correlated_full_frame_budgets():
             # constructing two billion source members is neither needed nor implied.
             lane.update(envelope)
             lane.update(lane_keys)
+            lane.update(road)
             lane['hue'] = 'chartreuse'
+            lane['parked'] = {'at': '9999-12-31T23:59:59Z', 'reason': '😀' * 160}
             for member in lane['members']:
                 member['goal_id'] = maximum['goal_id']
                 prior = {key: value for key, value in member.items()
@@ -407,10 +412,11 @@ def test_each_goal_class_including_empty_and_the_default_letter():
     assert project_lane(only_dropped, None, '2026-11-08T12:00:00Z')['goal_classes'] == 'q-'
 
 
-def test_working_needs_a_moving_member():
+def test_working_on_blocked_member_takes_precedence():
     row = _goal_row({'a': [('blocked', {}), ('backlog', {})]})
     shown = project_lane(row, None, '2026-11-08T12:00:00Z', sessions_by_stream=_working('spec_demo__a0'))
-    assert shown['goal_classes'] == 'b-'
+    assert shown['goal_classes'] == 'w-'
+    assert shown['goal_counts'] == [1, 0, 0, 0]
 
 
 def test_moving_ninth_goal_is_sent_before_eight_blocked_and_goals_keep_rank_order():
@@ -459,7 +465,7 @@ def test_detail_goal_keys_and_time_left_population():
                                      'working': False, 'left_h': 0.5, 'progress_at': '2026-11-03T00:00:00Z'}
     inventory = project_lane(row, None, '2026-11-08T12:00:00Z', sessions_by_stream={})
     assert set(inventory['default_goal']) == {'state', 'done', 'total'}
-    assert all(set(goal) <= {'goal_id', 'title', 'state', 'done', 'total', 'rank', 'icon', 'target_date'}
+    assert all(set(goal) <= {'goal_id', 'title', 'state', 'done', 'total', 'rank', 'icon', 'target_date', 'pos'}
                for goal in inventory['goals'])
 
 
@@ -489,3 +495,62 @@ def test_default_goal_members_are_reachable_unfiltered_across_pages(tmp_path):
         with pytest.raises(ValueError, match='goal_filter_invalid'):
             page_lane_detail(shown, projection, goal_filter='default')
     run(body)
+
+
+@pytest.mark.parametrize('status', ['backlog', 'ready_for_dev', 'blocked'])
+def test_working_unfinished_member_sets_working_goal_in_any_stage(status):
+    from _shared.work_goals import goal_class
+    assert goal_class([{'spec_id': 'spec_demo__working', 'status': status}], {'spec_demo__working'}) == 'w'
+
+
+def test_ten_goal_road_and_positions_align_full_order():
+    from _shared.work_goals import goal_class
+    records, members = {}, []
+    for i in range(10):
+        identity = f'epic_fixture_{i:02}'
+        records[identity] = {'quality': 'fresh', 'facts': {'title': f'Goal {i}', 'rank': i // 2}}
+        members.append({'spec_id': f'spec_demo__item{i}', 'goal_id': goal_id(identity),
+                        'status': 'in_progress' if i == 9 else 'completed', 'observation': {'quality': 'fresh'}})
+    lane = {'_goals': records, '_members': members, '_work_index_available': True}
+    frame = project_goals(lane)
+    detail = project_goals(lane, all_goals=True)
+    expected = sorted(records, key=lambda identity: (records[identity]['facts']['rank'], goal_id(identity)))
+    assert frame['goals_total'] == 10 and len(frame['goals']) == 8
+    assert [g['goal_id'] for g in detail['goals']] == [goal_id(identity) for identity in expected]
+    assert frame['goal_road'] == detail['goal_road'] == ''.join(
+        goal_class([m for m in members if m['goal_id'] == goal_id(identity)], set()) for identity in expected)
+    assert [g['pos'] for g in detail['goals']] == list(range(10))
+    for index, goal in enumerate(frame['goals']):
+        assert goal['pos'] == expected.index(next(identity for identity in expected if goal_id(identity) == goal['goal_id']))
+        assert frame['goal_road'][goal['pos']] == frame['goal_classes'][index]
+
+
+@pytest.mark.parametrize('n', [0, 64, 65])
+def test_goal_road_bounds_and_default_exclusion(n):
+    goals = {f'epic_fixture_{i}': {'facts': {'title': f'Goal {i}', 'rank': 1000}, 'quality': 'fresh'} for i in range(n)}
+    lane = {'_goals': goals, '_members': [{'spec_id': 'spec_demo__default', 'status': 'backlog'}],
+            '_working_specs': {'spec_demo__default'}}
+    for detail in [False, True]:
+        value = project_goals(lane, all_goals=detail)
+        assert value['goals_total'] == n and value['goal_classes'].endswith('w')
+        assert value['goal_counts'] == [1, 0, n, 0]
+        if n <= 64:
+            assert value['goal_road'] == 'q' * n
+            assert all(g['pos'] < n for g in value['goals'])
+        else:
+            assert 'goal_road' not in value
+            assert all('pos' not in g for g in value['goals'])
+        if detail:
+            assert value['default_goal']['working'] is True
+
+
+@pytest.mark.parametrize('members,working,expected', [
+    ([('completed', 'done'), ('in_progress', 'idle')], {'done'}, 'm'),
+    ([('completed', 'done')], {'done'}, 'd'),
+    ([('deprecated', 'old'), ('backlog', 'idle')], {'old'}, 'q'),
+    ([('blocked', 'idle')], set(), 'b'),
+    ([('analysis', 'idle')], set(), 'm'),
+])
+def test_goal_working_precedence_excludes_completed_and_deprecated(members, working, expected):
+    from _shared.work_goals import goal_class
+    assert goal_class([{'status': status, 'spec_id': identity} for status, identity in members], working) == expected

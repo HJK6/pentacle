@@ -700,7 +700,7 @@ preserve hue/order. Allocation/repair adds no work events, CAS/freshness changes
 source observation or goal digest input.
 
 Combined bounds remain <=800bytes/member added over the pre-fields baseline,
-<=2560bytes for the per-lane goal envelope (eight max records plus total/default/
+<=2624bytes for the per-lane goal envelope (eight max records plus total/default/
 revision/key overhead), <=320KiB for16x8 and <=1.25MiB for64x8 correlated frames.
 These include goal icons, hue, Unicode/escaping and all previous fields. The
 4MiB show ceiling is separate; no field dropping or budget increase is allowed.
@@ -713,7 +713,7 @@ Existing `status_text`/`next_action_text` keep their raw values. `status_line`/`
 
 Spec `goal_text` is detail-only, normalized paragraph prose capped at 2000 code points, with `goal_text_truncated` and `goal_source` (`spec_id,revision`). A goal-filtered page adds one `projection.selected_goal` containing its summary/Goal prose (`summary_text`, `goal_text`, corresponding truncated flags and `source` canonical epic/revision), also capped at 2000 code points each. Goal previews carry no new prose. Detail-only `visibility_counts` on the lane and selected goal count distinct items over the full membership: unfinished, working, blocked, needs_answer and checkpoint_deficient. Unknown counts are null; `complete` discloses source/presence/questions availability. Counts never derive from capped seat/member arrays.
 
-Inventory budgets are unchanged: at most 800 added bytes per member over the existing pre-fields baseline, 2560 bytes per lane goal envelope, 327680 bytes at 16x8 and 1310720 at 64x8. No new checkpoint/prose metadata appears in inventory. A detail member adds at most 49152 encoded JSON bytes and selected-goal additions at most 65536; actual paginated responses remain at most 4194304 bytes with at most 32 members. New detail fields appear once in top-level `members`; `projection.members` retains its legacy fields for the same page. Normalizers preserve optional/retired policy fields; no duplicate checkpoint object or lane/goal narrative is created.
+Inventory budgets are unchanged: at most 800 added bytes per member over the existing pre-fields baseline, 2624 bytes per lane goal envelope, 327680 bytes at 16x8 and 1310720 at 64x8. No new checkpoint/prose metadata appears in inventory. A detail member adds at most 49152 encoded JSON bytes and selected-goal additions at most 65536; actual paginated responses remain at most 4194304 bytes with at most 32 members. New detail fields appear once in top-level `members`; `projection.members` retains its legacy fields for the same page. Normalizers preserve optional/retired policy fields; no duplicate checkpoint object or lane/goal narrative is created.
 
 A NEW open assigned execution lead's `implementation_ready` assertion requires a valid current coherently read checkpoint in addition to existing verified-QA requirements. Invalid/unverifiable source returns `work_checkpoint_invalid`/`work_checkpoint_unverifiable` and field repairs before the readiness row is stored. Ordinary progress/error/recovery/QA reports remain usable. Accepted report replay retains its original policy/source snapshot and payload identity even after source deletion or policy change; new assertions use current policy. These checks certify the recorded snapshot, never shipment or arbitrary prose truth.
 
@@ -729,8 +729,8 @@ second (`YYYY-MM-DDTHH:MM:SSZ`); null means unknown, never "now".
 
 **Goal classes.** Each goal, and the default goal when it has members, has one
 class, evaluated in order: done `d` (at least one counted member, all completed),
-working `w` (a moving member, and a seat effectively assigned to one of the
-goal's members is working now, measured over all sessions before caps), moving
+working `w` (a seat effectively assigned to an unfinished member in any stage
+is working now, measured over all sessions before caps), moving
 `m` (a member in analysis, in_progress or needs_qa), blocked `b` (a member in
 blocked), queued `q` (everything else, including a goal with no members).
 Deprecated members are not counted. Clients read the letters only through
@@ -744,7 +744,8 @@ default goal; working counts as moving. `progress_at` is the newest member
 event whose next state differs from its prior state; a rename or membership
 edit does not move it. `freshness_at` and `updated_at` keep their meaning. At
 worst-case values the four keys add 158 bytes per lane; the goal envelope and
-frame limits are unchanged.
+frame limits are unchanged by these four keys. See [Complete goal road](#complete-goal-road)
+for the separate road and position bounds.
 
 **Detail goals.** Show goal records and `default_goal` add `moving`, `blocked`
 (member counts), `working` (class is working), `left_h` and `progress_at` over
@@ -752,7 +753,7 @@ full membership. `left_h` sums estimate medians over members that are not
 completed, deprecated, missing or ambiguous and not estimate-exempt (the lane
 `open_estimate_h` population), rounded to one decimal and capped at 99999.9; it
 is null when that population is empty, any member has no estimate, or any is
-not fresh. Inventory goal records and `default_goal` gain nothing. A
+not fresh. Inventory goal records and `default_goal` omit these detail-only facts. A
 goal-filtered page's `selected_goal` adds `summary_line` (the epic `summary`
 when it passes `goal_summary`) and `recent`. The goal filter is unchanged; the
 default goal is its unplaced members in the unfiltered pages and has no
@@ -789,3 +790,56 @@ or goal are skipped before the cap. The read walks at most the lane's 500 newest
 
 Rollback is a revert: the previous daemon ignores the observation `progress_at`
 and the added payload keys, and the added index is unused.
+
+## Parked lanes
+
+A parked lane is still `state: "paused"`. Its inventory, list and show projection
+adds `parked: {at, reason}`; other lanes omit the key. `at` is the park time in
+UTC to the second, while `state_at` remains the time the lane entered its state.
+The stored show row also includes nullable `parked_at` and `parked_reason`.
+
+`agent-orch work-lane set-state <lane> --to paused --parked --reason "Later season"`
+parks an active, blocked, done or ordinary paused lane. The trimmed reason must
+contain 1–160 characters, without control characters. No next action is needed.
+The command retains version, request replay, owner confirmation/FD override and
+reopen membership checks. Parking twice refuses as an unchanged state.
+
+Any accepted state change clears the park record. A plain pause (including
+`parked: false`) unparks and requires the usual reason and next action. Other
+operations preserve the record. Paused ordering, hue, counts, membership and
+transition publications stay unchanged. Parked lanes suppress estimate-missing
+episodes; the next reconcile clears any existing episode. The web label and CLI
+list/show identify them as PARKED; older clients continue to display PAUSED.
+
+## Complete goal road
+
+Lane inventory, list and show projections include `goal_road`: one `d/w/m/b/q`
+letter per named goal in ascending rank, then goal ID order. Each sent goal has
+`pos`, its zero-based index in that road. The road length equals `goals_total`;
+zero goals produces `""`. The default goal contributes no road letter. Above
+64 named goals, both `goal_road` and every `pos` are omitted. The existing eight
+record selection and `goal_classes`/`goal_counts` shapes remain unchanged.
+
+Classes are evaluated in order: all completed (`d`); a working seat on any
+unfinished, non-deprecated member, in any stage (`w`); an analysis, in-progress
+or needs-QA member (`m`); a blocked member (`b`); otherwise queued (`q`). Working
+on a completed member cannot make a goal working. The same rule governs default
+goals, detail `working`, selection and counts; working counts as moving.
+
+The goal envelope limit is 2624 bytes to include eight `pos` fields and the
+nine-character icon key. The 64-letter road adds at most 79 bytes. Frame limits
+remain 327680 bytes at 16 lanes and 1310720 at 64 lanes, including parked reasons.
+The shared core accepts road alignment only when the length matches the total,
+letters are valid, and every raw goal has a distinct integer position inside
+the road. Otherwise it keeps the lane/goals with a null road and no positions.
+`workLaneGoalRoad` decodes a valid road to named classes for clients.
+
+## Lane icon selection
+
+The canonical palette appends `briefcase` (acquisition/business), `headset`
+(crm/support), `film` (animation/film), and `server` (host/server). Existing
+keyword matches retain their precedence. `work-lane set-text <lane> --icon <key>`
+sets an explicit icon; `--clear-icon` sends null and restores title fallback.
+These flags are mutually exclusive and may accompany `--title` or `--summary`.
+At least one text/icon flag is required. The daemon validates unknown keys as
+`work_lane_icon_invalid`; expected-version and request-id semantics are unchanged.

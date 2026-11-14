@@ -426,3 +426,22 @@ def test_renewed_freshness_clears_stale_without_recovery_fact():
         assert len(sink.calls) == 1
         assert (await env.store.get_work_lane(lane["lane_id"]))["lane"]["version"] == lane["version"]
     run(body)
+
+
+def test_parking_clears_estimate_episode_and_plain_pause_reopens():
+    async def body(env):
+        lane = (await env.adopt(state="paused", owner="operator", members=["spec_demo__span"]))["lane"]
+        await seed_observations(env.store, [member("backlog")])
+        sink = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
+        assert [e["kind"] for e in await episodes(env.store)] == ["estimate_missing"]
+        await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later"}, lane=lane["lane_id"], version=1)
+        await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
+        assert (await episodes(env.store))[0]["cleared_at"] == NOW
+        await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
+        assert len(await episodes(env.store)) == 1
+        await env.op("set_state", {"to": "paused", "reason": "Resume", "next_action": "Estimate"}, lane=lane["lane_id"], version=2)
+        await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
+        assert len(await episodes(env.store)) == 2
+        assert (await episodes(env.store))[1]["cleared_at"] is None
+    run(body)

@@ -20,6 +20,10 @@
     {"key": "key", "keywords": ["credential", "auth", "key"]},
     {"key": "leaf", "keywords": ["garden", "plant", "leaf"]},
     {"key": "wrench", "keywords": ["tool", "fleet", "infrastructure"]},
-    {"key": "pentacle", "keywords": ["pentacle"]}
+    {"key": "pentacle", "keywords": ["pentacle"]},
+    {"key": "briefcase", "keywords": ["acquisition", "business"]},
+    {"key": "headset", "keywords": ["crm", "support"]},
+    {"key": "film", "keywords": ["animation", "film"]},
+    {"key": "server", "keywords": ["host", "server"]}
   ]
 }

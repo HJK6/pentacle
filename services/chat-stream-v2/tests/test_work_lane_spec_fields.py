@@ -30,7 +30,7 @@ def member(**extra):
 
 
 def test_icons_explicit_order_fallback_unknown_once(caplog):
-    assert len(LANE_ICON_KEYS) == 20
+    assert len(LANE_ICON_KEYS) == 24
     assert resolve_icon("cube", "Mobile release") == "cube"
     assert resolve_icon(None, "Mobile release") == "phone"
     assert resolve_icon(None, "Unmatched project") is None
@@ -113,10 +113,15 @@ def test_inventory_omits_detail_arrays_but_show_keeps_all_members():
 def test_structured_wire_fixture_matches_both_surfaces():
     fixture = json.loads((Path(__file__).resolve().parents[3] /
                           "pentacle-chat-core/tests/fixtures/work-lanes-inventory.json").read_text())["spec_details_v1"]
-    assert build_frame([fixture["lane"]], fixture["sessions"], now_iso=fixture["now_iso"],
-                       worked_by_spec=fixture["worked_by_spec"]) == fixture["inventory_frame"]
-    assert project_lane(fixture["lane"], None, fixture["now_iso"], all_members=True,
-                        sessions_by_stream=fixture["sessions"], worked_by_spec=fixture["worked_by_spec"]) == fixture["show_projection"]
+    frame = build_frame([fixture["lane"]], fixture["sessions"], now_iso=fixture["now_iso"],
+                        worked_by_spec=fixture["worked_by_spec"])
+    shown = project_lane(fixture["lane"], None, fixture["now_iso"], all_members=True,
+                         sessions_by_stream=fixture["sessions"], worked_by_spec=fixture["worked_by_spec"])
+    # Preserve the frozen older cell while checking the one additive empty-road key.
+    assert frame["lanes"][0].pop("goal_road") == ""
+    assert shown.pop("goal_road") == ""
+    assert frame == fixture["inventory_frame"]
+    assert shown == fixture["show_projection"]
 
 
 def test_real_index_show_and_material_journal(tmp_path, monkeypatch):
@@ -340,3 +345,14 @@ def test_cache_ttl_off_loop_timeout_and_missing_ledger(tmp_path):
         assert missing.values == {SPEC: None}
         await missing.stop()
     asyncio.run(body())
+
+
+def test_appended_lane_icons_preserve_existing_keyword_precedence():
+    from _shared.lane_icons import validate_icon, resolve_icon
+    for key in ('briefcase', 'headset', 'film', 'server'):
+        assert validate_icon(key) == key
+    for title, expected in [('Business acquisition', 'briefcase'), ('Customer support', 'headset'),
+                            ('Animation', 'film'), ('Hosts and accounts', 'server'),
+                            ('Pentacle mobile', 'phone'), ('Altum CRM and phone', 'phone'),
+                            ('Government contracts', 'columns')]:
+        assert resolve_icon(None, title) == expected

@@ -644,3 +644,161 @@ def test_list_paging_is_tie_safe_qa_f1():
                       "before_lane_id": page["next_before_lane_id"]}
         assert len(seen) == 3 and len(set(seen)) == 3
     run(body)
+
+
+def test_park_paused_lane_and_plain_pause_unparks():
+    async def body(env):
+        lane = (await env.adopt(state="paused", owner="operator"))["lane"]
+        parked = await env.op("set_state", {"to": "paused", "parked": True, "reason": "  Await a new season  "},
+                              lane=lane["lane_id"], version=1, request_id="park")
+        assert parked["lane"]["work_state"] == "paused"
+        assert parked["lane"]["parked_at"] == parked["event"]["created_at"]
+        assert parked["lane"]["parked_reason"] == "Await a new season"
+        assert parked["event"]["payload"]["reason"] == "  Await a new season  "
+        assert parked["update"] is None
+        unparked = await env.op("set_state", {"to": "paused", "reason": "Resume soon", "next_action": "Schedule work"},
+                                lane=lane["lane_id"], version=2)
+        assert unparked["lane"]["parked_at"] is None
+        assert unparked["lane"]["parked_reason"] is None
+    run(body)
+
+
+@pytest.mark.parametrize("state", ["active", "blocked", "done", "paused"])
+def test_parking_transitions_replay_and_version(state):
+    async def body(env):
+        lane = (await env.adopt())["lane"]
+        lid = lane["lane_id"]
+        if state != "active":
+            lane = (await env.op("set_state", {"to": state, "reason": "Wait", "next_action": "Resume",
+                          "blocker": "Dependency", "outcome": "Complete"}, lane=lid, version=lane["version"]))["lane"]
+        payload = {"to": "paused", "parked": True, "reason": "\t Later season \t"}
+        result = await env.op("set_state", payload, lane=lid, version=lane["version"], request_id="park")
+        assert result["lane"]["parked_reason"] == "Later season"
+        assert result["lane"]["blocker"] is None
+        assert result["event"]["update_kind"] == ("lane_unblocked" if state == "blocked" else None)
+        if state == "blocked":
+            assert result["event"]["payload"]["cleared_blocker"] == "Dependency"
+        replay = await env.op("set_state", payload, lane=lid, version=lane["version"], request_id="park")
+        assert replay["duplicate"] is True
+        with pytest.raises(ValueError, match="assistant_lane_version_conflict"):
+            await env.op("set_state", payload, lane=lid, version=lane["version"])
+        with pytest.raises(ValueError, match="work_lane_state_unchanged"):
+            await env.op("set_state", payload, lane=lid, version=result["lane"]["version"])
+    run(body)
+
+
+@pytest.mark.parametrize("reason,error", [(None, "work_lane_reason_required"), (" \t", "work_lane_reason_required"),
+    ("x" * 161, "work_lane_parked_reason_invalid"), ("a\nb", "work_lane_parked_reason_invalid"),
+    ("a\x7fb", "work_lane_parked_reason_invalid"), (42, "work_lane_parked_reason_invalid")])
+def test_parking_reason_validation(reason, error):
+    async def body(env):
+        lane = (await env.adopt())["lane"]
+        with pytest.raises(ValueError, match=error):
+            await env.op("set_state", {"to": "paused", "parked": True, "reason": reason},
+                         lane=lane["lane_id"], version=1)
+        assert (await env.store.get_work_lane(lane["lane_id"]))["lane"]["version"] == 1
+    run(body)
+
+
+@pytest.mark.parametrize("target,flag", [("active", True), ("done", False), ("blocked", True),
+                                          ("paused", "true"), ("paused", 1), ("paused", None)])
+def test_parked_payload_is_boolean_and_pause_only(target, flag):
+    async def body(env):
+        lane = (await env.adopt())["lane"]
+        with pytest.raises(ValueError, match="work_lane_payload_invalid"):
+            await env.op("set_state", {"to": target, "parked": flag, "reason": "Later"},
+                         lane=lane["lane_id"], version=1)
+    run(body)
+
+
+def test_adopt_cannot_park():
+    async def body(env):
+        with pytest.raises(ValueError, match="work_lane_payload_invalid"):
+            await env.adopt(parked=True)
+    run(body)
+
+
+@pytest.mark.parametrize("target,kind", [("active", None), ("blocked", "lane_blocked"), ("done", "lane_completed"),
+                                       ("paused", None)])
+def test_unparking_obeys_transition_rules(target, kind):
+    async def body(env):
+        lane = (await env.adopt())["lane"]
+        lid = lane["lane_id"]
+        await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later"}, lane=lid, version=1)
+        if target == "paused":
+            for payload, error in [({"to": target}, "work_lane_reason_required"),
+                                   ({"to": target, "reason": "Resume"}, "work_lane_next_action_required")]:
+                with pytest.raises(ValueError, match=error):
+                    await env.op("set_state", payload, lane=lid, version=2)
+        result = await env.op("set_state", {"to": target, "reason": "Resume", "next_action": "Start",
+                                  "blocker": "Dependency", "outcome": "Complete"}, lane=lid, version=2)
+        assert result["lane"]["parked_at"] is None and result["lane"]["parked_reason"] is None
+        assert result["event"]["update_kind"] == kind
+    run(body)
+
+
+def test_parked_operator_confirmation_and_unqualified_lead():
+    async def body(env):
+        lane = (await env.adopt(state="paused", owner="operator"))["lane"]
+        lid = lane["lane_id"]
+        with pytest.raises(ValueError, match="work_lane_reason_required"):
+            await env.op("set_state", {"to": "paused", "parked": True}, lane=lid, version=1)
+        confirm = env.confirm("park-confirm", lid, "set_state:paused")
+        result = await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later",
+                                           "operator_confirmation": confirm}, lane=lid, version=1)
+        assert result["event"]["consumed_question_id"] == "park-confirm"
+        with pytest.raises(ValueError, match="work_lane_visible_lead_required"):
+            await env.op("set_state", {"to": "active", "reason": "Start"}, lane=lid, version=2)
+        assert (await env.store.get_work_lane(lid))["lane"]["parked_at"]
+    run(body)
+
+
+def test_park_record_survives_other_mutations_and_preserves_membership_and_hue():
+    async def body(env):
+        lane = (await env.adopt(members=["spec_demo__parked"]))["lane"]
+        lid = lane["lane_id"]
+        hue_before = await env.store.submit(lambda conn: tuple(conn.execute(
+            "SELECT hue,hue_open_order FROM v2_assistant_composite_lanes WHERE lane_id=?", (lid,)).fetchone()))
+        parked = (await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later"}, lane=lid, version=1))["lane"]
+        lead = await env.seat("replacement", role="lead", parent_stream_id=FD)
+        for operation, payload in [("set_text", {"title": "New name"}),
+            ("set_members", {"members": ["spec_demo__parked", "spec_demo__extra"]}),
+            ("set_lead", {"lead": {"stream_id": lead[0], "generation": lead[1]}}),
+            ("set_owner", {"to": "operator"})]:
+            current = (await env.store.get_work_lane(lid))["lane"]
+            result = await env.op(operation, payload, lane=lid, version=current["version"])
+            assert result["lane"]["parked_at"] == parked["parked_at"]
+            assert result["lane"]["parked_reason"] == "Later"
+        other = (await env.adopt(key="stream:other"))["lane"]
+        with pytest.raises(ValueError, match="work_lane_member_conflict"):
+            await env.op("set_members", {"members": ["spec_demo__parked"]}, lane=other["lane_id"], version=1)
+        current = (await env.store.get_work_lane(lid))["lane"]
+        await env.op("set_state", {"to": "paused", "parked": False, "reason": "Resume", "next_action": "Start"},
+                     lane=lid, version=current["version"])
+        hue_after = await env.store.submit(lambda conn: tuple(conn.execute(
+            "SELECT hue,hue_open_order FROM v2_assistant_composite_lanes WHERE lane_id=?", (lid,)).fetchone()))
+        assert hue_after == hue_before
+    run(body)
+
+
+def test_parking_done_lane_preserves_reopen_member_conflict_guard():
+    async def body(env):
+        lane = (await env.adopt(members=["spec_demo__parked"]))["lane"]
+        await env.op("set_state", {"to": "done", "outcome": "Complete"}, lane=lane["lane_id"], version=1)
+        await env.adopt(key="stream:other", members=["spec_demo__parked"])
+        with pytest.raises(ValueError, match="work_lane_member_conflict"):
+            await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later"},
+                         lane=lane["lane_id"], version=2)
+    run(body)
+
+
+def test_set_text_new_icon_and_clear_restores_fallback():
+    from work_lanes_projection import project_lane
+    async def body(env):
+        lane = (await env.adopt(title="Business acquisition"))["lane"]
+        for version, icon, expected in [(1, "headset", "headset"), (2, None, "briefcase")]:
+            result = await env.op("set_text", {"icon": icon}, lane=lane["lane_id"], version=version)
+            assert result["lane"]["icon"] == icon
+            shown = await env.store.get_work_lane(lane["lane_id"])
+            assert project_lane(shown["_projection_row"], None, "2026-01-01T00:00:00Z")["icon"] == expected
+    run(body)

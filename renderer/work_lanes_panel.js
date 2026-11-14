@@ -83,7 +83,7 @@ function renderLaneRow(lane, { tapTarget, etaLabel, nowMs, renderLeadCard }) {
       <span class="lane-presence ${presenceClass(lane)}" title="${label}" aria-label="${label}"></span>
       <span class="lane-title">${escapeHtml(lane.title || lane.lane_id)}</span>
       ${owner}
-      <span class="lane-state is-${escapeHtml(lane.state)}">${STATE_LABEL[lane.state] || escapeHtml(lane.state)}</span>
+      <span class="lane-state is-${escapeHtml(lane.state)}">${lane.parked ? 'PARKED' : STATE_LABEL[lane.state] || escapeHtml(lane.state)}</span>
     </div>
     ${lane.summary ? `<div class="lane-summary">${escapeHtml(lane.summary)}</div>` : ''}
     ${blocker}

@@ -116,3 +116,10 @@ test('empty inventory renders nothing; truncated inventory says so', () => {
   assert.match(doc.querySelector('.sidebar-group-label')!.textContent!, /Lanes \(70\)/);
   assert.match(doc.querySelector('.lanes-truncated')!.textContent!, /Showing 4 of 70/);
 });
+
+test('parked pause displays PARKED and retains paused state', () => {
+  const parked = applyWorkLanesFrame(emptyWorkLanesInventory(), fixture.parked_v1.inventory_frame);
+  const doc = mount(renderWorkLanesPanelHtml(parked, helpers));
+  assert.equal(doc.querySelector('.lane-state')!.textContent, 'PARKED');
+  assert.equal(doc.querySelector<HTMLElement>('.lane-row')!.dataset.laneState, 'paused');
+});

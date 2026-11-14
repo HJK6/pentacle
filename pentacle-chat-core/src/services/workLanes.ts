@@ -15,6 +15,7 @@ export const WORK_LANE_OPEN_STATES: readonly WorkLaneState[] = ['active', 'pause
 export const LANE_ICON_KEYS = [
   'pentacle', 'flask', 'cube', 'phone', 'bot', 'bug', 'truck', 'wrench', 'columns', 'rocket',
   'hammer', 'eye', 'camera', 'cursor', 'home', 'book', 'chart', 'shield', 'key', 'leaf',
+  'briefcase', 'headset', 'film', 'server',
 ] as const;
 export type LaneIconKey = typeof LANE_ICON_KEYS[number];
 /** Ordered keys mirror the canonical lane_hues.json; parity is tested. */
@@ -67,7 +68,7 @@ export type WorkLaneGoalDetail = {
 };
 export type WorkLaneGoalProgress = { state: 'not_started' | 'in_progress' | 'done'; done: number; total: number } & WorkLaneGoalDetail;
 export type WorkLaneGoal = WorkLaneGoalProgress & {
-  goal_id: string; title: string; rank: number; target_date?: string; icon?: LaneIconKey | null;
+  goal_id: string; title: string; rank: number; pos?: number; target_date?: string; icon?: LaneIconKey | null;
 };
 export type WorkLaneGoalClass = 'done' | 'working' | 'moving' | 'blocked' | 'queued';
 /** One entry of real progress, newest first; titles come from the member. */
@@ -164,6 +165,8 @@ export type WorkLane = {
   lane_id: string;
   goals?: WorkLaneGoal[];
   goals_total?: number;
+  /** Complete named-goal classes in rank/id order, or null for absent/invalid input. */
+  goal_road: string | null;
   default_goal?: WorkLaneGoalProgress | null;
   /** One class letter per goal, then the default goal; read it only through workLaneGoalClasses. */
   goal_classes?: string | null;
@@ -181,6 +184,7 @@ export type WorkLane = {
   hue?: LaneHueKey | null;
   summary: string;
   state: WorkLaneState;
+  parked?: { at: string | null; reason: string | null };
   state_reason: string | null;
   blocker: string | null;
   owner_kind: 'operator' | 'fd' | null;
@@ -467,6 +471,15 @@ function normalizeLane(raw: unknown): WorkLane | null {
   const last = raw.last_update;
   const rawGoals = Array.isArray(raw.goals) ? raw.goals : [];
   const goals = rawGoals.map(normalizeGoal);
+  const road = typeof raw.goal_road === 'string' && !/[^dwmbq]/.test(raw.goal_road)
+    && raw.goal_road.length === count(raw.goals_total)
+    && rawGoals.every((goal) => isRec(goal) && Number.isInteger(goal.pos)
+      && (goal.pos as number) >= 0 && (goal.pos as number) < (raw.goal_road as string).length)
+    && new Set(rawGoals.map((goal) => (goal as Record<string, unknown>).pos)).size === rawGoals.length
+    ? raw.goal_road : null;
+  if (road !== null) goals.forEach((goal, index) => {
+    if (goal) goal.pos = (rawGoals[index] as Record<string, unknown>).pos as number;
+  });
   // One letter per raw goal plus the default goal; dropped goals drop their letter.
   const letters = typeof raw.goal_classes === 'string' && raw.goal_classes.length === rawGoals.length + 1
     && /^[dwmbq]*[dwmbq-]$/.test(raw.goal_classes) ? raw.goal_classes : null;
@@ -480,6 +493,7 @@ function normalizeLane(raw: unknown): WorkLane | null {
         ...('recent' in raw.selected_goal ? { recent: normalizeTrail(raw.selected_goal.recent) } : {}) } } : {}),
     goals: goals.filter((goal): goal is WorkLaneGoal => goal !== null),
     goals_total: count(raw.goals_total) ?? 0,
+    goal_road: road,
     default_goal: normalizeGoalProgress(raw.default_goal),
     ...('goal_classes' in raw ? { goal_classes: letters
       ? goals.flatMap((goal, index) => (goal ? [letters[index]] : [])).join('') + letters[rawGoals.length] : null } : {}),
@@ -495,6 +509,7 @@ function normalizeLane(raw: unknown): WorkLane | null {
     hue: typeof raw.hue === 'string' && LANE_HUE_KEYS.includes(raw.hue as LaneHueKey) ? raw.hue as LaneHueKey : null,
     summary: str(raw.summary) ?? '',
     state,
+    ...(isRec(raw.parked) ? { parked: { at: nonEmpty(raw.parked.at), reason: nonEmpty(raw.parked.reason) } } : {}),
     state_reason: str(raw.state_reason),
     blocker: str(raw.blocker),
     owner_kind: raw.owner_kind === 'operator' || raw.owner_kind === 'fd' ? raw.owner_kind : null,
@@ -509,6 +524,12 @@ function normalizeLane(raw: unknown): WorkLane | null {
       : null,
     progress: normalizeProgress(raw),
   };
+}
+
+/** Decode the complete named-goal road; legacy and invalid input has no road. */
+export function workLaneGoalRoad(lane: Pick<WorkLane, 'goal_road'>): WorkLaneGoalClass[] | null {
+  if (lane.goal_road == null) return null;
+  return [...lane.goal_road].map((letter) => GOAL_CLASS_NAMES[letter]);
 }
 
 /** Validate one inventory frame; null when it carries no `lanes` array. Server order is preserved. */

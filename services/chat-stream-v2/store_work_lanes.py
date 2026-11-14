@@ -31,6 +31,8 @@ from store_routing import _assistant_actor_conn, _record_publication_conn
 
 WORK_LANE_COLUMNS = (
     ("work_state", "TEXT"),
+    ("parked_at", "TEXT"),
+    ("parked_reason", "TEXT"),
     ("work_state_reason", "TEXT"),
     ("blocker", "TEXT"),
     ("owner_kind", "TEXT"),
@@ -156,18 +158,20 @@ def _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor
             derived = any(target == lane["lane_id"] for target in snapshot["assigned"].values())
             members, _ = validate_members(payload["members"], payload.get("no_spec_reason"), derived=derived)
         elif operation == "set_state" and lane["work_state"] == "done" and payload.get("to") in OPEN_WORK_STATES:
-            if set(payload) - {"to", "blocker", "outcome", "resolution", "reason", "next_action", "operator_confirmation"}:
+            if set(payload) - {"to", "blocker", "outcome", "resolution", "reason", "next_action", "operator_confirmation", "parked"}:
                 return
-            _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
+            parking = _parking_reason(payload)
+            _text(parking if parking is not None else payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
             if "operator_confirmation" in payload:
                 question = _verify_confirmation(payload.get("operator_confirmation") and confirmation,
                     lane_id=lane["lane_id"], action="set_state:" + payload["to"], actor_stream_id=actor)
                 _consume_confirmation_conn(conn, question)
             elif lane.get("owner_kind") == "operator":
-                _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_override_reason_required", required=True)
+                _text(parking if parking is not None else payload.get("reason"), UPDATE_TEXT_MAX,
+                      "work_lane_override_reason_required", required=True)
             if payload["to"] == "active":
                 _require_qualifying_lead(lane, conn)
-            if payload["to"] in {"paused", "blocked"}:
+            if payload["to"] in {"paused", "blocked"} and parking is None:
                 _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required", required=True)
                 _text(payload.get("next_action"), UPDATE_TEXT_MAX, "work_lane_next_action_required", required=True)
             if payload["to"] == "blocked":
@@ -238,6 +242,23 @@ def _text(value: Any, limit: int, code: str, *, required: bool = False) -> str |
         raise ValueError(code)
     value = value.strip()
     return value or None
+
+
+def _parking_reason(payload: dict[str, Any]) -> str | None:
+    """Validate the optional pause-only flag and its bounded, trimmed record."""
+    if "parked" in payload and (type(payload["parked"]) is not bool or payload.get("to") != "paused"):
+        raise ValueError("work_lane_payload_invalid")
+    if not payload.get("parked"):
+        return None
+    value = payload.get("reason")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("work_lane_reason_required")
+    if not isinstance(value, str):
+        raise ValueError("work_lane_parked_reason_invalid")
+    value = value.strip()
+    if len(value) > 160 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("work_lane_parked_reason_invalid")
+    return value
 
 
 def _split(stream_id: str) -> tuple[str, str]:
@@ -828,15 +849,20 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         update = None
         changes: dict[str, Any] = {}
         if operation == "set_state":
-            allowed = {"to", "blocker", "outcome", "resolution", "reason", "next_action", "operator_confirmation"}
+            allowed = {"to", "blocker", "outcome", "resolution", "reason", "next_action", "operator_confirmation", "parked"}
             if set(payload) - allowed or payload.get("to") not in WORK_STATES:
                 raise ValueError("work_lane_payload_invalid")
             to = payload["to"]
+            parking = _parking_reason(payload)
+            was_parked = prior_state == "paused" and bool(lane.get("parked_at"))
+            park_changed = to == "paused" and was_parked != (parking is not None)
             lead_lost = _lead_lost_conn(lane, conn)
             # A legacy stored paused/lead_lost is a fault, so a deliberate pause restates it.
-            if to == prior_state and not (lead_lost and to == "paused"):
+            if to == prior_state and not park_changed and not (lead_lost and to == "paused" and not was_parked):
                 raise ValueError("work_lane_state_unchanged")
-            if lead_lost and to == "paused":
+            if parking is not None:
+                reason = parking
+            elif lead_lost and to == "paused":
                 reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required",
                                required=True)
             else:
@@ -849,17 +875,18 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                                                 actor_stream_id=actor)
                 _consume_confirmation_conn(conn, consumed)
             elif lane.get("owner_kind") == "operator":
-                reason = _text(payload.get("reason"), UPDATE_TEXT_MAX,
+                reason = _text(parking if parking is not None else payload.get("reason"), UPDATE_TEXT_MAX,
                                "work_lane_override_reason_required", required=True)
                 event_payload = dict(payload, override=_override_audit(
                     actor, generation, "set_state:" + to, prior_state, to, reason))
+            changes.update(parked_at=stamp if parking is not None else None, parked_reason=parking)
             changes["work_state"] = to
             changes["work_state_reason"] = "reopened" if prior_state == "done" else "fd"
             if to == "active":
                 _require_qualifying_lead(lane, conn)
                 if lane.get("bound_stream_id") == actor:
                     raise ValueError("work_lane_lead_ineligible")
-            if to in {"paused", "blocked"}:
+            if to in {"paused", "blocked"} and parking is None:
                 _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required", required=True)
                 _text(payload.get("next_action"), UPDATE_TEXT_MAX, "work_lane_next_action_required", required=True)
             if prior_state == "blocked" and to == "active":
@@ -886,7 +913,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                 event_payload = dict(event_payload, cleared_blocker=lane.get("blocker"))
             if prior_state == "done":
                 update = None  # D6: reopen emits no update, whatever the reopened state
-            del reason  # recorded on the event row only, never published
+            del reason  # pause/override reasons are never published
         elif operation == "set_lead":
             if set(payload) - {"lead", "visible_chat"} or "lead" not in payload:
                 raise ValueError("work_lane_payload_invalid")

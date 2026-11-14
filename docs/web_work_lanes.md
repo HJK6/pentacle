@@ -97,3 +97,46 @@ of size; no size-dependent field dropping occurs.
 ## Validation
 
 `pentacle-chat-core/tests/workLanes.test.ts` (fixture parity), `test/work_lanes_panel.test.ts`, `test/work_lanes_transcript.test.ts`, `test/work_lanes_client.test.js`, `test/work_lanes_web.test.js` (real `renderer/app.js` in jsdom), and the `web-work-lanes` scenario of `node test/e2e/web_gate.js` (real Chrome and stylesheet; the lane frames are the frozen fixture injected through the renderer's frame listener, because the seeded gate daemon owns no lanes or closed chats).
+
+## Parked lanes
+
+A parked lane is still `state: "paused"`. Its inventory, list and show projection
+adds `parked: {at, reason}`; other lanes omit the key. `at` is the park time in
+UTC to the second, while `state_at` remains the time the lane entered its state.
+The stored show row also includes nullable `parked_at` and `parked_reason`.
+
+`agent-orch work-lane set-state <lane> --to paused --parked --reason "Later season"`
+parks an active, blocked, done or ordinary paused lane. The trimmed reason must
+contain 1–160 characters, without control characters. No next action is needed.
+The command retains version, request replay, owner confirmation/FD override and
+reopen membership checks. Parking twice refuses as an unchanged state.
+
+Any accepted state change clears the park record. A plain pause (including
+`parked: false`) unparks and requires the usual reason and next action. Other
+operations preserve the record. Paused ordering, hue, counts, membership and
+transition publications stay unchanged. Parked lanes suppress estimate-missing
+episodes; the next reconcile clears any existing episode. The web label and CLI
+list/show identify them as PARKED; older clients continue to display PAUSED.
+
+## Complete goal road
+
+Lane inventory, list and show projections include `goal_road`: one `d/w/m/b/q`
+letter per named goal in ascending rank, then goal ID order. Each sent goal has
+`pos`, its zero-based index in that road. The road length equals `goals_total`;
+zero goals produces `""`. The default goal contributes no road letter. Above
+64 named goals, both `goal_road` and every `pos` are omitted. The existing eight
+record selection and `goal_classes`/`goal_counts` shapes remain unchanged.
+
+Classes are evaluated in order: all completed (`d`); a working seat on any
+unfinished, non-deprecated member, in any stage (`w`); an analysis, in-progress
+or needs-QA member (`m`); a blocked member (`b`); otherwise queued (`q`). Working
+on a completed member cannot make a goal working. The same rule governs default
+goals, detail `working`, selection and counts; working counts as moving.
+
+The goal envelope limit is 2624 bytes to include eight `pos` fields and the
+nine-character icon key. The 64-letter road adds at most 79 bytes. Frame limits
+remain 327680 bytes at 16 lanes and 1310720 at 64 lanes, including parked reasons.
+The shared core accepts road alignment only when the length matches the total,
+letters are valid, and every raw goal has a distinct integer position inside
+the road. Otherwise it keeps the lane/goals with a null road and no positions.
+`workLaneGoalRoad` decodes a valid road to named classes for clients.

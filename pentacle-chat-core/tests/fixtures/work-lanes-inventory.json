@@ -5232,7 +5232,8 @@
               "total": 1,
               "rank": 0,
               "icon": "cube",
-              "target_date": "2026-11-30"
+              "target_date": "2026-11-30",
+              "pos": 0
             },
             {
               "goal_id": "g_91716977daa6ddedd93acce6",
@@ -5242,7 +5243,8 @@
               "total": 0,
               "rank": 1,
               "icon": null,
-              "target_date": "2026-11-30"
+              "target_date": "2026-11-30",
+              "pos": 1
             }
           ],
           "goals_total": 2,
@@ -5253,7 +5255,8 @@
             1,
             0
           ],
-          "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "goal_road": "wq"
         }
       ],
       "counts": {
@@ -5409,7 +5412,8 @@
           "blocked": 0,
           "working": true,
           "left_h": null,
-          "progress_at": null
+          "progress_at": null,
+          "pos": 0
         },
         {
           "goal_id": "g_91716977daa6ddedd93acce6",
@@ -5424,7 +5428,8 @@
           "blocked": 0,
           "working": false,
           "left_h": null,
-          "progress_at": null
+          "progress_at": null,
+          "pos": 1
         }
       ],
       "goals_total": 2,
@@ -5444,6 +5449,1181 @@
         "checkpoint_deficient": null,
         "complete": {
           "source": false,
+          "presence": true,
+          "questions": false
+        }
+      },
+      "goal_road": "wq"
+    }
+  },
+  "parked_v1": {
+    "row": {
+      "lane_id": "wl-parked-0001",
+      "version": 1,
+      "work_state": "paused",
+      "work_state_reason": "fd",
+      "title": "Seasonal project",
+      "owner_kind": "operator",
+      "parked_at": "2026-01-02T03:04:05.123Z",
+      "parked_reason": "Resume next season."
+    },
+    "inventory_frame": {
+      "type": "work_lanes.inventory",
+      "lanes": [
+        {
+          "lane_id": "wl-parked-0001",
+          "title": "Seasonal project",
+          "summary": "",
+          "icon": null,
+          "hue": null,
+          "state": "paused",
+          "state_reason": "fd",
+          "blocker": null,
+          "parked": {
+            "at": "2026-01-02T03:04:05Z",
+            "reason": "Resume next season."
+          },
+          "owner_kind": "operator",
+          "version": 1,
+          "updated_at": null,
+          "first_admitted_at": null,
+          "done_at": null,
+          "lead": null,
+          "visible_chat": {
+            "stream_id": null,
+            "generation": null,
+            "kind": "session",
+            "available": "unavailable"
+          },
+          "last_update": null,
+          "progress_at": null,
+          "state_at": null,
+          "members": [],
+          "members_total": 0,
+          "no_spec_reason": null,
+          "items_total": 0,
+          "items_completed": 0,
+          "items_dropped": 0,
+          "items_open": 0,
+          "items_unresolved": 0,
+          "ac_checked": null,
+          "ac_total": null,
+          "ac_members": 0,
+          "open_estimate_h": null,
+          "open_estimated": 0,
+          "estimate_complete": true,
+          "freshness_at": null,
+          "completion_pending": null,
+          "lead_reported_done": null,
+          "stale": false,
+          "goals": [],
+          "goals_total": 0,
+          "goal_road": "",
+          "goal_classes": "-",
+          "goal_counts": [
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "counts": {
+        "open": 1,
+        "active": 0,
+        "paused": 1,
+        "blocked": 0
+      },
+      "truncated": false,
+      "generated_at": "2026-01-03T00:00:00Z",
+      "work_index": {
+        "available": false,
+        "root_configured": false,
+        "snapshot_at": null,
+        "last_sweep_at": null,
+        "error": "work_index_unavailable"
+      }
+    }
+  },
+  "goal_road_v1": {
+    "lane": {
+      "lane_id": "wl-detail",
+      "title": "Mobile release",
+      "version": 1,
+      "work_state": "paused",
+      "icon": "phone",
+      "_members": [
+        {
+          "spec_id": "spec_demo__road0",
+          "goal_id": "g_e898e20d30cf87bc3f8b813e",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road1",
+          "goal_id": "g_f3b66fae35c74c69712171a5",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road2",
+          "goal_id": "g_8d2a5d012ab7ffe255bec4e5",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road3",
+          "goal_id": "g_303f86d5fc857373ec7fd9f4",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road4",
+          "goal_id": "g_ca1397989d1ff469bce38a94",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road5",
+          "goal_id": "g_e4a00209767f3fda9140510d",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road6",
+          "goal_id": "g_643b671b90d923bfb5480ad6",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road7",
+          "goal_id": "g_103927657550b6b8c155ca19",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road8",
+          "goal_id": "g_4e22e00343ee1b153179e4d9",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          }
+        },
+        {
+          "spec_id": "spec_demo__road9",
+          "goal_id": "g_797a5aec2ec9ced28e68c815",
+          "status": "in_progress",
+          "terminal": null,
+          "observation": {
+            "quality": "fresh"
+          }
+        }
+      ],
+      "hue": "chartreuse",
+      "_detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "_work_index_available": true,
+      "_goals": {
+        "epic_road_00": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 1",
+            "rank": 0,
+            "icon": "cube"
+          }
+        },
+        "epic_road_01": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 2",
+            "rank": 1,
+            "icon": "cube"
+          }
+        },
+        "epic_road_02": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 3",
+            "rank": 2,
+            "icon": "cube"
+          }
+        },
+        "epic_road_03": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 4",
+            "rank": 3,
+            "icon": "cube"
+          }
+        },
+        "epic_road_04": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 5",
+            "rank": 4,
+            "icon": "cube"
+          }
+        },
+        "epic_road_05": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 6",
+            "rank": 5,
+            "icon": "cube"
+          }
+        },
+        "epic_road_06": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 7",
+            "rank": 6,
+            "icon": "cube"
+          }
+        },
+        "epic_road_07": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 8",
+            "rank": 7,
+            "icon": "cube"
+          }
+        },
+        "epic_road_08": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 9",
+            "rank": 8,
+            "icon": "cube"
+          }
+        },
+        "epic_road_09": {
+          "quality": "fresh",
+          "facts": {
+            "title": "Goal 10",
+            "rank": 9,
+            "icon": "cube"
+          }
+        }
+      }
+    },
+    "sessions": {},
+    "worked_by_spec": {},
+    "now_iso": "2026-01-03T00:00:00Z",
+    "inventory_frame": {
+      "type": "work_lanes.inventory",
+      "lanes": [
+        {
+          "lane_id": "wl-detail",
+          "title": "Mobile release",
+          "summary": "",
+          "icon": "phone",
+          "hue": "chartreuse",
+          "state": "paused",
+          "state_reason": null,
+          "blocker": null,
+          "owner_kind": null,
+          "version": 1,
+          "updated_at": null,
+          "first_admitted_at": null,
+          "done_at": null,
+          "lead": null,
+          "visible_chat": {
+            "stream_id": null,
+            "generation": null,
+            "kind": "session",
+            "available": "unavailable"
+          },
+          "last_update": null,
+          "progress_at": null,
+          "state_at": null,
+          "members": [
+            {
+              "spec_id": "spec_demo__road0",
+              "goal_id": "g_e898e20d30cf87bc3f8b813e",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            },
+            {
+              "spec_id": "spec_demo__road1",
+              "goal_id": "g_f3b66fae35c74c69712171a5",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            },
+            {
+              "spec_id": "spec_demo__road2",
+              "goal_id": "g_8d2a5d012ab7ffe255bec4e5",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            },
+            {
+              "spec_id": "spec_demo__road3",
+              "goal_id": "g_303f86d5fc857373ec7fd9f4",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            },
+            {
+              "spec_id": "spec_demo__road4",
+              "goal_id": "g_ca1397989d1ff469bce38a94",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            },
+            {
+              "spec_id": "spec_demo__road5",
+              "goal_id": "g_e4a00209767f3fda9140510d",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            },
+            {
+              "spec_id": "spec_demo__road6",
+              "goal_id": "g_643b671b90d923bfb5480ad6",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            },
+            {
+              "spec_id": "spec_demo__road7",
+              "goal_id": "g_103927657550b6b8c155ca19",
+              "status": "completed",
+              "terminal": "completed",
+              "observation": {
+                "quality": "fresh"
+              },
+              "seats": [],
+              "seats_total": 0,
+              "lead_seat": null,
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": null,
+              "status_line": null,
+              "next_line": null
+            }
+          ],
+          "members_total": 10,
+          "no_spec_reason": null,
+          "items_total": 10,
+          "items_completed": 9,
+          "items_dropped": 0,
+          "items_open": 1,
+          "items_unresolved": 0,
+          "ac_checked": null,
+          "ac_total": null,
+          "ac_members": 0,
+          "open_estimate_h": null,
+          "open_estimated": 0,
+          "estimate_complete": false,
+          "freshness_at": null,
+          "completion_pending": false,
+          "lead_reported_done": null,
+          "stale": false,
+          "goals": [
+            {
+              "goal_id": "g_e898e20d30cf87bc3f8b813e",
+              "title": "Goal 1",
+              "state": "done",
+              "done": 1,
+              "total": 1,
+              "rank": 0,
+              "icon": "cube",
+              "pos": 0
+            },
+            {
+              "goal_id": "g_f3b66fae35c74c69712171a5",
+              "title": "Goal 2",
+              "state": "done",
+              "done": 1,
+              "total": 1,
+              "rank": 1,
+              "icon": "cube",
+              "pos": 1
+            },
+            {
+              "goal_id": "g_8d2a5d012ab7ffe255bec4e5",
+              "title": "Goal 3",
+              "state": "done",
+              "done": 1,
+              "total": 1,
+              "rank": 2,
+              "icon": "cube",
+              "pos": 2
+            },
+            {
+              "goal_id": "g_303f86d5fc857373ec7fd9f4",
+              "title": "Goal 4",
+              "state": "done",
+              "done": 1,
+              "total": 1,
+              "rank": 3,
+              "icon": "cube",
+              "pos": 3
+            },
+            {
+              "goal_id": "g_ca1397989d1ff469bce38a94",
+              "title": "Goal 5",
+              "state": "done",
+              "done": 1,
+              "total": 1,
+              "rank": 4,
+              "icon": "cube",
+              "pos": 4
+            },
+            {
+              "goal_id": "g_e4a00209767f3fda9140510d",
+              "title": "Goal 6",
+              "state": "done",
+              "done": 1,
+              "total": 1,
+              "rank": 5,
+              "icon": "cube",
+              "pos": 5
+            },
+            {
+              "goal_id": "g_643b671b90d923bfb5480ad6",
+              "title": "Goal 7",
+              "state": "done",
+              "done": 1,
+              "total": 1,
+              "rank": 6,
+              "icon": "cube",
+              "pos": 6
+            },
+            {
+              "goal_id": "g_797a5aec2ec9ced28e68c815",
+              "title": "Goal 10",
+              "state": "in_progress",
+              "done": 0,
+              "total": 1,
+              "rank": 9,
+              "icon": "cube",
+              "pos": 9
+            }
+          ],
+          "goals_total": 10,
+          "goal_road": "dddddddddm",
+          "goal_classes": "dddddddm-",
+          "goal_counts": [
+            1,
+            0,
+            0,
+            9
+          ],
+          "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "counts": {
+        "open": 1,
+        "active": 0,
+        "paused": 1,
+        "blocked": 0
+      },
+      "truncated": false,
+      "generated_at": "2026-01-03T00:00:00Z",
+      "work_index": {
+        "available": false,
+        "root_configured": false,
+        "snapshot_at": null,
+        "last_sweep_at": null,
+        "error": "work_index_unavailable"
+      }
+    },
+    "show_projection": {
+      "lane_id": "wl-detail",
+      "title": "Mobile release",
+      "summary": "",
+      "icon": "phone",
+      "hue": "chartreuse",
+      "state": "paused",
+      "state_reason": null,
+      "blocker": null,
+      "owner_kind": null,
+      "version": 1,
+      "updated_at": null,
+      "first_admitted_at": null,
+      "done_at": null,
+      "lead": null,
+      "visible_chat": {
+        "stream_id": null,
+        "generation": null,
+        "kind": "session",
+        "available": "unavailable"
+      },
+      "last_update": null,
+      "progress_at": null,
+      "state_at": null,
+      "members": [
+        {
+          "spec_id": "spec_demo__road0",
+          "goal_id": "g_e898e20d30cf87bc3f8b813e",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road1",
+          "goal_id": "g_f3b66fae35c74c69712171a5",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road2",
+          "goal_id": "g_8d2a5d012ab7ffe255bec4e5",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road3",
+          "goal_id": "g_303f86d5fc857373ec7fd9f4",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road4",
+          "goal_id": "g_ca1397989d1ff469bce38a94",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road5",
+          "goal_id": "g_e4a00209767f3fda9140510d",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road6",
+          "goal_id": "g_643b671b90d923bfb5480ad6",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road7",
+          "goal_id": "g_103927657550b6b8c155ca19",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road8",
+          "goal_id": "g_4e22e00343ee1b153179e4d9",
+          "status": "completed",
+          "terminal": "completed",
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        },
+        {
+          "spec_id": "spec_demo__road9",
+          "goal_id": "g_797a5aec2ec9ced28e68c815",
+          "status": "in_progress",
+          "terminal": null,
+          "observation": {
+            "quality": "fresh"
+          },
+          "seats": [],
+          "seats_total": 0,
+          "lead_seat": null,
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": null,
+          "status_line": null,
+          "next_line": null,
+          "blocked_line": null,
+          "progress_at": null,
+          "criteria": [],
+          "transitions": [],
+          "goal_text_truncated": null,
+          "summary_line": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_state": null,
+          "blockers_text": null,
+          "recent": [],
+          "estimate_first": null,
+          "goal_text": null,
+          "checkpoint_deficiencies": [],
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "goal_source": null,
+          "checkpoint_revision": null,
+          "checkpoint_first_observed_at": null,
+          "unblocks": []
+        }
+      ],
+      "members_total": 10,
+      "no_spec_reason": null,
+      "items_total": 10,
+      "items_completed": 9,
+      "items_dropped": 0,
+      "items_open": 1,
+      "items_unresolved": 0,
+      "ac_checked": null,
+      "ac_total": null,
+      "ac_members": 0,
+      "open_estimate_h": null,
+      "open_estimated": 0,
+      "estimate_complete": false,
+      "freshness_at": null,
+      "completion_pending": false,
+      "lead_reported_done": null,
+      "stale": false,
+      "goals": [
+        {
+          "goal_id": "g_e898e20d30cf87bc3f8b813e",
+          "title": "Goal 1",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 0,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 0
+        },
+        {
+          "goal_id": "g_f3b66fae35c74c69712171a5",
+          "title": "Goal 2",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 1,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 1
+        },
+        {
+          "goal_id": "g_8d2a5d012ab7ffe255bec4e5",
+          "title": "Goal 3",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 2,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 2
+        },
+        {
+          "goal_id": "g_303f86d5fc857373ec7fd9f4",
+          "title": "Goal 4",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 3,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 3
+        },
+        {
+          "goal_id": "g_ca1397989d1ff469bce38a94",
+          "title": "Goal 5",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 4,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 4
+        },
+        {
+          "goal_id": "g_e4a00209767f3fda9140510d",
+          "title": "Goal 6",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 5,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 5
+        },
+        {
+          "goal_id": "g_643b671b90d923bfb5480ad6",
+          "title": "Goal 7",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 6,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 6
+        },
+        {
+          "goal_id": "g_103927657550b6b8c155ca19",
+          "title": "Goal 8",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 7,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 7
+        },
+        {
+          "goal_id": "g_4e22e00343ee1b153179e4d9",
+          "title": "Goal 9",
+          "state": "done",
+          "done": 1,
+          "total": 1,
+          "rank": 8,
+          "icon": "cube",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 8
+        },
+        {
+          "goal_id": "g_797a5aec2ec9ced28e68c815",
+          "title": "Goal 10",
+          "state": "in_progress",
+          "done": 0,
+          "total": 1,
+          "rank": 9,
+          "icon": "cube",
+          "moving": 1,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null,
+          "pos": 9
+        }
+      ],
+      "goals_total": 10,
+      "goal_road": "dddddddddm",
+      "goal_classes": "dddddddddm-",
+      "goal_counts": [
+        1,
+        0,
+        0,
+        9
+      ],
+      "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "visibility_counts": {
+        "unfinished": 1,
+        "working": 0,
+        "blocked": 0,
+        "needs_answer": null,
+        "checkpoint_deficient": 10,
+        "complete": {
+          "source": true,
           "presence": true,
           "questions": false
         }

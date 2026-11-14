@@ -153,8 +153,10 @@ def goal_class(members: list[dict], working_ids: set[str]) -> str:
     counted = [member for member in members if _status(member) != 'deprecated']
     if counted and all(_status(member) == 'completed' for member in counted):
         return 'd'
+    if any(_status(member) != 'completed' and member['spec_id'] in working_ids for member in counted):
+        return 'w'
     if any(_status(member) in MOVING for member in counted):
-        return 'w' if any(member['spec_id'] in working_ids for member in counted) else 'm'
+        return 'm'
     return 'b' if any(_status(member) == 'blocked' for member in counted) else 'q'
 
 
@@ -195,9 +197,14 @@ def project_goals(lane: dict, *, all_goals: bool = False) -> dict:
     goals.sort(key=order)
     if len(goals) > MAX_COUNT:
         raise ValueError('work_lane_goal_count_overflow')
+    if len(goals) <= 64:
+        for pos, goal in enumerate(goals):
+            goal['pos'] = pos
     selected = goals if all_goals else sorted(
         sorted(goals, key=lambda goal: (CLASS_GROUP[classes[goal['goal_id']]], *order(goal)))[:8], key=order)
     result = {'goals': selected, 'goals_total': len(goals)}
+    if len(goals) <= 64:
+        result['goal_road'] = ''.join(classes[goal['goal_id']] for goal in goals)
     legacy = [member for member in members if not member.get('goal_id') and _status(member) != 'deprecated']
     default = goal_class(legacy, working_ids) if legacy else None
     if legacy:

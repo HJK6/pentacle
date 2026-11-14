@@ -53,6 +53,8 @@ def _lane_line(lane: dict[str, Any]) -> str:
                  f"a verified restart, or set-state --to paused|blocked with a reason")
     if lane.get("blocker"):
         state = f"{state}: {lane['blocker']}"
+    if lane.get("parked"):
+        state = f"PARKED since {lane['parked']['at']}: {lane['parked']['reason']}"
     return (f"{lane.get('lane_id')}  v{lane.get('version')}  [{state}]  {lane.get('owner_kind')}  "
             f"{lane.get('title')}\n    lead {lead_text}  chat {chat.get('stream_id')} ({chat.get('available')})")
 
@@ -253,6 +255,11 @@ def _confirmation(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str
 
 def cmd_set_state(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {"to": args.to}
+    if getattr(args, "parked", False):
+        if args.to != "paused":
+            print("agent-orch work-lane set-state: --parked requires --to paused", file=sys.stderr)
+            return 2
+        payload["parked"] = True
     for key in ("blocker", "outcome", "resolution", "reason", "next_action"):
         if getattr(args, key, None):
             payload[key] = getattr(args, key)
@@ -285,9 +292,11 @@ def cmd_set_chat(args: argparse.Namespace) -> int:
 
 
 def cmd_set_text(args: argparse.Namespace) -> int:
-    payload = {k: getattr(args, k) for k in ("title", "summary") if getattr(args, k) is not None}
+    payload = {k: getattr(args, k) for k in ("title", "summary", "icon") if getattr(args, k, None) is not None}
+    if getattr(args, "clear_icon", False):
+        payload["icon"] = None
     if not payload:
-        print("agent-orch work-lane set-text: give --title and/or --summary", file=sys.stderr)
+        print("agent-orch work-lane set-text: give --title, --summary, --icon or --clear-icon", file=sys.stderr)
         return 2
     return _operation(args, "set_text", payload)
 
@@ -533,6 +542,7 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--reason", help="required for a bound-FD override of an operator-owned lane")
     p.add_argument("--next-action", help="required resume condition when pausing or blocking a lane")
     p.add_argument("--confirmation-question-id")
+    p.add_argument("--parked", action="store_true", help="park a paused lane with a reason")
     p.set_defaults(func=cmd_set_state)
 
     p = mutator("set-lead", "FD: link the lead (hidden lead/nexus allowed on FD lanes; never resumes)")
@@ -548,9 +558,12 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--chat-generation")
     p.set_defaults(func=cmd_set_chat)
 
-    p = mutator("set-text", "FD: lane title/summary")
+    p = mutator("set-text", "FD: lane title/summary/icon")
     p.add_argument("--title")
     p.add_argument("--summary")
+    icons = p.add_mutually_exclusive_group()
+    icons.add_argument("--icon", help="lane icon key")
+    icons.add_argument("--clear-icon", action="store_true", help="return to title fallback")
     p.set_defaults(func=cmd_set_text)
 
     p = sub.add_parser("add-member", help="FD: append one resolved spec, retrying one version conflict")
