@@ -26,7 +26,7 @@ def test_check_release_script_imports_shared_for_test_profile(tmp_path):
         out.write('''\n
 def release_exclusions(*args): return []
 def _launchd_state(*args): return LaunchdState(loaded=True, pid=1)
-def _capture_log_offsets(*args): return {}
+def _capture_log_offsets(*args, **kwargs): return {}
 def _daemon_log_paths(*args): return ()
 def _release_machines_file(*args): return "fixture"
 def _declared_release_scope(*args): return []
