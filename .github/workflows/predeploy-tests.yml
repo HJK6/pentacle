@@ -314,16 +314,8 @@ jobs:
         fi
     - name: Installed doctor and exact upgrade checklist
       run: |
-        python3 tools/pentacle/tests/checklist_journey.py install --evidence "${RUNNER_TEMP}/shareability-install"
-        python3 tools/pentacle/tests/checklist_journey.py rehearsal --evidence "${RUNNER_TEMP}/shareability-checklist"
-    - name: Retain installation journey evidence
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: shareability-journeys-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: ${{ runner.temp }}/shareability-*
+        python3 tools/pentacle/tests/checklist_journey.py install --evidence "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/shareability-install"
+        python3 tools/pentacle/tests/checklist_journey.py rehearsal --evidence "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/shareability-checklist"
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
     - name: Portable microphone contracts
@@ -352,6 +344,8 @@ jobs:
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/test-attempts.v1.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/shareability-install/**
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/shareability-checklist/**
     - name: Retain failed gate evidence
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
