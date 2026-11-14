@@ -40,13 +40,18 @@ def _main(provider):
     request_id = "doctor-" + uuid.uuid4().hex
     try:
         catalog = asyncio.run(spawn_catalog_get_once(config, timeout=10))
-        profile = catalog.get("profiles", {}).get("agent_orch", {}).get(provider)
+        profile = catalog.get("profiles", {}).get("test_prompt", {}).get(provider)
+        # A diagnostic must not fall back to the ordinary work profile when
+        # the deployment has no usable test tuple or has disabled this provider.
+        if (not isinstance(profile, list) or len(profile) != 2
+                or not isinstance(profile[0], str) or not profile[0]
+                or profile[1] != ("default" if provider in ("gemini", "cursor") else "low")):
+            return replied, closed
         payload = {"host": config.host_id, "provider": provider, "parent_stream_id": None,
                    "role": None, "phase": None, "visibility": "hidden", "request_id": request_id,
                    "idempotency_key": request_id, "initial_prompt": "Reply with exactly PENTACLE_DOCTOR_OK.",
                    "objective": "Pentacle functional health check"}
-        if isinstance(profile, list) and len(profile) == 2:
-            payload.update(model=profile[0], effort=profile[1])
+        payload.update(model=profile[0], effort=profile[1])
         response = asyncio.run(spawn_once(config, payload, timeout=min(50, max(1, deadline - time.monotonic()))))
         stream_id = response.get("stream_id") or response.get("session", {}).get("stream_id")
         if not stream_id:
