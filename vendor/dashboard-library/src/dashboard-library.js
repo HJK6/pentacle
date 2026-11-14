@@ -2845,6 +2845,12 @@
     const all = manifest?.[state.kind] || [], items = all.filter(item => [item.title, item.entry, item.group, item.surface].join(' ').toLowerCase().includes(state.query.toLowerCase()));
     if (manifest && !all.some(i => i.id === state.item)) state.item = items[0]?.id || '';
     const item = all.find(i => i.id === state.item);
+    const selectionKey = item ? [state.project, manifest.revision_id, state.kind, item.id].join(':') : null;
+    if (selectionKey !== refs.selectionKey) {
+      refs.selectionKey = selectionKey;
+      // Choose the useful default on open; keep explicit tab choices during polling.
+      state.mode = item?.prototype ? 'prototype' : 'screens';
+    }
     const list = root.querySelector('.dg-items'); list.replaceChildren();
     const groups = new Map();
     for (const row of items) { const group = row.group || (state.kind === 'flows' ? 'Flows' : row.surface === 'mobile' ? 'Mobile' : 'Web'); if (!groups.has(group)) groups.set(group, []); groups.get(group).push(row); }

@@ -11,7 +11,7 @@
 // blocks `import` over file:// (origin null). See
 // Consumers inject this optional dependency explicitly.
 //
-// 6a2740a435d5 is replaced by build.js with the source git short-sha.
+// a11c269480c2 is replaced by build.js with the source git short-sha.
 
 (function (root, factory) {
   const api = factory();
@@ -21,7 +21,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  const VERSION = '6a2740a435d5';
+  const VERSION = 'a11c269480c2';
 
   // ── Status set ────────────────────────────────────────────────
   // Canonical JS mirror of triforce-shared/specs_parser DEFAULT_STATUSES and
@@ -2845,6 +2845,12 @@
     const all = manifest?.[state.kind] || [], items = all.filter(item => [item.title, item.entry, item.group, item.surface].join(' ').toLowerCase().includes(state.query.toLowerCase()));
     if (manifest && !all.some(i => i.id === state.item)) state.item = items[0]?.id || '';
     const item = all.find(i => i.id === state.item);
+    const selectionKey = item ? [state.project, manifest.revision_id, state.kind, item.id].join(':') : null;
+    if (selectionKey !== refs.selectionKey) {
+      refs.selectionKey = selectionKey;
+      // Choose the useful default on open; keep explicit tab choices during polling.
+      state.mode = item?.prototype ? 'prototype' : 'screens';
+    }
     const list = root.querySelector('.dg-items'); list.replaceChildren();
     const groups = new Map();
     for (const row of items) { const group = row.group || (state.kind === 'flows' ? 'Flows' : row.surface === 'mobile' ? 'Mobile' : 'Web'); if (!groups.has(group)) groups.set(group, []); groups.get(group).push(row); }
