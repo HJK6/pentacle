@@ -18,6 +18,13 @@
     "not_applicable": "deprecated no-op"
   },
   {
+    "command": "compact",
+    "argv": ["compact"],
+    "handler": "agent_orch.cli.compact",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
     "command": "wake",
     "argv": [
       "wake",

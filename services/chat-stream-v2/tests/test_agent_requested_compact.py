@@ -36,10 +36,20 @@ async def request(server, **overrides):
 
 
 @pytest.mark.parametrize("provider,command", [("codex", "/compact"), ("claude", CONTEXT_COMPACT_COMMAND)])
-def test_busy_below_threshold_self_compact_is_bare_ordinary_input(tmp_path, provider, command):
+@pytest.mark.parametrize("front_desk", [False, True])
+def test_busy_below_threshold_self_compact_is_bare_ordinary_input(tmp_path, provider, command, front_desk):
     async def run():
         server, tmux, store, sessions = await setup(tmp_path, provider)
         try:
+            if front_desk:
+                from front_desk_digest import FrontDeskDigest
+                from types import SimpleNamespace
+                from v2_runtime import primary_assistant_name
+                server.comms.front_desk_digest = FrontDeskDigest(store, lambda: SimpleNamespace(
+                    enabled=True, name=primary_assistant_name(), direct_primary=True,
+                    direct_primary_stream_id=SID,
+                    direct_primary_generation=sessions.get(SID)["session_generation"],
+                ))
             # A forged force or body field cannot alter daemon-owned input.
             reply = await request(server, urgent=True, text="untrusted", force=True)
             assert reply["type"] == "compact.ok", reply
@@ -52,6 +62,11 @@ def test_busy_below_threshold_self_compact_is_bare_ordinary_input(tmp_path, prov
             assert receipt["actor_stream_id"] == SID and receipt["actor_trusted"]
             assert receipt["display_text"] == command
             assert await store.nudge_state(SID, "context_compact") is None
+            if front_desk:
+                held = await request(server, type="send", request_id="ordinary", text="routine update",
+                                     stream_id=SID, _self_compact_stream_id=SID)
+                assert held["reason"] == "front_desk_held"
+                assert tmux.pastes == [command]
         finally:
             store.stop()
     asyncio.run(run())

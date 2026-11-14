@@ -75,6 +75,10 @@ class FrontDeskDigest:
         # Server strips private wire fields, so a copied header cannot use it.
         if verb == 'send' and msg.get('_assistant_composite_backend_dispatch') is True:
             return None
+        # The compact handler pins this authenticated self target; Server strips
+        # private wire fields. A ready seat's compact request is immediate input.
+        if verb == 'send' and msg.get('_self_compact_stream_id') == target_stream_id:
+            return None
         if msg.get('_front_desk_digest_token') is DIGEST_TOKEN:
             return None
         # A caller-keyed tell's retained hold is checked BEFORE wake/drop
