@@ -42,6 +42,34 @@ def audio_duration_s(path):
     return duration
 
 
+def audio_has_signal(path):
+    """Reject digital silence without imposing a loudness floor on speech."""
+    from array import array
+    import math
+
+    decoded = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1",
+         "-ar", "16000", "-f", "f32le", "-t", "600.01", "pipe:1"],
+        capture_output=True, timeout=30, check=True,
+    )
+    samples = array("f")
+    samples.frombytes(decoded.stdout)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples or not all(math.isfinite(sample) for sample in samples):
+        raise ValueError("invalid decoded audio")
+    # -120 dBFS: only digital silence/roundoff, far below quiet speech.
+    return any(abs(sample) > 1e-6 for sample in samples)
+
+
+def segment_has_speech(segment):
+    # Uploads have no upstream VAD. Whisper's default silence check can be
+    # overridden by a confident hallucination (the reported silent upload).
+    # Keep its established 0.6 no-speech cutoff without that text-confidence
+    # override. Older adapters without acoustic metadata retain their behavior.
+    return float(getattr(segment, "no_speech_prob", 0.0)) <= 0.6
+
+
 PORT = 7780
 TRANSCRIPT_DIR = os.path.join(os.path.dirname(__file__), "transcripts")
 REMOTE_CLIPBOARD_MAX_LINES = 200
@@ -1216,15 +1244,18 @@ class MicHandler(BaseHTTPRequestHandler):
                 if duration_s > 600:
                     self._json({"error": "audio exceeds the ten-minute transcription cap"}, 413)
                     return
-                segments, info = model.transcribe(
-                    tmp_path, beam_size=1, language="en", vad_filter=False,
-                    initial_prompt=prompt,
-                )
+                if audio_has_signal(tmp_path):
+                    segments, info = model.transcribe(
+                        tmp_path, beam_size=1, language="en", vad_filter=False,
+                        initial_prompt=prompt,
+                    )
+                else:
+                    segments, info = (), None
                 seg_list = [
                     {"start": float(getattr(s, "start", 0.0)),
                      "end": float(getattr(s, "end", 0.0)),
                      "text": str(getattr(s, "text", ""))}
-                    for s in segments
+                    for s in segments if segment_has_speech(s)
                 ]
             except Exception as exc:  # noqa: BLE001 - undecodable audio is a 400
                 self._json({"error": f"could not decode audio: {exc}"}, 400)

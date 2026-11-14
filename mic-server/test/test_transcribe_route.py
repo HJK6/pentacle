@@ -74,6 +74,8 @@ class TranscribeRouteTest(unittest.TestCase):
         }, clear=False)
         self.env.start()
         mock.patch.object(mic_server, "audio_duration_s", return_value=1.5).start()
+        self.signal_probe = mic_server.audio_has_signal
+        self.signal_mock = mock.patch.object(mic_server, "audio_has_signal", return_value=True).start()
 
         self.model = FakeWhisperModel()
         mic_server.always_on_listener = SimpleNamespace(whisper_model=self.model, running=True)
@@ -172,6 +174,76 @@ class TranscribeRouteTest(unittest.TestCase):
     def test_wav_mime_accepted(self):
         status, body = self.post_audio("/transcribe?prompt_profile=fleet", content_type="audio/wav")
         self.assertEqual(status, 200)
+
+    def test_no_speech_segment_does_not_become_outgoing_text(self):
+        # High decoder confidence can override Whisper's default silence skip.
+        # The upload route must use the acoustic no-speech evidence, not words.
+        segment = SimpleNamespace(start=0, end=3, text="Thank you for watching!",
+                                  no_speech_prob=0.98, avg_logprob=-0.1)
+        with mock.patch.object(self.model, 'transcribe', return_value=(
+                iter([segment]), SimpleNamespace(language='en'))):
+            status, body = self.post_audio('/transcribe?prompt_profile=fleet')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['text'], '')
+        self.assertEqual(body['segments'], [])
+
+    def test_short_speech_including_reported_phrase_is_preserved(self):
+        for words in ('Yes.', 'Thank you for watching!'):
+            with self.subTest(words=words):
+                segment = SimpleNamespace(start=0, end=0.2, text=words,
+                                          no_speech_prob=0.02, avg_logprob=-0.1)
+                with mock.patch.object(self.model, 'transcribe', return_value=(
+                        iter([segment]), SimpleNamespace(language='en'))):
+                    status, body = self.post_audio('/transcribe?prompt_profile=fleet')
+                self.assertEqual(status, 200)
+                self.assertEqual(body['text'], words)
+
+    def test_encoded_silence_is_suppressed_before_asr(self):
+        import io
+        import wave
+        data = io.BytesIO()
+        with wave.open(data, 'wb') as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(16000)
+            out.writeframes(bytes(16000 * 2))
+        self.signal_mock.side_effect = self.signal_probe
+        status, body = self.post_audio('/transcribe?prompt_profile=fleet',
+                                       data.getvalue(), 'audio/wav')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['text'], '')
+        self.assertEqual(self.model.calls, [])
+
+    def test_quiet_encoded_signal_is_not_rejected_by_energy_floor(self):
+        import io
+        import math
+        import struct
+        import wave
+        data = io.BytesIO()
+        with wave.open(data, 'wb') as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(16000)
+            # -80 dBFS amplitude, 200 ms: proves only the signal floor, not ASR.
+            out.writeframes(b''.join(struct.pack('<h', round(3 * math.sin(i / 8)))
+                                    for i in range(3200)))
+        self.signal_mock.side_effect = self.signal_probe
+        self.model.text = 'Yes.'
+        status, body = self.post_audio('/transcribe?prompt_profile=fleet',
+                                       data.getvalue(), 'audio/wav')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['text'], 'Yes.')
+        self.assertEqual(len(self.model.calls), 1)
+
+    def test_no_speech_cutoff_keeps_boundary_and_filters_only_silent_segments(self):
+        segments = [SimpleNamespace(start=0, end=0.2, text='Yes.', no_speech_prob=0.6),
+                    SimpleNamespace(start=0.2, end=1, text=' phantom', no_speech_prob=0.61)]
+        with mock.patch.object(self.model, 'transcribe', return_value=(
+                iter(segments), SimpleNamespace(language='en'))):
+            status, body = self.post_audio('/transcribe?prompt_profile=fleet')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['text'], 'Yes.')
+        self.assertEqual(len(body['segments']), 1)
 
     def test_C4_route_serializes_with_live_path_on_the_shared_lock(self):
         """The upload route and a concurrent live-path inference never overlap:
