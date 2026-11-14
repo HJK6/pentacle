@@ -1801,6 +1801,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 "WHERE state='cancelled'"
             )
             conn.execute(SPAWN_ADMISSION_HOLD_DDL)
+            from maintenance_delegation import DDL as MAINTENANCE_DELEGATIONS_DDL
+            conn.execute(MAINTENANCE_DELEGATIONS_DDL)
             conn.execute(SPAWN_OUTCOME_REQUEST_INDEX_DDL)
             conn.execute(TELL_DELIVERY_DDL)
             conn.execute(SESSION_ROLE_DDL)

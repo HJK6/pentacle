@@ -310,7 +310,10 @@ Coordinated apply retains sealed scope, preimages, authority, account/quiescence
 checks and helper identity proof. After serving success, canary/log/FD failures do
 not trigger recovery or stop that target. Restoration proofs, cleanup and dispatch
 reports after prior restoration do not veto a complete prior boot attempt or stop
-a fully restored prior. Restoration uses no provider prompts. Excluded scope remains
+a fully restored prior. Restoration uses no provider prompts. A restarted daemon
+refuses a satellite host's spawn as `satellite_not_current` until that satellite's
+first admitted push, so the restoration spawn retries only that refusal with a fresh
+idempotency key every 2 s for up to 60 s and records each wait. Excluded scope remains
 explicit and does not imply fleet acceptance. Receipt preparation stays inert.
 
 The recurring deploy-time smoke installer is retired. Nightly checks report against

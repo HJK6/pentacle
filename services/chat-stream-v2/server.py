@@ -2539,7 +2539,15 @@ class Server:
                 auth.get("operator_authenticated")
                 or (auth.get("peer_loopback") and auth.get("local_admin_verified"))
             ):
-                code = "operator_auth_required"
+                from maintenance_delegation import eligible
+                if (verb in {"spawn_freeze", "spawn_unfreeze"}
+                        and isinstance(dispatch_msg.get("delegation"), dict) and eligible(auth)
+                        and websocket not in self._client_dot_connections
+                        and websocket not in self._client_scoped_connections):
+                    # Server-only resolver; client underscore keys were stripped.
+                    dispatch_msg["_delegation_candidate"] = self.lane_rulings
+                else:
+                    code = "operator_auth_required"
             if code:
                 self._diag_auth_failure(websocket, code)
                 denied = {"type": f"{verb}.error", "error_code": code}
@@ -4191,6 +4199,8 @@ class Server:
         host = str(msg.get("host") or self.local_host).strip()
         runtime=getattr(self,"account_runtime",None)
         from provider_cli_maintenance import FIELDS,freeze,legacy
+        if "delegation" in msg and not FIELDS <= msg.keys():
+            raise VerbError("maintenance_delegation_invalid", "maintenance fields required", reason="maintenance_fields")
         if FIELDS & msg.keys():
             if runtime is None:raise VerbError("provider_cli_maintenance_unavailable","account runtime required")
             from provider_accounts import AccountError
@@ -4207,6 +4217,8 @@ class Server:
 
     async def _on_spawn_unfreeze(self, msg: dict[str, Any]) -> dict[str, Any]:
         host = str(msg.get("host") or self.local_host).strip()
+        if "delegation" in msg and not msg.get("maintenance_id"):
+            raise VerbError("maintenance_delegation_invalid", "maintenance id required", reason="maintenance_id")
         runtime=getattr(self,"account_runtime",None)
         if runtime is not None:
             from provider_cli_maintenance import slot,unfreeze,legacy

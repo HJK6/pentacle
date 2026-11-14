@@ -2,12 +2,28 @@
 from __future__ import annotations
 
 from pathlib import Path
+import ast
 import json
+import time
 import uuid
 
 from deploy.coordinated import Invalid, atomic_json, digest, read_json
 from tools.live_window import OwnedSessionRegistry
 from tools.spawn_fleet_smoke import _operator_connection, DEFAULT_URL, DEFAULT_TOKEN_PATH
+
+# A restarted daemon refuses satellite-host spawns until that satellite's
+# first admitted push to the new process (provider_cli_pin.consumer_current).
+SATELLITE_WAIT_SECONDS, SATELLITE_BACKOFF_SECONDS = 60.0, 2.0
+
+
+def _satellite_not_current(exc):
+    """True only for the spawn refusal that waits on a fresh satellite push."""
+    try:
+        frame = ast.literal_eval(str(exc))
+    except (ValueError, SyntaxError):
+        return False
+    return (isinstance(frame, dict) and frame.get('error_code') == 'provider_cli_verification_unavailable'
+            and frame.get('reason') == 'satellite_not_current')
 
 
 def qualification_stamp(stamp):
@@ -73,6 +89,7 @@ def verify_no_input(bindings, state_path, *, url=DEFAULT_URL, token_path=DEFAULT
     for index, binding in enumerate(bindings):
         checkpoint = Path(str(state_path) + f'.{index}.json')
         intent = checkpoint.with_suffix('.spawn.json')
+        waits_path, waits = checkpoint.with_suffix('.satellite-waits.json'), []
         payload = read_json(intent).get('spawn') if intent.exists() else None
         expected_stream = f'{payload["host"]}:{payload["session_name"]}' if payload else None
         pending = []
@@ -108,17 +125,35 @@ def verify_no_input(bindings, state_path, *, url=DEFAULT_URL, token_path=DEFAULT
                 # existing registrar still requires its authoritative generation.
                 result = {'stream_id': expected_stream}
             else:
-                key = uuid.uuid4().hex
-                payload = {'type':'spawn', 'host':binding['host'], 'provider':binding['provider'],
-                    'account':binding['alias'], 'session_name':f'v2-restore-{binding["provider"]}-{key[:12]}',
-                    'visibility':'hidden', 'schema':'SpawnRequestV2', 'spawn_profile':'desktop_manual',
-                    'model':model, 'effort':effort, 'catalog_version':version,
-                    'resolution_source':'explicit_override', 'request_id':str(uuid.uuid4()), 'idempotency_key':key}
-                register_owned.prepare_owned_spawn(payload)
-                # Persist before dispatch: a committed spawn can outlive a lost
-                # reply or failed registration. Re-entry must not dispatch again.
-                atomic_json(intent, {'spawn': payload})
-                result = rpc(payload, 'spawn')
+                started = time.monotonic()
+                while True:
+                    key = uuid.uuid4().hex
+                    payload = {'type':'spawn', 'host':binding['host'], 'provider':binding['provider'],
+                        'account':binding['alias'], 'session_name':f'v2-restore-{binding["provider"]}-{key[:12]}',
+                        'visibility':'hidden', 'schema':'SpawnRequestV2', 'spawn_profile':'desktop_manual',
+                        'model':model, 'effort':effort, 'catalog_version':version,
+                        'resolution_source':'explicit_override', 'request_id':str(uuid.uuid4()), 'idempotency_key':key}
+                    register_owned.prepare_owned_spawn(payload)
+                    # Persist before dispatch: a committed spawn can outlive a lost
+                    # reply or failed registration. Re-entry must not dispatch again.
+                    atomic_json(intent, {'spawn': payload})
+                    try:
+                        result = rpc(payload, 'spawn')
+                        break
+                    except RuntimeError as exc:
+                        if not _satellite_not_current(exc):
+                            raise
+                        # Refused before any spawn: nothing is owned. A fresh
+                        # daemon admits a satellite only after its next push.
+                        atomic_json(intent, {'spawn': None})
+                        elapsed = time.monotonic() - started
+                        waits.append({'attempt': len(waits) + 1, 'reason': 'satellite_not_current',
+                                      'request_id': payload['request_id'], 'elapsed_seconds': round(elapsed, 3)})
+                        atomic_json(waits_path, {'host': binding['host'], 'waits': waits})
+                        if elapsed + SATELLITE_BACKOFF_SECONDS > SATELLITE_WAIT_SECONDS:
+                            exc.satellite_waits = waits
+                            raise
+                        time.sleep(SATELLITE_BACKOFF_SECONDS)
             stream = str(result.get('stream_id') or '')
             if not stream:
                 raise Invalid('restoration spawn returned no stream')
@@ -136,7 +171,8 @@ def verify_no_input(bindings, state_path, *, url=DEFAULT_URL, token_path=DEFAULT
                     raise Invalid('restoration readiness/binding mismatch')
                 cell = {k: binding[k] for k in ('host','provider','alias','generation')}
                 cell.update(stream_id=stream, session_generation=rows[0]['session_generation'],
-                            readiness='ready', outcome='passed', model_input='none')
+                            readiness='ready', outcome='passed', model_input='none',
+                            satellite_waits=waits)
             finally:
                 close_owned(stream)
                 atomic_json(intent, {'spawn': None})

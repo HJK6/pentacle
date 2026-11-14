@@ -1540,6 +1540,9 @@ def spawn_freeze(args: argparse.Namespace) -> int:
         payload["ttl_s"] = float(args.ttl)
     for name in ("input_provider","input_account","expected_login_generation","maintenance_id","expected_hold_digest"):
         if getattr(args,name,None) is not None:payload[name]=getattr(args,name)
+    if getattr(args,"delegation_dispatch",None) is not None or getattr(args,"delegation_ruling",None) is not None:
+        payload["delegation"]={"source_dispatch_id":getattr(args,"delegation_dispatch",None),
+                               "ruling_tell_id":getattr(args,"delegation_ruling",None)}
     try:
         response = asyncio.run(spawn_freeze_once(
             load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
@@ -1561,6 +1564,9 @@ def spawn_unfreeze(args: argparse.Namespace) -> int:
         payload["host"] = args.host
     for name in ("maintenance_id","expected_maintenance_digest","expected_hold_digest"):
         if getattr(args,name,None) is not None:payload[name]=getattr(args,name)
+    if getattr(args,"delegation_dispatch",None) is not None or getattr(args,"delegation_ruling",None) is not None:
+        payload["delegation"]={"source_dispatch_id":getattr(args,"delegation_dispatch",None),
+                               "ruling_tell_id":getattr(args,"delegation_ruling",None)}
     try:
         response = asyncio.run(spawn_freeze_once(
             load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
@@ -5535,6 +5541,8 @@ def build_parser() -> argparse.ArgumentParser:
     spawn_freeze_parser.add_argument("--expected-login-generation")
     spawn_freeze_parser.add_argument("--maintenance-id")
     spawn_freeze_parser.add_argument("--expected-hold-digest")
+    spawn_freeze_parser.add_argument("--delegation-dispatch", help="Operator dispatch granting this seat one maintenance hold; pair with --delegation-ruling.")
+    spawn_freeze_parser.add_argument("--delegation-ruling", help="Advisor tell with the matching DELEGATED-HOLD v1 scope; pair with --delegation-dispatch.")
     spawn_freeze_parser.set_defaults(func=spawn_freeze)
 
     spawn_unfreeze_parser = subparsers.add_parser(
@@ -5546,6 +5554,8 @@ def build_parser() -> argparse.ArgumentParser:
     spawn_unfreeze_parser.add_argument("--maintenance-id")
     spawn_unfreeze_parser.add_argument("--expected-maintenance-digest")
     spawn_unfreeze_parser.add_argument("--expected-hold-digest")
+    spawn_unfreeze_parser.add_argument("--delegation-dispatch", help="Operator dispatch granting this seat one maintenance hold; pair with --delegation-ruling.")
+    spawn_unfreeze_parser.add_argument("--delegation-ruling", help="Advisor tell with the matching DELEGATED-HOLD v1 scope; pair with --delegation-dispatch.")
     spawn_unfreeze_parser.set_defaults(func=spawn_unfreeze)
 
     schedule_parser = subparsers.add_parser("schedule")

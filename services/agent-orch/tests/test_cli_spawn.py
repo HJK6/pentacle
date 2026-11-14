@@ -1846,3 +1846,22 @@ def test_gemini_explicit_model_reaches_spawn_rpc(monkeypatch, tmp_path, capsys):
     assert cli.spawn(args) == 0
     _printed_json(capsys)
     assert (captured["provider"], captured["model"], captured["effort"]) == (args.provider, args.model, "default")
+
+
+@pytest.mark.parametrize("verb", ["spawn-freeze", "spawn-unfreeze"])
+def test_delegated_freeze_flags_forward_pair_and_document_help(monkeypatch, tmp_path, capsys, verb):
+    calls = []
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+    async def once(_config, payload, timeout):
+        calls.append(payload)
+        return {"type": "spawn_freeze.ok"}
+    monkeypatch.setattr(cli, "spawn_freeze_once", once)
+    assert cli.main([verb, "--host", "fixture-host", "--maintenance-id", "fixture-hold",
+                     "--delegation-dispatch", "fixture-dispatch", "--delegation-ruling", "fixture-ruling"]) == 0
+    assert calls[0]["delegation"] == {"source_dispatch_id": "fixture-dispatch", "ruling_tell_id": "fixture-ruling"}
+    assert "local_admin_token" not in calls[0]
+    with pytest.raises(SystemExit) as exc:
+        cli.main([verb, "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--delegation-dispatch" in help_text and "--delegation-ruling" in help_text

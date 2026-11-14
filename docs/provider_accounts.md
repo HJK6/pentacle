@@ -650,7 +650,7 @@ agent-orch spawn-freeze --host host-a --reason reviewed-home-slot --ttl 600 \
   --expected-hold-digest absent
 ```
 
-The authenticated operator/local-admin boundary is unchanged. The daemon
+The authenticated operator/local-admin path remains available. The daemon
 derives the home and captures current binding/session generations, creates the
 real host admission hold plus a durable input slot atomically, then settles
 dispatched creation outside locks. It never overwrites another slot or hold.
@@ -658,6 +658,31 @@ The home writer orders after an in-flight physical action; every later paste,
 Escape, Enter, compaction or resumed brief rechecks the durable fence. Other
 homes' existing work stays available; the host hold still refuses ordinary new
 launches on that host. Management, checkpoint/report and close remain available.
+
+**Delegated hold.** A token-verified loopback seat that is neither Dot nor scoped
+can also supply
+`--delegation-dispatch DISPATCH_ID --delegation-ruling TELL_ID` on both commands,
+with all maintenance fields on freeze and the same maintenance ID and comparison
+digests on clear. The daemon verifies a landed operator-origin dispatch to that
+seat generation and a tell with verified peer provenance from the current
+independent advisor binding. The tell must contain exactly one canonical line:
+
+```text
+DELEGATED-HOLD v1 dispatch=DISPATCH_ID actor=STREAM_ID/GENERATION host=HOST maintenance=MAINTENANCE_ID ttl_max_s=900
+```
+
+The requested TTL must fit the ruling and be at most 900 seconds. Each dispatch
+and ruling is reserved atomically for one host, maintenance ID and seat generation;
+retries replay the same receipt, and clear or expiry never renews the grant.
+`owner.delegation` records the operator source, scope and advisor binding snapshot.
+Clear checks that immutable reservation and the existing host proofs, so advisor
+rotation or tell eviction after acquire does not prevent clear, including expired
+recovery. A rotated advisor before acquire must reissue the ruling; a changed seat
+generation must be resolved with the advisor before acquiring, or use the existing
+operator-shell clear after acquiring. The daemon never silently rebinds either
+generation. Invalid grants return `maintenance_delegation_invalid` with a reason;
+reuse returns `maintenance_delegation_consumed`. This grants no other privileged
+RPC and requires neither seat operator authority nor a local-admin token.
 
 Frozen ingress, including a temporarily closed target, returns
 `provider_cli_input_maintenance`, `not_landed`, zero attempts and

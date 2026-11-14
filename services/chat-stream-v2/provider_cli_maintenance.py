@@ -97,7 +97,7 @@ def _operation_id(value):
 
 def _arguments(message,host):
     allowed=FIELDS|{"type","request_id","protocol","host","reason","ttl_s","local_admin_token",
-        "stream_id","from_stream_id","stream_token"}
+        "stream_id","from_stream_id","stream_token","delegation"}
     if any(not str(k).startswith("_") and k not in allowed for k in message):
         raise AccountError("provider_cli_maintenance_request_invalid")
     if not FIELDS<=message.keys():raise AccountError("provider_cli_maintenance_request_invalid")
@@ -140,11 +140,20 @@ def _seats(a,binding):
     return sorted(result,key=lambda r:r["stream_id"])
 
 
-def _begin(a,args,binding,now,owner):
+def _begin(a,args,binding,now,owner,message=None):
     with transaction(a.conn):
+        if message is not None:
+            from maintenance_delegation import verify_acquire
+            owner={**owner,"delegation":verify_acquire(a.conn,message,message.get("_auth_context") or {},now)}
         prior=_receipt(a,binding.host,args["maintenance_id"])
         if prior:
             if prior["arguments"]!=args:raise AccountError("provider_cli_maintenance_id_conflict")
+            if message is not None:
+                prior_owner=prior.get("owner") or {}
+                grant=prior_owner.get("delegation") or {}
+                if (any(prior_owner.get(k)!=owner.get(k) for k in ("stream_id","session_generation"))
+                        or any(grant.get(k)!=message["delegation"][k] for k in ("source_dispatch_id","ruling_tell_id"))):
+                    raise AccountError("maintenance_delegation_invalid",reason="receipt_owner")
             return prior
         if slot(a,binding.host):raise AccountError("provider_cli_maintenance_busy")
         held=hold(a,binding.host)
@@ -181,30 +190,47 @@ def _ready(a,value,now):
 
 
 async def freeze(runtime,message,host):
-    args=_arguments(message,host)
+    delegated=message.get("_delegation_candidate") is not None
+    message={**message,"host":host}
+    try:args=_arguments(message,host)
+    except AccountError:
+        if delegated:
+            from maintenance_delegation import invalid
+            invalid("request")
+        raise
     prior=await runtime.run(lambda a:_receipt(a,host,args["maintenance_id"]))
-    if prior:
+    if prior and not delegated:
         if prior["arguments"]!=args:raise AccountError("provider_cli_maintenance_id_conflict")
         if prior["state"] in {"cleared","ready"}:
             actual=await runtime.run(lambda a:status(a,host))
             return {"type":"spawn_freeze.ok","ok":True,"host":host,"receipt":prior,**actual,
                 "held_until":actual["hold"]["held_until"] if actual["hold"] else None,
                 "reason":actual["hold"]["reason"] if actual["hold"] else None}
-    binding=await runtime.run(lambda a:_binding(a,args))
+    try:
+        binding=Binding.from_public(prior["binding"]) if delegated and prior else await runtime.run(lambda a:_binding(a,args))
+    except AccountError:
+        if delegated:
+            from maintenance_delegation import invalid
+            invalid("binding")
+        raise
     # One short home writer orders the fence after already-admitted physical
     # actions. Waiting for SSH/creation completion happens after it is released.
     async with runtime.home_inputs(binding).write():
         auth=message.get("_auth_context") or {}
         owner={k:auth.get(k) for k in ("stream_id","session_generation","operator_credential_id","local_admin_verified","operator_authenticated")}
-        value=await runtime.run(lambda a:_begin(a,args,binding,runtime.clock(),owner),settle_on_cancel=True)
+        value=await runtime.run(lambda a:_begin(a,args,binding,runtime.clock(),owner,message if delegated else None),settle_on_cancel=True)
     if value["state"]=="settling":
         pending=list(getattr(runtime.spawnctl,"_background_spawns",set()))
         if pending:
             _,unfinished=await asyncio.wait(pending,timeout=min(30,args["ttl_s"]))
             if unfinished:raise AccountError("provider_cli_maintenance_launch_pending")
         value=await runtime.run(lambda a:_ready(a,value,runtime.clock()),settle_on_cancel=True)
-    return {"type":"spawn_freeze.ok","ok":True,"host":host,"receipt":value,
+    result={"type":"spawn_freeze.ok","ok":True,"host":host,"receipt":value,
             **await runtime.run(lambda a:status(a,host)),"held_until":value["hold"]["held_until"],"reason":args["reason"]}
+    if delegated:
+        result.update(held_until=result["hold"]["held_until"] if result["hold"] else None,
+                      reason=result["hold"]["reason"] if result["hold"] else None)
+    return result
 
 
 def _clear_snapshot(a,value):
@@ -244,7 +270,10 @@ async def _unfreeze_locked(runtime,message,host):
     from account_repin_state import host_status
     from account_revalidation import _valid_observation
     allowed={"type","request_id","protocol","host","local_admin_token","stream_id","from_stream_id","stream_token",
-        "maintenance_id","expected_maintenance_digest","expected_hold_digest"}
+        "maintenance_id","expected_maintenance_digest","expected_hold_digest","delegation"}
+    if message.get("_delegation_candidate") is not None:
+        from maintenance_delegation import verify_clear
+        await runtime.run(lambda a:verify_clear(a.conn,{**message,"host":host},message.get("_auth_context") or {}))
     if any(not str(k).startswith("_") and k not in allowed for k in message):
         raise AccountError("provider_cli_maintenance_request_invalid")
     value=await runtime.run(lambda a:slot(a,host))
