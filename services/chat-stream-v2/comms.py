@@ -1121,6 +1121,10 @@ class Comms:
         if not route["ok"]:
             raise VerbError(route["reason"] or "route_failed", f"cannot route to {host}:{name}")
         target = str(route["final_target"])
+        # Self-requested compaction must not follow a caller that retired after
+        # authentication into another seat's handoff successor.
+        if msg.get("_self_compact_stream_id") not in {None, target}:
+            raise VerbError("compact_self_only", "compact cannot follow a different seat")
         host, name = self.sessions.split(target)
         # Read the authoritative row before any peer reachability/RPC probe.
         # A rejected Codex reset or unresolved initial prompt must not even

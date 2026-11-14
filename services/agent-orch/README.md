@@ -185,6 +185,24 @@ Pass `--model` to choose a tier, or give the host a cheaper default, for example
 `{"schema_version": 1, "host_overrides": {"<host>": {"claude": {"model": "claude-haiku-5-5", "effort": "high"}}}}`.
 Stdout and the exit code are unchanged.
 
+## Request context compaction
+
+After writing your checkpoint, run `agent-orch compact`. The daemon immediately
+submits the calling seat's native `/compact` through ordinary input. It does
+not wait for the turn to end or interrupt it; the provider CLI handles queueing.
+Claude receives the existing checkpoint-preservation instructions with the
+command. The automatic threshold pass is unchanged.
+
+The command requires the seat's stream token and accepts no target or force
+option. It cannot compact another seat or follow a retired seat's successor.
+Use `--request-id checkpoint-one` to retain an explicit retry identity; otherwise
+the CLI generates and prints one. Reuse that ID after a lost reply. Existing
+send receipts deduplicate accepted/in-flight/submitted requests, including after
+daemon restart; a confirmed non-delivery retains ordinary send retry behavior.
+The reply includes `send_request_id` for ordinary send-receipt lookup. An accepted
+or queued reply confirms input acceptance, not completed compaction: completion
+is visible in the provider transcript.
+
 ## Peer messaging
 
 Use `agent-orch send` when the sender owns a `msg_id` and expects a completion report that it will await. The CLI builds a minimal Inbox v1 envelope with `from` set to the discovered leader stream id or `null`, `to` set to the target stream id, `task` set to the prompt text, and empty `inputs` / `extras`. The daemon re-validates that envelope and returns `inbox_invalid` for malformed evidence.

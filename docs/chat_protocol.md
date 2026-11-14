@@ -126,6 +126,7 @@ The public service may expose the following generic families:
 | `ping`, `hello` | connection and capability checks |
 | `list_sessions`, `inspect_stream` | read visible session state |
 | `spawn`, `send`, `close`, `rename` | session lifecycle and input |
+| `compact` | authenticated self-only context compaction through ordinary input; see the [CLI contract](../services/agent-orch/README.md#request-context-compaction) |
 | `send_image` | attach an already-uploaded image to the caller's OWN conversation as an agent-authored transcript event |
 | `subscribe`, `unsubscribe` | event visibility controls |
 | `watch`, `wake` | optional local notifications |

@@ -489,6 +489,15 @@ Committed history batches yield between broadcasts so existing socket writers ca
 
 ## Context crossing and compaction
 
+`agent-orch compact` submits the authenticated calling seat's compact command
+immediately through ordinary `Comms.send`, even during a turn or below a context
+threshold. The provider CLI handles its native queue. This self-only request has
+no force or turn-end wait, and cannot follow handoff routing to another seat.
+The daemon generates a bare `/compact` for Codex or the existing preservation
+command for Claude. Existing atomic send receipts deduplicate retries by request
+ID; no new daemon queue or cooldown is involved. The [CLI contract](../agent-orch/README.md#request-context-compaction)
+distinguishes input acceptance from transcript-confirmed completion.
+
 `NudgeJob` sends a `context_advisory` notice to an open, reachable Claude
 seat and its current live non-Codex parent, including hidden and working seats.
 Parentless seats also get a daemon-owned operator notification through `Notify`.

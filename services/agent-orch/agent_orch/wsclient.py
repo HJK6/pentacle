@@ -54,6 +54,7 @@ SPAWN_RPC_TIMEOUT_DEFAULT_S = 185.0
 # either read-only, final-state idempotent, or daemon-deduped by a stable key.
 RPC_RETRY_ELIGIBLE_TYPES = frozenset(
     {
+        "compact",
         "wake.register", "wake.list", "wake.cancel",
         "watch.register", "watch.list", "watch.cancel",
         "await_report",
@@ -1857,7 +1858,7 @@ async def coordination_once(config: Config, payload: dict[str, Any], *, timeout:
     payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"{payload.get('type', 'coordination')}-{uuid.uuid4()}")
     family = str(payload.get("type", "")).split(".", 1)[0]
-    prefix = family if family in {"watch", "wake"} else "coordination"
+    prefix = family if family in {"watch", "wake", "compact"} else "coordination"
     return await _one_shot_rpc(config, payload, prefix=prefix, timeout=timeout, from_stream_id=from_stream_id)
 
 
