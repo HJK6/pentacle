@@ -217,6 +217,18 @@ def test_typed_wire_error_and_unchanged_value_error_mapping():
         with pytest.raises(VerbError) as error:
             await server._on_assistant_operation(message)
         assert error.value.code == str(error.value) == "assistant_lane_version_conflict"
+        # F4: WorkLaneGoalUnresolved maps to its bare wire code; the epic id stays in the message.
+        adopt = {"type": "assistant.operation", "request_id": "wire-goal", "composite_stream_id": ASSISTANT,
+                 "dispatch_id": "none", "operation": "work_lane.adopt",
+                 "payload": {"adoption_key": "stream:goalwire", "title": "Goal wire", "summary": "g",
+                             "owner_kind": "operator", "work_state": "paused",
+                             "visible_chat": {"stream_id": ASSISTANT}, "no_spec_reason": "Fixture",
+                             "goals": ["epic_unobserved"]},
+                 "_auth_context": {"token_verified": True, "stream_id": FD, "session_generation": env.gen}}
+        with pytest.raises(VerbError) as error:
+            await server._on_assistant_operation(adopt)
+        assert error.value.code == "work_lane_goal_unresolved"
+        assert "epic_unobserved" in str(error.value)
     run(body)
 
 

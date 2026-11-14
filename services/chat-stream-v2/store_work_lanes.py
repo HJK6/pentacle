@@ -118,8 +118,11 @@ def _validate_goal_ids(payload: dict[str, Any]) -> list[str]:
     goals = payload.get("goals")
     if goals is None or (isinstance(goals, list) and not goals):
         raise ValueError("work_lane_goal_required")
-    if (not isinstance(goals, list) or len(goals) > MAX_GOALS or len(set(goals)) != len(goals)
-            or any(not isinstance(epic, str) or not EPIC_ID.fullmatch(epic) for epic in goals)):
+    # Validate element shape/id before set() uniqueness: an unhashable dict/list
+    # element would otherwise raise TypeError here instead of the specified refusal.
+    if (not isinstance(goals, list) or len(goals) > MAX_GOALS
+            or any(not isinstance(epic, str) or not EPIC_ID.fullmatch(epic) for epic in goals)
+            or len(set(goals)) != len(goals)):
         raise ValueError("work_lane_payload_invalid")
     return goals
 

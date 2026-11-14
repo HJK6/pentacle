@@ -611,6 +611,9 @@ def test_v1_goal_less_creation_refused_writes_nothing(tmp_path):
         await refused('work_lane_payload_invalid', ['not-an-epic'])
         await refused('work_lane_payload_invalid', ['epic_dup', 'epic_dup'])
         await refused('work_lane_payload_invalid', ['epic_' + str(n) for n in range(17)])
+        # Unhashable elements must be the specified refusal, not a TypeError from set().
+        await refused('work_lane_payload_invalid', [{}])
+        await refused('work_lane_payload_invalid', [[]])
         # An epic the daemon has not observed is unresolved.
         await refused('work_lane_goal_unresolved', ['epic_unobserved'])
         # A valid charter that names a different lane is unresolved for this one.
