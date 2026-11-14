@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import plistlib
 import socket
 import sys
 import tempfile
@@ -14,7 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from pentacle import discovery as d
 from pentacle.cli import doctor_text, parser, version_text
-from pentacle.doctor import CHECKS, Snapshot, evaluate, private_config, transactions
+from pentacle.doctor import CHECKS, Snapshot, evaluate, private_config
 from pentacle.install import atomic_json, identity, release_manifest
 
 
@@ -37,23 +38,47 @@ class DoctorTest(unittest.TestCase):
                     if blocked:
                         self.assertEqual(actual[check_id]["status"], "skip")
 
-    def test_transaction_exception_is_only_named_served_and_no_other_open(self):
-        cases = [([], None, "ok"), ([{"id": "one", "state": "served"}], None, "fail"),
-                 ([{"id": "one", "state": "served"}], "one", "ok"),
-                 ([{"id": "one", "state": "started"}], "one", "fail"),
-                 ([{"id": "one", "state": "served"}, {"id": "two", "state": "planned"}], "one", "fail")]
-        for open_records, chosen, expected in cases:
-            with self.subTest(records=open_records, chosen=chosen):
-                facts = self.facts()
-                facts["transactions"] = open_records
-                checks = {c["id"]: c for c in evaluate(facts, for_transaction=chosen)}
-                self.assertEqual(checks["install.transaction"]["status"], expected)
-
     def test_live_is_opt_in(self):
         facts = self.facts()
         facts["live.reply"] = "fail"
         self.assertEqual(evaluate(facts)[-1]["status"], "skip")
         self.assertEqual(evaluate(facts, live=True)[-1]["status"], "fail")
+
+    def test_doctor_accepts_pip_cli_launcher_when_venv_path_contains_spaces(self):
+        import subprocess
+        import shlex
+        with tempfile.TemporaryDirectory(prefix="doctor space ") as folder:
+            root = Path(folder)
+            venv = root / ".venv"
+            subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True)
+            python = str(venv / "bin/python")
+            package = root / "services/agent-orch/agent_orch"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("")
+            site = next((venv / "lib").glob("python*/site-packages"))
+            (site / "fixture.pth").write_text(str(package.parent) + "\n")
+            executable = venv / "bin/agent-orch"
+            # pip/distlib's shell trampoline is used for long or spaced paths.
+            executable.write_text('#!/bin/sh\n' + "'''exec' " + shlex.quote(python) + ' "$0" "$@"\n' + "' '''\nimport agent_orch\n")
+            executable.chmod(0o700)
+            snap = object.__new__(Snapshot)
+            snap.root, snap.python = root, python
+            snap.identity = {"install": {"commit": "a"*40, "version": None}, "latest": {"commit": None},
+                             "daemon": {"commit": None}, "web": {"build_commit": None}}
+            snap.manifest = {"source": "none"}
+            snap.daemon = snap.web = snap.daemon_process = snap.daemon_unit = snap.config = None
+            snap.daemon_url = "ws://127.0.0.1:1"
+            snap.config_path = root / "config.js"
+            with patch.dict(os.environ, {"PATH": str(venv / "bin") + os.pathsep + os.environ["PATH"]}):
+                self.assertEqual(snap.facts()["deps.cli"], "ok")
+
+    def test_doctor_interpreter_uses_macos_launcher_environment(self):
+        snap = object.__new__(Snapshot)
+        snap.root = Path("/install")
+        snap.daemon_process = d.Process(12, ["/framework/Python", "main.py"], snap.root,
+                                       {"__PYVENV_LAUNCHER__": "/install/venv space/bin/python"})
+        with patch.object(sys, "platform", "darwin"):
+            self.assertEqual(snap.interpreter(), "/install/venv space/bin/python")
 
     def test_raw_fixture_fields_cannot_reach_either_output_form(self):
         markers = ["TOKEN_SEED", "UNKNOWN_KEY_SEED", "CONFIG_VALUE_SEED", "THROWN_SEED",
@@ -103,7 +128,24 @@ class DoctorTest(unittest.TestCase):
             provider.unlink()
             self.assertEqual(snapshot.provider_status(), "fail")
 
-    def test_private_permissions_and_unreadable_transaction(self):
+    def test_probe_environment_uses_install_shared_code_and_omits_invoking_seat(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            token = root / "token"
+            token.write_text("FIXTURE_CREDENTIAL")
+            snapshot = object.__new__(Snapshot)
+            snapshot.root, snapshot.config = root, {"token_path": str(token)}
+            snapshot.daemon_url = "ws://127.0.0.1:18791"
+            snapshot.daemon_process = d.Process(123, ["python", "--local-host", "local"], root)
+            with patch.dict(os.environ, {"AGENT_ORCH_STREAM_ID": "example:caller", "AGENT_ORCH_STREAM_TOKEN": "INVOKER_TOKEN", "PENTACLE_STREAM_ID": "example:caller", "PYTHONPATH": "/unrelated/source"}):
+                env = snapshot.cli_environment()
+            self.assertEqual(env["PYTHONPATH"], str(root / "services"))
+            self.assertNotIn("AGENT_ORCH_STREAM_ID", env)
+            self.assertNotIn("AGENT_ORCH_STREAM_TOKEN", env)
+            self.assertNotIn("PENTACLE_STREAM_ID", env)
+            self.assertEqual(env["AGENT_ORCH_TOKEN"], "FIXTURE_CREDENTIAL")
+
+    def test_private_permissions(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             config_dir = root / "config"
@@ -114,12 +156,6 @@ class DoctorTest(unittest.TestCase):
             self.assertTrue(private_config(config_dir / "config.js", token))
             token.chmod(0o644)
             self.assertFalse(private_config(config_dir / "config.js", token))
-            record = root / ".pentacle-deploy/update/open/transaction.json"
-            atomic_json(record, {"id": "open", "state": "planned"})
-            self.assertEqual(record.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(transactions(root), [{"id": "open", "state": "planned"}])
-            record.write_text("corrupt")
-            self.assertEqual(transactions(root), [{}])
 
     def test_loopback_is_literal_and_remote_discovery_is_skipped(self):
         for value in ("ws://127.0.0.1:1", "ws://[::1]:1", "ws://localhost:1"):

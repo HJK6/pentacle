@@ -46,7 +46,9 @@ Keep the defaults if the owner has no preference.
    host lists, the real provider executable paths, and the real transcript
    directory. Store the database/config/credentials outside the public repo.
    Start the documented daemon command in a persistent terminal or service and
-   record how to stop and restart it.
+   record how to stop and restart it. The optional [daemon unit guide](services/chat-stream-v2/deploy/daemon/README.md)
+   uses `--state-dir`, unlike the README's `--db` path. An existing install must
+   keep its own store paths when adopting a unit.
 4. **Set up Pentacle Web.** Issue its daemon credential, build it with
    `npm run build:web` and serve it with `node server` as in the README (behind `tailscale serve` with identity auth for
    remote use — see [server/README.md](server/README.md)); open the URL in a
@@ -72,6 +74,8 @@ Keep the defaults if the owner has no preference.
    provider reply in the actual terminal or mobile transcript. Passing unit
    tests or launching a window alone does not establish a connected setup.
    Do not repeat the repository's full test suites just to install the app.
+   Finish with `bin/pentacle doctor --live`; use `--config`, `--daemon-url` and
+   `--web-url` for non-default endpoints. Follow [UPGRADE.md](UPGRADE.md) for later upgrades.
 7. **Finish with a short handover.** Report the installed source revision,
    config paths, daemon endpoint, start/stop commands and the observed reply.
    Keep tokens and enrollment links out of the report. If an owner login,

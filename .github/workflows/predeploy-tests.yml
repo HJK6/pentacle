@@ -312,6 +312,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${missing[@]}"
         fi
+    - name: Installed doctor and exact upgrade checklist
+      run: |
+        python3 tools/pentacle/tests/checklist_journey.py install --evidence "${RUNNER_TEMP}/shareability-install"
+        python3 tools/pentacle/tests/checklist_journey.py rehearsal --evidence "${RUNNER_TEMP}/shareability-checklist"
+    - name: Retain installation journey evidence
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: shareability-journeys-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        path: ${{ runner.temp }}/shareability-*
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
     - name: Portable microphone contracts

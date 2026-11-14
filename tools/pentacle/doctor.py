@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import datetime as dt
 import os
 import re
 import shutil
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from . import discovery as d
 from .install import commit, identity, release_manifest, safe_sha
-from .releases import OFFICIAL_REMOTE, ancestor
+from .releases import OFFICIAL_REMOTE, VERSION, ancestor
 
 # id, dependencies, failure finding, fix. Success and blocked text are fixed too.
 CHECKS = [
@@ -21,21 +22,17 @@ CHECKS = [
     ("prereq.git", [], "Git or the installation checkout is unavailable.", "Install Git and select the checkout with --install."),
     ("source.clean", ["prereq.git"], "Tracked installation files were modified.", "Commit or preserve tracked changes before updating."),
     ("source.remote", ["prereq.git"], "The checkout origin differs from the official remote.", "Confirm that this is the intended checkout."),
-    ("source.release", ["prereq.git"], "This checkout is a development build.", "Use pentacle update to select a stable release."),
+    ("source.release", ["prereq.git"], "This checkout is a development build.", "Follow UPGRADE.md to select a stable release."),
     ("source.latest", ["prereq.git"], "Latest stable release is unknown, cached, or ahead of this install.", "Connect to the release source and run pentacle update --check."),
-    ("source.served", ["prereq.git"], "The checkout is older than the last served commit.", "Restore the last served release before starting services."),
-    ("install.record", [], "The install record is missing or unreadable.", "Use pentacle update to write a verified install record."),
-    ("install.transaction", [], "An update transaction is open or unreadable.", "Run pentacle update to continue the recorded transaction."),
     ("deps.node", ["prereq.node"], "Node packages do not match the lock file.", "Run npm ci in the checkout."),
     ("deps.python", ["prereq.python"], "The daemon interpreter cannot satisfy its requirements.", "Install the daemon requirements in its own interpreter."),
     ("deps.cli", ["prereq.python"], "agent-orch is missing or imports from another install.", "Install services/agent-orch with the daemon interpreter and add its bin directory to PATH."),
     ("daemon.reachable", [], "No daemon welcome arrived within ten seconds.", "Start the daemon and check the configured connection."),
     ("daemon.commit", ["daemon.reachable", "prereq.git"], "The daemon commit differs from the checkout.", "Restart the installed daemon from the matching release."),
     ("daemon.process", ["daemon.reachable"], "The local daemon uses another checkout or interpreter.", "Run the daemon from this checkout and its interpreter."),
-    ("daemon.service", ["daemon.reachable"], "The daemon is hand-started or its unit names another checkout.", "Run pentacle service adopt --yes for this install."),
+    ("daemon.service", ["daemon.reachable"], "The daemon unit names another checkout.", "Correct the installed daemon unit to use this checkout."),
     ("web.reachable", [], "Web health did not answer within ten seconds.", "Start the web host and check its connection."),
     ("web.commit", ["web.reachable", "prereq.git"], "The served web commit differs from the checkout.", "Build the web client and restart its host from the matching release."),
-    ("web.service", ["web.reachable"], "The web host is hand-started or its unit names another checkout.", "Run pentacle service adopt --yes for this install."),
     ("config.readable", ["prereq.node"], "The selected config is missing or could not load.", "Create or repair the selected Pentacle config."),
     ("config.warnings", ["config.readable"], "The config has warnings.", "Review the supported config fields in docs/desktop_config.md."),
     ("config.permissions", ["config.readable"], "The token or config directory is missing or readable by other users.", "Make the config directory private and the token readable only by its owner."),
@@ -43,17 +40,13 @@ CHECKS = [
     ("workspace.roots", [], "Workspace roots differ or a configured root is missing.", "Set the daemon and client to the same existing memory directory."),
     ("live.reply", ["daemon.commit", "deps.cli"], "The functional reply or session cleanup failed.", "Check provider authentication and run pentacle doctor --live again."),
 ]
-FINAL_STATES = {"updated", "updated-with-failures", "restored", "restore-unproven", "current", "refused"}
 
 
-def evaluate(facts, *, for_transaction=None, live=False):
+def evaluate(facts, *, live=False):
     checks, by_id = [], {}
     for check_id, dependencies, finding, fix in CHECKS:
         blocked = [key for key in dependencies if by_id[key]["status"] != "ok"]
         status = facts.get(check_id, "fail")
-        if check_id == "install.transaction":
-            transactions = facts.get("transactions", [])
-            status = "ok" if all(t.get("id") == for_transaction and t.get("state") == "served" for t in transactions) else "fail"
         if blocked:
             status = "skip"
         if check_id == "live.reply" and not live:
@@ -64,16 +57,6 @@ def evaluate(facts, *, for_transaction=None, live=False):
         checks.append(item)
         by_id[check_id] = item
     return checks
-
-
-def transactions(root: Path):
-    result = []
-    for folder in sorted((root / ".pentacle-deploy/update").glob("*")):
-        if folder.is_dir():
-            record = d.read_json(folder / "transaction.json")
-            if not isinstance(record, dict) or record.get("state") not in FINAL_STATES:
-                result.append(record if isinstance(record, dict) else {})
-    return result
 
 
 def private_config(path: Path, token: Path):
@@ -125,14 +108,13 @@ class Snapshot:
         self.config_path = Path(args.config).expanduser().resolve()
         self.config = d.config(self.root, self.config_path)
         self.daemon_url = args.daemon_url or (self.config or {}).get("daemon_url") or "ws://127.0.0.1:7791"
-        self.web_url = args.web_url
+        self.web_url = args.web_url or "http://127.0.0.1:7795"
         self.remote = args.release_remote
         self.daemon = d.welcome(self.daemon_url)
         self.web = d.health(self.web_url)
         self.daemon_process = d.listener(self.daemon_url)
         self.web_process = d.listener(self.web_url)
         self.daemon_unit = d.unit_for(self.daemon_process, "daemon")
-        self.web_unit = d.unit_for(self.web_process, "web")
         self.stores = d.open_stores(self.daemon_process)
         self.manifest = release_manifest(self.root, self.remote, fetch=fetch, write_cache=write_cache)
         self.identity = identity(self.root, self.manifest, self.daemon, self.web)
@@ -140,7 +122,7 @@ class Snapshot:
 
     def interpreter(self):
         if self.daemon_process:
-            executable = self.daemon_process.argv[0]
+            executable = (self.daemon_process.env.get("__PYVENV_LAUNCHER__") if sys.platform == "darwin" else None) or self.daemon_process.argv[0]
             if Path(executable).is_absolute():
                 return executable
         for path in (self.root / "services/chat-stream-v2/.venv/bin/python", self.root / ".venv/bin/python"):
@@ -153,6 +135,9 @@ class Snapshot:
         # invoking agent seat. The credential remains inside the subprocess.
         env = {k: v for k, v in os.environ.items() if not k.startswith("AGENT_ORCH_") and k != "PENTACLE_STREAM_ID"}
         env["AGENT_ORCH_WS_URL"] = self.daemon_url
+        # The editable CLI package imports shared source modules for v2 proof.
+        # Keep this subprocess on the installation's own shared code.
+        env["PYTHONPATH"] = str(self.root / "services")
         env["AGENT_ORCH_HOST_ID"] = (self.daemon_process.option("--local-host") if self.daemon_process else None) or __import__("socket").gethostname().split(".")[0]
         token = Path((self.config or {}).get("token_path") or "~/.config/pentacle-stream/token").expanduser()
         try:
@@ -178,12 +163,6 @@ class Snapshot:
         facts["source.release"] = "ok" if self.identity["install"]["version"] else "warn"
         recent = self.manifest["source"] == "fetched" or (self.manifest["source"] == "cache" and self.manifest["age_days"] <= 7)
         facts["source.latest"] = "ok" if recent and self.identity["latest"]["commit"] == head and head else "warn"
-        record_path = self.root / ".pentacle-deploy/install.json"
-        record = d.read_json(record_path)
-        facts["install.record"] = "warn" if not record_path.exists() else "ok" if isinstance(record, dict) and record.get("schema_version") == 1 and safe_sha(record.get("commit")) else "fail"
-        last = safe_sha((record or {}).get("last_served_commit")) if isinstance(record, dict) else None
-        facts["source.served"] = "fail" if head and last and head != last and ancestor(self.root, head, last) else "ok"
-        facts["transactions"] = transactions(self.root)
         if facts["prereq.node"] == "ok":
             packages = d.run(["node", "-e", NODE_DEPS, self.root], cwd=self.root)
             listing = d.run(["npm", "ls", "--all", "--json"], cwd=self.root)
@@ -196,8 +175,13 @@ class Snapshot:
             cli_path_ok = False
             if executable:
                 try:
-                    first = Path(executable).read_text().splitlines()[0]
+                    lines = Path(executable).read_text().splitlines()
+                    first = lines[0]
                     command = __import__("shlex").split(first[2:]) if first.startswith("#!") else []
+                    if command == ["/bin/sh"] and len(lines) >= 3 and lines[2] == "' '''":
+                        trampoline = __import__("shlex").split(lines[1])
+                        if len(trampoline) == 4 and trampoline[0] == "exec" and trampoline[2:] == ["$0", "$@"]:
+                            command = [trampoline[1]]
                     if command and Path(command[0]).name == "env":
                         command = command[1:]
                     if command and "python" in Path(command[0]).name:
@@ -210,18 +194,14 @@ class Snapshot:
         facts["daemon.commit"] = "ok" if head and self.identity["daemon"]["commit"] == head else "fail"
         facts["web.reachable"] = "ok" if self.web is not None else "fail"
         facts["web.commit"] = "ok" if head and self.identity["web"]["build_commit"] == head else "fail"
-        for kind in ("daemon", "web"):
-            url = self.daemon_url if kind == "daemon" else self.web_url
-            proc = getattr(self, kind + "_process")
-            unit = getattr(self, kind + "_unit")
-            local = d.loopback(url)
-            if kind == "daemon":
-                checkout = proc.checkout(kind) if proc else None
-                executable = Path(self.python)
-                own_interpreter = executable.is_relative_to(self.root)
-                facts["daemon.process"] = "skip" if not local else "ok" if checkout == self.root and own_interpreter else "fail"
-            checkout = proc.checkout(kind) if proc else None
-            facts[kind + ".service"] = "skip" if not local else "warn" if unit is None else "ok" if checkout == self.root else "fail"
+        proc = self.daemon_process
+        local = d.loopback(self.daemon_url)
+        checkout = proc.checkout("daemon") if proc else None
+        own_interpreter = Path(self.python).is_relative_to(self.root)
+        facts["daemon.process"] = "skip" if not local else "ok" if checkout == self.root and own_interpreter else "fail"
+        unit = self.daemon_unit
+        unit_checkout = d.Process(0, unit["argv"], Path(unit["cwd"])).checkout("daemon") if unit else None
+        facts["daemon.service"] = "skip" if not local else "ok" if unit is None or unit_checkout == self.root else "fail"
         facts["config.readable"] = "ok" if self.config is not None else "fail"
         facts["config.warnings"] = "warn" if (self.config or {}).get("warnings") else "ok"
         token = Path((self.config or {}).get("token_path") or "~/.config/pentacle-stream/token").expanduser()
@@ -265,7 +245,7 @@ class Snapshot:
         return "ok" if all(p.is_dir() for p in paths) and len(set(paths)) == 1 else "fail"
 
 
-def report(snapshot: Snapshot, *, live=False, for_transaction=None):
-    checks = evaluate(snapshot.facts(live=live), live=live, for_transaction=for_transaction)
+def report(snapshot: Snapshot, *, live=False):
+    checks = evaluate(snapshot.facts(live=live), live=live)
     summary = {status: sum(c["status"] == status for c in checks) for status in ("ok", "warn", "fail", "skip")}
     return {"schema_version": 1, "identity": snapshot.identity, "checks": checks, "summary": summary}

@@ -31,7 +31,7 @@ def _main(provider):
     import asyncio
     import uuid
     from agent_orch.config import load_config
-    from agent_orch.wsclient import close_once, inspect_stream_once, spawn_catalog_get_once, spawn_once
+    from agent_orch.wsclient import _operator_envelope_rpc, inspect_stream_once, spawn_catalog_get_once, spawn_once
 
     config = load_config()
     deadline = time.monotonic() + 120
@@ -64,8 +64,14 @@ def _main(provider):
     finally:
         if stream_id:
             try:
-                response = asyncio.run(close_once(config, stream_id, reason="pentacle_doctor_cleanup",
-                                                   operator_confirm=True, force=True, timeout=20))
+                host, session = stream_id.split(":", 1)
+                payload = {"type": "close", "request_id": "doctor-close-" + uuid.uuid4().hex,
+                           "host": host, "session_name": session, "reason": "pentacle_doctor_cleanup",
+                           "operator_confirm": True, "force": True}
+                # The ordinary close helper uses legacy bearer transport.
+                # A doctor uses the configured desktop v2 credential and the
+                # existing connection-bound operator proof for its own session.
+                response = asyncio.run(_operator_envelope_rpc(config, payload, caller=None, prefix="close", timeout=20))
                 closed = response.get("type") == "close.ok"
             except Exception:
                 closed = False

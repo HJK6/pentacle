@@ -109,6 +109,12 @@ security boundary. For a phone, install
 [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) against the same
 daemon.
 
+Check the completed install with `bin/pentacle doctor --live`. Use
+`bin/pentacle version` for identities and [UPGRADE.md](UPGRADE.md) for upgrades.
+The optional [daemon unit guide](services/chat-stream-v2/deploy/daemon/README.md)
+uses `--state-dir`, unlike this quick start's `--db` path. Keep an existing
+install's own store paths when adopting a unit.
+
 ## Configuration
 
 The private config (`$HOME/.config/pentacle/pentacle.config.js`) selects the

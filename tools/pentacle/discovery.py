@@ -104,13 +104,28 @@ def _mac_args(pid: int):
     return argv, env
 
 
+def _mac_invocation(argv, env):
+    """The framework launcher re-execs Python but retains the venv entry path."""
+    launcher = env.get("__PYVENV_LAUNCHER__")
+    if argv and "/Resources/Python.app/" in argv[0] and launcher:
+        path = Path(launcher)
+        framework = Path(argv[0].split("/Resources/Python.app/", 1)[0])
+        try:
+            if path.is_absolute() and os.access(path, os.X_OK) and path.resolve(strict=True).is_relative_to(framework):
+                return [str(path), *argv[1:]]
+        except OSError:
+            pass
+    return argv
+
+
 def process(pid: int) -> Process | None:
     try:
         if sys.platform.startswith("linux"):
             root = Path("/proc") / str(pid)
             if root.stat().st_uid != os.getuid():
                 return None
-            argv = [os.fsdecode(v) for v in (root / "cmdline").read_bytes().split(b"\0") if v]
+            raw_argv = (root / "cmdline").read_bytes()
+            argv = [os.fsdecode(v) for v in raw_argv.split(b"\0")[:-1]]
             env = dict(os.fsdecode(v).split("=", 1) for v in (root / "environ").read_bytes().split(b"\0") if b"=" in v)
             start = (root / "stat").read_text().rsplit(")", 1)[1].split()[19]
             return Process(pid, argv, (root / "cwd").resolve(strict=True), env, start)
@@ -120,6 +135,7 @@ def process(pid: int) -> Process | None:
             if owner.returncode or int(fields[0]) != os.getuid():
                 return None
             argv, env = _mac_args(pid)
+            argv = _mac_invocation(argv, env)
             cwd = run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"])
             directory = next(line[1:] for line in cwd.stdout.splitlines() if line.startswith("n"))
             return Process(pid, argv, Path(directory), env, fields[1])
@@ -151,9 +167,12 @@ def listener(url: str) -> Process | None:
                 if not path.name.isdigit() or path.stat().st_uid != os.getuid():
                     continue
                 for fd in (path / "fd").iterdir():
-                    target = os.readlink(fd)
-                    if target.startswith("socket:[") and target[8:-1] in inodes:
-                        pids.add(int(path.name))
+                    try:
+                        target = os.readlink(fd)
+                        if target.startswith("socket:[") and target[8:-1] in inodes:
+                            pids.add(int(path.name))
+                    except OSError:
+                        continue
             except OSError:
                 continue
     candidates = [value for pid in pids if (value := process(pid)) is not None]
@@ -280,6 +299,37 @@ def welcome(url: str, timeout=10) -> dict | None:
         return None
 
 
+def read_unit(path: Path) -> dict | None:
+    try:
+        raw = path.read_bytes()
+        if path.suffix == ".plist":
+            data = plistlib.loads(raw)
+            if b"Pentacle managed service" not in raw and data.get("Label") != "com.pentacle.chat-streamd-v2":
+                return None
+            return {"label": data["Label"], "path": str(path), "argv": data["ProgramArguments"],
+                    "cwd": data["WorkingDirectory"], "env": data.get("EnvironmentVariables", {})}
+        text = raw.decode()
+        if "Pentacle managed service" not in text and path.name != "pentacle-chat-streamd-v2.service":
+            return None
+        values, environment = {}, {}
+        for line in text.splitlines():
+            if line.startswith("Environment="):
+                for entry in shlex.split(line.split("=", 1)[1]):
+                    key, value = entry.split("=", 1)
+                    environment[key] = value.replace("%%", "%")
+            elif "=" in line and not line.startswith("#"):
+                key, value = line.split("=", 1)
+                values[key] = value
+        argv = [v.replace("%%", "%").replace("$$", "$") for v in shlex.split(values["ExecStart"])]
+        working = values["WorkingDirectory"]
+        if working.startswith(('"', "'")):
+            working = shlex.split(working)[0]
+        return {"label": path.name, "path": str(path), "argv": argv,
+                "cwd": working.replace("%%", "%"), "env": environment}
+    except (OSError, ValueError, KeyError, UnicodeError, plistlib.InvalidFileException):
+        return None
+
+
 def unit_for(proc: Process | None, kind: str) -> dict | None:
     if proc is None:
         return None
@@ -290,41 +340,21 @@ def unit_for(proc: Process | None, kind: str) -> dict | None:
                   if len(parts := line.split()) == 3 and parts[0] == str(proc.pid)}
         for label in labels:
             path = home / "Library/LaunchAgents" / (label + ".plist")
-            try:
-                raw = path.read_bytes()
-                data = plistlib.loads(raw)
-                managed = b"Pentacle managed service" in raw or label == "com.pentacle.chat-streamd-v2"
-                if managed and data.get("Label") == label and data.get("ProgramArguments") == proc.argv:
-                    return {"label": label, "path": str(path), "argv": proc.argv,
-                            "cwd": data.get("WorkingDirectory"), "env": data.get("EnvironmentVariables", {}), "pid": proc.pid}
-            except (OSError, ValueError, plistlib.InvalidFileException):
-                continue
+            unit = read_unit(path)
+            if unit and unit["label"] == label and unit["argv"] == proc.argv:
+                return {**unit, "pid": proc.pid}
     elif sys.platform.startswith("linux"):
         folder = home / ".config/systemd/user"
         for path in folder.glob("*.service"):
             try:
-                text = path.read_text()
-                if "Pentacle managed service" not in text and path.name != "pentacle-chat-streamd-v2.service":
+                unit = read_unit(path)
+                if not unit:
                     continue
                 pid = run(["systemctl", "--user", "show", "--property=MainPID", "--value", path.name])
                 if pid.returncode or pid.stdout.strip() != str(proc.pid):
                     continue
-                values = {}
-                environment = {}
-                for line in text.splitlines():
-                    if line.startswith("Environment="):
-                        for entry in shlex.split(line.split("=", 1)[1]):
-                            key, value = entry.split("=", 1)
-                            environment[key] = value.replace("%%", "%").replace("$$", "$")
-                    elif "=" in line and not line.startswith("#"):
-                        key, value = line.split("=", 1)
-                        values[key] = value
-                # The installer restricts unrepresentable characters, so shlex
-                # recovers its quoted command without shell evaluation.
-                argv = [v.replace("%%", "%").replace("$$", "$") for v in shlex.split(values["ExecStart"])]
-                if argv == proc.argv:
-                    return {"label": path.name, "path": str(path), "argv": argv,
-                            "cwd": values.get("WorkingDirectory"), "env": environment, "pid": proc.pid}
+                if unit["argv"] == proc.argv:
+                    return {**unit, "pid": proc.pid}
             except (OSError, ValueError, KeyError):
                 continue
     return None

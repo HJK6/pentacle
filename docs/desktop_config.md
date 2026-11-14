@@ -210,8 +210,9 @@ reachability, credentials, every nested field, or completeness of host maps.
 
 ## Upgrading an existing install
 
-Build the browser assets with `npm run build:web`, restart the web host to
-serve the new build, and refresh the browser to load the new client code.
+Follow [UPGRADE.md](../UPGRADE.md) to upgrade the daemon and web host together,
+including dependencies, database copies and the final doctor check. Refresh the
+browser afterwards to load the new client code.
 
 Keep your private overlay outside the app/repository and keep selecting it with
 PENTACLE_CONFIG after replacing the package. Preserve hostNames, hostColors,

@@ -25,26 +25,12 @@ def parser():
     doctor = commands.add_parser("doctor", help="check the installation")
     common(doctor)
     doctor.add_argument("--live", action="store_true")
-    doctor.add_argument("--for-transaction", help=argparse.SUPPRESS)
-    service = commands.add_parser("service", help="adopt running services")
-    common(service)
-    service_commands = service.add_subparsers(dest="service_command", required=True)
-    adopt = service_commands.add_parser("adopt", help="install service units from running processes")
-    common(adopt)
-    adopt.add_argument("--yes", action="store_true")
-    update = commands.add_parser("update", help="update to a stable release")
+    update = commands.add_parser("update", help="check releases or prepare the upgrade checklist")
     common(update)
-    update.add_argument("--check", action="store_true")
-    update.add_argument("--to")
-    update.add_argument("--allow-untested-start", action="store_true")
+    modes = update.add_mutually_exclusive_group()
+    for mode in ("check", "prepare", "backup"):
+        modes.add_argument("--" + mode, action="store_true")
     update.add_argument("--ack-required-actions", action="store_true")
-    update.add_argument("--restart-now", action="store_true")
-    update.add_argument("--no-live", action="store_true")
-    update.add_argument("--boot-wait", type=float, default=180)
-    update.add_argument("--store", action="append", default=[])
-    update.add_argument("--restore-state")
-    update.add_argument("--yes", action="store_true")
-    update.add_argument("--transaction", help=argparse.SUPPRESS)
     return result
 
 
@@ -86,8 +72,9 @@ def main(argv=None, *, default_install=None):
     args = parser().parse_args(argv)
     defaults = {"install": str(default_install or Path(__file__).resolve().parents[2]),
                 "config": os.environ.get("PENTACLE_CONFIG") or "~/.config/pentacle/pentacle.config.js",
-                "daemon_url": None, "web_url": "http://127.0.0.1:7795",
-                "release_remote": OFFICIAL_REMOTE, "json": False}
+                "daemon_url": os.environ.get("PENTACLE_DAEMON_URL"),
+                "web_url": os.environ.get("PENTACLE_WEB_URL") or "http://127.0.0.1:7795",
+                "release_remote": os.environ.get("PENTACLE_RELEASE_REMOTE") or OFFICIAL_REMOTE, "json": False}
     for name, value in defaults.items():
         if not hasattr(args, name):
             setattr(args, name, value)
@@ -99,12 +86,9 @@ def main(argv=None, *, default_install=None):
                 value = snapshot.identity
                 print(json.dumps(value)) if args.json else version_text(value)
                 return 0
-            value = report(snapshot, live=args.live, for_transaction=args.for_transaction)
+            value = report(snapshot, live=args.live)
             print(json.dumps(value)) if args.json else doctor_text(value)
             return 1 if value["summary"]["fail"] else 0
-        if args.command == "service":
-            from .services import adopt
-            return adopt(args)
         from .update import update
         return update(args)
     except KeyboardInterrupt:

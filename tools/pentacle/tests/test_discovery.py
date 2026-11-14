@@ -17,6 +17,22 @@ from pentacle import discovery as d
 
 
 class DiscoveryTest(unittest.TestCase):
+    def test_framework_reexec_retains_the_virtual_environment_invocation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            framework = root / "Python.framework/Versions/3.13"
+            app = framework / "Resources/Python.app/Contents/MacOS/Python"
+            binary = framework / "bin/python3.13"
+            for file in (app, binary):
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("fixture")
+                file.chmod(0o700)
+            launcher = root / ".venv/bin/python"
+            launcher.parent.mkdir(parents=True)
+            launcher.symlink_to(binary)
+            argv = [str(app), str(root / "main.py"), "--example", ""]
+            self.assertEqual(d._mac_invocation(argv, {"__PYVENV_LAUNCHER__": str(launcher)}), [str(launcher), *argv[1:]])
+            self.assertEqual(d._mac_invocation(argv, {}), argv)
     def test_real_owned_process_arguments_cwd_and_open_store(self):
         with tempfile.TemporaryDirectory(prefix="install-process-") as folder:
             root = Path(folder)

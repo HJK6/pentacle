@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import tempfile
@@ -36,6 +37,7 @@ def safe_sha(value):
 
 def release_manifest(root: Path, remote: str, *, write_cache=True, fetch=True) -> dict:
     source = "official" if remote == OFFICIAL_REMOTE else "custom"
+    remote_digest = hashlib.sha256(remote.encode()).hexdigest()
     cache = root / ".pentacle-deploy/releases-cache.json"
     result = {"source": "none", "fetched_at": None, "data": None, "age_days": None, "release_remote": source}
     fetched = run(["git", "-C", root, "fetch", remote, "main"], timeout=30) if fetch else None
@@ -47,13 +49,14 @@ def release_manifest(root: Path, remote: str, *, write_cache=True, fetch=True) -
                 timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
                 result.update(source="fetched", fetched_at=timestamp, data=data, age_days=0)
                 if write_cache:
-                    atomic_json(cache, {"schema_version": 1, "remote": remote, "fetched_at": timestamp, "manifest": data})
+                    atomic_json(cache, {"schema_version": 1, "release_remote": source, "remote_sha256": remote_digest,
+                                        "fetched_at": timestamp, "manifest": data})
                 return result
         except (ReleaseError, OSError):
             pass
     cached = read_json(cache)
     try:
-        if isinstance(cached, dict) and cached.get("remote") == remote and cached.get("schema_version") == 1:
+        if isinstance(cached, dict) and cached.get("remote_sha256") == remote_digest and cached.get("schema_version") == 1:
             data = parse(json.dumps(cached["manifest"]))
             stamp = dt.datetime.fromisoformat(cached["fetched_at"])
             if stamp.tzinfo is None:
