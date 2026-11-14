@@ -10,15 +10,32 @@ import nightly_journey as nj
 import scheduled_admission as sa
 
 
+@pytest.mark.parametrize('history', ['current', 'legacy', 'rotated', 'split_marker', 'missing_marker', 'rotation_gap', 'conflicting_marker', 'legacy_after'])
 @pytest.mark.parametrize('diagnostic', ['', 'INFO ws client=reader close code=1011\n'])
-def test_nightly_scans_the_existing_process_generation(tmp_path, monkeypatch, diagnostic):
+def test_nightly_scans_the_existing_process_generation(tmp_path, monkeypatch, diagnostic, history):
     from managed_logs import Config
     from .test_deploy_script import deploy_mod as d
     from .test_deploy_log_guard import _boot, _ACTIVE_START
 
     config = Config(tmp_path / 'daemon.out', tmp_path / 'daemon.err')
-    config.stdout.write_text(_boot())
+    legacy = 'chat_streamd_v2 listening on 127.0.0.1:1234\n'
+    old_failure = 'WARNING slow_consumer overflow client=old\n'
+    config.stdout.write_text(legacy + _boot() if history == 'legacy' else _boot())
     config.stderr.write_text(_boot() + diagnostic)
+    if history == 'legacy':
+        config.stderr.write_text(legacy + old_failure + _boot() + diagnostic)
+    elif history in ('rotated', 'split_marker', 'rotation_gap'):
+        raw = (old_failure + _boot()).encode()
+        split = raw.index(b'generation=') + 7 if history == 'split_marker' else len(raw)
+        Path(str(config.stderr) + ('.2' if history == 'rotation_gap' else '.1')).write_bytes(raw[:split])
+        config.stderr.write_bytes(raw[split:] + diagnostic.encode())
+    elif history == 'missing_marker':
+        Path(str(config.stderr) + '.1').write_text(legacy)
+        config.stderr.write_text(diagnostic)
+    elif history == 'conflicting_marker':
+        config.stderr.write_text(_boot(boot_uuid='d84cb03f-ff3e-4461-8650-e30a3832373e') + diagnostic)
+    elif history == 'legacy_after':
+        config.stderr.write_text(_boot() + legacy + diagnostic)
     monkeypatch.setattr(d, '_daemon_log_paths', lambda _: (config.stdout, config.stderr))
     monkeypatch.setattr(d, '_managed_log_config', lambda _: config)
     monkeypatch.setattr(d, '_launchd_state', lambda *_: d.LaunchdState(loaded=True, pid=222))
@@ -28,8 +45,16 @@ def test_nightly_scans_the_existing_process_generation(tmp_path, monkeypatch, di
     checks = d.run_post_release_checks(d.SERVICES['chat-streamd-v2'], tmp_path, 'a' * 40, {},
         runner=runner, fleet_smoke_check=lambda: {'outcome': 'passed'})
 
-    assert checks['slow_consumer']['attribution']['outcome'] == 'no_outgoing_writer', checks['slow_consumer']
-    assert checks['slow_consumer']['outcome'] == ('failed' if diagnostic else 'passed')
+    scan = checks['slow_consumer']
+    if history in ('missing_marker', 'rotation_gap', 'conflicting_marker', 'legacy_after'):
+        assert scan['outcome'] == 'failed', scan
+        assert scan['attribution']['outcome'] == 'attribution_ambiguous'
+    else:
+        assert scan['attribution']['outcome'] == 'no_outgoing_writer', scan
+        assert scan['outcome'] == ('failed' if diagnostic else 'passed')
+        if history in ('legacy', 'rotated', 'split_marker'):
+            assert scan['old_generation']['classifier']['failure_count'] == 1
+            assert scan['failure_count'] == bool(diagnostic)
 
 
 def test_held_admission_retries_inside_same_window(tmp_path, monkeypatch):

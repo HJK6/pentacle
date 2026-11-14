@@ -195,7 +195,9 @@ import time as _time
 
 def _frame(opcode, payload):
     head = bytes([0x80 | opcode])
-    return head + (bytes([len(payload)]) if len(payload) < 126 else bytes([126]) + struct.pack("!H", len(payload))) + payload
+    return head + (bytes([len(payload)]) if len(payload) < 126 else
+                   bytes([126]) + struct.pack("!H", len(payload)) if len(payload) < 65536 else
+                   bytes([127]) + struct.pack("!Q", len(payload))) + payload
 
 
 class RawPeer:
@@ -448,6 +450,24 @@ def test_real_peer_close_at_snapshot_handoff_is_not_promoted(tmp_path, monkeypat
         assert _time.monotonic() - started < 1.0
         assert connection._socket is None and connection.snapshot is None
         assert _owned_threads_end(before, peer)
+    finally:
+        connection._abort()
+        peer.stop()
+
+
+def test_image_broadcast_over_one_mib_does_not_disconnect_operator(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "operator_hello", lambda *_: {"type": "hello"})
+    payload = {"type": "chat.event", "stream_id": "unrelated", "image": "a" * (1100 * 1024)}
+    peer = RawPeer([("send", {"type": "welcome"}), ("read",),
+                    ("send", {"type": "snapshot", "sessions": []}),
+                    ("read",), ("send", payload),
+                    ("send", {"type": "pong", "request_id": "large-broadcast"})])
+    connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 5.0, None)
+    try:
+        connection.__enter__()
+        assert connection.rpc({"type": "ping", "request_id": "large-broadcast"}) == {
+            "type": "pong", "request_id": "large-broadcast"}
+        assert connection.socket.protocol.state.name == "OPEN"
     finally:
         connection._abort()
         peer.stop()

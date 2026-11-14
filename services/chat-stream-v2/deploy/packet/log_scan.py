@@ -104,6 +104,12 @@ def generation_ranges(groups, expected_pid, expected_start):
         for line in lines_many(group):
             size = len(line.encode('utf-8'))
             if BOOT_PREFIX in line:
+                # Legacy history is not attribution evidence. It is harmless
+                # only before a proven current marker, which remains required
+                # in both streams. A boot record after that marker fails closed.
+                if line.startswith(BOOT_PREFIX + ' ') and not matching:
+                    position += size
+                    continue
                 if matching:
                     boot_after = True
                 try:

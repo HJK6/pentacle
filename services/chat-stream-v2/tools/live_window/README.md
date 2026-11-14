@@ -61,3 +61,6 @@ never shorten the ownership suffix to satisfy the legacy smoke exception.
 Fleet smoke records client convergence (the existing two-second bound) separately from provider terminal idle (the cell timeout). A marker does not imply an idle provider. D2 compares durable delivered_at with controlled command start/end timestamps; the 60-second proof backoff observes durability and does not define delivery time. For helper-only repairs on a held runtime, --candidate-sha identifies the executed helper checkout and --runtime-sha identifies the frozen runtime; receipts retain both.
 
 Read-only SQLite polls close the connection on both success and query failure. The SQLite transaction context alone does not release the connection; relying on garbage collection can exhaust a low file-descriptor budget during long acceptance or teardown polling.
+
+The operator socket accepts messages up to 128 MiB, matching agent-orch so unrelated
+image-bearing broadcasts do not disconnect a smoke check.

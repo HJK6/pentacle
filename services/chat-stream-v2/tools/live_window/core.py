@@ -403,7 +403,9 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
         # Proof runs with no graceful-close wait, so a peer that begins closing
         # can never hold a send or close past the deadline; _promote restores
         # the normal close policy only for a proven, still-open connection.
-        self._socket = connect(self.url, open_timeout=self._remaining(deadline), close_timeout=0)
+        # Operator broadcasts may include images; match the agent-orch receive bound.
+        self._socket = connect(self.url, open_timeout=self._remaining(deadline),
+                               close_timeout=0, max_size=128 * 1024 * 1024)
         try:
             welcome = self._receive(self._remaining(deadline))
             self._remaining(deadline)

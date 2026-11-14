@@ -34,7 +34,9 @@ the deployed checkout, using the ordinary/coordinated post-release smoke,
 slow-consumer log and Front Desk checks. The separate installed-journey and
 12-hourly smoke jobs are retired; no replacement schedule or window is created.
 The nightly log report selects the running process generation from its retained
-boot markers. Missing generation evidence remains a failed check.
+boot markers across contiguous retained log files. Legacy boot lines before the
+current paired PID/start/UUID markers are history, not attribution proof. Missing
+or conflicting markers, expired evidence and rotation gaps remain failed checks.
 
 The wrapper uses `admit --job nightly-soak --wait-within-window`, the existing
 2400-second bound and 600-second reserve. A held window or active gate retries

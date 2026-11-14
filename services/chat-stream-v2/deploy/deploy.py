@@ -1083,14 +1083,18 @@ def _frozen_log_ranges(path: Path, previous_size: LogOffsets | None, managed=Non
 _CAPTURED_LOG_PINS: dict[str, int] = {}
 
 
-def _capture_log_offsets(paths: Sequence[Path]) -> LogOffsets | None:
+def _capture_log_offsets(paths: Sequence[Path], *, retained=None) -> LogOffsets | None:
     offsets: dict[str, int | dict[str, int] | None] = {}
     for path in paths:
         previous = _CAPTURED_LOG_PINS.pop(str(path), None)
         if previous is not None:
             os.close(previous)
         try:
-            fd = os.open(path, os.O_RDONLY)
+            # Nightly needs the boot marker even when it has rotated out of the
+            # active file. Pin the oldest retained inode under the active name;
+            # retained_paths verifies every segment through the active file.
+            source = next((p for p in reversed(retained.paths(path)) if p.is_file()), path) if retained else path
+            fd = os.open(source, os.O_RDONLY)
         except OSError:
             offsets[str(path)] = None
             continue
@@ -1823,7 +1827,8 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
         if no_outgoing_writer is None and prior_pid is None:
             no_outgoing_writer = True
         if prior_log_size is None:
-            prior_log_size = _capture_log_offsets(_daemon_log_paths(service))
+            prior_log_size = _capture_log_offsets(_daemon_log_paths(service),
+                                                   retained=_managed_log_config(service))
             for captured in (prior_log_size or {}).values():
                 if isinstance(captured, dict):
                     captured["size"] = 0
