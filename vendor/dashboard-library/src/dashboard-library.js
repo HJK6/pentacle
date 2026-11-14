@@ -2772,33 +2772,65 @@
     .dg-layout{display:grid;grid-template-columns:260px minmax(0,1fr) 280px;flex:1;min-height:0}.dg-nav{padding:16px 12px;background:var(--dg-panel);border-right:1px solid var(--dg-border);min-width:0}
     .dg-group{margin-top:18px}.dg-group h2{font:11px 'JetBrains Mono',monospace;color:var(--dg-dim);letter-spacing:.8px;text-transform:uppercase;margin:0 8px 6px}.dg-item{display:block;width:100%;text-align:left;margin:3px 0}.dg-item span{display:block;overflow-wrap:anywhere}.dg-item small{color:var(--dg-dim)}
     .dg-main{min-width:0;display:flex;flex-direction:column}.dg-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:16px 24px;border-bottom:1px solid var(--dg-border)}.dg-heading>div:first-child{flex:1 1 200px;min-width:0}.dg-heading h1{font-size:22px;font-weight:600;line-height:1.25;margin:4px 0;overflow-wrap:anywhere}
-    .dg-stage{padding:24px;background:var(--dg-ink);flex:1;min-height:400px;min-width:0}.dg-screens{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:20px}.dg-screens figure{margin:0;min-width:0}.dg-screens img{display:block;width:100%;max-height:680px;object-fit:contain;object-position:top;border:1px solid #1e2f26;border-radius:12px;background:var(--dg-panel)}.dg-screens figcaption{margin-top:8px;color:var(--dg-dim);overflow-wrap:anywhere}
-    .dg-stage video{display:block;width:100%;max-height:700px;background:var(--dg-panel)}.dg-stage iframe{display:block;width:100%;height:700px;border:1px solid var(--dg-border);background:var(--dg-panel)}.dg-note{color:var(--dg-dim);margin:12px 0;overflow-wrap:anywhere}.dg-empty{padding:24px;border:1px dashed var(--dg-border);border-radius:8px;color:var(--dg-dim)}
+    .dg-stage{padding:24px;background:var(--dg-ink);flex:1;min-height:400px;min-width:0}
+    .dg-stage iframe{display:block;width:100%;height:700px;border:1px solid var(--dg-border);background:var(--dg-panel)}.dg-stage iframe[data-surface="mobile"]{width:min(var(--dg-phone-width,390px),100%);height:auto;aspect-ratio:var(--dg-phone-ratio,390 / 844);margin:0 auto;border:1px solid #315b45;border-radius:26px;box-shadow:0 0 0 5px #14201a;overflow:hidden}.dg-note{color:var(--dg-dim);margin:12px 0;overflow-wrap:anywhere}.dg-empty{padding:24px;border:1px dashed var(--dg-border);border-radius:8px;color:var(--dg-dim)}
+    .dg-show-overview .dg-layout{grid-template-columns:minmax(0,1fr)}.dg-show-overview .dg-nav,.dg-show-overview .dg-details{display:none}
+    .dg-overview{display:flex;align-items:flex-start;gap:24px;max-width:100%;overflow-x:auto;padding:6px 6px 18px;overscroll-behavior-x:contain}.dg-flow-card{flex:none;min-width:0}.dg-flow-card h2{font-size:15px;margin:0 0 12px;min-height:46px;overflow-wrap:anywhere}.dg-flow-preview{width:100%;background:var(--dg-panel)}.dg-overview iframe,.dg-overview iframe[data-surface="mobile"]{width:100%;height:100%;aspect-ratio:auto;margin:0}
     .dg-details{padding:20px;background:var(--dg-panel);border-left:1px solid var(--dg-border);min-width:0}.dg-details h2{font:11px 'JetBrains Mono',monospace;letter-spacing:.8px;text-transform:uppercase;color:var(--dg-dim);margin:0 0 18px}.dg-details dl{display:grid;grid-template-columns:70px minmax(0,1fr);gap:10px 12px;margin:0}.dg-details dt{color:var(--dg-dim)}.dg-details dd{margin:0;overflow-wrap:anywhere}.dg-details select{width:100%;background:#0b1512;margin-top:8px}.dg-details label{display:block;margin-top:18px}.dg-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.dg-error{color:#f1b09c}.dg-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0)}
     @media(max-width:1100px){.dg-layout{grid-template-columns:230px minmax(0,1fr)}.dg-details{grid-column:1/-1;border-top:1px solid var(--dg-border);border-left:0}.dg-details dl{grid-template-columns:90px minmax(0,1fr)}}
-    @media(max-width:600px){.dg-header{padding:12px;gap:8px}.dg-search{order:3;flex-basis:100%;max-width:none;margin:0}.dg-layout{grid-template-columns:minmax(0,1fr)}.dg-nav{border-right:0;border-bottom:1px solid var(--dg-border);max-height:245px;overflow:auto}.dg-heading{padding:14px 12px}.dg-stage{padding:12px;min-height:350px}.dg-stage iframe{height:650px}.dg-sync{font-size:10px}.dg-projects button{padding:6px 8px}.dg-details{padding:16px}.dg-segment{width:100%}.dg-segment button{flex:1}}
+    @media(max-width:600px){.dg-header{padding:12px;gap:8px}.dg-search{order:3;flex-basis:100%;max-width:none;margin:0}.dg-layout{grid-template-columns:minmax(0,1fr)}.dg-nav{border-right:0;border-bottom:1px solid var(--dg-border);max-height:245px;overflow:auto}.dg-heading{padding:14px 12px}.dg-stage{padding:12px;min-height:350px}.dg-sync{font-size:10px}.dg-projects button{padding:6px 8px}.dg-details{padding:16px}.dg-segment{width:100%}.dg-segment button{flex:1}}
   `;
   function mountGallery(container, options = {}) {
     const doc = container.ownerDocument;
     const root = doc.createElement('section'); root.className = 'design-gallery'; root.setAttribute('aria-label', 'Mockups gallery');
-    root.innerHTML = `<style>${GALLERY_CSS}</style><header class="dg-header"><span class="dg-brand">✧ Mockups</span><nav class="dg-projects" aria-label="Projects"></nav><label class="dg-sr" for="dg-search">Search views and flows</label><input id="dg-search" class="dg-search" type="search" placeholder="Search views and flows"><span class="dg-sync" role="status">Loading library…</span></header><div class="dg-layout"><nav class="dg-nav" aria-label="Views and flows"><div class="dg-segment dg-kinds"></div><div class="dg-items"></div></nav><main class="dg-main"><div class="dg-heading"><div><div class="dg-mono dg-breadcrumb"></div><h1>Select a view</h1></div><div class="dg-segment dg-modes" role="group" aria-label="Show as"></div></div><div class="dg-stage" aria-live="polite"></div></main><aside class="dg-details" aria-label="Details"></aside></div>`;
+    root.innerHTML = `<style>${GALLERY_CSS}</style><header class="dg-header"><span class="dg-brand">✧ Mockups</span><nav class="dg-projects" aria-label="Projects"></nav><label class="dg-sr" for="dg-search">Search live designs</label><input id="dg-search" class="dg-search" type="search" placeholder="Search live designs"><span class="dg-sync" role="status">Loading library…</span></header><div class="dg-layout"><nav class="dg-nav" aria-label="Live designs"><div class="dg-items"></div></nav><main class="dg-main"><div class="dg-heading"><div><div class="dg-mono dg-breadcrumb"></div><h1>Select a view</h1></div><div class="dg-segment dg-modes" role="group" aria-label="View mode"></div></div><div class="dg-stage" aria-live="polite"></div></main><aside class="dg-details" aria-label="Details"></aside></div>`;
     container.replaceChildren(root);
     const storage = options.storage === undefined ? (() => { try { return doc.defaultView.sessionStorage; } catch { return null; } })() : options.storage;
     let saved; try { saved = JSON.parse(storage?.getItem('design-gallery.selection') || 'null'); } catch {}
-    const refs = { root, container, storage, fetch: options.fetch || doc.defaultView.fetch.bind(doc.defaultView), state: { project: '', revision: '', kind: 'views', item: '', mode: 'screens', query: '', ...saved }, catalog: { projects: [] }, disposed: false, generation: 0, displayKey: null, controller: null, historyController: null, historyLoading: null, historyError: null, historyErrorKey: null, historyManifest: null, lastCatalog: '' };
+    const refs = { root, container, storage, fetch: options.fetch || doc.defaultView.fetch.bind(doc.defaultView), state: { project: '', revision: '', item: '', query: '', ...saved, mode: 'prototype' }, catalog: { projects: [] }, disposed: false, generation: 0, displayKey: null, controller: null, historyController: null, historyLoading: null, historyError: null, historyErrorKey: null, historyManifest: null, lastCatalog: '' };
     root.querySelector('.dg-search').value = refs.state.query;
     root.querySelector('.dg-search').addEventListener('input', e => { refs.state.query = e.target.value; renderGallery(refs); });
     return refs;
   }
-  function galleryMedia(refs, file) { return '/design-media/' + [refs.state.project, refs.manifest.revision_id, ...file.split('/')].map(encodeURIComponent).join('/'); }
   function galleryCleanup(refs) {
     refs.generation++; refs.controller?.abort(); refs.controller = null;
-    refs.root.querySelectorAll('video').forEach(video => { video.pause(); video.removeAttribute('src'); video.load(); });
     refs.root.querySelectorAll('iframe').forEach(frame => { frame.removeAttribute('srcdoc'); frame.remove(); });
   }
   function unmountGallery(refs) { if (!refs) return; refs.disposed = true; refs.historyController?.abort(); galleryCleanup(refs); refs.root.remove(); }
   function galleryButton(refs, container, text, active, action) {
     const button = refs.root.ownerDocument.createElement('button'); button.type = 'button'; button.textContent = text; button.setAttribute('aria-pressed', String(!!active)); button.addEventListener('click', action); container.appendChild(button); return button;
+  }
+  function galleryFlowOrder(item) {
+    const match = /^flow-(\d+)$/.exec(item.variant || ''), order = match && Number(match[1]);
+    return Number.isSafeInteger(order) && order > 0 ? order : null;
+  }
+  function galleryFlowViews(views, item) {
+    const group = views.filter(view => (view.group || '') === (item.group || ''));
+    const ordered = group.filter(view => galleryFlowOrder(view) !== null);
+    return ordered.length ? ordered.sort((a, b) => galleryFlowOrder(a) - galleryFlowOrder(b) || a.id.localeCompare(b.id)) : group;
+  }
+  function galleryLoadFrame(refs, target, item, controller, generation) {
+    const { project } = refs.state, revision = refs.manifest.revision_id;
+    target.textContent = 'Loading live design…';
+    refs.fetch(`/api/designs/${project}/${revision}/${item.id}`, { signal: controller.signal }).then(async response => {
+      if (!response.ok) throw new Error('Live design unavailable or still syncing');
+      return response.json();
+    }).then(value => {
+      if (refs.disposed || generation !== refs.generation || controller.signal.aborted) return;
+      target.replaceChildren();
+      if (!value.document) { target.textContent = 'Live design unavailable.'; return; }
+      const frame = refs.root.ownerDocument.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts'); frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'");
+      frame.title = item.title + ' live design'; frame.dataset.surface = item.surface || 'web';
+      if (item.surface === 'mobile') {
+        const width = item.viewport?.width || 390, height = item.viewport?.height || 844;
+        frame.style.setProperty('--dg-phone-width', width + 'px'); frame.style.setProperty('--dg-phone-ratio', width + ' / ' + height);
+      }
+      frame.srcdoc = value.document; target.appendChild(frame);
+    }).catch(error => {
+      if (error.name !== 'AbortError' && !refs.disposed && generation === refs.generation && !controller.signal.aborted) target.textContent = error.message;
+    });
   }
   function updateGallery(refs, catalog) {
     if (refs.disposed) return;
@@ -2840,34 +2872,31 @@
     const projectNav = root.querySelector('.dg-projects'); projectNav.replaceChildren();
     projects.forEach(p => { const b = galleryButton(refs, projectNav, p.title, state.project === p.id, () => { Object.assign(state, { project: p.id, item: '', revision: '' }); refs.historyManifest = null; renderGallery(refs); }); b.dataset.project = p.id; });
     root.querySelector('.dg-sync').textContent = !projects.length ? 'Library empty' : `library · ${project?.sync === 'verified' ? 'verified locally' : project?.sync === 'conflict' ? 'sync conflict — retained revision' : 'sync pending — retained revision'}`;
-    const kinds = root.querySelector('.dg-kinds'); kinds.replaceChildren();
-    ['views', 'flows'].forEach(kind => galleryButton(refs, kinds, kind === 'views' ? 'Views' : 'Flows', state.kind === kind, () => { state.kind = kind; state.item = ''; renderGallery(refs); }));
-    const all = manifest?.[state.kind] || [], items = all.filter(item => [item.title, item.entry, item.group, item.surface].join(' ').toLowerCase().includes(state.query.toLowerCase()));
+    const live = (manifest?.views || []).filter(item => item.prototype);
+    const all = live.filter(item => galleryFlowOrder(item) === null || (!live.some(other => (other.group || '') === (item.group || '') && galleryFlowOrder(other) === null) && galleryFlowViews(live, item)[0] === item));
+    const items = all.filter(item => [item.title, item.entry, item.group, item.surface].join(' ').toLowerCase().includes(state.query.toLowerCase()));
     if (manifest && !all.some(i => i.id === state.item)) state.item = items[0]?.id || '';
     const item = all.find(i => i.id === state.item);
-    const selectionKey = item ? [state.project, manifest.revision_id, state.kind, item.id].join(':') : null;
-    if (selectionKey !== refs.selectionKey) {
-      refs.selectionKey = selectionKey;
-      // Choose the useful default on open; keep explicit tab choices during polling.
-      state.mode = item?.prototype ? 'prototype' : 'screens';
-    }
+    const selectionKey = item ? [state.project, manifest.revision_id, item.id].join(':') : null;
+    if (selectionKey !== refs.selectionKey) { refs.selectionKey = selectionKey; state.mode = 'prototype'; }
     const list = root.querySelector('.dg-items'); list.replaceChildren();
     const groups = new Map();
-    for (const row of items) { const group = row.group || (state.kind === 'flows' ? 'Flows' : row.surface === 'mobile' ? 'Mobile' : 'Web'); if (!groups.has(group)) groups.set(group, []); groups.get(group).push(row); }
+    for (const row of items) { const group = row.group || (row.surface === 'mobile' ? 'Mobile' : 'Web'); if (!groups.has(group)) groups.set(group, []); groups.get(group).push(row); }
     for (const [name, rows] of groups) {
       const group = root.ownerDocument.createElement('div'); group.className = 'dg-group';
       const heading = root.ownerDocument.createElement('h2'); heading.textContent = `${name} · ${rows.length}`; group.appendChild(heading); list.appendChild(group);
       for (const row of rows) { const button = galleryButton(refs, group, '', row.id === state.item, () => { state.item = row.id; renderGallery(refs); }); button.className = 'dg-item'; button.dataset.item = row.id; const title = root.ownerDocument.createElement('span'); title.textContent = row.title; const status = root.ownerDocument.createElement('small'); status.textContent = row.approval_ref ? 'Approved source · ' + row.compatibility?.status : row.compatibility?.status || 'Pending generation'; button.append(title, status); }
     }
-    if (!items.length) list.textContent = all.length ? 'No matching views or flows.' : 'No verified items yet.';
+    if (!items.length) list.textContent = all.length ? 'No matching live designs.' : 'No live designs yet.';
     root.querySelector('h1').textContent = item?.title || (state.revision && !manifest ? 'Retained revision' : projects.length ? 'No verified selection' : 'Your design library is empty');
-    root.querySelector('.dg-breadcrumb').textContent = [project?.title, item?.group || state.kind].filter(Boolean).join(' / ');
+    root.querySelector('.dg-breadcrumb').textContent = [project?.title, item?.group || 'Live designs'].filter(Boolean).join(' / ');
+    root.classList.toggle('dg-show-overview', state.mode === 'overview');
     const modes = root.querySelector('.dg-modes'); modes.replaceChildren();
-    [['screens', 'Screens'], ['video', 'Flow video'], ['prototype', 'Prototype']].forEach(([mode, title]) => galleryButton(refs, modes, title, state.mode === mode, () => { state.mode = mode; renderGallery(refs); }));
+    for (const [mode, title] of [['prototype', 'Prototype'], ['overview', 'Flow overview']]) galleryButton(refs, modes, title, state.mode === mode, () => { state.mode = mode; renderGallery(refs); });
     const detail = root.querySelector('.dg-details'); detail.replaceChildren();
     const title = root.ownerDocument.createElement('h2'); title.textContent = 'Details'; detail.appendChild(title);
     const dl = root.ownerDocument.createElement('dl'); detail.appendChild(dl);
-    for (const [label, value] of [['Surface', item?.surface || '—'], ['Status', item?.approval_ref ? 'Approved source (evidence linked)' : 'Mirror / candidate'], ['Frames', item?.screenshots?.length || 0], ['Revision', manifest?.source_revision || 'Unknown'], ['Generated', item?.generated ? 'Verified capture' : 'Imported reference / pending'], ['File', item?.entry || '—']]) { const dt = root.ownerDocument.createElement('dt'), dd = root.ownerDocument.createElement('dd'); dt.textContent = label; dd.textContent = value; dl.append(dt, dd); }
+    for (const [label, value] of [['Surface', item?.surface || '—'], ['Status', item?.approval_ref ? 'Approved source (evidence linked)' : 'Mirror / candidate'], ['Revision', manifest?.source_revision || 'Unknown'], ['Generated', item?.generated ? 'Verified capture' : 'Imported reference / pending'], ['File', item?.entry || '—']]) { const dt = root.ownerDocument.createElement('dt'), dd = root.ownerDocument.createElement('dd'); dt.textContent = label; dd.textContent = value; dl.append(dt, dd); }
     const authority = root.ownerDocument.createElement('p'); authority.className = 'dg-note'; authority.textContent = 'Claude Design is the design source of truth. This library contains mirrors and local candidates.'; detail.appendChild(authority);
     if (manifest && !manifest.complete) { const missing = root.ownerDocument.createElement('p'); missing.className = 'dg-note dg-error'; missing.textContent = 'Incomplete draft: ' + manifest.missing_paths.join(', '); detail.appendChild(missing); }
     if (item?.approval_ref) { const evidence = root.ownerDocument.createElement('p'); evidence.className = 'dg-note dg-mono'; evidence.textContent = 'Approval evidence: ' + item.approval_ref; detail.appendChild(evidence); }
@@ -2884,25 +2913,28 @@
       state.revision = history.value; refs.historyManifest = null; refs.historyError = null; refs.historyErrorKey = null; renderGallery(refs);
     });
     try { refs.storage?.setItem('design-gallery.selection', JSON.stringify(state)); } catch {}
-    const key = [state.project, manifest?.revision_id, state.revision, refs.historyError, state.kind, state.item, state.mode].join(':');
+    const key = [state.project, manifest?.revision_id, state.revision, refs.historyError, state.item, state.mode].join(':');
     if (key === refs.displayKey) return;
     galleryCleanup(refs); refs.displayKey = key;
     const stage = root.querySelector('.dg-stage'); stage.replaceChildren();
-    if (!item) { const empty = root.ownerDocument.createElement('p'); empty.className = 'dg-empty'; empty.textContent = state.revision && !manifest ? refs.historyError || 'Loading retained revision…' : 'Import a verified design revision to browse its views and flows.'; stage.appendChild(empty); return; }
-    const note = root.ownerDocument.createElement('p'); note.className = 'dg-note'; note.textContent = item.compatibility?.reason || 'Generation pending';
-    if (state.mode === 'screens') {
-      const grid = root.ownerDocument.createElement('div'); grid.className = 'dg-screens'; stage.appendChild(grid);
-      for (const screenshot of item.screenshots || []) { const figure = root.ownerDocument.createElement('figure'), image = root.ownerDocument.createElement('img'), caption = root.ownerDocument.createElement('figcaption'); image.src = galleryMedia(refs, screenshot.path); image.alt = screenshot.name; image.loading = 'lazy'; image.addEventListener('error', () => { caption.textContent = 'Screenshot unavailable or still syncing'; }); caption.textContent = screenshot.name; figure.append(image, caption); grid.appendChild(figure); }
-      if (!item.screenshots?.length) grid.textContent = 'No screenshot available for this incomplete view.';
-    } else if (state.mode === 'video') {
-      if (item.video) { const video = root.ownerDocument.createElement('video'); video.controls = true; video.preload = 'metadata'; video.playsInline = true; video.src = galleryMedia(refs, item.video); video.setAttribute('aria-label', item.title + ' flow video'); video.addEventListener('error', () => { note.textContent = 'Video unavailable or still syncing. Try Screens or refresh.'; }); stage.appendChild(video); const steps = root.ownerDocument.createElement('p'); steps.className = 'dg-mono'; steps.textContent = (item.steps || []).map(s => s.name).join(' → '); stage.appendChild(steps); }
-      else stage.appendChild(root.ownerDocument.createTextNode('No flow video for this view. Select Flows to play a recorded journey.'));
-    } else if (item.prototype || item.kind === 'flow') {
-      note.textContent = 'Offline preview · transient storage · calls mocked when labelled. Imported canvas editing and persistence are unsupported. ' + (item.compatibility?.reason || '');
-      const controller = new AbortController(); refs.controller = controller; const generation = refs.generation;
-      stage.appendChild(root.ownerDocument.createTextNode('Loading offline prototype…'));
-      refs.fetch(`/api/designs/${state.project}/${manifest.revision_id}/${item.id}`, { signal: controller.signal }).then(async response => { if (!response.ok) throw new Error('Prototype unavailable or still syncing'); return response.json(); }).then(value => { if (refs.disposed || generation !== refs.generation || controller.signal.aborted) return; stage.replaceChildren(); if (!value.document) { stage.textContent = 'This view is screenshot/video-only.'; stage.appendChild(note); return; } const frame = root.ownerDocument.createElement('iframe'); frame.setAttribute('sandbox', 'allow-scripts'); frame.setAttribute('referrerpolicy', 'no-referrer'); frame.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'"); frame.title = item.title + ' offline prototype'; frame.srcdoc = value.document; stage.append(frame, note); }).catch(error => { if (error.name !== 'AbortError' && !refs.disposed && generation === refs.generation) { stage.textContent = error.message; stage.appendChild(note); } });
-    } else stage.appendChild(root.ownerDocument.createTextNode('This view is screenshot/video-only.'));
+    if (!item) { const empty = root.ownerDocument.createElement('p'); empty.className = 'dg-empty'; empty.textContent = state.revision && !manifest ? refs.historyError || 'Loading retained revision…' : 'No live design is available in this revision.'; stage.appendChild(empty); return; }
+    const note = root.ownerDocument.createElement('p'); note.className = 'dg-note';
+    note.textContent = item.compatibility?.reason || 'Offline live design';
+    const controller = new AbortController(); refs.controller = controller; const generation = refs.generation;
+    if (state.mode === 'overview') {
+      const overview = root.ownerDocument.createElement('div'); overview.className = 'dg-overview';
+      overview.setAttribute('aria-label', 'Flow overview'); overview.tabIndex = 0; stage.appendChild(overview);
+      for (const view of galleryFlowViews(live, item)) {
+        const card = root.ownerDocument.createElement('section'); card.className = 'dg-flow-card'; card.dataset.view = view.id;
+        const width = view.viewport?.width || (view.surface === 'mobile' ? 390 : 1280), height = view.viewport?.height || (view.surface === 'mobile' ? 844 : 800);
+        card.style.width = width + 'px';
+        const heading = root.ownerDocument.createElement('h2'); heading.textContent = view.title; card.appendChild(heading);
+        const preview = root.ownerDocument.createElement('div'); preview.className = 'dg-flow-preview'; preview.style.height = height + 'px';
+        card.appendChild(preview); overview.appendChild(card); galleryLoadFrame(refs, preview, view, controller, generation);
+      }
+    } else {
+      const preview = root.ownerDocument.createElement('div'); stage.appendChild(preview); galleryLoadFrame(refs, preview, item, controller, generation);
+    }
     stage.appendChild(note);
   }
 

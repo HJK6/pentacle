@@ -30,7 +30,7 @@ function unmount(refs) {
 window.DASHBOARDS.push({
   id: 'ui-review',
   name: 'Mockups',
-  description: 'Browse design views, recorded flows and offline prototypes',
+  description: 'Browse live designs and prototype flows',
   color: '#7ef0ba',
   mount,
   update,

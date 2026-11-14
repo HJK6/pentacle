@@ -1,6 +1,29 @@
 # Design library
 
-The Mockups dashboard and `/designs/` browse a private, local design library.
+The Mockups dashboard and `/designs/` show live HTML/UI designs from a private,
+local design library. Views with prepared documents appear; screenshots and
+recorded videos remain archived assets and are never viewer content. A live view
+need not contain clickable interactions. Mobile previews use their recorded phone
+viewport and fit narrower containers while preserving its proportions.
+
+Prototype opens the selected live design by default. Flow overview renders the
+workspace's views together in a horizontal scrolling region at their declared
+viewport sizes. Both use the same opaque sandbox and authenticated document API.
+Use these existing per-view fields to publish a workspace:
+
+- `group`: shared workspace label.
+- `variant: "prototype"`: the navigable prototype entry.
+- `variant: "flow-01"`, `"flow-02"`, etc.: ordered live overview entries. The
+  positive numeric suffix determines order; equal numbers sort by view ID.
+- `title`: view label; `surface`: `mobile` or `web`; `viewport`: width/height in
+  CSS pixels. Each entry has its own prepared HTML document.
+
+Multiple prototypes per project or workspace are supported. Untagged prepared
+views remain selectable. A workspace with only flow entries uses its first flow
+view as the default; when no flow entries exist, its live views form the overview.
+Grouping never crosses project or revision boundaries. Polling preserves running
+frames; switching selection, mode or revision disposes the previous previews.
+
 Claude Design remains the design source of truth until a separate parity
 cutover. Importing a page never approves it. The library contains mirrors and
 local candidates; approval labels require an explicit evidence pointer.
