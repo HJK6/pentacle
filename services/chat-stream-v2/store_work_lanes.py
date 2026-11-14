@@ -1215,13 +1215,16 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
     emit = payload.get("emit_started", False)
     if not isinstance(emit, bool):
         raise ValueError("work_lane_payload_invalid")
-    members, reason = validate_members(payload.get("members", []), payload.get("no_spec_reason"))
     target_id = payload.get("lane_id")
     # The lane id the charter must name: the existing routing row for a promotion,
     # the derived id for a new lane. Both are checked before any write.
     target_lane_id = str(target_id) if target_id is not None else derive_lane_id(stream_id, key)
     goals = _validate_goal_ids(payload)
     _require_pending_goals_conn(conn, goals, target_lane_id)
+    # Valid observed goals justify a lane, so goals-only adoption needs no members
+    # and no no_spec_reason (spec Creation 1.6); missing goals already refused above.
+    members, reason = validate_members(payload.get("members", []), payload.get("no_spec_reason"),
+                                       allow_empty_without_reason=True)
     columns = {"work_state": state, "work_state_reason": "fd", "blocker": blocker, "owner_kind": owner,
                "title": title, "visible_chat_stream_id": chat, "visible_chat_generation": chat_gen,
                "adoption_key": key, "first_admitted_at": stamp, "updated_at": stamp,

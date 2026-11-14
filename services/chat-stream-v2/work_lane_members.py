@@ -18,7 +18,7 @@ def validate_title(title: str) -> str:
     return title
 
 
-def validate_members(members, reason, *, derived=False) -> tuple[list[str], str | None]:
+def validate_members(members, reason, *, derived=False, allow_empty_without_reason=False) -> tuple[list[str], str | None]:
     if (not isinstance(members, list)
             or any(not isinstance(s, str) or not SPEC_ID_RE.fullmatch(s) for s in members)
             or len(set(members)) != len(members)):
@@ -26,6 +26,8 @@ def validate_members(members, reason, *, derived=False) -> tuple[list[str], str 
     if reason is not None and (not isinstance(reason, str) or len(reason) > 280):
         raise ValueError("work_lane_no_spec_reason_invalid")
     reason = reason.strip() or None if reason is not None else None
-    if not members and not reason:
+    # Goals-only adoption (valid observed goals, no members) needs no no_spec_reason;
+    # the caller sets allow_empty_without_reason once the goals are validated.
+    if not members and not reason and not allow_empty_without_reason:
         raise ValueError("work_lane_no_spec_reason_required")
     return list(members), reason
