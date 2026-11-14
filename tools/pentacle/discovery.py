@@ -334,6 +334,13 @@ def unit_for(proc: Process | None, kind: str) -> dict | None:
     if proc is None:
         return None
     home = Path.home()
+    if kind == "daemon":
+        canonical = home / ("Library/LaunchAgents/com.pentacle.chat-streamd-v2.plist" if sys.platform == "darwin"
+                            else ".config/systemd/user/pentacle-chat-streamd-v2.service")
+        if canonical.exists():
+            # An installed unit can point elsewhere even when the observed
+            # process is hand-started. A malformed installed unit fails too.
+            return read_unit(canonical) or {"argv": [], "cwd": str(home)}
     if sys.platform == "darwin":
         listing = run(["launchctl", "list"])
         labels = {parts[2] for line in listing.stdout.splitlines()

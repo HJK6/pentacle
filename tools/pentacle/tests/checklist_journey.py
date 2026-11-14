@@ -86,7 +86,7 @@ class Journey:
         self.git("remote", "set-url", "origin", "https://github.com/HJK6/pentacle.git")
         self.run([sys.executable, "-m", "venv", self.python.parent.parent])
         self.install_and_build()
-        provider = self.root / "provider"
+        provider = self.root / "OUTSIDE_DIRECTORY_SEED"
         provider.mkdir()
         shutil.copyfile(SOURCE / "services/chat-stream-v2/tests/smoke/ingest_provider_stub.py", provider / "ingest_provider_stub.py")
         self.provider = provider / "claude"
@@ -393,6 +393,31 @@ os.execv({real_git!r},[{real_git!r},*args])
         self.git("add", "releases/manifest.json", cwd=self.release)
         self.git("commit", "-qm", "Malformed fixture manifest", cwd=self.release)
         check("malformed manifest", {"source.latest": "warn", "source.release": "warn"})
+        # Exercise the complete public command, not just the formatting helper,
+        # against hostile file contents and subprocess output in both forms.
+        markers = ["TOKEN_SEED", "UNKNOWN_KEY_SEED", "CONFIG_VALUE_SEED", "THROWN_SEED",
+                   "PROVIDER_STDOUT_SEED", "PROVIDER_STDERR_SEED", "URL_QUERY_SEED", "OUTSIDE_DIRECTORY_SEED"]
+        token = self.token.read_bytes(); provider = self.provider.read_bytes()
+        self.token.write_text("TOKEN_SEED")
+        self.provider.write_text("#!/bin/sh\necho PROVIDER_STDOUT_SEED\necho PROVIDER_STDERR_SEED >&2\nexit 1\n")
+        for broken in (False, True):
+            if broken:
+                self.config.write_text("console.log('CONFIG_VALUE_SEED');console.error('THROWN_SEED');throw Error('THROWN_SEED')")
+            else:
+                self.config.write_text("module.exports=" + json.dumps({"UNKNOWN_KEY_SEED": "CONFIG_VALUE_SEED", "localHostId": "local",
+                    "chatStream": {"url": self.daemon_url + "/?URL_QUERY_SEED", "hosts": ["local"], "tokenPath": str(self.token)}}) + ";\n")
+            for json_output in (False, True):
+                args = [self.python, self.checkout / "bin/pentacle", "doctor", "--config", self.config,
+                        "--daemon-url", self.daemon_url + "/?URL_QUERY_SEED", "--web-url", self.web_url,
+                        "--release-remote", self.release]
+                if json_output:
+                    args.append("--json")
+                result = self.run(args, expected=None)
+                assert result.returncode in {0, 1}
+                import pwd
+                for marker in [*markers, pwd.getpwuid(os.getuid()).pw_name, socket.gethostname()]:
+                    assert marker not in result.stdout + result.stderr, "Doctor leaked a seeded or identity value"
+        self.config.write_bytes(original_config); self.token.write_bytes(token); self.provider.write_bytes(provider)
         atomic_json(self.evidence / "install.json", {"status": "passed", "candidate": self.candidate, "faults": len(cases) - 1,
                     "live_reply": healthy["checks"][-1]["status"]})
 

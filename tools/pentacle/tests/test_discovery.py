@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import plistlib
 import socket
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -17,6 +19,26 @@ from pentacle import discovery as d
 
 
 class DiscoveryTest(unittest.TestCase):
+    def test_installed_daemon_unit_is_checked_even_with_hand_started_process(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            local = home / "install"
+            other = home / "other"
+            proc = d.Process(123456789, [sys.executable, str(local / "services/chat-stream-v2/main.py")], local)
+            with patch.object(Path, "home", return_value=home):
+                if sys.platform == "darwin":
+                    unit = home / "Library/LaunchAgents/com.pentacle.chat-streamd-v2.plist"
+                    unit.parent.mkdir(parents=True)
+                    unit.write_bytes(plistlib.dumps({"Label": "com.pentacle.chat-streamd-v2", "WorkingDirectory": str(other),
+                        "ProgramArguments": [sys.executable, str(other / "services/chat-stream-v2/main.py")]}))
+                else:
+                    unit = home / ".config/systemd/user/pentacle-chat-streamd-v2.service"
+                    unit.parent.mkdir(parents=True)
+                    unit.write_text("WorkingDirectory=" + str(other) + "\nExecStart=" + sys.executable + " " + str(other / "services/chat-stream-v2/main.py") + "\n")
+                found = d.unit_for(proc, "daemon")
+            self.assertIsNotNone(found)
+            self.assertEqual(d.Process(0, found["argv"], Path(found["cwd"])).checkout("daemon"), other.resolve())
+
     def test_framework_reexec_retains_the_virtual_environment_invocation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
