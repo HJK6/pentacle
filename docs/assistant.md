@@ -458,10 +458,11 @@ and the earlier event id. An identical request-key replay returns its receipt.
 The daemon verifies the bound seat and its generation on every publish.
 
 The advisor lists recent `other` notes and their reasons with a read-only,
-index-bounded query (here the last seven days; it never reads `kv`):
+index-bounded query; set `COMPOSITE_STREAM_ID` to the composite stream id (here the last seven days;
+it never reads `kv`):
 
 ```sh
-python3 - ~/.local/share/pentacle-stream/sessions.db bart:assistant <<'PY'
+python3 - ~/.local/share/pentacle-stream/sessions.db "$COMPOSITE_STREAM_ID" <<'PY'
 import sqlite3, sys, time
 SQL = """
 SELECT created_at,event_id,json_extract(canonical_payload_json,'$.ref'),json_extract(canonical_payload_json,'$.note_reason')
