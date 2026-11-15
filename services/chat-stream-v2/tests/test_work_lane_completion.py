@@ -460,6 +460,35 @@ def test_v7a_new_empty_goal_reopens(tmp_path):
     run(body, str(tmp_path / 'v7g.db'))
 
 
+def test_v7_open_unplaced_item_reopens(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:v7unplaced'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        write_goal(root, lane_id, 'g')
+        write_item(root, 'done1', status='completed', epic='epic_g')
+        write_item(root, 'loose', status='completed', epic=None)
+        await reconcile(env.store, scanner(root))
+        await env.op('adopt', {'adoption_key': key, 'title': 'L', 'summary': 'g', 'owner_kind': 'operator',
+            'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT}, 'goals': ['epic_g'],
+            'members': ['spec_demo__loose']}, request_id='adopt:' + key, inject_goals=False)
+        await reconcile(env.store, scanner(root))
+        await lifecycle(env)
+        # Goal done and the unplaced member completed: the lane completes.
+        assert (await lane_now(env, lane_id))['work_state'] == 'done'
+        # Reopening the unplaced member (open, no goal) reopens the settled lane.
+        import shutil
+        shutil.rmtree(root / 'work' / 'completed' / 'demo__loose')
+        write_item(root, 'loose', status='in_progress', epic=None)
+        await reconcile(env.store, scanner(root))
+        result = await lifecycle(env)
+        assert lane_id in result['reopened']
+        st = await lane_now(env, lane_id)
+        assert st['work_state'] == 'paused' and st['work_state_reason'] == 'reopened'
+    run(body, str(tmp_path / 'v7unplaced.db'))
+
+
 def test_v7c_hand_closed_lane_settles_then_reopens(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
