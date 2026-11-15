@@ -495,5 +495,8 @@ refresh is retried on a later context reading. The tell wakes the front desk
 without waiting for the digest. Before each ruling request or peer tell to the
 bound advisor, the daemon sends its current guidelines in a stamped tell. A
 missing or unreadable file is logged and retried; it does not block an advisor
-request. `inspect` includes `assistant_guidelines`, with the seat, last delivered
+request. A submitted baseline whose proof is still pending does not block the
+next request either. A baseline that may still be unsubmitted refuses advisor
+tells with `guidelines_delivery_unconfirmed` for at most ten minutes after it
+was sent. `inspect` includes `assistant_guidelines`, with the seat, last delivered
 identity and time, and whether the identity matches the current files.

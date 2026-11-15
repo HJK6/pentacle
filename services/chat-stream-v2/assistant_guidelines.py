@@ -202,8 +202,12 @@ class AssistantGuidelines:
         if loaded is None:
             return None
         record = await self._reconcile('advisor', await self._read_record('advisor'))
+        # A committed baseline was submitted, and its stamped input is SYSTEM, so
+        # retained proof may never confirm it. Input that may still be unsubmitted
+        # holds advisor tells for ten minutes, never until the generation changes.
         if ((record.get('stream_id'), record.get('generation')) == (target, binding['generation'])
-                and record.get('delivery_status') in {'committed_pending_proof', 'pasted_unsubmitted', 'proof_unavailable'}):
+                and record.get('delivery_status') in {'pasted_unsubmitted', 'proof_unavailable'}
+                and time.time() - float(record.get('delivered_at') or 0) < 600):
             from sessions import VerbError
             raise VerbError('guidelines_delivery_unconfirmed', 'previous advisor guidelines delivery is unconfirmed')
         identity, text = loaded
