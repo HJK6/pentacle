@@ -18,7 +18,7 @@ from typing import Callable, Mapping
 FAMILY_CODES: dict[str, frozenset[str]] = {
     "provider_account.v1": frozenset({"login_unavailable", "identity_unverified"}),
     "daemon_runtime.v1": frozenset({"loop_stalled", "store_call_slow"}),
-    "work_lane.v1": frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost"}),
+    "work_lane.v1": frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost", "lane_status_behind"}),
     "session_lifecycle": frozenset({"session_dead", "close_failed", "close_carcass", "reap_exhausted", "reap_fenced"}),
     "integrity": frozenset({"pin_drift", "close_claim_mismatch", "ingest_identity_blocked"}),
     "system_deploy": frozenset({"deploy_failed"}),

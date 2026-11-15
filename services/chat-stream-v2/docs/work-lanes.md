@@ -55,7 +55,7 @@ Updates arrive both live (as a `chat.event` broadcast) and through history (`req
 - An ACTIVE lane requires an exact generation-bound live dedicated `lead` or `nexus`. Hidden leads qualify for either management owner kind. Closed, offline/presumed-dead, stale-generation, protected, composite and current authenticated assistant backends do not qualify. `owner_kind: fd` grants management, never execution ownership. Visible-chat eligibility remains separate and unchanged.
 - Error codes keep their wire names. `work_lane_visible_lead_required` means `set_state active` (or an `active` adopt) found no qualifying lead. `work_lane_lead_ineligible` means that seat cannot lead this lane.
 
-Lane state is explicit: member attendance/activity never resumes a paused lane or hides ownership loss. The existing display-only `lead.presence.working` ORs actual working/background activity across every effectively assigned member seat, before member/seat/page caps, plus the bound lead's existing busy descendants. Lead identity, generation, qualification, status, online and card still describe the bound lead. Historical bindings remain available for fault display. Terminal/unresolved residual execution remains observable and grants no new execution. Existing client paused/blocked/done/needs-you motion gates remain; when all question-bearing members are beyond the eight-row preview, its final row is replaced with one such member.
+A paused, unparked lane with a live assigned work seat resumes on refresh with reason `work_started`; that seat also suppresses lead-lost and permits explicit activation. A parked lane stays parked. A manual pause lasts until the next refresh if work continues. The existing display-only `lead.presence.working` ORs actual working/background activity across every effectively assigned member seat, before member/seat/page caps, plus the bound lead's existing busy descendants. Lead identity, generation, qualification, status, online and card still describe the bound lead. Historical bindings remain available for fault display. Terminal/unresolved residual execution remains observable and grants no new execution. Existing client paused/blocked/done/needs-you motion gates remain; when all question-bearing members are beyond the eight-row preview, its final row is replaced with one such member.
 
 Lanes are display and grouping state, not execution admission. Spawn, send,
 close and assignment changes do not depend on lane state or lead presence.
@@ -573,7 +573,7 @@ DB. Review the concrete rollback artifact before activation.
 
 ## Owner loss (`lead_lost` fault)
 
-- The existing episode drain opens one `lead_lost` episode (`<lane_id>:lead_lost:<n>`) for a non-done lane in either of two states: stored `active` without a qualifying lead, or stored `paused` with reason `lead_lost` (legacy rows) while its lead does not qualify. Member attendance or activity never suppresses the fault.
+- The existing episode drain opens one `lead_lost` episode (`<lane_id>:lead_lost:<n>`) for a non-done lane in either of two states: stored `active` without a qualifying lead, or stored `paused` with reason `lead_lost` (legacy rows) while its lead does not qualify. An eligible live work seat suppresses the fault.
 - It is delivered through the same `work_lane.v1` sink with code `lane_lead_lost` as a direct FD alert, not in the Work update digest, because a lost lead needs repair before the lane looks idle. It also wakes the front desk past its routine-ingress hold: the notice queue marks it with an in-process wake token that no wire input can carry. The other work-lane kinds stay on the digest. The existing storm guard can still hold a repeat or a burst for the digest. Detection takes ≤ the 60 s pass plus one pass. The alert names the lost lead and generation and the repair commands.
 - The same episode and notification survive a restart and an FD rebind. Delivery or acknowledgement never clears it.
 - It clears only when one of these holds:
@@ -862,3 +862,18 @@ sets an explicit icon; `--clear-icon` sends null and restores title fallback.
 These flags are mutually exclusive and may accompany `--title` or `--summary`.
 At least one text/icon flag is required. The daemon validates unknown keys as
 `work_lane_icon_invalid`; expected-version and request-id semantics are unchanged.
+
+
+A detail member's `latest_event` is its latest attributed done report (`review_passed`,
+`review_failed`, or `reported_done`), or null. `status_behind` is true when a fresh,
+unfinished item has a passing review or done report at least 30 minutes old and newer
+than its last observed progress. An unavailable index cannot establish this flag. The
+`lane_status_behind` episode reports up to three items captured at its opening.
+
+Before rolling back to a release without this episode kind, run against the daemon
+SQLite database before starting the older release:
+
+```sql
+UPDATE v2_work_lane_episodes SET cleared_at=COALESCE(cleared_at, datetime('now')),
+  emitted_ref=COALESCE(emitted_ref, 'rollback') WHERE kind='status_behind';
+```

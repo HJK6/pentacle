@@ -64,6 +64,32 @@ def lane_estimate_missing(lane: dict[str, Any], *, index_available: bool | None 
                and m.get("estimate") is None for m in members)
 
 
+STATUS_BEHIND_GRACE_S = 1800
+
+
+def member_status_behind(member: dict[str, Any], now_iso: str, index_available: bool) -> bool:
+    event = member.get("_latest_event") or {}
+    at = event.get("at")
+    progress = member.get("_progress_at")
+    return bool(index_available and member.get("status") not in ("completed", "deprecated")
+                and member.get("terminal") not in ("completed", "deprecated")
+                and member.get("observation", {}).get("quality") == "fresh"
+                and event.get("kind") in ("review_passed", "reported_done") and at
+                and (not progress or _epoch(at) > _epoch(progress))
+                and _epoch(now_iso) - _epoch(at) >= STATUS_BEHIND_GRACE_S)
+
+
+def lane_status_behind(lane: dict[str, Any], now_iso: str) -> bool | None:
+    if lane.get("work_state") == "done" or (lane.get("work_state") == "paused" and lane.get("parked_at")):
+        return False
+    if not lane.get("_work_index_available"):
+        return None
+    members = lane.get("_members") or []
+    if any(member_status_behind(m, now_iso, True) for m in members):
+        return True
+    return None if any(m.get("observation", {}).get("quality") != "fresh" for m in members) else False
+
+
 def members_working(lane: dict[str, Any], sessions: list[dict[str, Any]] | None = None) -> bool:
     """Actual activity over all effective assignments, before presentation caps."""
     if sessions is None:
@@ -148,7 +174,7 @@ def lane_lead_lost(lane: dict[str, Any]) -> bool:
     while their lead does not qualify; a qualifying lead clears it either way."""
     state = lane.get("work_state")
     legacy = state == "paused" and lane.get("work_state_reason") == "lead_lost"
-    return (state == "active" or legacy) and not lane.get("_qualifies")
+    return (state == "active" or legacy) and not lane.get("_qualifies") and not lane.get("_has_work_seat")
 
 
 def lane_progress(lane: dict[str, Any], *, all_members: bool = False,

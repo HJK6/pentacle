@@ -239,7 +239,7 @@ def _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor
                 _text(parking if parking is not None else payload.get("reason"), UPDATE_TEXT_MAX,
                       "work_lane_override_reason_required", required=True)
             if payload["to"] == "active":
-                _require_qualifying_lead(lane, conn)
+                _require_lead_or_work_seat(lane, conn)
             if payload["to"] in {"paused", "blocked"} and parking is None:
                 _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required", required=True)
                 _text(payload.get("next_action"), UPDATE_TEXT_MAX, "work_lane_next_action_required", required=True)
@@ -257,6 +257,30 @@ from store_lane_hues import (ensure_lane_hues_schema, enter_open_conn, prepare_h
                              repair_hues_conn, hue_transaction)
 
 
+def ensure_latest_report_schema(conn) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS v2_work_item_latest_report ("
+                 "spec_id TEXT PRIMARY KEY, kind TEXT NOT NULL, at TEXT NOT NULL, report_id TEXT NOT NULL)")
+
+
+def record_latest_report_conn(conn, report: dict) -> bool:
+    attribution = (report.get("usage_snapshot") or {}).get("attribution") or {}
+    if report.get("status") != "done" or attribution.get("mode") != "exclusive_primary" or not attribution.get("spec_id"):
+        return False
+    kind = {"accept": "review_passed", "reject": "review_failed"}.get(report.get("qa_verdict"), "reported_done")
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(report["created_at"]))
+    return bool(conn.execute("INSERT INTO v2_work_item_latest_report (spec_id,kind,at,report_id) VALUES (?,?,?,?) "
+        "ON CONFLICT(spec_id) DO UPDATE SET kind=excluded.kind,at=excluded.at,report_id=excluded.report_id "
+        "WHERE excluded.at >= v2_work_item_latest_report.at",
+        (attribution["spec_id"], kind, at, report["report_id"])).rowcount)
+
+
+def enrich_latest_reports_conn(conn, members: list[dict]) -> None:
+    for member in members:
+        row = conn.execute("SELECT kind,at,report_id FROM v2_work_item_latest_report WHERE spec_id=?", (member["spec_id"],)).fetchone()
+        member["_latest_event"] = {"kind": row[0], "at": row[1]} if row else None
+        member["_latest_report_id"] = row[2] if row else None
+
+
 def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
     """Additive migration only: nullable columns, a new table, partial indexes."""
     present = {row[1] for row in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")}
@@ -265,6 +289,7 @@ def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE v2_assistant_composite_lanes ADD COLUMN {column} {ddl}")
     upgrade_events(conn, WORK_LANE_EVENTS_DDL)
     ensure_work_index_schema(conn)
+    ensure_latest_report_schema(conn)
     ensure_work_lane_episodes_schema(conn)
     for ddl in WORK_LANE_INDEX_DDL:
         conn.execute(ddl)
@@ -593,8 +618,10 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
     route_dispatch_map = resolved_route_dispatch_map(conn)
     for lane in lanes:
         lane["_members"] = members_conn(conn, lane, snapshot)
+        enrich_latest_reports_conn(conn, lane["_members"])
         enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
+        lane["_has_work_seat"] = _has_work_seat_conn(conn, lane)
         marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
         fd_stamp = conn.execute(
             f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",
@@ -888,9 +915,28 @@ def _assigned_seats_conn(conn, spec_ids: list[str]) -> list[dict[str, str]]:
         (*spec_ids, *spec_ids))]
 
 
+def _has_work_seat_conn(conn, lane: dict[str, Any]) -> bool:
+    members = lane.get("_members")
+    if members is None:
+        enriched = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane["lane_id"])), None)
+        members = enriched.get("_members", []) if enriched else []
+    ids = [m["spec_id"] for m in members if m.get("status") not in ("completed", "deprecated")]
+    for assigned in _assigned_seats_conn(conn, ids):
+        row = _session_conn(conn, assigned["stream_id"])
+        if row and seat_live(row) and not (_is_composite(row) or _protected(row) or row.get("_fd_backend")) and row.get("role") != "planner":
+            return True
+    return False
+
+
+def _require_lead_or_work_seat(lane, conn):
+    if not _has_work_seat_conn(conn, lane):
+        _require_qualifying_lead(lane, conn)
+
+
 def _lead_lost_conn(lane: dict[str, Any], conn) -> bool:
     lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
-    return lane_lead_lost({**lane, "_qualifies": work_lane_lead_qualifies(lane, lead)})
+    return lane_lead_lost({**lane, "_qualifies": work_lane_lead_qualifies(lane, lead),
+                           "_has_work_seat": _has_work_seat_conn(conn, lane)})
 
 
 def _override_audit(actor: str, generation: str, action: str, prior: str, nxt: str,
@@ -995,7 +1041,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             changes["work_state"] = to
             changes["work_state_reason"] = "reopened" if prior_state == "done" else "fd"
             if to == "active":
-                _require_qualifying_lead(lane, conn)
+                _require_lead_or_work_seat(lane, conn)
                 if lane.get("bound_stream_id") == actor:
                     raise ValueError("work_lane_lead_ineligible")
             if to in {"paused", "blocked"} and parking is None:
@@ -1477,6 +1523,7 @@ def _lifecycle_lane_rows_conn(conn) -> list[dict[str, Any]]:
     for lane in lanes:
         lane.pop("hue_open_order", None)
         lane["_members"] = members_conn(conn, lane, snapshot)
+        enrich_latest_reports_conn(conn, lane["_members"])
         enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
     return lanes
@@ -1487,6 +1534,7 @@ def _reconcile_lane_lifecycle_conn(conn) -> dict[str, Any]:
     completed: list[str] = []
     settled: list[str] = []
     reopened: list[str] = []
+    resumed: list[str] = []
     for lane in _lifecycle_lane_rows_conn(conn):
         # Spec F's reversible archive mark is skipped by settling and reopening.
         if lane.get("archived_at"):
@@ -1498,6 +1546,17 @@ def _reconcile_lane_lifecycle_conn(conn) -> dict[str, Any]:
             if status == "finished":
                 _complete_lane_conn(conn, lane, stamp)
                 completed.append(lane["lane_id"])
+            elif state == "paused" and not lane.get("parked_at") and _has_work_seat_conn(conn, lane):
+                version = int(lane["version"]) + 1
+                cur = conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='active', work_state_reason='work_started', version=?, updated_at=? WHERE lane_id=? AND version=?",
+                                   (version, stamp, lane["lane_id"], lane["version"]))
+                if cur.rowcount != 1:
+                    raise ValueError("assistant_lane_version_conflict")
+                event_id = f"lifecycle:resume:{lane['lane_id']}:{version}"
+                _insert_event(conn, event_id=event_id, lane=lane, operation="set_state", source_id=event_id,
+                              actor=DAEMON_ACTOR, generation=None, prior="paused", nxt="active", expected=None,
+                              payload={"to": "active", "auto": "work_started"}, stamp=stamp)
+                resumed.append(lane["lane_id"])
         elif state == "done":
             if lane.get("work_state_reason") != "goals_done":
                 # Hand-closed: settle once it certainly has no unfinished work.
@@ -1508,7 +1567,7 @@ def _reconcile_lane_lifecycle_conn(conn) -> dict[str, Any]:
                 # Settled: reopen the moment it certainly has unfinished work.
                 if _reopen_lane_conn(conn, lane, stamp):
                     reopened.append(lane["lane_id"])
-    return {"completed": completed, "settled": settled, "reopened": reopened}
+    return {"completed": completed, "settled": settled, "reopened": reopened, "resumed": resumed}
 
 
 def new_request_id(prefix: str = "wl") -> str:

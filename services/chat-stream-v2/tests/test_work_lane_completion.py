@@ -756,3 +756,54 @@ def test_v7e_member_conflict_leaves_settled_lane_done(tmp_path):
         assert lid not in result['reopened']
         assert (await lane_now(env, lid))['work_state'] == 'done'
     run(body, str(tmp_path / 'v7e.db'))
+
+
+def test_paused_lane_resumes_for_live_assigned_worker(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:resume', goal='resume', items=[('i1', 'in_progress')])
+        await env.store.open_session('host-a', 'resume-worker', role='worker', assigned_spec_id='spec_demo__i1')
+        result = await lifecycle(env)
+        assert lane['lane_id'] in result['resumed']
+        current = await lane_now(env, lane['lane_id'])
+        assert (current['work_state'], current['work_state_reason'], current['version']) == ('active', 'work_started', lane['version'] + 1)
+        events = await lane_lifecycle_events(env, lane['lane_id'])
+        assert len(events) == 1 and events[0]['payload'] == {'to': 'active', 'auto': 'work_started'}
+        assert (await lifecycle(env))['resumed'] == []
+    run(body, str(tmp_path / 'resume.db'))
+
+
+@pytest.mark.parametrize('role,pane,expected', [('lead', 'pane_alive', True), ('qa', 'pane_alive', True),
+                                              (None, 'pane_alive', True), ('planner', 'pane_alive', False),
+                                              ('worker', 'pane_dead', False)])
+def test_resume_seat_eligibility(tmp_path, role, pane, expected):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:seat', goal='seat', items=[('i1', 'in_progress')])
+        await env.store.open_session('host-a', 'seat', role=role, pane_status=pane, assigned_spec_id='spec_demo__i1')
+        result = await lifecycle(env)
+        assert (lane['lane_id'] in result['resumed']) is expected
+    run(body, str(tmp_path / 'seat.db'))
+
+
+def test_report_changes_detail_revision_and_opens_behind_episode(tmp_path):
+    from work_lanes_projection import project_lane
+    from test_work_lane_episodes import RecordingSink
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:milestone', goal='milestone', items=[('i1', 'in_progress')])
+        before = (await env.store.work_lane_rows())[0]
+        def record(conn):
+            conn.execute("INSERT INTO v2_work_item_latest_report VALUES (?,?,?,?)", ('spec_demo__i1', 'review_passed', '2099-01-01T00:00:00Z', 'r1'))
+            conn.commit()
+        await env.store.submit(record)
+        after = (await env.store.work_lane_rows())[0]
+        assert before['_detail_revision'] != after['_detail_revision']
+        projected = project_lane(after, None, '2099-01-01T00:31:00Z', all_members=True)
+        assert projected['members'][0]['latest_event'] == {'kind': 'review_passed', 'at': '2099-01-01T00:00:00Z'}
+        assert projected['members'][0]['status_behind'] is True
+        sink = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(sink, now_iso='2099-01-01T00:31:00Z')
+        facts = [fact for fact in sink.calls if fact['kind'] == 'status_behind']
+        assert len(facts) == 1 and facts[0]['items'] == ['spec_demo__i1']
+    run(body, str(tmp_path / 'milestone.db'))

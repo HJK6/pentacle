@@ -108,6 +108,8 @@ export type WorkLaneMember = {
   blocked_line?: string | null;
   /** Detail-only derived facts: last real progress, readable summary, first estimate, what it unblocks, its trail. */
   progress_at?: string | null;
+  latest_event?: { kind: string; at: string } | null;
+  status_behind?: boolean;
   summary_line?: string | null;
   estimate_first?: { p25: number; p75: number; median: number } | null;
   unblocks?: Array<{ spec_id: string; title: string | null }>;

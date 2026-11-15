@@ -850,6 +850,9 @@ class Ledger:
                 **put_kwargs,
             )
             inserted = bool(row.pop("_report_inserted", True))
+            latest_changed = row.pop("_latest_report_changed", False)
+            if latest_changed and (refresh := getattr(self.sessions, "refresh_work_for_report", None)):
+                refresh()
             if inserted:
                 if apply_state := getattr(self.sessions, "apply_report_state", None):
                     try:

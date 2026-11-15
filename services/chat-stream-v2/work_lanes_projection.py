@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from work_lane_progress import lane_state, lane_progress, seat_live, seat_working, working_spec_ids
+from work_lane_progress import lane_state, lane_progress, seat_live, seat_working, working_spec_ids, member_status_behind
 from store_work_lane_episodes import LaneEpisodeSink
 from _shared.lane_icons import resolve_icon
 from _shared.lane_hues import resolve_hue
@@ -31,7 +31,7 @@ def detail_member_keys():
     return detail_field_keys() | {"blocked_line", "checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
         "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
         "goal_text", "goal_text_truncated", "goal_source",
-        "progress_at", "summary_line", "estimate_first", "unblocks", "recent"}
+        "progress_at", "summary_line", "estimate_first", "unblocks", "recent", "latest_event", "status_behind"}
 
 def _line(member, field_id, raw_key):
     """Whole valid label or null; a duplicate label is never valid, though raw text keeps the first."""
@@ -182,6 +182,8 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                              "next_line": _line(member, "next_action", "next_action_text"),
                              **({"blocked_line": _line(member, "blockers", "blockers_text"),
                                  "progress_at": member.get("_progress_at"),
+                                 "latest_event": member.get("_latest_event"),
+                                 "status_behind": member_status_behind(member, now_iso, bool(lane.get("_work_index_available"))),
                                  "criteria": member.get("criteria", []),
                                  "transitions": member.get("transitions", [])} if all_members else {})}
                             for member in progress["members"]]
