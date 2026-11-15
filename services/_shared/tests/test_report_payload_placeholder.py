@@ -95,7 +95,7 @@ def test_progress_reports_unchanged():
     [
         {"summary": "Shipped e7aae4f9; live proof recorded in agent-outputs.", "findings": [FINDING], "next_action": "none"},
         {"summary": "Spec QA ACCEPT; no defects in the plan or tests.", "findings": [], "no_findings": True, "next_action": "lead_merge"},
-        {"summary": "recurring smoke passed on thoth", "findings": [], "no_findings": True, "next_action": "done"},
+        {"summary": "recurring smoke passed on the host", "findings": [], "no_findings": True, "next_action": "done"},
     ],
 )
 def test_real_report_shapes_accepted(body):
