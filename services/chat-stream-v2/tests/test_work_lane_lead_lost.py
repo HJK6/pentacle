@@ -266,12 +266,12 @@ def test_parallel_member_owners_share_projection_fault_and_stale_predicate(store
         for name, role, spec in zip(("parallel-lead", "parallel-planner"), ("lead", "planner"), specs):
             await env.seat(name, role=role, visibility="hidden", assigned_spec_id=spec, parent_stream_id=FD)
         await drain(env.store)
-        assert all(item["cleared_at"] is None for item in await episodes(env.store, lid))
+        assert all(item["cleared_at"] is not None for item in await episodes(env.store, lid))
         rows = await env.store.work_lane_rows()
         row = next(row for row in rows if row["lane_id"] == lid)
         shown = presented(row)
-        assert shown["state"] == ("paused" if stored == "paused" else "active")
-        assert shown["state_reason"] == ("fd" if stored == "paused" else "lead_lost")
+        assert shown["state"] == ("active" if stored == "active" else "paused")
+        assert shown["state_reason"] == ("lead_lost" if stored == "legacy" else "fd")
         assert shown["stale"] is False
         census = {f"{seat['host']}:{seat['session_name']}": seat for seat in await env.store.list_sessions("open")}
         detail = project_lane(row, None, "2026-10-08T00:00:00Z", all_members=True, sessions_by_stream=census)

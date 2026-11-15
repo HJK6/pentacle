@@ -807,3 +807,95 @@ def test_report_changes_detail_revision_and_opens_behind_episode(tmp_path):
         facts = [fact for fact in sink.calls if fact['kind'] == 'status_behind']
         assert len(facts) == 1 and facts[0]['items'] == ['spec_demo__i1']
     run(body, str(tmp_path / 'milestone.db'))
+
+
+def test_report_only_wakes_inventory_subscriber(tmp_path):
+    from ledger import Ledger
+    from sessions import Sessions
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:subscriber', goal='subscriber', items=[('i1', 'in_progress')])
+        sessions = Sessions(env.store, local_host='host-a')
+        await sessions.open('host-a', 'reporter', provider='codex', role='worker',
+                            spec_ids=['spec_demo__i1'], assigned_spec_id='spec_demo__i1')
+        frames = []
+        async def broadcast(frame):
+            frames.append(frame)
+        inv = WorkLanesInventory(env.store, sessions, broadcast)
+        inv.refresh_min_s = 0
+        sessions.refresh_work_for_report = inv.refresh
+        await inv.emit_if_changed()
+        first = next(x for x in frames[-1]['lanes'] if x['lane_id'] == lane['lane_id'])['detail_revision']
+        ledger = Ledger(env.store, sessions=sessions)
+        await ledger.report({'report_id': 'subscriber-report', 'from_stream_id': 'host-a:reporter',
+                             'msg_id': 0, 'status': 'done', 'summary': 'Completed the commissioned implementation', 'findings': [],
+                             'no_findings': True, 'next_action': 'Review'})
+        if inv._task:
+            await inv._task
+        last = next(x for x in frames[-1]['lanes'] if x['lane_id'] == lane['lane_id'])['detail_revision']
+        assert len(frames) >= 2 and first != last
+        assert all('latest_event' not in m for m in frames[-1]['lanes'][0]['members'])
+        await inv.stop()
+    run(body, str(tmp_path / 'subscriber.db'))
+
+
+@pytest.mark.parametrize('condition', ['closed', 'offline', 'terminal', 'parked', 'blocked', 'archived', 'done'])
+def test_ineligible_work_does_not_resume(tmp_path, condition):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:noresume', goal='noresume', items=[('i1', 'completed' if condition == 'terminal' else 'in_progress')])
+        lid = lane['lane_id']
+        await env.store.open_session('host-a', 'candidate', role='worker', assigned_spec_id='spec_demo__i1')
+        if condition == 'closed':
+            await env.store.mark_closed('host-a', 'candidate', closed_at='2026-01-01T00:00:00Z', pane_status='pane_dead')
+        if condition == 'offline':
+            await env.store.update_session('host-a', 'candidate', offline_since_ts='2026-01-01T00:00:00Z')
+        if condition in ('parked', 'blocked', 'archived', 'done'):
+            def set_lane(conn):
+                if condition == 'parked':
+                    conn.execute("UPDATE v2_assistant_composite_lanes SET parked_at='2026-01-01', parked_reason='hold' WHERE lane_id=?", (lid,))
+                elif condition == 'archived':
+                    conn.execute("ALTER TABLE v2_assistant_composite_lanes ADD COLUMN archived_at TEXT")
+                    conn.execute("UPDATE v2_assistant_composite_lanes SET archived_at='2026-01-01' WHERE lane_id=?", (lid,))
+                else:
+                    conn.execute('UPDATE v2_assistant_composite_lanes SET work_state=? WHERE lane_id=?', (condition, lid))
+                conn.commit()
+            await env.store.submit(set_lane)
+        assert lid not in (await lifecycle(env))['resumed']
+    run(body, str(tmp_path / 'ineligible.db'))
+
+
+def test_resume_version_conflict_keeps_lane_paused(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:conflict', goal='conflict', items=[('i1', 'in_progress')])
+        await env.store.open_session('host-a', 'worker', role='worker', assigned_spec_id='spec_demo__i1')
+        def conflict(conn):
+            conn.execute("CREATE TRIGGER reject_resume BEFORE UPDATE OF work_state ON v2_assistant_composite_lanes WHEN NEW.work_state='active' BEGIN SELECT RAISE(IGNORE); END")
+        await env.store.submit(conflict)
+        with pytest.raises(ValueError, match='assistant_lane_version_conflict'):
+            await lifecycle(env)
+        after = await lane_now(env, lane['lane_id'])
+        assert after['work_state'] == 'paused' and after['version'] == lane['version']
+        assert await lane_lifecycle_events(env, lane['lane_id']) == []
+    run(body, str(tmp_path / 'conflict.db'))
+
+
+@pytest.mark.parametrize('excluded', ['composite', 'protected', 'front_desk'])
+def test_excluded_backend_seat_cannot_resume(tmp_path, monkeypatch, excluded):
+    root = tmp_path / 'memory'
+    if excluded == 'protected':
+        monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'protected_worker')
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:excluded', goal='excluded', items=[('i1', 'in_progress')])
+        role = 'protected_worker' if excluded == 'protected' else 'worker'
+        row = await env.store.open_session('host-a', 'candidate', provider='composite' if excluded == 'composite' else 'codex',
+                                           role=role, assigned_spec_id='spec_demo__i1')
+        if excluded == 'front_desk':
+            def bind(conn):
+                conn.execute("INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) VALUES(?,?,?,?,?)",
+                             ('test-extra', 'host-a:candidate', row['session_generation'], 1, '2026-01-01T00:00:00Z'))
+                conn.commit()
+            await env.store.submit(bind)
+        assert lane['lane_id'] not in (await lifecycle(env))['resumed']
+    run(body, str(tmp_path / 'excluded.db'))

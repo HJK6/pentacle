@@ -74,3 +74,25 @@ def test_report_insert_updates_latest_in_same_transaction(tmp_path):
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def test_report_insert_rolls_back_when_latest_row_fails(tmp_path):
+    import asyncio
+    from ledger import Ledger
+    from store import Store
+    from test_report_disposition_context import setup, payload
+    async def run():
+        store = Store(str(tmp_path / 'rollback.db'))
+        store.start()
+        try:
+            sessions = await setup(store)
+            snapshot = await Ledger(store, sessions=sessions)._report_routing_snapshot('host-a:reporter')
+            await store.submit(lambda conn: conn.execute("CREATE TRIGGER fail_latest BEFORE INSERT ON v2_work_item_latest_report BEGIN SELECT RAISE(ABORT, 'injected failure'); END"))
+            import pytest
+            with pytest.raises(sqlite3.IntegrityError, match='injected failure'):
+                await store.put_report(payload('rolled-back'), routing_snapshot=snapshot)
+            assert await store.get_report('rolled-back') is None
+            assert await store.submit(lambda conn: conn.execute('SELECT count(*) FROM v2_work_item_latest_report').fetchone()[0]) == 0
+        finally:
+            store.stop()
+    asyncio.run(run())

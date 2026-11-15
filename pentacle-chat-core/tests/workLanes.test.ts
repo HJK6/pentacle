@@ -238,3 +238,18 @@ test('park record is additive and malformed values never drop a lane', () => {
   assert.deepEqual(normalizeWorkLanesInventory(cell.inventory_frame)!.lanes[0].parked,
     cell.inventory_frame.lanes[0].parked);
 });
+
+test('latest report and behind fields survive normalization when present and remain optional', () => {
+  const cell = fixture.spec_details_v1;
+  const raw = structuredClone(cell.show_projection);
+  raw.members[0].latest_event = { kind: 'review_passed', at: '2026-01-01T00:00:00Z' };
+  raw.members[0].status_behind = true;
+  const member = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0].progress!.members[0];
+  assert.deepEqual(member.latest_event, raw.members[0].latest_event);
+  assert.equal(member.status_behind, true);
+  delete raw.members[0].latest_event;
+  delete raw.members[0].status_behind;
+  const old = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0].progress!.members[0];
+  assert.equal('latest_event' in old, false);
+  assert.equal('status_behind' in old, false);
+});
