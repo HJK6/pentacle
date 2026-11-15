@@ -717,3 +717,26 @@ def test_other_notes_query_is_documented_and_lists_reasons():
             "EXPLAIN QUERY PLAN " + strict_publication.OTHER_NOTES_SQL, (ASSISTANT, "x"))))
         assert "USING INDEX" in plan and "kv" not in strict_publication.OTHER_NOTES_SQL
     run(body, strict=True)
+
+
+@pytest.mark.parametrize("note_type", ["started", "change"])
+@pytest.mark.parametrize("age,refused", [(86400.25, False), (86399.75, True)])
+def test_repeat_window_keeps_fractional_seconds(note_type, age, refused):
+    import calendar
+    import strict_publication
+    stamp = "2026-11-14T04:21:40.500000Z"
+    then = calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S")) + 0.5
+    async def body(h):
+        await _seed_note_refs(h)
+        first = await h.composite.publish(_note(h, "first", "First note", note_type=note_type, ref="tell:tell1"), actor_stream_id=ROOT)
+        await h.store.submit(lambda conn: (conn.execute(
+            "UPDATE v2_assistant_composite_publications SET created_at=? WHERE publication_key='first'", (stamp,)), conn.commit()))
+        clock = SimpleNamespace(time=lambda: then + age, strftime=time.strftime, gmtime=time.gmtime)
+        with patch.object(strict_publication, "time", clock):
+            later = _note(h, "later", "Later note", note_type=note_type, ref="tell:tell1")
+            if refused:
+                with pytest.raises(ValueError, match=f"assistant_publish_repeat:{first['event_id']}$"):
+                    await h.composite.publish(later, actor_stream_id=ROOT)
+            else:
+                assert not (await h.composite.publish(later, actor_stream_id=ROOT))["duplicate"]
+    run(body, strict=True)

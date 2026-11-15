@@ -25,8 +25,9 @@ def normalize(text):
 
 def window_start(seconds, now=None):
     """The publications.created_at stamp (sub-second ISO) `seconds` before now."""
-    now = time.time() if now is None else now
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now - seconds)) + ".000000Z"
+    cut = (time.time() if now is None else now) - seconds
+    whole = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(cut))
+    return f"{whole}.{int(cut * 1_000_000) % 1_000_000:06d}Z"
 
 
 def recent_proactive_notes(conn, stream_id, now=None):
