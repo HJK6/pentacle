@@ -76,10 +76,12 @@ async def adopt(s, *, kind="completed", members=None):
         row = await s.server.sessions.open("fixture", "v2-lead", provider="codex", role="lead", visibility="visible")
         lead = {"stream_id": "fixture:v2-lead", "generation": row["session_generation"]}
     from test_work_lanes import seed_pending_goal, synthetic_epic
-    from _shared.work_goals import derive_lane_id
+    from _shared.work_goals import derive_lane_id, goal_id
     epic = synthetic_epic("stream:synthetic-lane")
-    # An empty goal keeps the lane open, so the existing completion/stale/estimate
-    # episode machinery this file exercises is unchanged by auto-completion.
+    # The member sits under the lane's goal, so a completed member finishes the
+    # goal (the lane completes through the lifecycle and emits a completed
+    # episode), while an in-progress member keeps the goal and the lane open for
+    # the stale and estimate-missing journeys.
     await seed_pending_goal(s.store, epic, derive_lane_id("fixture:assistant", "stream:synthetic-lane"))
     payload = {"adoption_key": "stream:synthetic-lane", "title": "Build paper bridges",
                "owner_kind": "operator", "work_state": "active" if lead else "paused",
@@ -92,7 +94,9 @@ async def adopt(s, *, kind="completed", members=None):
         lane_id=None, expected_lane_version=None, payload=payload, actor_stream_id="fixture:v2-test",
         actor_generation=s.origin["session_generation"], binding_name=s.composite.config.name,
         env_binding=s.composite._env_binding())
-    await seed_observations(s.store, [lane_member(kind)])
+    item = lane_member(kind)
+    item["goal_id"] = goal_id(epic)
+    await seed_observations(s.store, [item])
     return result["lane"]
 
 
