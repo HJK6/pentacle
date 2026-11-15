@@ -141,3 +141,62 @@ def test_real_cli_conflict_has_exact_code_and_lane_id(tmp_path):
             await server.close()
             assert server._ws_server is None
     run(body, str(tmp_path / "fixture.db"))
+
+
+def test_real_cli_preview_then_apply_both_shapes(tmp_path):
+    """V8: the real CLI `adopt --preview` -> FD edit -> `adopt --apply` roundtrip both
+    creates a new-lane adoption (by adoption_key) and promotes a routing row (by
+    lane_id), each only once its goal charter is observed. No mock is in the path."""
+    from test_work_lane_goals import write_goal, reconcile, scanner
+    from test_work_lanes_adoption import _admit_routing_lane
+    memory = tmp_path / "memory"
+    (memory / "work").mkdir(parents=True)
+
+    async def body(env):
+        token_hash = hashlib.sha256(b"fixture-lane-token").hexdigest()
+        assert await env.store.grant_stream_token("fixture-root", "visible", token_hash, STREAM_TOKEN_HASH_VERSION) == "ok"
+        # New-lane candidate: an adoptable visible lead seat. Promotion candidate: an
+        # admitted routing row. Each needs its goal charter observed before adopt.
+        sid, _gen = await env.seat("preview-lead", role="lead", parent_stream_id=FD)
+        new_lane = derive_lane_id(ASSISTANT, "stream:" + sid)
+        promote_lane = "wl-previewpromote000000000"
+        await _admit_routing_lane(env, promote_lane, "Routing candidate", "preview-request")
+        write_goal(memory, new_lane, "newlane")
+        write_goal(memory, promote_lane, "promote")
+        await reconcile(env.store, scanner(memory))
+        sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
+        await sessions.refresh()
+        server = Server(port=0, store=env.store, sessions=sessions, local_host="fixture-root")
+        server.assistant_composite = env.composite
+        specs = SpecsSubsystem(session_summaries=sessions.list_open, changed_callback=lambda ids: None, debounce_s=0)
+        server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast, specs=specs,
+                                               sweep_interval_s=0.2, settle_s=0)
+        try:
+            port = await server.bind()
+            preview = await cli_call(port, tmp_path, "adopt", "--preview", "--composite-stream-id", ASSISTANT)
+            cands = {c.get("lane_id") or c["adoption_key"]: c for c in preview["candidates"]}
+            assert ("stream:" + sid) in cands and promote_lane in cands
+            newc, promc = cands["stream:" + sid], cands[promote_lane]
+            # A new-lane candidate is display-only on new_lane_id and carries no lane_id.
+            assert newc["new_lane_id"] == new_lane and not newc.get("lane_id")
+
+            async def apply_one(entry, goals, *, status=0):
+                plan = tmp_path / "plan.json"
+                plan.write_text(json.dumps([{**entry, "owner_kind": "operator",
+                                             "work_state": "paused", "goals": goals}]))
+                return await cli_call(port, tmp_path, "adopt", "--apply", str(plan),
+                                      "--composite-stream-id", ASSISTANT, expected_status=status)
+
+            # The FD edits the preview (owner_kind + the observed goal) and applies each shape.
+            out_new = await apply_one(newc, ["epic_newlane"])
+            out_prom = await apply_one(promc, ["epic_promote"])
+            assert str(out_new["response"]["type"]).endswith(".ok"), out_new
+            assert str(out_prom["response"]["type"]).endswith(".ok"), out_prom
+            n = (await env.store.get_work_lane(new_lane))["lane"]
+            p = (await env.store.get_work_lane(promote_lane))["lane"]
+            assert n["lane_id"] == new_lane and n["work_state"] == "paused"
+            assert p["lane_id"] == promote_lane and p["work_state"] == "paused"
+        finally:
+            await server.close()
+            assert server._ws_server is None
+    run(body, str(tmp_path / "fixture.db"))

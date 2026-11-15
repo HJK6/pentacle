@@ -230,11 +230,16 @@ unchanged. JSON list/show passes through the keys. The fixture retains its eight
 existing `progress_v2` cells and appends `stale_observation_completed`,
 `completion_pending` and `stale_lane`; older consumers can ignore the additions.
 
-- `completion_pending` is true only for a non-done lane with at least one member,
-  no unresolved members, every member freshly observed and terminal, and at
-  least one completed member. It is null when the index is unavailable or a
-  member is stale/error, otherwise false. A done lane always reports false.
-  Deprecated-only, empty and settled missing/ambiguous sets do not imply completion.
+- `completion_pending` follows the one certain lane-work rule for every non-done
+  lane (goal-bearing or goal-less). It is true only when the daemon is certain the
+  lane has no unfinished work: the index is available, every goal record and every
+  member observation is freshly observed, every goal is done (non-empty with all its
+  placed members completed), and no open unplaced item remains. It is null when the
+  daemon cannot be certain — the index is unavailable, or any goal record or member
+  observation is stale/missing/ambiguous/error — so uncertain data holds rather than
+  clearing a recorded completion. It is false when the lane is certainly still open:
+  an empty or not-done goal, or an open unplaced item, keeps it open even when every
+  member spec is terminal. A done lane always reports false.
 - `lead_reported_done` is independent of member completion. A resolved dispatch
   related to this lane by its route or admission receipt establishes routing
   correlation. Without correlation the value is null; with correlation but no

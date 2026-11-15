@@ -362,11 +362,12 @@ def test_v4_parked_and_blocked_lanes_complete(tmp_path):
 
 
 def test_v4_missing_goal_charter_holds_lane_uncertain(tmp_path):
-    """A deleted goal charter is observed as `missing` (not removed), so the lane
-    is uncertain and the daemon neither completes nor reopens it. NOTE: the spec
-    Non-Goal says a lane whose last goal is moved away `simply completes`; the
-    implementation instead holds it uncertain while the charter reads missing.
-    Flagged to the front desk as a design discrepancy (see build report)."""
+    """A deleted/missing/invalid goal charter is observed as `missing` (not removed),
+    so the lane stays uncertain and the daemon neither completes nor reopens it. This
+    is the intended option-A behavior per the approved disposition (advisor 3c6461bc /
+    b323d70a): only a FRESH observed move-away permits completion, while a missing,
+    deleted or invalid source leaves completion, reopening and settling unchanged
+    (per V5 and the Risks section). It is a clarification, not a behavior change."""
     root = tmp_path / 'memory'
     async def body(env):
         lane = await build_lane(env, root, key='stream:v4miss', goal='g', items=[('i1', 'completed')],
