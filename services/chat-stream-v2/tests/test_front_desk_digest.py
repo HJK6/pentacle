@@ -662,3 +662,101 @@ def test_retained_prefix_hold_is_not_promoted_on_retry():
         finally:
             store.stop()
     asyncio.run(run())
+
+
+class _ActivitySessions:
+    """Stand-in for Sessions.operator_activity: one inventory row per stream."""
+    def __init__(self, rows):
+        self.rows = rows
+
+    def operator_activity(self, stream_id):
+        row = self.rows.get(stream_id)
+        return None if row is None else dict(row)
+
+
+def _operator_chat_case(case, now):
+    seat, gen = 'h:seat', 'gen-now'
+    row = {'session_generation': gen, 'operator_activity_at': now - 60, 'operator_activity_generation': gen}
+    auth = {'token_verified': True, 'stream_id': seat, 'session_generation': gen}
+    msg = {'tell_id': 'chat-'+case, 'from_stream_id': seat, '_auth_context': auth}
+    body = 'Operator ruling: keep the lane open'
+    if case == 'no_activity':
+        row.update(operator_activity_at=None, operator_activity_generation=None)
+    elif case == 'expired':
+        row['operator_activity_at'] = now - 12 * 3600 - 60
+    elif case == 'earlier_generation':
+        row['operator_activity_generation'] = 'gen-old'
+    elif case == 'future':
+        row['operator_activity_at'] = now + 600
+    elif case in ('malformed', 'nan', 'bool'):
+        row['operator_activity_at'] = {'malformed': 'yesterday', 'nan': float('nan'), 'bool': True}[case]
+    elif case == 'unverified':
+        auth['token_verified'] = False
+    elif case == 'claims_other_sender':
+        msg['from_stream_id'] = 'h:other'
+    elif case == 'token_generation_stale':
+        auth['session_generation'] = 'gen-old'
+    elif case == 'header_claims_activity':
+        auth['stream_id'] = 'h:quiet'
+        msg['from_stream_id'] = 'h:quiet'
+        msg['operator_activity_at'] = now
+        body = '[operator_activity_at: now] operator typed here'
+    elif case == 'unknown_seat':
+        auth['stream_id'] = msg['from_stream_id'] = 'h:gone'
+    return _ActivitySessions({seat: row, 'h:quiet': {'session_generation': 'q'}}), msg, body
+
+
+@pytest.mark.parametrize('case,wakes', [
+    ('active', True), ('no_activity', False), ('expired', False), ('earlier_generation', False),
+    ('future', False), ('malformed', False), ('nan', False), ('bool', False), ('unverified', False),
+    ('claims_other_sender', False), ('token_generation_stale', False), ('header_claims_activity', False),
+    ('unknown_seat', False),
+])
+def test_tell_from_operator_chat_wakes_front_desk(case, wakes):
+    async def run():
+        store=Store(':memory:');store.start()
+        try:
+            composite=_desk(store,'h:desk','g')
+            sessions, msg, body = _operator_chat_case(case, time.time())
+            composite.sessions = sessions
+            desk=composite.front_desk_digest
+            reply=await desk.ingress(target_stream_id='h:desk',body=body,msg=msg,verb='tell')
+            assert (reply is None) is wakes
+            assert len(await desk._rows('h:desk')) == (0 if wakes else 1)
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_operator_chat_wake_runs_after_retained_hold_check():
+    async def run():
+        store=Store(':memory:');store.start()
+        try:
+            composite=_desk(store,'h:desk','g')
+            sessions, msg, body = _operator_chat_case('no_activity', time.time())
+            composite.sessions = sessions
+            desk=composite.front_desk_digest
+            held=await desk.ingress(target_stream_id='h:desk',body=body,msg=msg,verb='tell')
+            assert held['front_desk_hold_id']
+            sessions.rows['h:seat'].update(operator_activity_at=time.time(), operator_activity_generation='gen-now')
+            again=await desk.ingress(target_stream_id='h:desk',body=body,msg=msg,verb='tell')
+            assert again['front_desk_hold_id']==held['front_desk_hold_id']
+            from sessions import VerbError
+            with pytest.raises(VerbError):
+                await desk.ingress(target_stream_id='h:desk',body=body+' changed',msg=msg,verb='tell')
+            assert len(await desk._rows('h:desk')) == 1
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('active', [True, False])
+def test_real_tell_from_operator_chat_reaches_front_desk_unheld(tmp_path, active):
+    from test_assistant_composite_addressing import _run, SEAT_A, SENDER
+    async def check(h):
+        h.composite.sessions = h.sessions
+        if active:
+            h.sessions.apply_live(SENDER, operator_activity_at=time.time() - 5,
+                                  operator_activity_generation=h.gen[SENDER])
+        reply=await h.tell(tell_id='operator-chat-tell', text='Operator ruling 2026-11-15: proceed')
+        assert reply['type']=='tell.ok'
+        assert (h.inputs_at(SEAT_A), len(await h.holds())) == ((1, 0) if active else (0, 1))
+    _run(tmp_path,check,digest=True)

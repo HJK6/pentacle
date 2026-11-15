@@ -6,6 +6,7 @@ from test_assistant_prose_mirror import ASSISTANT, ROOT
 import asyncio
 import json
 import shlex
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -544,4 +545,174 @@ def test_marker_sweep_failure_does_not_block_ruling_reconciliation(caplog):
         await service.tick()
         assert checked == [True]
         assert 'assistant unanswered-marker check failed; will retry' in caplog.text
+    run(body, strict=True)
+
+
+def _note(h, key, text, **extra):
+    return {"request_id": key, "composite_stream_id": ASSISTANT, "publish_kind": "status",
+            "message": text, "_auth_context": {"token_verified": True, "stream_id": ROOT,
+            "session_generation": h.generation}, **extra}
+
+
+async def _seed_note_refs(h):
+    def seed(conn):
+        conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,summary,created_at,updated_at,work_state) VALUES ('lane1',?,'execution','x','now','now','active')", (ASSISTANT,))
+        conn.execute("INSERT INTO v2_reports(report_id,from_stream_id,status,ingested_at,created_at) VALUES ('report1',?,'done','now',0)", (ROOT,))
+        conn.execute("INSERT INTO v2_watch_wake(id,kind,owner,owner_generation,request_id,fingerprint,state,data) VALUES ('wake1','idle',?,'g','r','f','active','{}')", (ROOT,))
+        for tell in ("tell1", "tell2"):
+            conn.execute("INSERT INTO v2_tell_deliveries(tell_id,reply,created_at) VALUES (?,'{}',0)", (tell,))
+        conn.commit()
+    await h.store.submit(seed)
+
+
+def test_started_change_other_notes_publish_like_result():
+    async def body(h):
+        await _seed_note_refs(h)
+        result = await h.composite.publish(_note(h, "n-result", "Result note", note_type="result", ref="tell:tell1"), actor_stream_id=ROOT)
+        started = await h.composite.publish(_note(h, "n-started", "Started note", note_type="started", ref="tell:tell1"), actor_stream_id=ROOT)
+        change = await h.composite.publish(_note(h, "n-change", "Change note", note_type="change", ref="report:report1"), actor_stream_id=ROOT)
+        other = await h.composite.publish(_note(h, "n-other", "Other note", note_type="other", ref="wake:wake1",
+                                                note_reason="  operator asked to hear about new hosts  "), actor_stream_id=ROOT)
+        assert not any(r["duplicate"] for r in (result, started, change, other))
+        events = {e["text"]: e for e in await h.answers()}
+        base = events["Result note"]
+        varying = {"text", "message_id", "timestamp", "daemon_seq", "event_id", "note_type", "ref", "note_reason", "seq"}
+        for text, note_type in (("Started note", "started"), ("Change note", "change"), ("Other note", "other")):
+            event = events[text]
+            assert event["note_type"] == note_type and event["raw"]["note_type"] == note_type
+            assert {k: v for k, v in event.items() if k not in varying | {"raw"}} == {
+                k: v for k, v in base.items() if k not in varying | {"raw"}}
+            assert set(event["raw"]) - {"note_reason"} == set(base["raw"])
+        assert events["Other note"]["note_reason"] == "operator asked to hear about new hosts"
+        assert all("operator asked" not in e["text"] for e in events.values())
+        stored = await h.store.submit(lambda conn: conn.execute(
+            "SELECT canonical_payload_json FROM v2_assistant_composite_publications WHERE publication_key='n-other'").fetchone())
+        assert json.loads(stored[0])["note_reason"] == "operator asked to hear about new hosts"
+    run(body, strict=True)
+
+
+@pytest.mark.parametrize("note_type,reason", [
+    ("other", None), ("other", "   "), ("other", "x" * 201), ("other", 7),
+    ("result", "why"), ("started", "why"), ("change", "why"), ("problem", "why"),
+])
+def test_note_reason_required_for_other_and_refused_elsewhere(note_type, reason):
+    async def body(h):
+        await _seed_note_refs(h)
+        extra = {} if reason is None else {"note_reason": reason}
+        with pytest.raises(ValueError, match="assistant_publish_reason_required"):
+            await h.composite.publish(_note(h, "reason", "Reason note", note_type=note_type, ref="tell:tell1", **extra), actor_stream_id=ROOT)
+        assert (await h.composite.publish(_note(h, "reason-ok", "Reason boundary", note_type="other", ref="tell:tell1",
+                                                note_reason="y" * 200), actor_stream_id=ROOT))["duplicate"] is False
+    run(body, strict=True)
+
+
+@pytest.mark.parametrize("ref", ["report:report1", "wake:wake1"])
+def test_started_refuses_report_and_wake_refs(ref):
+    async def body(h):
+        await _seed_note_refs(h)
+        with pytest.raises(ValueError, match="assistant_publish_ref_kind_not_allowed"):
+            await h.composite.publish(_note(h, "bad-started", "Started badly", note_type="started", ref=ref), actor_stream_id=ROOT)
+        for index, ok in enumerate(("tell:tell1", "lane:lane1")):
+            await h.composite.publish(_note(h, f"ok-started-{index}", f"Started ok {index}", note_type="started", ref=ok), actor_stream_id=ROOT)
+    run(body, strict=True)
+
+
+@pytest.mark.parametrize("note_type", ["started", "change"])
+def test_started_and_change_repeat_guard_is_per_ref_per_day(note_type):
+    async def body(h):
+        await _seed_note_refs(h)
+        first_msg = _note(h, "first", "First note", note_type=note_type, ref="tell:tell1")
+        first = await h.composite.publish(first_msg, actor_stream_id=ROOT)
+        with pytest.raises(ValueError, match=f"assistant_publish_repeat:{first['event_id']}$"):
+            await h.composite.publish(_note(h, "second", "Second note", note_type=note_type, ref="tell:tell1"), actor_stream_id=ROOT)
+        replay = await h.composite.publish(first_msg, actor_stream_id=ROOT)
+        assert replay["duplicate"] is True and replay["event_id"] == first["event_id"]
+        assert not (await h.composite.publish(_note(h, "result", "Result same ref", note_type="result", ref="tell:tell1"), actor_stream_id=ROOT))["duplicate"]
+        assert not (await h.composite.publish(_note(h, "other-ref", "Other ref", note_type=note_type, ref="tell:tell2"), actor_stream_id=ROOT))["duplicate"]
+        def age(conn, seconds):
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - seconds)) + ".000000Z"
+            conn.execute("UPDATE v2_assistant_composite_publications SET created_at=? WHERE publication_key='first'", (stamp,))
+            conn.commit()
+        await h.store.submit(lambda conn: age(conn, 24 * 3600 - 60))
+        with pytest.raises(ValueError, match=f"assistant_publish_repeat:{first['event_id']}$"):
+            await h.composite.publish(_note(h, "third", "Third note", note_type=note_type, ref="tell:tell1"), actor_stream_id=ROOT)
+        await h.store.submit(lambda conn: age(conn, 24 * 3600 + 60))
+        assert not (await h.composite.publish(_note(h, "later", "Later note", note_type=note_type, ref="tell:tell1"), actor_stream_id=ROOT))["duplicate"]
+    run(body, strict=True)
+
+
+def test_repeat_guard_read_is_bounded_by_the_window():
+    import strict_publication
+    async def body(h):
+        def work(conn):
+            plan = " ".join(str(row[-1]) for row in conn.execute(
+                "EXPLAIN QUERY PLAN " + strict_publication.REPEAT_GUARD_SQL, (ASSISTANT, "2026-01-01T00:00:00.000000Z")))
+            steps = [0]
+            def tick():
+                steps[0] += 1
+            conn.set_progress_handler(tick, 1)
+            try:
+                strict_publication.recent_proactive_notes(conn, ASSISTANT)
+            finally:
+                conn.set_progress_handler(None, 1)
+            return plan, steps[0]
+        def seed(conn):
+            conn.executemany(
+                "INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,"
+                "canonical_payload_json,dispatch_id,publish_kind,event_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                [(f"old-{i}", ASSISTANT, "d", json.dumps({"note_type": "started", "ref": "tell:tell1"}), "",
+                  "status", 1_000_000 + i, "2025-01-01T00:00:00.000000Z") for i in range(10_000)])
+            conn.commit()
+        _, before = await h.store.submit(work)
+        await h.store.submit(seed)
+        plan, after = await h.store.submit(work)
+        assert "USING INDEX" in plan and "stream_id=? AND created_at>?" in plan, plan
+        assert after == before
+    run(body, strict=True)
+
+
+def test_pre_release_note_without_reason_replays_unchanged():
+    async def body(h):
+        await _seed_note_refs(h)
+        msg = _note(h, "pre-release", "Pre release note", note_type="result", ref="tell:tell1")
+        first = await h.composite.publish(msg, actor_stream_id=ROOT)
+        stored = await h.store.submit(lambda conn: conn.execute(
+            "SELECT canonical_payload_json FROM v2_assistant_composite_publications WHERE publication_key='pre-release'").fetchone()[0])
+        assert "note_reason" not in json.loads(stored)
+        replay = await h.composite.publish(msg, actor_stream_id=ROOT)
+        assert replay["duplicate"] is True and replay["event_id"] == first["event_id"]
+    run(body, strict=True)
+
+
+def test_strict_off_strips_note_reason_like_note_type():
+    async def body(h):
+        def off(conn):
+            conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES('assistant.strict_publication.enabled','off')")
+            conn.commit()
+        await h.store.submit(off)
+        await h.composite.publish(_note(h, "loose", "Loose note", note_type="other", ref="tell:none",
+                                        note_reason="why"), actor_stream_id=ROOT)
+        stored = await h.store.submit(lambda conn: conn.execute(
+            "SELECT canonical_payload_json FROM v2_assistant_composite_publications WHERE publication_key='loose'").fetchone()[0])
+        assert not {"note_type", "ref", "note_reason"} & json.loads(stored).keys()
+        event = (await h.answers())[-1]
+        assert not {"note_type", "ref", "note_reason"} & (event.keys() | event["raw"].keys())
+    run(body, strict=True)
+
+
+def test_other_notes_query_is_documented_and_lists_reasons():
+    import pathlib
+    import strict_publication
+    doc = (pathlib.Path(__file__).resolve().parents[3] / "docs" / "assistant.md").read_text()
+    assert strict_publication.OTHER_NOTES_SQL in " ".join(doc.split())
+    async def body(h):
+        await _seed_note_refs(h)
+        await h.composite.publish(_note(h, "o1", "Other one", note_type="other", ref="tell:tell1", note_reason="first reason"), actor_stream_id=ROOT)
+        await h.composite.publish(_note(h, "r1", "Result one", note_type="result", ref="tell:tell1"), actor_stream_id=ROOT)
+        rows = await h.store.submit(lambda conn: [tuple(r) for r in conn.execute(
+            strict_publication.OTHER_NOTES_SQL, (ASSISTANT, "2000-01-01T00:00:00Z"))])
+        assert [(r[2], r[3]) for r in rows] == [("tell:tell1", "first reason")]
+        plan = await h.store.submit(lambda conn: " ".join(str(r[-1]) for r in conn.execute(
+            "EXPLAIN QUERY PLAN " + strict_publication.OTHER_NOTES_SQL, (ASSISTANT, "x"))))
+        assert "USING INDEX" in plan and "kv" not in strict_publication.OTHER_NOTES_SQL
     run(body, strict=True)
