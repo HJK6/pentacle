@@ -661,6 +661,41 @@ def test_v1_promotion_shape_refuses_goal_less_and_unresolved(tmp_path):
     run(body, str(tmp_path / 'v1p.db'))
 
 
+def test_v1_goals_only_adoption_without_members_or_no_spec_reason(tmp_path):
+    """F1: valid observed goals justify a lane, so neither members nor a
+    no_spec_reason is required; missing goals is goal_required, not
+    no_spec_reason_required, for both the new-lane and promotion shapes."""
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:goalonly'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        await seed_pending_goal(env.store, 'epic_goalonly', lane_id)
+        # New-lane shape: goals, no members, no no_spec_reason -> created.
+        out = await env.op('adopt', {'adoption_key': key, 'title': 'Goals only', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'goals': ['epic_goalonly']}, request_id='adopt:' + key, inject_goals=False)
+        assert out['lane']['lane_id'] == lane_id and out['lane']['members'] == [] and out['lane']['no_spec_reason'] is None
+        # Missing goals (also no members, no no_spec_reason) is goal_required, writing nothing.
+        before = await _lane_event_counts(env.store)
+        with pytest.raises(ValueError, match='work_lane_goal_required'):
+            await env.op('adopt', {'adoption_key': 'stream:nogoal', 'title': 'No goal', 'summary': 'g',
+                'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT}},
+                request_id='adopt:stream:nogoal', inject_goals=False)
+        assert await _lane_event_counts(env.store) == before
+        # Promotion shape: a routing row promoted by its goal alone, no members/no_spec_reason.
+        from test_work_lanes_adoption import _admit_routing_lane
+        await _admit_routing_lane(env, 'wl-promote0000000000000', 'Routing candidate', 'req-promote')
+        write_goal(root, 'wl-promote0000000000000', 'promo')
+        await reconcile(env.store, scanner(root))
+        promoted = await env.op('adopt', {'adoption_key': 'request:promote-me', 'title': 'Promo', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'lane_id': 'wl-promote0000000000000', 'goals': ['epic_promo']},
+            request_id='promote-goalonly', inject_goals=False)
+        assert promoted['lane']['lane_id'] == 'wl-promote0000000000000' and promoted['lane']['no_spec_reason'] is None
+    run(body, str(tmp_path / 'v1goalonly.db'))
+
+
 def test_v2_creation_with_a_goal_is_immediate_and_replayable(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
