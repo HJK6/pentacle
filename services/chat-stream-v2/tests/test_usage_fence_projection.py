@@ -103,6 +103,12 @@ async def _measure(store, action):
     return result, elapsed, statements, tables
 
 
+# The scale-10 case seeds 500k session_event_tail rows and, since the native-input
+# AFTER INSERT trigger (64c9bbc0), takes 27-52s against the suite-wide 60s pytest
+# timeout, so a loaded host can push it past 60s and os._exit the xdist worker. Give
+# it explicit headroom (like the soak overrides) without touching the fixture, the
+# query shape or the assertions, and keep scale 1 well within it.
+@pytest.mark.timeout(150)
 @pytest.mark.parametrize("scale", [1, 10])
 def test_complete_fence_lookup_has_no_history_work(tmp_path, scale, record_testsuite_property):
     def record(name, value):
