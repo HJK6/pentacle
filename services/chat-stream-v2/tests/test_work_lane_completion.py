@@ -241,7 +241,8 @@ from _shared.work_goals import derive_lane_id
 from test_work_lane_goals import write_goal, write_item, scanner, reconcile
 from test_work_lane_episodes import RecordingSink, member, seed_observations
 from test_work_lanes import lane_updates
-from work_lanes_projection import build_frame
+from work_lanes_projection import WorkLanesInventory, build_frame
+from types import SimpleNamespace
 
 
 async def build_lane(env, root, *, key, goal='g', items=(), extra_goals=(), state='paused',
@@ -383,86 +384,162 @@ def test_v4_missing_goal_charter_holds_lane_uncertain(tmp_path):
     run(body, str(tmp_path / 'v4miss.db'))
 
 
-def test_v4_moved_last_goal_charter_holds_lane_uncertain(tmp_path):
-    """A lane's last goal charter re-observed naming a DIFFERENT lane is quality='error'
-    for this lane, so lane_work_status is uncertain and the lane neither completes nor
-    reopens -- the SAME hold as a missing/deleted/invalid charter (test above), because
-    the observation layer cannot distinguish 'the work moved' from 'the source broke'
-    for this lane. Whether the disposition's 'a fresh move-away permits completion'
-    requires a behavior change here is a finding carried to the front desk."""
+async def refresh(env, root, sink):
+    """One real lane refresh: WorkLanesInventory._drain over a real scan of ``root``
+    (work index reconcile, lifecycle, episode drain to ``sink``, frame emission)."""
+    frames = []
+
+    async def broadcast(frame):
+        frames.append(frame)
+    inv = WorkLanesInventory(env.store, SimpleNamespace(list_open=lambda: []), broadcast,
+                             specs=scanner(root), settle_s=0, refresh_min_s=0, episode_sink=sink)
+    inv._running = True  # core-ready, without attaching the file watcher
+    await inv.refresh_for_close()
+    return frames
+
+
+def completed_alerts(sink, lane_id):
+    return sum(c['kind'] == 'completed' and c['lane_id'] == lane_id for c in sink.calls)
+
+
+def test_v4_moved_to_unknown_lane_holds_lane_uncertain(tmp_path):
+    """A last goal charter re-observed naming a lane the daemon does not know is held
+    pending for that future lane (quality 'error' here), so this lane is uncertain and
+    holds, the same as a missing/deleted/invalid charter. A move to a known lane is the
+    fresh move-away that completes (next test)."""
     root = tmp_path / 'memory'
     async def body(env):
         lane = await build_lane(env, root, key='stream:v4mv', goal='g', items=[('i1', 'in_progress')])
         lid = lane['lane_id']
         other = derive_lane_id(ASSISTANT, 'stream:v4mv-elsewhere')
-        write_goal(root, other, 'g')  # epics/g.md re-observed naming `other` (a fresh move-away)
-        await reconcile(env.store, scanner(root))
+        write_goal(root, other, 'g')
+        sink = RecordingSink()
+        await refresh(env, root, sink)
         record = await env.store.submit(lambda conn: __import__('store_work_index')._state_conn(conn)
                                         ['goal_observations']['epic_g'])
-        assert record['quality'] == 'error'  # fresh, but names another lane -> error for this lane
-        result = await lifecycle(env)
-        assert lid not in result['completed']
-        assert (await lane_now(env, lid))['work_state'] != 'done'  # held uncertain, not completed
+        assert record['quality'] == 'error' and record['error'] == 'work_goal_lane_unknown'
+        assert (await lane_now(env, lid))['work_state'] != 'done'
+        assert completed_alerts(sink, lid) == 0
     run(body, str(tmp_path / 'v4mv.db'))
 
 
+def test_v4_last_goal_moved_to_known_lane_completes_on_real_refresh(tmp_path):
+    """V4: a lane whose only goal moved to another (known) lane completes in one real
+    refresh, with its single alert, and the frame drops it; the receiving lane, which
+    now owns the unfinished goal, stays open."""
+    root = tmp_path / 'memory'
+    async def body(env):
+        source = await build_lane(env, root, key='stream:v4mvk', goal='g', items=[('i1', 'in_progress')])
+        target = await build_lane(env, root, key='stream:v4mvk-target', goal='h', items=[('h1', 'in_progress')])
+        sid, tid = source['lane_id'], target['lane_id']
+        sink = RecordingSink()
+        await refresh(env, root, sink)
+        assert (await lane_now(env, sid))['work_state'] != 'done'
+        write_goal(root, tid, 'g')  # the memory edit moving the last goal to the target lane
+        frames = await refresh(env, root, sink)
+        moved = await lane_now(env, sid)
+        assert moved['work_state'] == 'done' and moved['work_state_reason'] == 'goals_done'
+        events = await lane_lifecycle_events(env, sid)
+        assert [e['payload']['auto'] for e in events] == ['goals_done']
+        assert completed_alerts(sink, sid) == 1
+        assert (await lane_now(env, tid))['work_state'] != 'done'
+        assert completed_alerts(sink, tid) == 0
+        assert frames and not any(l['lane_id'] == sid for l in frames[-1]['lanes'])
+        assert any(l['lane_id'] == tid for l in frames[-1]['lanes'])
+    run(body, str(tmp_path / 'v4mvk.db'))
+
+
 def test_v4_preexisting_completed_episode_alerts_once_no_repeats(tmp_path):
-    """A lane's auto-completion opens exactly one completed episode; draining it alerts
-    once, and neither a further lifecycle refresh nor a repeated episode reconcile
-    re-alerts for it -- exactly one completed episode row exists for the lane."""
+    """V4: a lane that already has an uncleared, not-yet-handed `completed` episode
+    (opened by an earlier episode pass, as before this release) completes in a real
+    refresh with exactly one alert handed to the sink, and two further refreshes hand
+    no new one and open no new episode."""
     root = tmp_path / 'memory'
     async def body(env):
         lane = await build_lane(env, root, key='stream:v4ep', goal='g', items=[('i1', 'completed')])
         lid = lane['lane_id']
-        await lifecycle(env)  # completes -> opens the completed episode
-        first = RecordingSink()
-        await env.store.reconcile_work_lane_episodes(first)
-        assert sum(c['kind'] == 'completed' and c.get('lane_id') == lid for c in first.calls) == 1
-        # A second lifecycle refresh and a second drain alert zero more times for it.
-        await lifecycle(env)
-        second = RecordingSink()
-        await env.store.reconcile_work_lane_episodes(second)
-        assert all(c.get('lane_id') != lid for c in second.calls)
-        # Exactly one completed episode row exists for the lane (no repeats opened).
-        kinds = await env.store.submit(lambda conn: [r[0] for r in conn.execute(
-            "SELECT kind FROM v2_work_lane_episodes WHERE lane_id=? AND kind='completed'", (lid,))])
-        assert kinds == ['completed']
+        await env.store.reconcile_work_lane_episodes(None)  # episode opened, nothing handed yet
+        before = await env.store.submit(lambda conn: [dict(r) for r in conn.execute(
+            "SELECT episode_id,cleared_at,emitted_ref FROM v2_work_lane_episodes "
+            "WHERE lane_id=? AND kind='completed'", (lid,))])
+        assert len(before) == 1 and before[0]['cleared_at'] is None and before[0]['emitted_ref'] is None
+        assert (await lane_now(env, lid))['work_state'] != 'done'
+        sink = RecordingSink()
+        await refresh(env, root, sink)
+        assert (await lane_now(env, lid))['work_state'] == 'done'
+        assert completed_alerts(sink, lid) == 1
+        await refresh(env, root, sink)
+        await refresh(env, root, sink)
+        assert completed_alerts(sink, lid) == 1
+        rows = await env.store.submit(lambda conn: [r[0] for r in conn.execute(
+            "SELECT episode_id FROM v2_work_lane_episodes WHERE lane_id=? AND kind='completed'", (lid,))])
+        assert rows == [before[0]['episode_id']]
     run(body, str(tmp_path / 'v4ep.db'))
 
 
-def test_v5_uncertainty_prevents_completion_reopening_and_settling(tmp_path):
-    """V5: while the daemon is uncertain (the work index is unavailable, so neither the
-    goal records nor the member observations are fresh) it takes NONE of the three
-    lifecycle transitions. A complete-looking open lane is not auto-completed, a
-    hand-closed finished lane is not settled, and a settled lane with genuinely new
-    work is not reopened, because completion and settling require a certain `finished`
-    status and reopening a certain `unfinished` one, and `uncertain` is neither. V7
-    covers the affirmative settle/reopen once certainty returns."""
+V5_SOURCES = ('index_unavailable', 'stale_goal_record', 'stale_member', 'deleted_charter', 'invalid_charter')
+
+
+def _make_uncertain(root, source, lanes):
+    """Apply one V5 uncertainty source on disk; return a function that undoes it."""
+    if source == 'index_unavailable':
+        (root / 'work').rename(root / 'work.away')
+        return lambda: (root / 'work.away').rename(root / 'work')
+    if source == 'stale_goal_record':
+        (root / 'epics').rename(root / 'epics.away')
+        return lambda: (root / 'epics.away').rename(root / 'epics')
+    if source == 'stale_member':
+        # Each lane's completed item now names an epic that does not exist: its
+        # observation goes stale and keeps its last-good placement.
+        for _, goal, item in lanes:
+            write_item(root, item, status='completed', epic='epic_nowhere')
+        return lambda: [write_item(root, item, status='completed', epic='epic_' + goal) for _, goal, item in lanes]
+    if source == 'deleted_charter':
+        for _, goal, _ in lanes:
+            (root / 'epics' / (goal + '.md')).unlink()
+        return lambda: [write_goal(root, lane_id, goal) for lane_id, goal, _ in lanes]
+    if source == 'invalid_charter':
+        for _, goal, _ in lanes:
+            (root / 'epics' / (goal + '.md')).write_text('---\nid: [unclosed\n---\n')
+        return lambda: [write_goal(root, lane_id, goal) for lane_id, goal, _ in lanes]
+    raise AssertionError(source)
+
+
+@pytest.mark.parametrize('source', V5_SOURCES)
+def test_v5_uncertainty_prevents_completion_reopening_and_settling(tmp_path, source):
+    """V5: each uncertainty source in the spec leaves an otherwise complete lane open,
+    an otherwise reopenable settled lane done and a hand-closed finished lane unsettled,
+    over real refreshes. Undoing the source lets the same refresh complete, reopen and
+    settle them, so the hold is the uncertainty and nothing else. V7 covers the
+    affirmative transitions in full."""
     root = tmp_path / 'memory'
     async def body(env):
-        # (3) first, in isolation: a SETTLED (auto-completed, goals_done) lane with real
-        # new work, so settling it here does not also complete the lanes added below.
+        sink = RecordingSink()
         settled = await build_lane(env, root, key='stream:v5r', goal='r', items=[('r1', 'completed')])
         sid = settled['lane_id']
-        await lifecycle(env)  # auto-completes v5r -> done/goals_done (settled); only v5r exists yet
+        await refresh(env, root, sink)
         assert (await lane_now(env, sid))['work_state_reason'] == 'goals_done'
-        write_item(root, 'r2', status='in_progress', epic='epic_r')  # a real unfinished item under the goal
-        # (1) an otherwise-complete OPEN lane, and (2) a hand-closed finished lane, both
-        # built AFTER the settling lifecycle so neither has been through a certain pass.
+        write_item(root, 'r2', status='in_progress', epic='epic_r')  # reopening work
+        # Built after the settling refresh, so neither has been through a certain pass.
         complete = await build_lane(env, root, key='stream:v5c', goal='c', items=[('c1', 'completed')])
         handclosed = await build_lane(env, root, key='stream:v5s', goal='s', items=[('s1', 'completed')])
-        hc = handclosed['lane_id']
+        cid, hid = complete['lane_id'], handclosed['lane_id']
         await env.op('set_state', {'to': 'done', 'outcome': 'Closed by hand', 'reason': 'FD closes'},
-                     lane=hc, version=handclosed['version'])
-        assert (await lane_now(env, hc))['work_state_reason'] == 'fd'
-        # Now make the daemon uncertain and run the lifecycle: nothing moves.
-        await env.store.mark_work_index_pending()
-        result = await lifecycle(env)
-        assert result == {'completed': [], 'settled': [], 'reopened': []}
-        assert (await lane_now(env, complete['lane_id']))['work_state'] != 'done'   # not completed
-        assert (await lane_now(env, hc))['work_state_reason'] == 'fd'               # not settled
-        st = await lane_now(env, sid)
-        assert st['work_state'] == 'done' and st['work_state_reason'] == 'goals_done'  # not reopened
+                     lane=hid, version=handclosed['version'])
+        assert (await lane_now(env, hid))['work_state_reason'] == 'fd'
+        undo = _make_uncertain(root, source, [(sid, 'r', 'r1'), (cid, 'c', 'c1'), (hid, 's', 's1')])
+        await refresh(env, root, sink)
+        await refresh(env, root, sink)
+        assert (await lane_now(env, cid))['work_state'] != 'done'                 # not completed
+        assert (await lane_now(env, hid))['work_state_reason'] == 'fd'            # not settled
+        held = await lane_now(env, sid)
+        assert held['work_state'] == 'done' and held['work_state_reason'] == 'goals_done'  # not reopened
+        assert completed_alerts(sink, cid) == 0
+        undo()
+        await refresh(env, root, sink)
+        assert (await lane_now(env, cid))['work_state'] == 'done'
+        assert (await lane_now(env, hid))['work_state_reason'] == 'goals_done'
+        assert (await lane_now(env, sid))['work_state'] == 'paused'
     run(body, str(tmp_path / 'v5.db'))
 
 
