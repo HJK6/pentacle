@@ -747,3 +747,35 @@ def test_v2_index_pass_after_adoption_keeps_acceptance(tmp_path):
         record = await env.store.submit(goal_record)
         assert record['quality'] == 'fresh' and record['facts']['lane_id'] == lane_id and 'pending' not in record
     run(body, str(tmp_path / 'v2race.db'))
+
+
+def test_v2_held_scan_prepared_before_adoption_does_not_revert_acceptance(tmp_path):
+    """F5: the changed-base protection. A scan computed while the goal is still
+    pending (lane not yet created) must not, when applied after the adoption,
+    revert the acceptance written in the adopt transaction."""
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:v2held'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        write_goal(root, lane_id, 'held')
+        source = scanner(root)
+        await reconcile(env.store, source)  # epic_held observed as pending (lane absent)
+        pre = await env.store.submit(lambda conn: __import__('store_work_index')._state_conn(conn)
+                                     ['goal_observations']['epic_held'])
+        assert 'pending' in pre  # the charter is pending before the lane exists
+        # Prepare a scan snapshot BEFORE the adoption and hold it unapplied.
+        held = source.scan_work_observations()
+        out = await env.op('adopt', {'adoption_key': key, 'title': 'Held', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'goals': ['epic_held'], 'no_spec_reason': 'Fixture'}, request_id='adopt:' + key, inject_goals=False)
+        assert out['lane']['lane_id'] == lane_id
+        # Applying the pre-adoption snapshot recomputes against the post-adopt
+        # state and leaves the acceptance fresh (never reverts it to pending).
+        await env.store.reconcile_work_observations(held, settle_s=0, sweep=True)
+        def goal_record(conn):
+            from store_work_index import _state_conn
+            return _state_conn(conn)['goal_observations']['epic_held']
+        record = await env.store.submit(goal_record)
+        assert record['quality'] == 'fresh' and record['facts']['lane_id'] == lane_id and 'pending' not in record
+    run(body, str(tmp_path / 'v2held.db'))
