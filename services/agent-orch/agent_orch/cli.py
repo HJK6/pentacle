@@ -87,7 +87,7 @@ SERVICES_ROOT = Path(__file__).resolve().parents[2]
 if str(SERVICES_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICES_ROOT))
 import _shared
-from _shared.report_payload_v1 import SchemaError, validate as validate_report_payload
+from _shared.report_payload_v1 import EXAMPLE_SUMMARY, SchemaError, validate as validate_report_payload
 from _shared.asset_schema import (
     AssetBodyTooLarge,
     AssetValidationError,
@@ -129,7 +129,7 @@ SCHEDULE_STATES = (
 def _report_payload_example(status: str) -> dict[str, object]:
     if status in {"done", "error", "aborted"}:
         payload: dict[str, object] = {
-            "summary": "Completed the assigned work.",
+            "summary": EXAMPLE_SUMMARY,
             "findings": [
                 {
                     "severity": "info",
@@ -156,9 +156,12 @@ def _report_payload_shape(status: str) -> str:
             " and reason (non-empty string)" if status in {"error", "aborted"} else ""
         )
         return (
-            f"ReportPayloadV1 for --status {status} requires summary (non-empty string), "
-            f"findings (array), and next_action (non-empty string){reason_requirement}; "
-            f"{finding_shape}. Optional fields: details (string/object/array), extras (object)."
+            f"ReportPayloadV1 for --status {status} requires summary (at least 20 characters "
+            f"describing the result), findings (array), and next_action (at least 4 characters, "
+            f'e.g. "none"){reason_requirement}; {finding_shape}. '
+            + ('A done report with no findings sets "no_findings": true beside an empty findings list. '
+               if status == "done" else "")
+            + "Optional fields: details (string/object/array), extras (object)."
         )
     return (
         "ReportPayloadV1 for --status progress has no required payload fields. "
@@ -186,12 +189,31 @@ def _format_report_payload_validation_failure(exc: BaseException, status: str, *
     lines.append(_report_payload_shape(status))
 
     example = json.dumps(_report_payload_example(status), separators=(",", ":"))
-    lines.append(f"Minimal valid --result for --status {status}:")
+    lines.append(
+        f"Template --result for --status {status} "
+        "(replace summary, findings and next_action with your real result):"
+    )
     lines.append(example)
-    lines.append("Copy-paste command:")
+    lines.append("Template command (edit the --result before running):")
     msg_id_arg = str(msg_id) if msg_id is not None else "N"
     lines.append(f"agent-orch report --msg-id {msg_id_arg} --status {status} --result '{example}'")
+    # Last, so `| tail -1` still shows what was wrong.
+    lines.append(_rejected_line(violations, header))
     return "\n".join(lines)
+
+
+def _rejected_line(violations: object, fallback: str) -> str:
+    """One final line naming the first violation, for output read through a tail."""
+    named = [
+        v for v in (violations if isinstance(violations, list) else [])
+        if isinstance(v, dict) and v.get("field")
+    ]
+    if not named:
+        return f"REJECTED: {fallback}"
+    first = named[0]
+    detail = str(first.get("detail") or first.get("code") or "invalid").strip()
+    more = f" (+{len(named) - 1} more)" if len(named) > 1 else ""
+    return f"REJECTED: {first['field']}: {detail}{more}"
 
 
 class AgentOrchArgumentParser(argparse.ArgumentParser):
@@ -4848,6 +4870,15 @@ def report(args: argparse.Namespace) -> int:
     print(f"agent-orch report: report rejected: {error_code}", file=sys.stderr)
     if response.get("hint"):
         print(f"agent-orch report: hint: {response['hint']}", file=sys.stderr)
+    # The JSON line went to stdout; flush it so the reason stays last under `2>&1 | tail`.
+    sys.stdout.flush()
+    print(
+        _rejected_line(
+            response.get("schema_violations"),
+            f"{error_code}: {response.get('error_message') or ''}".rstrip(": "),
+        ),
+        file=sys.stderr,
+    )
     if error_code in {"report_id_replay_conflict"}:
         return 4
     if error_code in {"stream_unknown", "result_blob_unknown"}:

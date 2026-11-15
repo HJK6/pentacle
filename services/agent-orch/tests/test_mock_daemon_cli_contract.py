@@ -121,14 +121,14 @@ def test_mock_daemon_cli_contract_ring(monkeypatch, tmp_path, capsys):
                 "--report-id",
                 "report-1",
                 "--result",
-                '{"summary":"ok","findings":[],"next_action":"leader_proceed"}',
+                '{"summary":"ok (test report body)","findings":[], "no_findings": true,"next_action":"leader_proceed"}',
             ],
             {
                 "type": "report",
                 "from_stream_id": "hosta:leader",
                 "msg_id": 7,
                 "status": "done",
-                "summary": "ok",
+                "summary": "ok (test report body)",
                 "report_id": "report-1",
             },
             lambda request: {

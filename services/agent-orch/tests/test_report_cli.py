@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from argparse import Namespace
 import json
+from pathlib import Path
+
 import pytest
 
 from agent_orch import cli, stream_id
@@ -11,7 +13,7 @@ from _shared.report_payload_v1 import SchemaError, validate as validate_report_p
 
 def _args(**overrides):
     data = {
-        "result": json.dumps({"summary": "ok", "findings": [], "next_action": "leader_proceed"}),
+        "result": json.dumps({"summary": "ok (test report body)", "findings": [], "no_findings": True, "next_action": "leader_proceed"}),
         "result_file": None,
         "msg_id": 7,
         "status": "done",
@@ -31,7 +33,7 @@ def _args(**overrides):
 def test_report_explicit_commission_identity_is_typed():
     args = cli.build_parser().parse_args([
         "report", "--msg-id", "0", "--status", "done",
-        "--result", json.dumps({"summary": "repair review", "findings": [], "next_action": "repair"}),
+        "--result", json.dumps({"summary": "repair review (test report body)", "findings": [], "no_findings": True, "next_action": "repair"}),
         "--qa-verdict", "reject", "--target-sha", "a" * 40,
         "--qa-reviewed-scope", "admission", "--qa-gate-evidence-digest", "b" * 64,
         "--qa-commission-msg-id", "7",
@@ -53,7 +55,7 @@ def test_explicit_commission_requires_review_evidence_and_result_file_preserves_
     with pytest.raises(SchemaError):
         cli._report_payload_from_args(_args(qa_commission_msg_id=7))
     body = tmp_path / "review.json"
-    body.write_text(json.dumps({"summary": "review", "findings": [], "next_action": "repair"}))
+    body.write_text(json.dumps({"summary": "review (test report body)", "findings": [], "no_findings": True, "next_action": "repair"}))
     payload, blob = cli._report_payload_from_args(_args(
         result=None, result_file=str(body), qa_verdict="reject", target_sha="a" * 40,
         qa_reviewed_scope="admission", qa_gate_evidence_digest="b" * 64,
@@ -69,7 +71,7 @@ def test_qa_terminate_requires_explicit_message_before_network(monkeypatch, caps
         pytest.fail("missing QA message identity must refuse before config/network/close")
 
     monkeypatch.setattr(cli, "load_config", unexpected)
-    body = {"summary": "re-read", "findings": [], "next_action": "lead_proceed"}
+    body = {"summary": "re-read (test report body)", "findings": [], "no_findings": True, "next_action": "lead_proceed"}
     overrides = {"msg_id": None, "terminate": True}
     if source == "flags":
         overrides["qa_verdict"] = verdict
@@ -112,7 +114,7 @@ def test_initial_and_two_rereads_keep_explicit_commission_identity(
         "stream_id": "hostb:codex-x", "self_close_on_completion": True,
         "online": True, "parent_stream_id": "hostb:leader",
     }]})
-    body = {"summary": "scoped review", "findings": [{
+    body = {"summary": "scoped review (test report body)", "findings": [{
         "severity": "major", "where": "fixture", "issue": "scoped defect",
         "suggested_fix": "repair fixture",
     }], "next_action": "repair"}
@@ -195,7 +197,7 @@ def test_report_inline_success_uses_wrapperless_websocket(monkeypatch, capsys, t
     assert cli.report(_args()) == 0
     assert calls["request"]["from_stream_id"] == "hostb:codex-x"
     assert calls["request"]["msg_id"] == 7
-    assert calls["request"]["summary"] == "ok"
+    assert calls["request"]["summary"] == "ok (test report body)"
     assert json.loads(capsys.readouterr().out)["type"] == "report.ok"
 
 
@@ -283,7 +285,7 @@ def test_report_caller_stream_id_stays_env_when_from_stream_id_is_overridden(mon
         [
             "report", "--msg-id", "7", "--status", "done",
             "--from-stream-id", "hostb:other-seat",
-            "--result", json.dumps({"summary": "ok", "findings": [], "next_action": "leader_proceed"}),
+            "--result", json.dumps({"summary": "ok (test report body)", "findings": [], "no_findings": True, "next_action": "leader_proceed"}),
         ]
     )
     assert cli.report(args) == 0
@@ -317,8 +319,8 @@ def test_report_surfaces_daemon_warnings(monkeypatch, capsys, tmp_path):
 
 def test_report_payload_preserves_structured_qa_fields_inline_and_file_backed(tmp_path):
     payload = {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_proceed",
         "completion_kind": "implementation_ready",
         "qa_verdict": "accept",
@@ -342,8 +344,8 @@ def test_report_payload_preserves_structured_qa_fields_inline_and_file_backed(tm
 
 def test_report_payload_aggregates_malformed_structured_qa_fields():
     payload = {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_proceed",
         "completion_kind": "other",
         "qa_verdict": "maybe",
@@ -368,8 +370,8 @@ def test_report_payload_aggregates_malformed_structured_qa_fields():
 
 def test_report_payload_rejects_unknown_top_level_evidence_field():
     payload = {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_proceed",
         "reviewed_target_sha": "abc123",
     }
@@ -390,7 +392,7 @@ def test_report_payload_rejects_nested_qa_verdict_without_typed_field():
         ("details.qa_verdict", {"details": {"qa_verdict": "accept"}}),
         ("extras.nested.qa_verdict", {"extras": {"nested": {"qa_verdict": "reject"}}}),
     ):
-        body = {"summary": "ready", "findings": [], "next_action": "none", **payload}
+        body = {"summary": "ready (test report body)", "findings": [], "no_findings": True, "next_action": "none", **payload}
         with pytest.raises(SchemaError) as exc_info:
             cli._report_payload_from_args(_args(result=json.dumps(body)))
         assert any(
@@ -411,7 +413,7 @@ def test_report_payload_rejects_nested_qa_verdict_without_typed_field():
     ],
 )
 def test_report_payload_rejects_all_nested_governance_fields(container, value, field):
-    body = {"summary": "ready", "findings": [], "next_action": "none", container: value}
+    body = {"summary": "ready (test report body)", "findings": [], "no_findings": True, "next_action": "none", container: value}
     with pytest.raises(SchemaError) as exc_info:
         cli._report_payload_from_args(_args(result=json.dumps(body)))
     assert any(
@@ -422,8 +424,8 @@ def test_report_payload_rejects_all_nested_governance_fields(container, value, f
 
 def test_report_payload_requires_completion_kind_for_qa_attestation():
     body = {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "none",
         "qa_attestation": {"stream_id": "alpha:qa", "report_id": "qa-1"},
     }
@@ -437,8 +439,8 @@ def test_report_payload_requires_completion_kind_for_qa_attestation():
 
 def test_report_structured_completion_kind_rejects_payload_conflict():
     body = {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "none",
         "completion_kind": "implementation_ready",
     }
@@ -469,8 +471,8 @@ def test_report_fails_when_daemon_omits_submitted_governance_echo(monkeypatch, c
 
 def test_report_payload_preserves_typed_verdict_in_unknown_sidecar_error():
     body = {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "none",
         "qa_verdict": "accept",
         "candidate_sha": "abc123",
@@ -507,8 +509,8 @@ def test_report_tracked_completion_kind_is_typed_and_done_only():
         "--from-stream-id", "hosta:lead",
         "--completion-kind", "tracked",
         "--result", json.dumps({
-            "summary": "tracked",
-            "findings": [],
+            "summary": "tracked (test report body)",
+            "findings": [], "no_findings": True,
             "next_action": "branch_pushed",
         }),
     ])
@@ -520,8 +522,8 @@ def test_report_tracked_completion_kind_is_typed_and_done_only():
 
     with pytest.raises(SchemaError) as exc_info:
         validate_report_payload({
-            "summary": "tracked",
-            "findings": [],
+            "summary": "tracked (test report body)",
+            "findings": [], "no_findings": True,
             "next_action": "branch_pushed",
             "completion_kind": "tracked",
         }, "progress")
@@ -569,7 +571,7 @@ def test_report_structured_flags_send_typed_fields_without_handwritten_json(monk
 
 
 def test_report_structured_flags_reject_payload_conflicts():
-    body = {"summary": "ready", "findings": [], "next_action": "none", "qa_verdict": "accept"}
+    body = {"summary": "ready (test report body)", "findings": [], "no_findings": True, "next_action": "none", "qa_verdict": "accept"}
     with pytest.raises(SchemaError) as exc_info:
         cli._report_payload_from_args(_args(result=json.dumps(body), qa_verdict="accept"))
     assert exc_info.value.violations[0]["code"] == "flag_payload_conflict"
@@ -578,8 +580,8 @@ def test_report_structured_flags_reject_payload_conflicts():
 def test_report_structured_flags_reject_result_file_conflicts(tmp_path):
     result_file = tmp_path / "report.json"
     result_file.write_text(json.dumps({
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "none",
         "qa_verdict": "accept",
     }), encoding="utf-8")
@@ -597,8 +599,8 @@ def test_report_structured_flags_reject_result_file_conflicts(tmp_path):
 def test_report_result_file_composes_qa_verdict_and_target_sha(tmp_path):
     result_file = tmp_path / "report.json"
     result_file.write_text(json.dumps({
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_proceed",
     }), encoding="utf-8")
 
@@ -611,8 +613,8 @@ def test_report_result_file_composes_qa_verdict_and_target_sha(tmp_path):
 
     assert blob is None
     assert payload == {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_proceed",
         "qa_verdict": "accept",
         "target_sha": "0123456789abcdef0123456789abcdef01234567",
@@ -622,7 +624,7 @@ def test_report_result_file_composes_qa_verdict_and_target_sha(tmp_path):
 @pytest.mark.parametrize("file_backed", [False, True])
 def test_qa_review_flags_compose_inline_and_file_without_losing_extras(tmp_path, file_backed):
     body = {
-        "summary": "reviewed", "findings": [], "next_action": "lead_proceed",
+        "summary": "reviewed (test report body)", "findings": [], "no_findings": True, "next_action": "lead_proceed",
         "extras": {"review_note": "retained"},
     }
     result_file = tmp_path / "review.json"
@@ -660,7 +662,7 @@ def test_qa_review_flags_reject_partial_or_invalid_inputs(overrides, field):
 
 def test_qa_review_flags_conflict_with_prebuilt_evidence_but_legacy_payload_survives():
     body = {
-        "summary": "reviewed", "findings": [], "next_action": "lead_proceed",
+        "summary": "reviewed (test report body)", "findings": [], "no_findings": True, "next_action": "lead_proceed",
         "qa_verdict": "accept", "target_sha": "a" * 40,
         "extras": {"qa_review": {
             "candidate_identity": "a" * 40,
@@ -680,7 +682,7 @@ def test_qa_review_flags_conflict_with_prebuilt_evidence_but_legacy_payload_surv
 
 
 @pytest.mark.parametrize("result", [None, json.dumps({
-    "summary": "reviewed", "findings": [], "next_action": "lead_proceed",
+    "summary": "reviewed (test report body)", "findings": [], "no_findings": True, "next_action": "lead_proceed",
     "qa_verdict": None,
 })])
 def test_qa_review_flags_do_not_infer_verdict(result):
@@ -700,7 +702,7 @@ def test_qa_review_flags_do_not_infer_verdict(result):
 def test_qa_review_verdict_requirement_matches_status(
     monkeypatch, tmp_path, capsys, status, verdict, file_backed,
 ):
-    body = {"summary": "review state", "findings": [], "next_action": "lead_proceed"}
+    body = {"summary": "review state (test report body)", "findings": [], "no_findings": True, "next_action": "lead_proceed"}
     if status in {"aborted", "error"}:
         body["reason"] = "Review interrupted"
     if verdict == "null":
@@ -758,8 +760,8 @@ def test_qa_review_verdict_requirement_matches_status(
 def test_report_result_file_qa_flags_send_inline_without_blob_upload(monkeypatch, tmp_path):
     result_file = tmp_path / "report.json"
     result_file.write_text(json.dumps({
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_proceed",
     }), encoding="utf-8")
     calls = {}
@@ -812,8 +814,8 @@ def test_report_structured_flags_require_complete_attestation_pair():
 @pytest.mark.parametrize("status", ["progress", "error", "aborted"])
 def test_implementation_ready_requires_done_status(status):
     payload = {
-        "summary": "ready",
-        "findings": [],
+        "summary": "ready (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_proceed",
         "completion_kind": "implementation_ready",
     }
@@ -850,7 +852,7 @@ def test_report_from_stream_id_requires_canonical_id_before_transport(monkeypatc
             "--from-stream-id",
             "not a canonical stream id",
             "--result",
-            json.dumps({"summary": "ok", "findings": [], "next_action": "leader_proceed"}),
+            json.dumps({"summary": "ok (test report body)", "findings": [], "no_findings": True, "next_action": "leader_proceed"}),
         ]
     )
 
@@ -907,7 +909,7 @@ def test_report_direct_namespace_without_from_stream_id_still_uses_discovery(mon
 def test_report_file_precheck_and_upload_flow(monkeypatch, capsys, tmp_path):
     result_file = tmp_path / "result.json"
     result_file.write_text(
-        json.dumps({"summary": "file", "findings": [], "next_action": "leader_proceed", "details": {"x": 1}}),
+        json.dumps({"summary": "file (test report body)", "findings": [], "no_findings": True, "next_action": "leader_proceed", "details": {"x": 1}}),
         encoding="utf-8",
     )
     calls = {}
@@ -926,7 +928,7 @@ def test_report_file_precheck_and_upload_flow(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "report_once", fake_report_once)
 
     assert cli.report(_args(result=None, result_file=str(result_file), report_id="report-file")) == 0
-    assert calls["uploaded"]["summary"] == "file"
+    assert calls["uploaded"]["summary"] == "file (test report body)"
     assert calls["request"]["result_blob_sha"] == "abc"
     assert "summary" not in calls["request"]
     assert json.loads(capsys.readouterr().out)["ingested"] is True
@@ -960,7 +962,7 @@ def test_report_file_oversize_exits_before_network(monkeypatch, capsys, tmp_path
 
 def test_report_schema_error_names_missing_fields(capsys):
     # Ergonomics: a status=done report with an empty payload must tell the
-    # agent which fields are missing and show a valid shape to copy.
+    # agent which fields are missing and show a template to edit.
     assert cli.report(_args(result="{}", terminate=True)) == 2
     err = capsys.readouterr().err
     assert "schema_error" in err
@@ -969,20 +971,16 @@ def test_report_schema_error_names_missing_fields(capsys):
     assert "where (string)" in err
     assert "suggested_fix (string or null)" in err
     assert "agent-orch report --msg-id 7 --status done --result" in err
-    marker = "Minimal valid --result for --status done:\n"
-    example = json.loads(err.split(marker, 1)[1].splitlines()[0])
-    validate_report_payload(example, "done", enforce_inline_caps=True)
+    assert err.rstrip("\n").splitlines()[-1] == "REJECTED: summary: missing field: summary (+2 more)"
 
 
-def test_report_missing_reason_error_shows_valid_error_example(capsys):
+def test_report_missing_reason_error_shows_error_template(capsys):
     assert cli.report(_args(status="error", result="{}")) == 2
     err = capsys.readouterr().err
     assert "missing_reason" in err
     assert "reason" in err
     assert "agent-orch report --msg-id 7 --status error --result" in err
-    marker = "Minimal valid --result for --status error:\n"
-    example = json.loads(err.split(marker, 1)[1].splitlines()[0])
-    validate_report_payload(example, "error", enforce_inline_caps=True)
+    assert err.rstrip("\n").splitlines()[-1].startswith("REJECTED: ")
 
 
 def test_report_error_accepts_complete_result_payload(monkeypatch, capsys, tmp_path):
@@ -997,8 +995,8 @@ def test_report_error_accepts_complete_result_payload(monkeypatch, capsys, tmp_p
     monkeypatch.setattr(cli, "report_once", fake_report_once)
 
     result = {
-        "summary": "blocked",
-        "findings": [],
+        "summary": "blocked (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_decide",
         "reason": "blocked",
     }
@@ -1024,8 +1022,8 @@ def test_report_terminal_invalid_core_fails_before_transport_or_terminate(
     monkeypatch, capsys, field, value
 ):
     payload = {
-        "summary": "blocked",
-        "findings": [],
+        "summary": "blocked (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "leader_decide",
         "reason": "blocked",
     }
@@ -1050,8 +1048,8 @@ def test_report_terminal_invalid_result_file_fails_before_transport(tmp_path, mo
     result_file.write_text(
         json.dumps(
             {
-                "summary": "blocked",
-                "findings": [],
+                "summary": "blocked (test report body)",
+                "findings": [], "no_findings": True,
                 "next_action": None,
                 "reason": "blocked",
             }
@@ -1571,3 +1569,79 @@ def test_pop2_missing_reason_error_records_rejection(monkeypatch, capsys, tmp_pa
     assert "missing_reason" in capsys.readouterr().err
     assert calls["request"]["from_stream_id"] == "hostb:codex-x"
     assert calls["request"]["status"] == "error"
+
+
+# spec_pentacle__report_placeholder_reject_2026_11: the reason must be the last
+# line of the merged output, because seats read it through `2>&1 | tail -N`.
+INCIDENT_BODY = {"summary": "x", "findings": [], "next_action": "y"}
+_SERVICES = Path(__file__).resolve().parents[2]
+
+
+def _merged_pipe(code: str, *argv: str) -> list[str]:
+    import os
+    import subprocess
+    import sys as _sys
+
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("AGENT_ORCH_", "PENTACLE_"))}
+    env["PYTHONPATH"] = os.pathsep.join([str(_SERVICES / "agent-orch"), str(_SERVICES)])
+    env["AGENT_ORCH_WS_URL"] = "ws://127.0.0.1:9/unused"
+    out = subprocess.run(
+        [_sys.executable, "-c", code, *argv],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=60, check=False,
+    ).stdout.decode()
+    return out.rstrip("\n").splitlines()
+
+
+def test_validation_failure_last_line_names_violation():
+    lines = _merged_pipe(
+        "import sys; from agent_orch.cli import main; raise SystemExit(main(sys.argv[1:]))",
+        "report", "--msg-id", "0", "--status", "done", "--result", json.dumps(INCIDENT_BODY),
+    )
+    assert lines[-1].startswith("REJECTED: summary: summary must describe the result")
+    assert lines[-1].endswith("(+2 more)")
+
+
+def test_daemon_schema_rejection_prints_rejected_last_line():
+    harness = """
+import json, sys
+from argparse import Namespace
+from agent_orch import cli
+async def fake_report_once(config, request, timeout):
+    return {"type": "report.error", "error_code": "schema_error", "error_message": "placeholder",
+            "schema_violations": [{"field": "summary", "code": "placeholder_summary", "detail": "summary too short"}]}
+cli.report_once = fake_report_once
+cli.load_config = lambda: None
+cli.discover_leader_stream_id_short = lambda config: "alpha:worker"
+cli._require_stream_id = lambda verb, stream_id: True
+args = Namespace(result=sys.argv[1], result_file=None, msg_id=0, status="done", reason=None, report_id="r-1",
+                 timeout=1.0, debug=False, qa_verdict=None, target_sha=None, qa_attestation_stream_id=None,
+                 qa_attestation_report_id=None)
+raise SystemExit(cli.report(args))
+"""
+    body = {"summary": "A long enough summary for the local check.", "findings": [], "no_findings": True,
+            "next_action": "none"}
+    lines = _merged_pipe(harness, json.dumps(body))
+    assert any(line.startswith("{") and "schema_violations" in line for line in lines[:-1])
+    assert lines[-1] == "REJECTED: summary: summary too short"
+
+
+@pytest.mark.parametrize("status", ["done", "error"])
+def test_report_template_is_refused_until_edited(capsys, status):
+    assert cli.report(_args(status=status, result="{}")) == 2
+    err = capsys.readouterr().err
+    marker = f"Template --result for --status {status} (replace summary, findings and next_action with your real result):\n"
+    template = json.loads(err.split(marker, 1)[1].splitlines()[0])
+    with pytest.raises(SchemaError) as exc:
+        validate_report_payload(template, status, enforce_inline_caps=True)
+    assert {v["code"] for v in exc.value.violations} == {"placeholder_summary"}
+    template["summary"] = "Reviewed the change and found no defects."
+    validate_report_payload(template, status, enforce_inline_caps=True)
+    assert err.rstrip("\n").splitlines()[-1].startswith("REJECTED: ")
+
+
+def test_no_findings_marker_passes_cli_and_reaches_payload():
+    body = {"summary": "Reviewed the change and found no defects.", "findings": [], "no_findings": True,
+            "next_action": "none"}
+    payload, _ = cli._report_payload_from_args(_args(result=json.dumps(body)))
+    assert payload["no_findings"] is True and payload["findings"] == []

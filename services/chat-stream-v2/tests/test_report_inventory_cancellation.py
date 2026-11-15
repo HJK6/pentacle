@@ -17,7 +17,7 @@ from test_cancellation_continuation_controls import disconnect, observe_request
 
 def report(sid, report_id, status):
     return {"from_stream_id": sid, "report_id": report_id, "msg_id": 0,
-            "status": status, "summary": "Cancellation fixture", "findings": [],
+            "status": status, "summary": "Cancellation fixture", "findings": [], "no_findings": True,
             "reason": "fixture", "next_action": "continue"}
 
 

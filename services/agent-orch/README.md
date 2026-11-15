@@ -124,7 +124,7 @@ the standard `unsupported_in_v2` response.
 | `agent-orch inspect <stream_id> [--msg-id N] [--event-tail N] [--full \| --max-text N] [--json]` | Ask `chat_streamd` for the stream's current session status, recent daemon-held chat events, and the best existing terminal report for `msg_id` if supplied. Pretty output truncates event text at 160 characters by default; `--full` disables truncation. |
 | `agent-orch ledger get <tell_id>` | Read one durable peer-message ledger row through `chat_streamd`, including its exact stored text, route, delivery state, timestamps, and attempt metadata. This works from any configured peer; callers never read the daemon host's SQLite file directly. |
 | `agent-orch audit inbound [STREAM_ID] [--limit N]` | Read a bounded list of already-delivered tell frames addressed to a stream. The view is derived from completed delivery records and cannot defer, hold, queue, or redeliver anything. |
-| `agent-orch report [--msg-id N] --status done [--result JSON \| --result-file FILE] [--reason R] [--report-id UUID] [--qa-verdict accept\|reject] [--target-sha FULL_SHA] [--qa-reviewed-scope TEXT --qa-gate-evidence-digest SHA256] [--qa-commission-msg-id N] [--qa-attestation-stream-id STREAM --qa-attestation-report-id REPORT] [--from-stream-id STREAM_ID] [--timeout N] [--terminate]` | Direct completion RPC for sub-agents. v2 accepts inline `ReportPayloadV1` through `--result` and persists it in `v2_reports`; `--qa-verdict` and `--target-sha` add typed top-level fields. Paired QA review flags require an explicit full `--target-sha` and compose `extras.qa_review` with candidate identity copied exactly from that SHA; partial or conflicting inputs fail locally. `--result-file` with QA flags is validated and submitted inline. With `--terminate`, closes the reporting session after `report.ok`. `--msg-id` is the inbox message this report answers and is required for QA, even with `--terminate`. Other reports may omit it only with `--terminate`, which defaults to `0`; proactive non-terminating reports must explicitly use `--msg-id 0`. `--qa-commission-msg-id` binds the exact QA commission (spawn `0` or numeric re-read send id) and requires all QA review evidence flags. A payload that fails validation prints the offending fields. |
+| `agent-orch report [--msg-id N] --status done [--result JSON \| --result-file FILE] [--reason R] [--report-id UUID] [--qa-verdict accept\|reject] [--target-sha FULL_SHA] [--qa-reviewed-scope TEXT --qa-gate-evidence-digest SHA256] [--qa-commission-msg-id N] [--qa-attestation-stream-id STREAM --qa-attestation-report-id REPORT] [--from-stream-id STREAM_ID] [--timeout N] [--terminate]` | Direct completion RPC for sub-agents. v2 accepts inline `ReportPayloadV1` through `--result` and persists it in `v2_reports`; `--qa-verdict` and `--target-sha` add typed top-level fields. Paired QA review flags require an explicit full `--target-sha` and compose `extras.qa_review` with candidate identity copied exactly from that SHA; partial or conflicting inputs fail locally. `--result-file` with QA flags is validated and submitted inline. With `--terminate`, closes the reporting session after `report.ok`. `--msg-id` is the inbox message this report answers and is required for QA, even with `--terminate`. Other reports may omit it only with `--terminate`, which defaults to `0`; proactive non-terminating reports must explicitly use `--msg-id 0`. `--qa-commission-msg-id` binds the exact QA commission (spawn `0` or numeric re-read send id) and requires all QA review evidence flags. A payload that fails validation prints the offending fields, a template to edit, and last a `REJECTED: <field>: <detail>` line (also after a daemon-side rejection), so piped output still ends with the reason. |
 | `agent-orch close [--reason R] [--operator-confirm] [--force\|--defer-if-working] [--from-stream-id STREAM_ID] [--caller-stream-id STREAM_ID] [--progeny STREAM_ID] [--timeout N] <stream_id>` | Direct `close` RPC. Like `report`, this opens its own websocket directly to chat_streamd (`close_once`), so it works from any context with a valid config. `agent-orch close --operator-confirm $AGENT_ORCH_STREAM_ID` is therefore the **universal self-close** (see "Universal self-close" below). `--reason` default `"manual"`. `--operator-confirm` sets `operator_confirm=true` on the wire so the daemon will accept the close for operator-shape session names; the daemon-side identity check also requires the caller stream to be the close target itself, the target's `parent_stream_id`, or the desktop-UI surface (see chat-stream README "Operator-kill safeguards"). `--defer-if-working` persists a generation-fenced close intent and returns `close.ok` with `deferred:true`; bare close retains the `session_working` refusal. `--force` closes immediately; later process cleanup is reconciler-owned. Exit codes: `0` on `close.ok` or idempotent `close.already_closed`; `1` on `close.error`; `2` on malformed input; `64` unreachable; `66` auth failure; `67` timeout. |
 | `agent-orch drain-sessions --operator-confirm <host>:<session_name> [<host>:<session_name> ...] [--timeout N]` | Issue the compatibility `drain_sessions` RPC with explicit intent. The generic agent-orch transport is not an operator credential and the daemon returns `drain_sessions.error error_code="operator_trust_required"`; the CLI prints that typed refusal without fallback or retry. Operands remain exact `host:session_name` keys and wildcards are rejected locally. A future credentialed admin CLI is separate scope. |
 | `agent-orch reconcile status [--host HOST] [--json] [--timeout N]` | Read-only daemon reconciliation audit. Returns counts and row details for open rows whose session is dead, open rows whose host is unreachable, closed rows with unreaped survivor state, and unmanaged trees. Live sessions with no durable row are folded into `unmanaged_tree`. |
@@ -921,7 +921,7 @@ The same payload is sent on reconnect. chat_streamd stores the latest payload pe
 `agent-orch report --terminate` submits the normal completion report and closes only after the daemon reads the inserted ledger row back successfully. `report.ok` must carry `durability_ack:true`; the CLI refuses both daemon-atomic and fallback close when it is missing or false. A failed readback returns `report_durability_readback_failed` and leaves the worker open; retrying the same report id reconciles the persisted row, returns the acknowledgement, and lets the CLI resume close. The close is gated by the daemon's operator-kill safeguards (see chat-stream README "Operator-kill safeguards") because worker session names match `REAL_TUI_SESSION_RE`; the architectural rule is **leaders own worker lifecycle by default and workers self-terminate only when no leader exists, or when the leader explicitly delegated self-close at spawn time**.
 
 ```bash
-agent-orch report --msg-id 3 --status done --result '{"summary":"done","findings":[],"next_action":"leader_proceed"}' --terminate
+agent-orch report --msg-id 3 --status done --result '{"summary":"Updated the docs as briefed","findings":[],"no_findings":true,"next_action":"leader_proceed"}' --terminate
 ```
 
 `--terminate` is valid only with terminal statuses: `done`, `error`, or `aborted`. Argparse rejects `--terminate --status progress` before any websocket traffic with `report: --terminate is incompatible with --status=progress`. For sessions closed after the close-retention migration, the close path marks the persisted chat-stream session row `status='closed'` with an ISO `closed_at` timestamp instead of deleting it.
@@ -965,7 +965,7 @@ agent-orch spawn --provider codex --role qa --phase spec_review --visibility hid
 
 # Worker (running under codex) finishes its work and exits cleanly:
 agent-orch report --msg-id 0 --status done \
-  --result '{"summary":"done","findings":[],"next_action":"leader_proceed"}' --terminate
+  --result '{"summary":"Updated the docs as briefed","findings":[],"no_findings":true,"next_action":"leader_proceed"}' --terminate
 ```
 
 Constraints and safety:
@@ -1165,7 +1165,7 @@ Sub-agents complete work by calling `agent-orch report` directly. This command r
 Canonical done report:
 
 ```bash
-agent-orch report --msg-id 8 --status done --result '{"summary":"Docs updated","findings":[],"next_action":"leader_proceed"}'
+agent-orch report --msg-id 8 --status done --result '{"summary":"Docs updated for the new flag","findings":[],"no_findings":true,"next_action":"leader_proceed"}'
 ```
 
 Failure report:
@@ -1184,8 +1184,9 @@ The raw daemon request shape is:
   "from_stream_id": "linux-workstation:codex-linux-workstation-1779000000",
   "msg_id": 42,
   "status": "done",
-  "summary": "short leader-facing result",
+  "summary": "short leader-facing result (20+ characters)",
   "findings": [],
+  "no_findings": true,
   "next_action": "leader_proceed",
   "details": {"optional": true},
   "extras": {},
@@ -1205,7 +1206,7 @@ parent delivery. Stream ownership is verified before the report-id idempotency
 claim, so a foreign actor cannot reserve, persist, or notify through another
 stream's report identity.
 
-`status` is one of `done`, `progress`, `error`, or `aborted`. `done`, `error`, and `aborted` are terminal for `await`; `progress` persists a ledger row and broadcasts a report, but `await` ignores it for terminal matching. Every terminal report requires non-empty `summary`, array `findings`, and non-empty `next_action`; `error` and `aborted` additionally require a non-empty `--reason` / `reason` value. CLI validation precedes websocket setup and self-termination classification, so an incomplete `--terminate` leaves the worker open.
+`status` is one of `done`, `progress`, `error`, or `aborted`. `done`, `error`, and `aborted` are terminal for `await`; `progress` persists a ledger row and broadcasts a report, but `await` ignores it for terminal matching. Every terminal report requires a `summary` of at least 20 characters that describes the result (the CLI's template text is refused), array `findings`, and a `next_action` of at least 4 characters (for example `none`); a `done` report with an empty `findings` list must also set `"no_findings": true`, which is refused beside real findings. At daemon ingest these placeholder rules apply to new report ids only: a retry of a report the daemon already stored replays as before, so an older CLI's retry still works. The updated CLI validates locally first and refuses such a placeholder retry, so file a new report with a real body instead; `error` and `aborted` additionally require a non-empty `--reason` / `reason` value. CLI validation precedes websocket setup and self-termination classification, so an incomplete `--terminate` leaves the worker open.
 
 Report content is `ReportPayloadV1`:
 
@@ -1220,7 +1221,8 @@ Report content is `ReportPayloadV1`:
 
 The closed top-level `ReportPayloadV1` allowlist is `summary`, `findings`,
 `next_action`, `details`, `extras`, `reason`, `completion_kind`, `qa_verdict`,
-`target_sha`, and `qa_attestation`. Any other result-body key is rejected with
+`target_sha`, `qa_attestation`, `ac_claim` and `no_findings` (a validation-only
+marker that is neither stored nor part of the replay hash). Any other result-body key is rejected with
 `error_code:"schema_error"` and a field-naming violation; it is never accepted
 and discarded. Put workflow-specific structured evidence under `extras` (for
 example `extras.qa_envelope_v1`) or narrative evidence under `details`.
@@ -1246,7 +1248,7 @@ The rollout defaults to `warn` (`PENTACLE_QA_ATTESTATION_MODE=warn`). An unverif
 Use `--result` for v2 report payloads:
 
 ```bash
-agent-orch report --msg-id 42 --status done --result '{"summary":"done","findings":[],"next_action":"leader_proceed"}'
+agent-orch report --msg-id 42 --status done --result '{"summary":"Finished the assigned review","findings":[],"no_findings":true,"next_action":"leader_proceed"}'
 ```
 
 Inline reports enforce per-field caps: `summary` <= 4 KiB, `next_action` <= 4 KiB, `reason` <= 512 bytes, serialized `findings` <= 64 KiB, serialized `details` <= 256 KiB, serialized `extras` <= 256 KiB, and total inline payload <= 1 MiB. If any cap is close or exceeded, commit the larger evidence through the git channel / committed-artifact path and keep the report's summary and artifact path inline.
@@ -1620,7 +1622,7 @@ SPAWN=$(agent-orch spawn --provider "$PROVIDER" --role qa --phase roundtrip --vi
 QA=$(printf '%s' "$SPAWN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session"]["stream_id"])')
 
 # Send the role-establishment + first task.
-PROMPT="Review snippet for typos: 'helo wrold'. Then run: agent-orch report --msg-id 1 --status done --result '{\"summary\":\"<short>\",\"findings\":[],\"next_action\":\"leader_proceed\"}'."
+PROMPT="Review snippet for typos: 'helo wrold'. Then run: agent-orch report --msg-id 1 --status done --result '{\"summary\":\"<what you found, 20+ characters>\",\"findings\":[],\"no_findings\":true,\"next_action\":\"leader_proceed\"}'."
 agent-orch send "$QA" 1 "$PROMPT"
 
 # Block on the await.

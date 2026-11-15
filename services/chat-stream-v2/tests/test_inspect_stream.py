@@ -46,10 +46,10 @@ async def _report(ledger: Ledger, report_id: str, msg_id: int, *, status: str = 
         "from_stream_id": STREAM_ID,
         "msg_id": msg_id,
         "status": status,
-        "summary": report_id,
+        "summary": f"{report_id} finished its work",
     }
     if status == "done":
-        payload.update({"findings": [], "next_action": "inspect"})
+        payload.update({"findings": [], "no_findings": True, "next_action": "inspect"})
     await ledger.ingest(payload)
 
 
@@ -102,8 +102,8 @@ def test_inspect_report_id_is_scoped_to_the_requested_stream() -> None:
                 "from_stream_id": "beta:other",
                 "msg_id": 1,
                 "status": "done",
-                "summary": "other",
-                "findings": [],
+                "summary": "other (test report body)",
+                "findings": [], "no_findings": True,
                 "next_action": "inspect",
             })
 

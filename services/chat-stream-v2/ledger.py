@@ -59,6 +59,7 @@ if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide schema, not a v
     sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.report_payload_v1 import (  # noqa: E402
+    PLACEHOLDER_CODES,
     REPORT_PAYLOAD_FIELDS,
     SchemaError,
     unknown_report_message_violations,
@@ -745,7 +746,18 @@ class Ledger:
         payload = {field: msg[field] for field in INLINE_SCHEMA_FIELDS if field in msg}
         qa_grade = await self._is_qa_grade_reporter(from_stream_id)
         try:
-            validated = validate_report_payload(payload, str(status), qa_grade=qa_grade)
+            try:
+                validated = validate_report_payload(payload, str(status), qa_grade=qa_grade)
+            except SchemaError as exc:
+                # A report stored before the placeholder rule shipped still
+                # replays (or conflicts) on its own id; new ids always get the rule.
+                if not exc.violations or any(
+                    v.get("code") not in PLACEHOLDER_CODES for v in exc.violations
+                ) or await self.store.get_report(report_id) is None:
+                    raise
+                validated = validate_report_payload(
+                    payload, str(status), qa_grade=qa_grade, reject_placeholders=False,
+                )
         except SchemaError as exc:
             # pop2: a schema-rejected TERMINAL report from a self-close seat must
             # not vanish. Persist the rejected attempt before raising so the

@@ -36,8 +36,8 @@ async def _report(ledger: Ledger, stream_id: str, *, msg_id: int, report_id: str
         "from_stream_id": stream_id,
         "msg_id": msg_id,
         "status": "done",
-        "summary": "completed",
-        "findings": [],
+        "summary": "completed (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "none",
     })
 

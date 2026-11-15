@@ -465,8 +465,9 @@
         "caller_stream_id": "fixture-host:child",
         "msg_id": 7,
         "status": "done",
-        "summary": "Synthetic report",
+        "summary": "Synthetic child report body",
         "findings": [],
+        "no_findings": true,
         "next_action": "continue"
       },
       "expected": {
@@ -492,8 +493,9 @@
         "caller_stream_id": "fixture-host:child",
         "msg_id": 8,
         "status": "error",
-        "summary": "Synthetic report",
+        "summary": "Synthetic child report body",
         "findings": [],
+        "no_findings": true,
         "next_action": "continue",
         "reason": "Synthetic bounded reason"
       },
@@ -520,8 +522,9 @@
         "caller_stream_id": "fixture-host:child",
         "msg_id": 9,
         "status": "aborted",
-        "summary": "Synthetic report",
+        "summary": "Synthetic child report body",
         "findings": [],
+        "no_findings": true,
         "next_action": "continue",
         "reason": "Synthetic bounded reason"
       },
@@ -548,8 +551,9 @@
         "caller_stream_id": "fixture-host:child",
         "msg_id": 10,
         "status": "progress",
-        "summary": "Synthetic report",
+        "summary": "Synthetic child report body",
         "findings": [],
+        "no_findings": true,
         "next_action": "continue"
       },
       "expected": {
@@ -575,8 +579,9 @@
         "caller_stream_id": "fixture-host:child",
         "msg_id": 11,
         "status": "invalid",
-        "summary": "Synthetic report",
+        "summary": "Synthetic child report body",
         "findings": [],
+        "no_findings": true,
         "next_action": "continue"
       },
       "expected": {
@@ -603,8 +608,9 @@
         "caller_stream_id": "fixture-host:child",
         "msg_id": 12,
         "status": "done",
-        "summary": "Synthetic report",
+        "summary": "Synthetic child report body",
         "findings": [],
+        "no_findings": true,
         "next_action": "continue"
       },
       "expected": {
@@ -631,8 +637,9 @@
         "caller_stream_id": "fixture-host:child",
         "msg_id": "bad",
         "status": "done",
-        "summary": "Synthetic report",
+        "summary": "Synthetic child report body",
         "findings": [],
+        "no_findings": true,
         "next_action": "continue"
       },
       "expected": {

@@ -67,8 +67,8 @@ def _provenance_report(report_id: str) -> dict:
         "from_stream_id": "alpha:worker",
         "msg_id": 7,
         "status": "done",
-        "summary": "provenance fixture",
-        "findings": [],
+        "summary": "provenance fixture (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "continue",
     }
 
@@ -112,8 +112,8 @@ def _claim_report(report_id: str, claim: dict) -> dict:
         "from_stream_id": "alpha:worker",
         "msg_id": 1,
         "status": "done",
-        "summary": "claim fixture",
-        "findings": [],
+        "summary": "claim fixture (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "continue",
         "ac_claim": claim,
     }
@@ -252,8 +252,8 @@ def test_nested_governance_field_is_rejected_before_any_durable_row(
                     "from_stream_id": "alpha:worker",
                     "msg_id": 1,
                     "status": "done",
-                    "summary": "misfiled verdict",
-                    "findings": [],
+                    "summary": "misfiled verdict (test report body)",
+                    "findings": [], "no_findings": True,
                     "next_action": "refile",
                     container: value,
                 })
@@ -290,8 +290,8 @@ def test_report_ack_echoes_every_submitted_governance_field() -> None:
                 "from_stream_id": "alpha:worker",
                 "msg_id": 1,
                 "status": "done",
-                "summary": "typed readiness",
-                "findings": [],
+                "summary": "typed readiness (test report body)",
+                "findings": [], "no_findings": True,
                 "next_action": "continue",
                 "completion_kind": "implementation_ready",
                 "qa_verdict": "accept",
@@ -311,8 +311,8 @@ def test_report_ack_echoes_every_submitted_governance_field() -> None:
                     "from_stream_id": "alpha:worker",
                     "msg_id": 1,
                     "status": "done",
-                    "summary": "typed readiness",
-                    "findings": [],
+                    "summary": "typed readiness (test report body)",
+                    "findings": [], "no_findings": True,
                     "next_action": "continue",
                     "completion_kind": "implementation_ready",
                     "qa_verdict": "accept",
@@ -341,8 +341,8 @@ def test_top_level_qa_verdict_persists_to_the_durable_report_row() -> None:
                 "from_stream_id": "alpha:worker",
                 "msg_id": 1,
                 "status": "done",
-                "summary": "typed verdict",
-                "findings": [],
+                "summary": "typed verdict (test report body)",
+                "findings": [], "no_findings": True,
                 "next_action": "continue",
                 "qa_verdict": "accept",
             })
@@ -362,8 +362,8 @@ def _qa_grade_report(report_id: str, stream_id: str, **fields: object) -> dict[s
         "from_stream_id": stream_id,
         "msg_id": 1,
         "status": "done",
-        "summary": "typed QA verdict",
-        "findings": [],
+        "summary": "typed QA verdict (test report body)",
+        "findings": [], "no_findings": True,
         "next_action": "continue",
         **fields,
     }
@@ -468,7 +468,7 @@ def test_qa_progress_and_non_qa_terminal_reports_do_not_require_target_binding()
         ledger = Ledger(store, sessions=sessions)
         try:
             progress = _qa_grade_report("qa-progress", "alpha:qa-progress")
-            progress.update({"status": "progress", "summary": "still reviewing"})
+            progress.update({"status": "progress", "summary": "still reviewing (test report body)"})
             progress.pop("findings")
             progress.pop("next_action")
             assert (await ledger.report(progress))["report_id"] == "qa-progress"
@@ -503,8 +503,8 @@ def test_report_stamps_daemon_observed_effective_tuple(tmp_path) -> None:
                     "report_id": "tuple-stamped",
                     "from_stream_id": "hosta:qa-seat",
                     "status": "done",
-                    "summary": "review complete",
-                    "findings": [],
+                    "summary": "review complete (test report body)",
+                    "findings": [], "no_findings": True,
                     "next_action": "accept",
                 }
             )
@@ -550,7 +550,7 @@ def test_report_accepts_live_mismatch_even_when_swept_field_is_stale(tmp_path) -
                     "from_stream_id": "hosta:drifted-seat",
                     "status": "done",
                     "summary": "live drift remains reportable",
-                    "findings": [],
+                    "findings": [], "no_findings": True,
                     "next_action": "continue",
                     "qa_verdict": "accept",
                 }
@@ -697,6 +697,112 @@ def test_report_requires_a_complete_provenance_snapshot(tmp_path) -> None:
             assert await store.get_report("provenance-unavailable") is None
             assert (await store.get_awaiter_result("alpha:worker", 7))["outcome"] == "pending"
             assert frames == []
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+# spec_pentacle__report_placeholder_reject_2026_11: the 2026-11-15 incident body.
+INCIDENT_BODY = {"summary": "x", "findings": [], "next_action": "y"}
+REAL_BODY = {"summary": "Fixed the report validator and shipped it.", "findings": [], "next_action": "none"}
+
+
+async def _worker_ledger(store: Store) -> Ledger:
+    sessions = Sessions(store, local_host="alpha")
+    await sessions.open("alpha", "worker", visibility="hidden", role="worker")
+    return Ledger(store, sessions=sessions)
+
+
+def _report(report_id: str, body: dict) -> dict:
+    return {"report_id": report_id, "from_stream_id": "alpha:worker", "msg_id": 0, "status": "done", **body}
+
+
+async def _store_as_before_deploy(ledger: Ledger, report: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ledger as ledger_module
+
+    original = ledger_module.validate_report_payload
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            ledger_module, "validate_report_payload",
+            lambda *a, **kw: original(*a, **{**kw, "reject_placeholders": False}),
+        )
+        await ledger.ingest(report)
+
+
+def test_ingest_rejects_placeholder_done_report_and_seat_stays_open() -> None:
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            ledger = await _worker_ledger(store)
+            with pytest.raises(VerbError) as raised:
+                await ledger.ingest(_report("placeholder", INCIDENT_BODY))
+            codes = {v["field"]: v["code"] for v in raised.value.extra["schema_violations"]}
+            assert codes == {
+                "summary": "placeholder_summary",
+                "next_action": "placeholder_next_action",
+                "findings": "findings_unmarked_empty",
+            }
+            assert await store.get_report("placeholder") is None
+            assert (await store.fetch_session("alpha", "worker"))["status"] == "open"
+            await ledger.ingest(_report("real", {**REAL_BODY, "no_findings": True}))
+            final = await store.find_report("alpha:worker", statuses=("done",))
+            assert final["report_id"] == "real"
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+def test_ingest_accepts_no_findings_marker() -> None:
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            ledger = await _worker_ledger(store)
+            await ledger.ingest(_report("marked", {**REAL_BODY, "no_findings": True}))
+            row = await store.get_report("marked")
+            assert row["findings"] in ([], "[]")
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+def test_ingest_replays_predeploy_placeholder_row_same_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            ledger = await _worker_ledger(store)
+            await _store_as_before_deploy(ledger, _report("old", INCIDENT_BODY), monkeypatch)
+            stored = await store.get_report("old")
+            await ledger.ingest(_report("old", INCIDENT_BODY))
+            assert await store.get_report("old") == stored
+            with pytest.raises(VerbError) as raised:
+                await ledger.ingest(_report("old", {**INCIDENT_BODY, "next_action": "lead_merge"}))
+            assert raised.value.code == "report_id_replay_conflict"
+            with pytest.raises(VerbError) as raised:
+                await ledger.ingest(_report("new", INCIDENT_BODY))
+            assert raised.value.code == "schema_error"
+            assert await store.get_report("new") is None
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+def test_no_findings_marker_keeps_request_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            ledger = await _worker_ledger(store)
+            await _store_as_before_deploy(ledger, _report("legacy", REAL_BODY), monkeypatch)
+            stored = await store.get_report("legacy")
+            await ledger.ingest(_report("legacy", {**REAL_BODY, "no_findings": True}))
+            assert await store.get_report("legacy") == stored
         finally:
             store.stop()
 

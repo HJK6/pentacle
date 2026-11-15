@@ -60,8 +60,8 @@ async def _seed_terminal_report(sessions: Sessions, store: Store, stream_id: str
         {
             "from_stream_id": stream_id,
             "status": "done",
-            "summary": "finished",
-            "findings": [],
+            "summary": "finished (test report body)",
+            "findings": [], "no_findings": True,
             "next_action": "done",
         }
     )

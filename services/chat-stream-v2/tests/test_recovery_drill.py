@@ -56,8 +56,8 @@ def _seed(state: Path, *, populated=False):
                     sessions = Sessions(store, local_host="fixture-chat")
                     await sessions.refresh()
                     await store.put_report({"report_id": "captured-fixture-report", "from_stream_id": "fixture-a:assistant",
-                        "to_stream_id": "fixture-a:assistant", "msg_id": 0, "status": "done", "summary": "Private fixture",
-                        "findings": [], "next_action": "Fixture", "ingested_at": "2026-01-01T00:00:00Z"},
+                        "to_stream_id": "fixture-a:assistant", "msg_id": 0, "status": "done", "summary": "Private fixture (test report body)",
+                        "findings": [], "no_findings": True, "next_action": "Fixture", "ingested_at": "2026-01-01T00:00:00Z"},
                         routing_snapshot=await Ledger(store, sessions=sessions)._report_routing_snapshot("fixture-a:assistant"),
                         announce=False)
                     from test_work_lanes import seed_pending_goal, synthetic_epic

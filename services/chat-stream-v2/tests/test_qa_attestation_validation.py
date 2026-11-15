@@ -80,10 +80,10 @@ def _report(
         "from_stream_id": stream_id,
         "msg_id": 7,
         "status": status,
-        "summary": report_id,
+        "summary": f"{report_id} finished its review",
     }
     if status == "done":
-        message.update({"findings": [], "next_action": "complete"})
+        message.update({"findings": [], "no_findings": True, "next_action": "complete"})
     if qa_verdict is not None:
         message["qa_verdict"] = qa_verdict
     if completion_kind is not None:

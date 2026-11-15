@@ -175,7 +175,7 @@ def test_report_cli_sends_discharges(monkeypatch, tmp_path):
             "--msg-id",
             "0",
             "--result",
-            json.dumps({"summary": "ok", "findings": [], "next_action": "nexus_verify"}),
+            json.dumps({"summary": "ok (test report body)", "findings": [], "no_findings": True, "next_action": "nexus_verify"}),
             "--discharges",
             "obl-1",
             "--discharges",

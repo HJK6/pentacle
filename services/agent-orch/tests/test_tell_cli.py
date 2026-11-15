@@ -308,7 +308,7 @@ def test_alias_not_accepted_by_other_stream_commands(monkeypatch, capsys, tmp_pa
         ["inspect", ALIAS],
         ["await", ALIAS, "101"],
         ["report", "--status", "done", "--msg-id", "0", "--from-stream-id", ALIAS, "--result", json.dumps({
-            "summary": "Synthetic report.", "next_action": "lead_merge",
+            "summary": "Synthetic report. (test report body)", "next_action": "lead_merge",
             "findings": [{"severity": "info", "where": "README.md:1", "issue": "none", "suggested_fix": "n/a"}],
         })],
     ):

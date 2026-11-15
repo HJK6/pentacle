@@ -11,6 +11,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+- Refuse placeholder final reports: a done, error or aborted report needs a 20+ character summary and a 4+ character next action, and a done report with no findings sets `"no_findings": true`. Every refused report ends with a `REJECTED: <field>: <detail>` line.
 - Let the front desk send `started`, `change` and `other` notes (`other` with a logged `--why` reason, one `started` or `change` per record per day), and wake it at once for tells from a chat the operator is working in.
 - Make coordinated deploy restoration wait up to 60 s for a satellite host to reconnect after the daemon restarts, instead of failing the release.
 - Let a seat acquire and clear one maintenance hold with a server-verified operator dispatch and advisor ruling, without operator privileges.

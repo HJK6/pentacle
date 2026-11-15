@@ -20,11 +20,24 @@ INLINE_FIELD_CAPS = {
 }
 INLINE_TOTAL_CAP = 1024 * 1024
 
+# Placeholder final reports (summary "x", next_action "y", an unmarked empty
+# findings list) once replaced real results that had been refused for schema
+# errors. Every terminal summary under 20 characters seen in v2_reports was a
+# placeholder, probe or fixture; "none" is the shortest real next_action.
+MIN_TERMINAL_SUMMARY_CHARS = 20
+MIN_TERMINAL_NEXT_ACTION_CHARS = 4
+# The CLI prints this as a template; it is refused verbatim so it must be edited.
+EXAMPLE_SUMMARY = "Replace this with what you did and the result."
+PLACEHOLDER_CODES = frozenset({"placeholder_summary", "placeholder_next_action", "findings_unmarked_empty"})
+
 # These are the only fields that belong inside a ReportPayloadV1 object. Keep
 # this set next to the validator so every caller applies one fail-closed rule.
 REPORT_PAYLOAD_FIELDS = frozenset({
     "summary", "findings", "next_action", "details", "extras", "reason",
     "completion_kind", "qa_verdict", "target_sha", "qa_attestation", "ac_claim",
+    # Validation-only marker for a done report with no findings; never stored
+    # or hashed, since the persisted empty findings list already says "none".
+    "no_findings",
 })
 GOVERNANCE_FIELDS = ("completion_kind", "qa_verdict", "target_sha", "qa_attestation", "ac_claim")
 FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
@@ -117,6 +130,7 @@ def validate(
     *,
     enforce_inline_caps: bool = True,
     qa_grade: bool = False,
+    reject_placeholders: bool = True,
 ) -> ReportPayloadV1:
     if status not in STATUSES:
         raise SchemaError("invalid_status", "status must be done, progress, error, or aborted")
@@ -169,6 +183,16 @@ def validate(
                 violations.append(_violation("next_action", "wrong_type", "next_action has wrong type"))
         elif terminal and not payload["next_action"].strip():
             violations.append(_violation("next_action", "invalid_required_string", "next_action must be non-empty"))
+    if terminal and reject_placeholders:
+        violations.extend(placeholder_violations(payload, status))
+    if "no_findings" in payload:
+        no_findings = payload["no_findings"]
+        if not isinstance(no_findings, bool):
+            violations.append(_violation("no_findings", "wrong_type", "no_findings must be a boolean"))
+        elif no_findings and isinstance(payload.get("findings"), list) and payload["findings"]:
+            violations.append(_violation(
+                "no_findings", "invalid_dependency", "no_findings is true but findings is not empty",
+            ))
     if "reason" in payload and payload["reason"] is not None and not isinstance(payload["reason"], str):
         violations.append(_violation("reason", "wrong_type", "reason has wrong type"))
     if "findings" in payload:
@@ -331,6 +355,36 @@ def validate(
         qa_attestation=payload.get("qa_attestation") if isinstance(payload.get("qa_attestation"), dict) else None,
         ac_claim=payload.get("ac_claim") if isinstance(payload.get("ac_claim"), dict) else None,
     )
+
+
+def placeholder_violations(payload: dict[str, Any], status: str) -> list[dict[str, Any]]:
+    """Return violations for a terminal report body that is only a placeholder."""
+    violations: list[dict[str, Any]] = []
+    summary = payload.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        text = summary.strip()
+        if len(text) < MIN_TERMINAL_SUMMARY_CHARS:
+            violations.append(_violation(
+                "summary", "placeholder_summary",
+                f"summary must describe the result in at least {MIN_TERMINAL_SUMMARY_CHARS} characters (got {len(text)})",
+            ))
+        elif text.casefold() == EXAMPLE_SUMMARY.casefold():
+            violations.append(_violation(
+                "summary", "placeholder_summary", "summary is the example text; describe the actual result",
+            ))
+    next_action = payload.get("next_action")
+    if isinstance(next_action, str) and next_action.strip() and len(next_action.strip()) < MIN_TERMINAL_NEXT_ACTION_CHARS:
+        violations.append(_violation(
+            "next_action", "placeholder_next_action",
+            f'next_action must name the next step in at least {MIN_TERMINAL_NEXT_ACTION_CHARS} characters, '
+            f'e.g. "none" (got {len(next_action.strip())})',
+        ))
+    if status == "done" and payload.get("findings") == [] and payload.get("no_findings") is not True:
+        violations.append(_violation(
+            "findings", "findings_unmarked_empty",
+            'findings is empty; list real findings or set "no_findings": true',
+        ))
+    return violations
 
 
 def inline_size_violations(payload: dict[str, Any]) -> list[dict[str, Any]]:

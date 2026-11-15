@@ -19,7 +19,7 @@ async def setup(store):
 
 def payload(identity="context-first", status="done", **extra):
     return {"report_id": identity, "from_stream_id": "host-a:reporter", "to_stream_id": "host-a:parent",
-            "msg_id": 0, "status": status, "summary": "Finished commission", "findings": [],
+            "msg_id": 0, "status": status, "summary": "Finished commission (test report body)", "findings": [], "no_findings": True,
             "next_action": "Review result", "ingested_at": "2026-10-22T20:00:00Z", **extra}
 
 
