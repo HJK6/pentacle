@@ -47,6 +47,15 @@ def unplaced(status, quality="fresh", spec="spec_demo__b"):
     return item
 
 
+def on_goal(item, key="stream:x"):
+    """Place a member observation under the synthetic goal env.adopt seeds for ``key``.
+
+    A completed+fresh member placed on its lane's goal makes that goal done, so the
+    lane satisfies the certain completion rule (empty goals never complete a lane)."""
+    item["goal_id"] = goal_id(synthetic_epic(key))
+    return item
+
+
 # Completion follows the certain goal rule: a lane is complete only when every
 # goal is done (non-empty and all its members completed) and no open unplaced
 # item remains; done lanes are never pending and any staleness is uncertain.

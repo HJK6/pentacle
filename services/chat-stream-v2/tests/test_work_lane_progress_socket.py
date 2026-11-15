@@ -9,10 +9,12 @@ import sys
 from server import Server
 from sessions import Sessions
 from store import STREAM_TOKEN_HASH_VERSION
-from test_work_lanes import FD, run
+from test_work_lanes import FD, run, synthetic_epic
+from test_work_lane_goals import write_goal
 from test_assistant_prose_mirror import ASSISTANT
 from work_lanes_projection import WorkLanesInventory
 from _shared.specs_service import SpecsSubsystem
+from _shared.work_goals import derive_lane_id
 
 
 async def cli_call(port, tmp_path, *args, expected_status=0):
@@ -48,6 +50,11 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
         other.mkdir(parents=True)
         (other / "spec.md").write_text(content.replace("spec_demo__bridge", identity).replace("[ ]", "[x]"))
         (other / "summary.md").write_text("**Status** — Retained outcome.\n")
+    # The lane env.adopt creates (default key "stream:x") needs its goal observed on
+    # disk, or the real sweep leaves the goal uncertain and completion_pending reads
+    # null; an empty goal keeps the lane open (completion_pending False), as expected.
+    write_goal(memory, derive_lane_id(ASSISTANT, "stream:x"),
+               name=synthetic_epic("stream:x").removeprefix("epic_"))
     monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(memory))
 
     async def body(env):
