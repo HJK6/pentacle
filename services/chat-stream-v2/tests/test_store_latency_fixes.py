@@ -18,7 +18,7 @@ from store import Store
 from store_work_lane_episodes import resolved_route_dispatch_map
 
 from test_read_projection_deliveries import corpus
-from test_work_lane_episodes import RecordingSink, episodes, member, seed_observations, NOW, OLD
+from test_work_lane_episodes import RecordingSink, episodes, member, on_goal, seed_observations, NOW, OLD
 
 BIRTH = "2026-10-01T00:00:00Z"
 
@@ -135,7 +135,7 @@ def test_reconcile_skips_done_lanes_keeps_clears_and_always_drains():
         done_open = (await env.adopt(key="stream:d", state="paused", lead=False, owner="operator"))["lane"]
         done_cleared = (await env.adopt(key="stream:e", state="paused", lead=False, owner="operator"))["lane"]
         done_quiet = (await env.adopt(key="stream:f", state="paused", lead=False, owner="operator"))["lane"]
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [on_goal(member(), "stream:a")])  # completes the active lane's goal
 
         def force(conn):
             for lane in (done_open["lane_id"], done_cleared["lane_id"], done_quiet["lane_id"]):

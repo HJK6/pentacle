@@ -1018,7 +1018,7 @@ from store_work_index import (_observed_record, effective_member_ids, effective_
 from store_work_lanes import work_lane_rows_conn
 
 from test_work_lanes import run as lanes_run
-from test_work_lane_episodes import member, seed_observations, NOW, OLD, episodes
+from test_work_lane_episodes import member, obs, seed_observations, NOW, OLD, episodes
 
 
 def _oracle_effective_membership(conn, decode_cache=None, **_ignored):
@@ -1314,9 +1314,9 @@ def test_item4_reconcile_rereads_inside_begin_immediate():
     # decides the episode.
     async def body(env):
         lane = (await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"]))["lane"]
-        await seed_observations(env.store, [member("in_progress")])
+        await seed_observations(env.store, [obs("in_progress")])
         await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True))     # preliminary read
-        await seed_observations(env.store, [member()])                                  # lands before the txn
+        await seed_observations(env.store, [obs()])                                     # lands before the txn; completes the goal
         seen: list[str] = []
         await env.store.submit(lambda c: c.set_trace_callback(seen.append))
         await env.store.reconcile_work_lane_episodes(None, now_iso=NOW)

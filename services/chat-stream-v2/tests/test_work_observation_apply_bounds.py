@@ -202,8 +202,15 @@ def test_competing_scans_validate_snapshot_and_reject_reverse_order(tmp_path, mo
 
 def test_commit_uses_current_members_and_fanout_across_composites(tmp_path, monkeypatch):
     async def body(env):
+        from test_work_lanes import seed_pending_goal, synthetic_epic
+        from _shared.work_goals import derive_lane_id
         lane = (await env.adopt(state="paused", lead=False, owner="operator", members=[A]))["lane"]
         await env.store.reconcile_work_observations(scan(100, fresh(), fresh(B)), settle_s=10, sweep=True)
+        # Each other-composite lane needs an observed goal naming it; adopting
+        # them mid-preparation exercises the changed-base recompute (spec §1.4).
+        other_epics = [synthetic_epic(f"request:other-{i}") for i in range(3)]
+        for i, epic in enumerate(other_epics):
+            await seed_pending_goal(env.store, epic, derive_lane_id(f"other-{i}:assistant", f"request:other-{i}"))
         entered, release = hold_preparation(monkeypatch, 200)
         pending = asyncio.create_task(env.store.reconcile_work_observations(
             scan(200, fresh(checked=1, digest="second"), fresh(B)), settle_s=10, sweep=True))
@@ -216,7 +223,7 @@ def test_commit_uses_current_members_and_fanout_across_composites(tmp_path, monk
                     stream_id=f"other-{i}:assistant", request_id=f"other-adopt-{i}", operation="adopt", lane_id=None,
                     expected_lane_version=None, payload={"adoption_key": f"request:other-{i}", "title": "Other composite",
                         "owner_kind": "operator", "work_state": "paused", "visible_chat": {"stream_id": f"other-{i}:assistant"},
-                        "members": [A]}, actor_stream_id=FD, actor_generation=env.gen, binding_name="primary",
+                        "goals": [other_epics[i]], "members": [A]}, actor_stream_id=FD, actor_generation=env.gen, binding_name="primary",
                     env_binding=env.composite._env_binding())
                 others.append(out["lane"]["lane_id"])
             await env.op("set_members", {"members": [B, unknown]}, lane=lane["lane_id"], version=lane["version"])
@@ -355,10 +362,10 @@ def test_readers_see_complete_snapshot_while_delta_commit_is_held(tmp_path):
 
 @pytest.mark.parametrize('scoped', [False, True])
 def test_store_members_never_expose_private_keys(tmp_path, scoped):
-    from test_work_lane_goals import write_goal, write_item, scanner, reconcile, projected
+    from test_work_lane_goals import adopt_with_goal, write_goal, write_item, scanner, reconcile, projected
     root = tmp_path / 'memory'
     async def body(env):
-        lane = (await env.adopt(state='paused', owner='operator', members=['spec_demo__boundary']))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator', members=['spec_demo__boundary'])
         if scoped:
             write_goal(root, lane['lane_id'])
         write_item(root, 'boundary', status='completed', epic='epic_fixture' if scoped else None)
@@ -374,10 +381,10 @@ def test_store_members_never_expose_private_keys(tmp_path, scoped):
 
 
 def test_file_store_goal_and_legacy_membership_noop_and_fixed_delta_decode_zero_records(tmp_path, monkeypatch):
-    from test_work_lane_goals import write_goal, write_item, scanner, reconcile, projected
+    from test_work_lane_goals import adopt_with_goal, write_goal, write_item, scanner, reconcile, projected
     root, database = tmp_path / 'memory', str(tmp_path / 'state.db')
     async def body(env):
-        lane = (await env.adopt(state='paused', owner='operator', members=['spec_demo__legacy']))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator', members=['spec_demo__legacy'])
         write_goal(root, lane['lane_id'])
         write_item(root, 'legacy', epic=None)
         for i in range(65):

@@ -29,11 +29,15 @@ def test_fd_done_override_real_cli(tmp_path):
             server.assistant_composite = composite
             try:
                 port = await server.bind()
+                from test_work_lanes import seed_pending_goal, synthetic_epic
+                from _shared.work_goals import derive_lane_id
+                epic = synthetic_epic("stream:override")
+                await seed_pending_goal(store, epic, derive_lane_id(ASSISTANT, "stream:override"))
                 lane = (await composite.operation({"type": "assistant.operation", "request_id": "adopt:override",
                     "composite_stream_id": ASSISTANT, "dispatch_id": "none", "operation": "work_lane.adopt",
                     "payload": {"adoption_key": "stream:override", "title": "Override lane", "owner_kind": "operator",
                                 "work_state": "paused", "visible_chat": {"stream_id": ASSISTANT},
-                                "no_spec_reason": "Disposable override fixture."},
+                                "goals": [epic], "no_spec_reason": "Disposable override fixture."},
                     "_auth_context": {"token_verified": True, "stream_id": actor,
                                       "session_generation": row["session_generation"]}}, actor_stream_id=actor))["lane"]
                 env = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"), LANG="C.UTF-8", PYTHONPATH=str(Path(__file__).resolve().parents[2] / "agent-orch"),

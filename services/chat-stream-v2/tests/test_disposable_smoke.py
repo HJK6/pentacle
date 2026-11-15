@@ -9,6 +9,8 @@ import sys
 import pytest
 
 import spawn_fleet_smoke
+from _shared.work_goals import derive_lane_id
+from test_work_lanes import seed_pending_goal
 from tools.disposable_smoke import disposable_composite, guard_target
 
 
@@ -24,10 +26,14 @@ def test_real_cli_lane_and_card_are_disposable():
         operator = "operator-fixture:assistant"
         async with disposable_composite(operator_composite=operator) as harness:
             target = harness["target"]
+            # A lane cannot be created without an observed goal charter naming it.
+            await seed_pending_goal(harness["store"], "epic_smokeoverride",
+                derive_lane_id(target, "stream:postdeploy-override-smoke-test"))
             plan = harness["state_path"] / "plan.json"
             plan.write_text(json.dumps([{"adoption_key": "stream:postdeploy-override-smoke-test",
                 "title": "Daemon override smoke", "summary": "Disposable override test.",
-                "owner_kind": "operator", "work_state": "paused", "visible_chat": {"stream_id": target},
+                "owner_kind": "operator", "work_state": "paused", "goals": ["epic_smokeoverride"],
+                "visible_chat": {"stream_id": target},
                 "no_spec_reason": "One-off deployment override test, not ongoing work."}]))
 
             async def cli(*args):

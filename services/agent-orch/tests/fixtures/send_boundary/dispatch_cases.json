@@ -19,7 +19,9 @@
   },
   {
     "command": "compact",
-    "argv": ["compact"],
+    "argv": [
+      "compact"
+    ],
     "handler": "agent_orch.cli.compact",
     "network_entry": "coordination_once",
     "not_applicable": null
@@ -841,6 +843,20 @@
       "--preview"
     ],
     "handler": "agent_orch.work_lane_cli.cmd_adopt",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane lane-id",
+    "argv": [
+      "work-lane",
+      "lane-id",
+      "--adoption-key",
+      "stream:fixture",
+      "--composite-stream-id",
+      "fixture:composite"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_lane_id",
     "network_entry": "assistant_once",
     "not_applicable": null
   },

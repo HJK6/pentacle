@@ -1,6 +1,7 @@
 """First-class work lanes: store operations, CAS, idempotency, lifecycle, owner kind (V1-V9, V12, V13)."""
 import asyncio
 import json
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -9,9 +10,45 @@ import pytest
 
 from assistant_composite import AssistantComposite
 from store import Store
+from _shared.work_goals import derive_lane_id
 from test_assistant_prose_mirror import ASSISTANT, ROOT, _config
 
 FD = ROOT
+
+
+async def seed_pending_goal(store, epic_id, lane_id, *, title="Synthetic goal", rank=1000):
+    """Record a valid, unique charter naming a not-yet-known lane, so adopt can accept it.
+
+    This is the observable state the work-index scan leaves for a charter that
+    names a lane before that lane exists; adopt reads its ``pending`` facts."""
+    def write(conn):
+        from store_work_index import _state_conn, ensure_work_index_schema
+        ensure_work_index_schema(conn)
+        state = _state_conn(conn)
+        # A seeded charter means the scan ran and the index is available; without
+        # this the lane reads as uncertain and is never completed or reopened.
+        state.setdefault("available", True)
+        state.setdefault("root_configured", True)
+        state.setdefault("snapshot_at", "2026-01-01T00:00:00.000Z")
+        state["available"] = True
+        observations = dict(state.get("goal_observations", {}))
+        observations[epic_id] = {
+            "quality": "error", "error": "work_goal_lane_unknown",
+            "pending": {"facts": {"epic_id": epic_id, "title": title, "lane_id": lane_id, "rank": rank,
+                                  "_detail": {"summary_text": "Synthetic goal.", "summary_text_truncated": False,
+                                              "summary_line": None, "goal_text": "Synthetic.",
+                                              "goal_text_truncated": False}},
+                        "source_hash": "synthetic:" + epic_id, "path": f"epics/{epic_id}.md"}}
+        state["goal_observations"] = observations
+        conn.execute("INSERT INTO v2_work_index_state(singleton,state_json) VALUES (1,?) "
+                     "ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",
+                     (json.dumps(state, separators=(",", ":")),))
+        conn.commit()
+    await store.submit(write)
+
+
+def synthetic_epic(key):
+    return "epic_fixture_" + re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
 
 
 class Env:
@@ -37,7 +74,19 @@ class Env:
             "answer": answer, "actor_class": actor_class}
         return {"question_id": question_id}
 
-    async def op(self, operation, payload, *, lane=None, version=None, request_id=None, actor=FD, gen=None):
+    async def op(self, operation, payload, *, lane=None, version=None, request_id=None, actor=FD, gen=None,
+                 inject_goals=True):
+        # Every lane now needs an observed goal that names it. Seed one synthetic
+        # empty goal for any adopt that does not set `goals`, so fixtures that
+        # exercise other adoption rules still create their lane. A test of the
+        # goal requirement itself passes inject_goals=False.
+        if (operation == "adopt" and inject_goals and isinstance(payload, dict)
+                and "goals" not in payload and payload.get("adoption_key")):
+            key = payload["adoption_key"]
+            target = payload.get("lane_id") or derive_lane_id(ASSISTANT, key)
+            epic = synthetic_epic(key)
+            await seed_pending_goal(self.store, epic, target)
+            payload = {**payload, "goals": [epic]}
         self.seq += 1
         msg = {"type": "assistant.operation", "request_id": request_id or f"req-{self.seq}",
                "composite_stream_id": ASSISTANT, "dispatch_id": "none", "operation": "work_lane." + operation,
@@ -53,11 +102,19 @@ class Env:
         row = await self.store.open_session("host-a", name, **fields)
         return f"host-a:{name}", row["session_generation"]
 
-    async def adopt(self, key="stream:x", state="active", owner="fd", lead=None, chat=None, **extra):
+    async def adopt(self, key="stream:x", state="active", owner="fd", lead=None, chat=None, goals=None, **extra):
         if lead is None and state == "active":
             lead = await self.seat("lead-" + key.replace(":", "-"), role="lead", parent_stream_id=FD)
+        if goals is None:
+            # A lane cannot be created without an observed goal that names it.
+            # Seed one synthetic empty goal so existing fixtures still adopt; an
+            # empty goal keeps the lane open (it is never auto-completed).
+            target = extra.get("lane_id") or derive_lane_id(ASSISTANT, key)
+            epic = synthetic_epic(key)
+            await seed_pending_goal(self.store, epic, target)
+            goals = [epic]
         payload = {"adoption_key": key, "title": "Lane " + key, "summary": "Goal line", "owner_kind": owner,
-                   "work_state": state, "visible_chat": chat or {"stream_id": ASSISTANT},
+                   "work_state": state, "visible_chat": chat or {"stream_id": ASSISTANT}, "goals": goals,
                    "no_spec_reason": None if extra.get("members") else "Synthetic test lane.", **extra}
         if lead:
             payload["lead"] = {"stream_id": lead[0], "generation": lead[1]}
@@ -271,6 +328,8 @@ def test_blocked_survives_lead_loss_v4():
 def test_each_update_kind_atomic_retry_restart_v12(kind):
     async def setup_lane(env):
         if kind == "lane_started":
+            await seed_pending_goal(env.store, "epic_fixture_started",
+                                    derive_lane_id(ASSISTANT, "stream:started"))
             return None
         lid = (await env.adopt(key="stream:k"))["lane"]["lane_id"]
         if kind == "lane_unblocked":
@@ -283,6 +342,7 @@ def test_each_update_kind_atomic_retry_restart_v12(kind):
             lead_payload = None
             return ("adopt", {"adoption_key": "stream:started", "title": "Started", "summary": "Goal",
                               "owner_kind": "operator", "work_state": "paused", "emit_started": True,
+                              "goals": ["epic_fixture_started"],
                               "no_spec_reason": "Synthetic publication fixture.",
                               "visible_chat": {"stream_id": ASSISTANT}}, None, None, "adopt:stream:started")
         lid, version = ctx

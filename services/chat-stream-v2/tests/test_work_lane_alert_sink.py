@@ -17,8 +17,14 @@ from alerts import Alerts
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from server import Server
 from test_work_lane_episodes import member, seed_observations, episodes
+from test_work_lanes import synthetic_epic
+from _shared.work_goals import goal_id
 from notification_answer_fixture import fixture
 from work_lanes_projection import WorkLanesInventory
+
+# The lane's single goal; a completed member under it finishes the goal so the
+# lifecycle completes the lane and emits the completed episode.
+SYNTH_GW = goal_id(synthetic_epic("stream:synthetic-lane"))
 
 
 def inventory(s):
@@ -75,9 +81,17 @@ async def adopt(s, *, kind="completed", members=None):
     if kind == "stale":
         row = await s.server.sessions.open("fixture", "v2-lead", provider="codex", role="lead", visibility="visible")
         lead = {"stream_id": "fixture:v2-lead", "generation": row["session_generation"]}
+    from test_work_lanes import seed_pending_goal, synthetic_epic
+    from _shared.work_goals import derive_lane_id, goal_id
+    epic = synthetic_epic("stream:synthetic-lane")
+    # The member sits under the lane's goal, so a completed member finishes the
+    # goal (the lane completes through the lifecycle and emits a completed
+    # episode), while an in-progress member keeps the goal and the lane open for
+    # the stale and estimate-missing journeys.
+    await seed_pending_goal(s.store, epic, derive_lane_id("fixture:assistant", "stream:synthetic-lane"))
     payload = {"adoption_key": "stream:synthetic-lane", "title": "Build paper bridges",
                "owner_kind": "operator", "work_state": "active" if lead else "paused",
-               "visible_chat": {"stream_id": "fixture:assistant"},
+               "visible_chat": {"stream_id": "fixture:assistant"}, "goals": [epic],
                "members": members or ["spec_demo__span"]}
     if lead:
         payload["lead"] = lead
@@ -94,6 +108,7 @@ def lane_member(kind):
     item = member("completed" if kind == "completed" else "in_progress")
     if kind == "estimate_missing":
         item["estimate"] = None
+    item["goal_id"] = SYNTH_GW
     return item
 
 
@@ -147,9 +162,14 @@ async def test_inventory_emits_one_neutral_digest_line_per_episode(tmp_path, mon
         assert digest["body"].startswith("Work update digest.") and "BLOCKER" not in digest["body"]
         assert json.loads(digest["metadata"])["members"] == [fact["notification_id"]]
         assert s.server.error_alerts.delivery(rows[held["notice_id"]], rows)["state"] == "delivered"
-        assert (await s.store.get_work_lane(lane["lane_id"]))["lane"]["version"] == lane["version"]
         if kind == "completed":
+            # Completion is a real lifecycle transition: the lane moves to done
+            # (version advances) and leaves the open board; stale/estimate do not.
+            final = (await s.store.get_work_lane(lane["lane_id"]))["lane"]
+            assert final["work_state"] == "done" and final["version"] == lane["version"] + 1
             assert lane["bound_stream_id"] is None
+        else:
+            assert (await s.store.get_work_lane(lane["lane_id"]))["lane"]["version"] == lane["version"]
 
 
 @pytest.mark.asyncio
@@ -318,7 +338,10 @@ async def test_held_across_fd_rebind_delivers_once(tmp_path, monkeypatch, kind, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["completed", "estimate_missing"])
+# Completed episodes now recur only through the lifecycle (a settled lane reopens
+# then recompletes), covered by test_clear_then_recur; the direct episode-pass
+# clear/recur under a held sink applies to the still-periodic estimate_missing.
+@pytest.mark.parametrize("kind", ["estimate_missing"])
 async def test_real_core_commit_survives_clear_recur_during_sink_await(tmp_path, monkeypatch, kind):
     monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
     async with subject(tmp_path) as s:

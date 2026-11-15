@@ -6,6 +6,8 @@ import math
 import os
 from typing import Any
 
+from _shared.work_goals import lane_work_status
+
 INLINE_MEMBERS = 8
 
 
@@ -156,12 +158,16 @@ def lane_progress(lane: dict[str, Any], *, all_members: bool = False,
     available = lane.get("_work_index_available", False) if index_available is None else index_available
     if lane.get("work_state") == "done":
         completion = False
-    elif not available or any(m.get("observation", {}).get("quality") in ("stale", "error") for m in members):
-        completion = None
     else:
-        completion = bool(members and not facts["items_unresolved"] and facts["items_completed"]
-                          and all(m.get("observation", {}).get("quality") == "fresh"
-                                  and m.get("terminal") in ("completed", "deprecated") for m in members))
+        # Completion follows the one certain lane-work rule for EVERY non-done
+        # lane, including a goal-less (legacy/synthetic) row with an empty goals
+        # map: lane_work_status holds (uncertain -> None) on a stale/missing
+        # member or an unavailable index, so uncertain data never reads as a
+        # definitive not-complete that would clear an existing completed episode.
+        # An empty or not-done goal (or an open unplaced item) keeps the lane
+        # open even when every member spec is terminal.
+        status = lane_work_status(lane.get("_goals") or {}, members, available)
+        completion = True if status == "finished" else (None if status == "uncertain" else False)
     threshold = stale_interval_h() * 3600
     active = lane_state(lane)[0] == "active" and bool(lane.get("_qualifies"))
     now = _epoch(now_iso) if now_iso else datetime.now(timezone.utc).timestamp()

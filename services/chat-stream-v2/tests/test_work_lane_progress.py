@@ -207,6 +207,15 @@ async def a1_snapshot(env):
     return (await env.store.submit(lambda conn: tuple(conn.iterdump())), list(env.broadcasts))
 
 
+async def seed_fresh(env, *spec_ids, status="in_progress"):
+    """A fresh observation for each member, so a lane with them is certain.
+
+    Manual reopening now needs certainty: every member observation fresh. These
+    membership fixtures otherwise leave their synthetic members unresolved."""
+    from test_work_lane_episodes import member, seed_observations
+    await seed_observations(env.store, [{**member(status), "spec_id": spec_id} for spec_id in spec_ids])
+
+
 async def a1_close(env, lane, *, memory_root=None):
     # These membership tests keep IDs unresolved until completion setup.
     # Completion now needs readable synthetic members, without a runtime tree.
@@ -248,12 +257,16 @@ def test_same_composite_product_conflict(state):
 
 def test_different_composite_allowed():
     async def body(env):
+        from test_work_lanes import seed_pending_goal, synthetic_epic
+        from _shared.work_goals import derive_lane_id
         await a1_holder(env)
+        epic = synthetic_epic("request:other")
+        await seed_pending_goal(env.store, epic, derive_lane_id("other:assistant", "request:other"))
         result = await env.store.apply_work_lane_operation(
             stream_id="other:assistant", request_id="other-adopt", operation="adopt", lane_id=None,
             expected_lane_version=None, payload={"adoption_key": "request:other", "title": "Other composite",
                 "owner_kind": "operator", "work_state": "paused", "visible_chat": {"stream_id": "other:assistant"},
-                "members": [A]}, actor_stream_id=FD, actor_generation=env.gen, binding_name="primary",
+                "goals": [epic], "members": [A]}, actor_stream_id=FD, actor_generation=env.gen, binding_name="primary",
             env_binding=env.composite._env_binding())
         assert result["lane"]["members"] == [A]
     run(body)
@@ -300,6 +313,8 @@ def test_every_done_to_open_conflicts_without_consuming_confirmation(to):
     async def body(env):
         history = await a1_close(env, (await env.adopt("stream:history", owner="operator", members=[A]))["lane"])
         holder = await a1_holder(env)
+        # A fresh member makes the reopen certain once the conflicting lane is gone.
+        await seed_fresh(env, A)
         confirmation = env.confirm("reopen-confirm", history["lane_id"], "set_state:" + to)
         payload = {"to": to, "reason": "Reopen fixture", "next_action": "Resume after dependency clears", "operator_confirmation": confirmation}
         if to == "blocked":
@@ -322,6 +337,8 @@ def test_done_membership_repair_allows_reopen(replacement):
         await env.adopt("stream:current", state="paused", owner="operator", members=[A])
         fixed = (await env.op("set_members", {"members": replacement, "no_spec_reason": None if replacement else "Replanned"},
                             lane=history["lane_id"], version=history["version"]))["lane"]
+        # The repaired members must be observed for the reopen to be certain.
+        await seed_fresh(env, *replacement)
         result = await env.op("set_state", {"to": "paused", "reason": "Replanned", "next_action": "Resume after the fixture dependency clears"}, lane=fixed["lane_id"], version=fixed["version"])
         assert result["lane"]["work_state"] == "paused"
     run(body)
@@ -339,6 +356,7 @@ def test_replay_before_conflict(operation):
             if operation == "reopen":
                 lane = await a1_close(env, lane)
                 lane = (await env.op("set_members", {"members": [A]}, lane=lane["lane_id"], version=lane["version"]))["lane"]
+                await seed_fresh(env, A)
                 payload, verb = {"to": "paused", "reason": "Resume fixture", "next_action": "Resume after the fixture dependency clears"}, "set_state"
             else:
                 payload, verb = {"members": [A]}, "set_members"

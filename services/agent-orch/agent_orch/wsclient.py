@@ -1753,7 +1753,8 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
                     "assistant.authority", "assistant.ruling", "assistant.transfer",
                     # Work-lanes v1 read verbs (`agent-orch work-lane list|show|adopt --preview`);
                     # the mutators stay `assistant.operation` with `operation: work_lane.*`.
-                    "work.unattended", "work.owed", "work_lanes.list", "work_lanes.show", "work_lanes.adopt_preview"}:
+                    "work.unattended", "work.owed", "work_lanes.list", "work_lanes.show", "work_lanes.adopt_preview",
+                    "work_lanes.lane_id"}:
         raise ValueError("assistant_verb_invalid")
     payload = defer_stream_token(payload, enabled=verb == "assistant.transfer" and bool(from_stream_id),
                                  keep=False, from_stream_id=from_stream_id, identity_with_token=True)

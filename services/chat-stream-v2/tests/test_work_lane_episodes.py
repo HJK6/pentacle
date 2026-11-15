@@ -6,11 +6,18 @@ import json
 import pytest
 
 from work_lane_progress import lane_progress
-from test_work_lanes import run
+from _shared.work_goals import goal_id
+from test_work_lanes import run, synthetic_epic
 
 
 NOW = "2026-01-03T00:00:00.000Z"
 OLD = "2026-01-01T00:00:00.000Z"
+
+GOAL = "epic_tri"
+GW = goal_id(GOAL)
+# The goal env.adopt seeds for its default adoption key; the episode-machinery
+# lanes complete when their one member (spec_demo__span) finishes this goal.
+LANE_GW = goal_id(synthetic_epic("stream:x"))
 
 
 def member(status="completed", quality="fresh"):
@@ -21,25 +28,52 @@ def member(status="completed", quality="fresh"):
             "source_changed_at": OLD, "observation": {"quality": quality}, "obs_rev": 1}
 
 
-@pytest.mark.parametrize("members,available,state,expected", [
-    ([member()], True, "paused", True),
-    ([member(), member("deprecated")], True, "blocked", True),
-    ([member("deprecated")], True, "paused", False),
-    ([], True, "paused", False),
-    ([member(), member("in_progress")], True, "paused", False),
-    ([member(), member("missing", "missing")], True, "paused", False),
-    ([member(), member("ambiguous", "ambiguous")], True, "paused", False),
-    ([member(quality="stale")], True, "paused", None),
-    ([member(quality="error")], True, "paused", None),
-    ([member()], False, "paused", None),
-    ([member()], True, "done", False),
-    ([member(quality="stale")], False, "done", False),
-    ([member(), member("in_progress"), member("in_progress", "stale"), member("missing", "missing")],
-     True, "paused", None),
+def obs(status="completed", quality="fresh"):
+    """The lane's single member (spec_demo__span) under env.adopt's default goal."""
+    item = member(status, quality)
+    item["goal_id"] = LANE_GW
+    return item
+
+
+def placed(status, quality="fresh", spec="spec_demo__a"):
+    item = member(status, quality)
+    item["spec_id"], item["goal_id"] = spec, GW
+    return item
+
+
+def unplaced(status, quality="fresh", spec="spec_demo__b"):
+    item = member(status, quality)
+    item["spec_id"], item["goal_id"] = spec, None
+    return item
+
+
+def on_goal(item, key="stream:x"):
+    """Place a member observation under the synthetic goal env.adopt seeds for ``key``.
+
+    A completed+fresh member placed on its lane's goal makes that goal done, so the
+    lane satisfies the certain completion rule (empty goals never complete a lane)."""
+    item["goal_id"] = goal_id(synthetic_epic(key))
+    return item
+
+
+# Completion follows the certain goal rule: a lane is complete only when every
+# goal is done (non-empty and all its members completed) and no open unplaced
+# item remains; done lanes are never pending and any staleness is uncertain.
+@pytest.mark.parametrize("goals,members,available,state,expected", [
+    ({GOAL: {"quality": "fresh"}}, [placed("completed")], True, "paused", True),
+    ({GOAL: {"quality": "fresh"}}, [placed("completed"), placed("deprecated", spec="spec_demo__c")], True, "blocked", True),
+    ({GOAL: {"quality": "fresh"}}, [placed("deprecated")], True, "paused", False),
+    ({GOAL: {"quality": "fresh"}}, [], True, "paused", False),
+    ({GOAL: {"quality": "fresh"}}, [placed("completed"), unplaced("in_progress")], True, "paused", False),
+    ({GOAL: {"quality": "fresh"}}, [placed("in_progress")], True, "paused", False),
+    ({GOAL: {"quality": "fresh"}}, [placed("completed", "stale")], True, "paused", None),
+    ({GOAL: {"quality": "stale"}}, [placed("completed")], True, "paused", None),
+    ({GOAL: {"quality": "fresh"}}, [placed("completed")], False, "paused", None),
+    ({GOAL: {"quality": "fresh"}}, [placed("completed")], True, "done", False),
 ])
-def test_completion_pending_tristate(members, available, state, expected):
-    result = lane_progress({"_members": members, "_work_index_available": available,
-                            "work_state": state})
+def test_completion_pending_tristate(goals, members, available, state, expected):
+    result = lane_progress({"_goals": goals, "_members": members,
+                            "_work_index_available": available, "work_state": state})
     assert result["completion_pending"] is expected
     assert result["lead_reported_done"] is None
 
@@ -100,13 +134,17 @@ class RecordingSink:
 
 async def seed_observations(store, members, *, available=True):
     def write(conn):
+        from store_work_index import _state_conn
         conn.execute("BEGIN IMMEDIATE")
         for item in members:
             conn.execute("INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
                          (item["spec_id"], json.dumps({"member": item})))
-        conn.execute("INSERT OR REPLACE INTO v2_work_index_state VALUES (1,?)", (json.dumps({
-            "available": available, "root_configured": True, "snapshot_at": OLD,
-            "last_sweep_at": OLD, "error": None}),))
+        # Preserve any accepted goal observations so a lane adopted with its
+        # required goal keeps that goal (an empty goal keeps the lane open).
+        state = _state_conn(conn)
+        state.update(available=available, root_configured=True, snapshot_at=OLD,
+                     last_sweep_at=OLD, error=None)
+        conn.execute("INSERT OR REPLACE INTO v2_work_index_state VALUES (1,?)", (json.dumps(state),))
         conn.commit()
     await store.submit(write)
 
@@ -120,21 +158,21 @@ def test_completion_null_hold_silent_clear_recur_and_no_version_bump():
     async def body(env):
         lane = (await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"]))["lane"]
         sink = RecordingSink()
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         assert len(sink.calls) == 1
         first = (await episodes(env.store))[0]
         assert first["episode_id"] == f"{lane['lane_id']}:completed:1"
         assert first["emitted_ref"] == "recorded:" + first["episode_id"]
-        await seed_observations(env.store, [member(quality="stale")])
+        await seed_observations(env.store, [obs(quality="stale")])
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         assert (await episodes(env.store))[0]["cleared_at"] is None
-        await seed_observations(env.store, [member("in_progress")])
+        await seed_observations(env.store, [obs("in_progress")])
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         assert (await episodes(env.store))[0]["cleared_at"] == NOW
         assert len(sink.calls) == 1
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         assert [r["episode_id"] for r in await episodes(env.store)] == [
             f"{lane['lane_id']}:completed:1", f"{lane['lane_id']}:completed:2"]
@@ -147,10 +185,10 @@ def test_unknown_does_not_open_and_unavailable_retries_same_fact():
     async def body(env):
         await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"])
         sink = RecordingSink()
-        await seed_observations(env.store, [member(quality="error")])
+        await seed_observations(env.store, [obs(quality="error")])
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         assert await episodes(env.store) == []
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         sink.unavailable = True
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         assert (await episodes(env.store))[0]["emitted_ref"] is None
@@ -181,7 +219,7 @@ def test_stale_clear_on_leave_active_and_immediate_recur():
 def test_concurrent_replayed_sweeps_open_once_and_use_same_writer_without_deadlock():
     async def body(env):
         await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"])
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         sink = RecordingSink()
         original = sink.emit
         async def emit(fact):
@@ -204,7 +242,7 @@ def test_restart_rehands_identical_fact_after_crash(tmp_path, crash_after_commit
     sink = RecordingSink()
     async def seed(env):
         await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"])
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         if crash_after_commit:
             sink.raise_after_commit = True
             await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
@@ -238,7 +276,7 @@ def test_restart_rehands_identical_fact_after_crash(tmp_path, crash_after_commit
 def test_clear_recur_while_sink_awaits_latches_only_exact_opening(membership_change):
     async def body(env):
         lane = (await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"]))["lane"]
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         sink = RecordingSink()
         entered, release = asyncio.Event(), asyncio.Event()
         original = sink.emit
@@ -252,9 +290,9 @@ def test_clear_recur_while_sink_awaits_latches_only_exact_opening(membership_cha
         if membership_change:
             await env.op("set_members", {"members": ["spec_demo__other"]}, lane=lane["lane_id"], version=1)
         else:
-            await seed_observations(env.store, [member("in_progress")])
+            await seed_observations(env.store, [obs("in_progress")])
         await env.store.reconcile_work_lane_episodes(None, now_iso=NOW)
-        current_member = dict(member(), spec_id="spec_demo__other") if membership_change else member()
+        current_member = dict(obs(), spec_id="spec_demo__other") if membership_change else obs()
         await seed_observations(env.store, [current_member])
         await env.store.reconcile_work_lane_episodes(None, now_iso=NOW)
         assert len(await episodes(env.store)) == 2
@@ -273,8 +311,8 @@ def test_clear_recur_while_sink_awaits_latches_only_exact_opening(membership_cha
 @pytest.mark.parametrize("quality", ["fresh", "stale"])
 def test_membership_change_clears_even_true_or_unknown_and_replay_is_silent(quality):
     async def body(env):
-        first = member()
-        second = dict(member(quality=quality), spec_id="spec_demo__other")
+        first = obs()
+        second = dict(obs(quality=quality), spec_id="spec_demo__other")
         lane = (await env.adopt(state="paused", lead=False, owner="operator", members=[first["spec_id"]]))["lane"]
         await seed_observations(env.store, [first, second])
         sink = RecordingSink()
@@ -304,7 +342,7 @@ def test_drain_rereads_membership_after_index_scan_and_membership_clear_is_atomi
     from work_lanes_projection import WorkLanesInventory
     async def body(env):
         lane = (await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"]))["lane"]
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         sink = RecordingSink()
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         entered, release = asyncio.Event(), asyncio.Event()
@@ -341,8 +379,8 @@ def test_periodic_drain_and_session_inventory_emit_trigger_episodes():
     from sessions import Sessions
     from work_lanes_projection import WorkLanesInventory
     async def body(env):
-        await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"])
-        await seed_observations(env.store, [member("in_progress")])
+        lane = (await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"]))["lane"]
+        await seed_observations(env.store, [obs("in_progress")])
         sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
         await sessions.refresh()
         frames = []
@@ -353,16 +391,20 @@ def test_periodic_drain_and_session_inventory_emit_trigger_episodes():
         inv.start(interval_s=0.02)
         try:
             await inv._task
-            await seed_observations(env.store, [member()])
+            await seed_observations(env.store, [obs()])
             async with asyncio.timeout(3):
                 while not sink.committed:
                     await asyncio.sleep(0.005)
             assert len(sink.committed) == 1
+            # The lane auto-completed and settled; adding unfinished work reopens it
+            # through the running drain, so finishing it again recurs a second episode.
+            await seed_observations(env.store, [obs("in_progress")])
+            async with asyncio.timeout(3):
+                while (await env.store.get_work_lane(lane["lane_id"]))["lane"]["work_state"] == "done":
+                    await asyncio.sleep(0.005)
+            await seed_observations(env.store, [obs()])
         finally:
             await inv.stop()
-        await seed_observations(env.store, [member("in_progress")])
-        await env.store.reconcile_work_lane_episodes(sink)
-        await seed_observations(env.store, [member()])
         # Exercise the existing main.py session-emitter wrapper, including its
         # deduped path, without booting any daemon or adding another cadence.
         import ast
@@ -391,7 +433,7 @@ def test_periodic_drain_and_session_inventory_emit_trigger_episodes():
 def test_pending_fact_survives_fd_rebind_and_crash_after_sink_return():
     async def body(env):
         await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"])
-        await seed_observations(env.store, [member()])
+        await seed_observations(env.store, [obs()])
         sink = RecordingSink()
         original = env.store.submit
         async def crash_latch(fn):
@@ -415,7 +457,7 @@ def test_pending_fact_survives_fd_rebind_and_crash_after_sink_return():
 def test_renewed_freshness_clears_stale_without_recovery_fact():
     async def body(env):
         lane = (await env.adopt(members=["spec_demo__span"]))["lane"]
-        await seed_observations(env.store, [member("in_progress")])
+        await seed_observations(env.store, [obs("in_progress")])
         sink = RecordingSink()
         await env.store.reconcile_work_lane_episodes(sink, now_iso="2030-01-01T00:00:00Z")
         assert len(sink.calls) == 1 and sink.calls[0]["kind"] == "stale"
@@ -431,7 +473,7 @@ def test_renewed_freshness_clears_stale_without_recovery_fact():
 def test_parking_clears_estimate_episode_and_plain_pause_reopens():
     async def body(env):
         lane = (await env.adopt(state="paused", owner="operator", members=["spec_demo__span"]))["lane"]
-        await seed_observations(env.store, [member("backlog")])
+        await seed_observations(env.store, [obs("backlog")])
         sink = RecordingSink()
         await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
         assert [e["kind"] for e in await episodes(env.store)] == ["estimate_missing"]

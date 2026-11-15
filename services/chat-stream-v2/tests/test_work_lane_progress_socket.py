@@ -9,10 +9,12 @@ import sys
 from server import Server
 from sessions import Sessions
 from store import STREAM_TOKEN_HASH_VERSION
-from test_work_lanes import FD, run
+from test_work_lanes import FD, run, synthetic_epic
+from test_work_lane_goals import write_goal
 from test_assistant_prose_mirror import ASSISTANT
 from work_lanes_projection import WorkLanesInventory
 from _shared.specs_service import SpecsSubsystem
+from _shared.work_goals import derive_lane_id
 
 
 async def cli_call(port, tmp_path, *args, expected_status=0):
@@ -48,6 +50,11 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
         other.mkdir(parents=True)
         (other / "spec.md").write_text(content.replace("spec_demo__bridge", identity).replace("[ ]", "[x]"))
         (other / "summary.md").write_text("**Status** — Retained outcome.\n")
+    # The lane env.adopt creates (default key "stream:x") needs its goal observed on
+    # disk, or the real sweep leaves the goal uncertain and completion_pending reads
+    # null; an empty goal keeps the lane open (completion_pending False), as expected.
+    write_goal(memory, derive_lane_id(ASSISTANT, "stream:x"),
+               name=synthetic_epic("stream:x").removeprefix("epic_"))
     monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(memory))
 
     async def body(env):
@@ -130,6 +137,65 @@ def test_real_cli_conflict_has_exact_code_and_lane_id(tmp_path):
                 "--expected-version", "0", "--request-id", "socket-stale", "--composite-stream-id", ASSISTANT,
                 expected_status=1)
             assert reply["error_code"] == reply["error"] == "assistant_lane_version_conflict"
+        finally:
+            await server.close()
+            assert server._ws_server is None
+    run(body, str(tmp_path / "fixture.db"))
+
+
+def test_real_cli_preview_then_apply_both_shapes(tmp_path):
+    """V8: the real CLI `adopt --preview` -> FD edit -> `adopt --apply` roundtrip both
+    creates a new-lane adoption (by adoption_key) and promotes a routing row (by
+    lane_id), each only once its goal charter is observed. No mock is in the path."""
+    from test_work_lane_goals import write_goal, reconcile, scanner
+    from test_work_lanes_adoption import _admit_routing_lane
+    memory = tmp_path / "memory"
+    (memory / "work").mkdir(parents=True)
+
+    async def body(env):
+        token_hash = hashlib.sha256(b"fixture-lane-token").hexdigest()
+        assert await env.store.grant_stream_token("fixture-root", "visible", token_hash, STREAM_TOKEN_HASH_VERSION) == "ok"
+        # New-lane candidate: an adoptable visible lead seat. Promotion candidate: an
+        # admitted routing row. Each needs its goal charter observed before adopt.
+        sid, _gen = await env.seat("preview-lead", role="lead", parent_stream_id=FD)
+        new_lane = derive_lane_id(ASSISTANT, "stream:" + sid)
+        promote_lane = "wl-previewpromote000000000"
+        await _admit_routing_lane(env, promote_lane, "Routing candidate", "preview-request")
+        write_goal(memory, new_lane, "newlane")
+        write_goal(memory, promote_lane, "promote")
+        await reconcile(env.store, scanner(memory))
+        sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
+        await sessions.refresh()
+        server = Server(port=0, store=env.store, sessions=sessions, local_host="fixture-root")
+        server.assistant_composite = env.composite
+        specs = SpecsSubsystem(session_summaries=sessions.list_open, changed_callback=lambda ids: None, debounce_s=0)
+        server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast, specs=specs,
+                                               sweep_interval_s=0.2, settle_s=0)
+        try:
+            port = await server.bind()
+            preview = await cli_call(port, tmp_path, "adopt", "--preview", "--composite-stream-id", ASSISTANT)
+            cands = {c.get("lane_id") or c["adoption_key"]: c for c in preview["candidates"]}
+            assert ("stream:" + sid) in cands and promote_lane in cands
+            newc, promc = cands["stream:" + sid], cands[promote_lane]
+            # A new-lane candidate is display-only on new_lane_id and carries no lane_id.
+            assert newc["new_lane_id"] == new_lane and not newc.get("lane_id")
+
+            async def apply_one(entry, goals, *, status=0):
+                plan = tmp_path / "plan.json"
+                plan.write_text(json.dumps([{**entry, "owner_kind": "operator",
+                                             "work_state": "paused", "goals": goals}]))
+                return await cli_call(port, tmp_path, "adopt", "--apply", str(plan),
+                                      "--composite-stream-id", ASSISTANT, expected_status=status)
+
+            # The FD edits the preview (owner_kind + the observed goal) and applies each shape.
+            out_new = await apply_one(newc, ["epic_newlane"])
+            out_prom = await apply_one(promc, ["epic_promote"])
+            assert str(out_new["response"]["type"]).endswith(".ok"), out_new
+            assert str(out_prom["response"]["type"]).endswith(".ok"), out_prom
+            n = (await env.store.get_work_lane(new_lane))["lane"]
+            p = (await env.store.get_work_lane(promote_lane))["lane"]
+            assert n["lane_id"] == new_lane and n["work_state"] == "paused"
+            assert p["lane_id"] == promote_lane and p["work_state"] == "paused"
         finally:
             await server.close()
             assert server._ws_server is None

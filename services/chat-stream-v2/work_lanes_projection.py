@@ -424,6 +424,9 @@ class WorkLanesInventory:
             self._last_pass = time.monotonic()
             try:
                 await self.reconcile_index()
+                # Complete, settle and reopen lanes from their goals before the
+                # episode alerts and the frame are built from the new state.
+                await self.store.reconcile_lane_lifecycle()
                 await self.store.reconcile_work_lane_episodes(self.episode_sink)
                 if self.worked.needs_refresh():
                     rows = await self.store.work_lane_rows(include_done=True)

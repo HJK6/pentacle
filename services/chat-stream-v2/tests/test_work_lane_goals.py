@@ -5,9 +5,18 @@ from pathlib import Path
 import pytest
 
 from _shared.specs_service import SpecsSubsystem
-from _shared.work_goals import goal_id, goal_progress, parse_goal_facts, project_goals, wire_title
-from test_work_lanes import run
+from _shared.work_goals import derive_lane_id, goal_id, goal_progress, parse_goal_facts, project_goals, wire_title
+from test_assistant_prose_mirror import ASSISTANT
+from test_work_lanes import run, seed_pending_goal
 from work_lanes_projection import project_lane
+
+
+async def adopt_with_goal(env, *, key='stream:x', name='fixture', **kw):
+    """Adopt a lane with one real goal via the proper flow: a charter the scan
+    observed names the lane, then adopt accepts it. The caller's own write_goal
+    then replaces the seeded facts with the real charter, leaving one goal."""
+    await seed_pending_goal(env.store, 'epic_' + name, derive_lane_id(ASSISTANT, key))
+    return (await env.adopt(key=key, goals=['epic_' + name], **kw))['lane']
 
 
 def write_goal(root, lane_id, name='fixture', *, rank=1000, icon='cube', title='Finish the fixture', nested=False):
@@ -153,7 +162,7 @@ def test_pages_traverse_65_once_with_full_aggregates_and_goal_filter(tmp_path):
     from work_lanes_projection import page_lane_detail
     root = tmp_path / 'memory'
     async def body(env):
-        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator')
         write_goal(root, lane['lane_id'])
         for i in range(65):
             write_item(root, f'n{i:02}')
@@ -191,8 +200,9 @@ def test_pages_traverse_65_once_with_full_aggregates_and_goal_filter(tmp_path):
 def test_cross_lane_goal_move_partial_pair_and_root_loss_keep_last_good(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
-        a = (await env.adopt(key='request:a', state='paused', owner='operator'))['lane']
-        b = (await env.adopt(key='request:b', state='paused', owner='operator'))['lane']
+        # Both lanes are created with their own goal (a lane cannot be goal-less).
+        a = await adopt_with_goal(env, key='request:a', name='fixture', state='paused', owner='operator')
+        b = await adopt_with_goal(env, key='request:b', name='bside', state='paused', owner='operator')
         goal = write_goal(root, a['lane_id'])
         member = write_item(root, 'one')
         source = scanner(root)
@@ -214,8 +224,11 @@ def test_cross_lane_goal_move_partial_pair_and_root_loss_keep_last_good(tmp_path
         root.rename(tmp_path / 'unavailable')
         await reconcile(env.store, source)
         lost = await env.store.get_work_lane(b['lane_id'])
-        assert len(lost['members']) == 1 and projected(lost)['goals_total'] == 1
-        assert projected(lost)['goals'][0]['state'] == 'in_progress'
+        # b keeps its own goal plus the one moved in from a; the moved goal's
+        # member contribution survives the root loss as last-good.
+        assert len(lost['members']) == 1 and projected(lost)['goals_total'] == 2
+        moved = next(g for g in projected(lost)['goals'] if g['goal_id'] == goal_id('epic_fixture'))
+        assert moved['state'] == 'in_progress'
     run(body)
 
 
@@ -223,7 +236,7 @@ def test_named_goal_and_digest_survive_restart_without_reinterpretation(tmp_path
     root, database = tmp_path / 'memory', str(tmp_path / 'state.db')
     retained = {}
     async def first(env):
-        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator')
         write_goal(root, lane['lane_id'], icon=None)
         write_item(root, 'one', status='completed')
         await reconcile(env.store, scanner(root))
@@ -297,7 +310,7 @@ def test_maximum_goal_envelope_and_correlated_full_frame_budgets():
 def test_source_membership_replacement_clears_completion_episode_even_if_still_terminal(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
-        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator')
         write_goal(root, lane['lane_id'])
         write_item(root, 'first', status='completed')
         source = scanner(root)
@@ -321,7 +334,7 @@ def test_source_membership_replacement_clears_completion_episode_even_if_still_t
 def test_owner_beyond_preview_drives_attendance_through_derived_membership(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
-        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator')
         write_goal(root, lane['lane_id'])
         for i in range(65):
             write_item(root, f'n{i:02}', status='in_progress')
@@ -349,7 +362,7 @@ def test_settled_uncertain_goal_keeps_last_good_contribution_and_restart(tmp_pat
         assert (goal['state'], goal['done'], goal['total']) == expected
         assert '_goal_status' not in projected(shown)['members'][0]
     async def first(env):
-        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator')
         write_goal(root, lane['lane_id'])
         folder = write_item(root, 'settled', status=status)
         source = scanner(root)
@@ -554,3 +567,264 @@ def test_goal_road_bounds_and_default_exclusion(n):
 def test_goal_working_precedence_excludes_completed_and_deprecated(members, working, expected):
     from _shared.work_goals import goal_class
     assert goal_class([{'status': status, 'spec_id': identity} for status, identity in members], working) == expected
+
+
+# ---------------------------------------------------------------------------
+# V1 / V2: a lane cannot be created without an observed goal that names it.
+# ---------------------------------------------------------------------------
+
+async def _lane_event_counts(store):
+    def q(conn):
+        return (conn.execute("SELECT COUNT(*) FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM v2_work_lane_events").fetchone()[0])
+    return await store.submit(q)
+
+
+def _write_raw_goal(root, name, body):
+    path = root / 'epics' / (name + '.md')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def test_v1_goal_less_creation_refused_writes_nothing(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:v1'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        async def refused(code, goals, *, seed_name=None):
+            before = await _lane_event_counts(env.store)
+            payload = {'adoption_key': key, 'title': 'V1', 'summary': 'g', 'owner_kind': 'operator',
+                       'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+                       'no_spec_reason': 'Fixture'}
+            if goals is not None:
+                payload['goals'] = goals
+            with pytest.raises(ValueError) as exc:
+                await env.op('adopt', payload, request_id='adopt:' + key, inject_goals=False)
+            assert str(exc.value).split(':')[0] == code, (code, str(exc.value))
+            assert await _lane_event_counts(env.store) == before  # a refusal writes nothing
+        # Missing and empty both demand a goal.
+        await refused('work_lane_goal_required', None)
+        await refused('work_lane_goal_required', [])
+        # Shape errors are payload-invalid.
+        await refused('work_lane_payload_invalid', ['not-an-epic'])
+        await refused('work_lane_payload_invalid', ['epic_dup', 'epic_dup'])
+        await refused('work_lane_payload_invalid', ['epic_' + str(n) for n in range(17)])
+        # Unhashable elements must be the specified refusal, not a TypeError from set().
+        await refused('work_lane_payload_invalid', [{}])
+        await refused('work_lane_payload_invalid', [[]])
+        # An epic the daemon has not observed is unresolved.
+        await refused('work_lane_goal_unresolved', ['epic_unobserved'])
+        # A valid charter that names a different lane is unresolved for this one.
+        write_goal(root, derive_lane_id(ASSISTANT, 'stream:elsewhere'), 'other')
+        # An invalid charter observed under its own id (names no lane, no Goal
+        # section) and a duplicated id both leave no pending facts for this lane.
+        _write_raw_goal(root, 'broken', '---\nid: epic_broken\ntype: epic\ntitle: Broken\nsummary: S\n---\nNo goal section.\n')
+        # A genuinely parser-invalid charter (malformed YAML frontmatter) leaves no
+        # pending facts either; adopting its id is unresolved, never a silent create.
+        _write_raw_goal(root, 'malformed', '---\nid: epic_malformed\ntype: epic\ntitle: [unterminated\n'
+                        '  lane_id: ' + lane_id + '\n: : :\n---\n## Goal\n\nBad frontmatter.\n')
+        _write_raw_goal(root, 'twinA', '---\nid: epic_twin\ntype: epic\ntitle: T\nsummary: S\nlane_id: '
+                        + lane_id + '\n---\n## Goal\n\nDone.\n')
+        _write_raw_goal(root, 'twinB', '---\nid: epic_twin\ntype: epic\ntitle: T\nsummary: S\nlane_id: '
+                        + lane_id + '\n---\n## Goal\n\nDone.\n')
+        await reconcile(env.store, scanner(root))
+        await refused('work_lane_goal_unresolved', ['epic_other'])     # names stream:elsewhere
+        await refused('work_lane_goal_unresolved', ['epic_broken'])    # valid parse, names no lane, no pending
+        await refused('work_lane_goal_unresolved', ['epic_malformed']) # parser-invalid frontmatter, no pending
+        await refused('work_lane_goal_unresolved', ['epic_twin'])      # duplicated, ambiguous
+        # The work index being unavailable is also unresolved, not a silent create.
+        write_goal(root, lane_id, 'ready')
+        await reconcile(env.store, scanner(root))
+        await env.store.mark_work_index_pending()
+        await refused('work_lane_goal_unresolved', ['epic_ready'])
+    run(body, str(tmp_path / 'v1.db'))
+
+
+def test_v1_promotion_shape_refuses_goal_less_and_unresolved(tmp_path):
+    from test_work_lanes_adoption import _admit_routing_lane
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        lane_id = 'wl-promote0000000000000'
+        await _admit_routing_lane(env, lane_id, 'Routing candidate', 'req-promote')
+        base = {'adoption_key': 'request:promote-me', 'title': 'Promo', 'summary': 'g', 'owner_kind': 'operator',
+                'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT}, 'lane_id': lane_id,
+                'no_spec_reason': 'Fixture'}
+        seq = [0]
+        async def refused(code, goals):
+            before = await _lane_event_counts(env.store)
+            payload = dict(base)
+            if goals is not None:
+                payload['goals'] = goals
+            seq[0] += 1
+            with pytest.raises(ValueError) as exc:
+                await env.op('adopt', payload, request_id=f'promote-x{seq[0]}', inject_goals=False)
+            assert str(exc.value).split(':')[0] == code, (code, str(exc.value))
+            assert await _lane_event_counts(env.store) == before  # a refusal writes nothing
+        # The promotion shape enforces the SAME goal refusal matrix as new-lane creation.
+        await refused('work_lane_goal_required', None)
+        await refused('work_lane_goal_required', [])
+        await refused('work_lane_payload_invalid', ['not-an-epic'])
+        await refused('work_lane_payload_invalid', ['epic_dup', 'epic_dup'])
+        await refused('work_lane_payload_invalid', ['epic_' + str(i) for i in range(17)])
+        await refused('work_lane_payload_invalid', [{}])
+        await refused('work_lane_payload_invalid', [[]])
+        await refused('work_lane_goal_unresolved', ['epic_absent'])
+        write_goal(root, derive_lane_id(ASSISTANT, 'stream:elsewhere'), 'other')
+        _write_raw_goal(root, 'broken', '---\nid: epic_broken\ntype: epic\ntitle: Broken\nsummary: S\n---\nNo goal section.\n')
+        _write_raw_goal(root, 'malformed', '---\nid: epic_malformed\ntype: epic\ntitle: [unterminated\n'
+                        '  lane_id: ' + lane_id + '\n: : :\n---\n## Goal\n\nBad frontmatter.\n')
+        _write_raw_goal(root, 'twinA', '---\nid: epic_twin\ntype: epic\ntitle: T\nsummary: S\nlane_id: '
+                        + lane_id + '\n---\n## Goal\n\nDone.\n')
+        _write_raw_goal(root, 'twinB', '---\nid: epic_twin\ntype: epic\ntitle: T\nsummary: S\nlane_id: '
+                        + lane_id + '\n---\n## Goal\n\nDone.\n')
+        await reconcile(env.store, scanner(root))
+        await refused('work_lane_goal_unresolved', ['epic_other'])      # names a different lane
+        await refused('work_lane_goal_unresolved', ['epic_broken'])     # valid parse, no lane, no pending
+        await refused('work_lane_goal_unresolved', ['epic_malformed'])  # parser-invalid frontmatter
+        await refused('work_lane_goal_unresolved', ['epic_twin'])       # duplicated, ambiguous
+        # A charter naming the routing row's own id promotes it with that goal.
+        write_goal(root, lane_id, 'promo')
+        await reconcile(env.store, scanner(root))
+        # The index being unavailable is unresolved, not a silent promote.
+        await env.store.mark_work_index_pending()
+        await refused('work_lane_goal_unresolved', ['epic_promo'])
+        await reconcile(env.store, scanner(root))
+        out = await env.op('adopt', dict(base, goals=['epic_promo']), request_id='promote-c', inject_goals=False)
+        assert out['lane']['lane_id'] == lane_id and out['lane']['work_state'] == 'paused'
+        shown = await env.store.get_work_lane(lane_id)
+        assert project_lane(shown['_projection_row'], None, '2026-11-14T00:00:00Z')['goals_total'] == 1
+    run(body, str(tmp_path / 'v1p.db'))
+
+
+def test_v1_goals_only_adoption_without_members_or_no_spec_reason(tmp_path):
+    """F1: valid observed goals justify a lane, so neither members nor a
+    no_spec_reason is required; missing goals is goal_required, not
+    no_spec_reason_required, for both the new-lane and promotion shapes."""
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:goalonly'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        await seed_pending_goal(env.store, 'epic_goalonly', lane_id)
+        # New-lane shape: goals, no members, no no_spec_reason -> created.
+        out = await env.op('adopt', {'adoption_key': key, 'title': 'Goals only', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'goals': ['epic_goalonly']}, request_id='adopt:' + key, inject_goals=False)
+        assert out['lane']['lane_id'] == lane_id and out['lane']['members'] == [] and out['lane']['no_spec_reason'] is None
+        # Missing goals (also no members, no no_spec_reason) is goal_required, writing nothing.
+        before = await _lane_event_counts(env.store)
+        with pytest.raises(ValueError, match='work_lane_goal_required'):
+            await env.op('adopt', {'adoption_key': 'stream:nogoal', 'title': 'No goal', 'summary': 'g',
+                'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT}},
+                request_id='adopt:stream:nogoal', inject_goals=False)
+        assert await _lane_event_counts(env.store) == before
+        # Promotion shape: a routing row promoted by its goal alone, no members/no_spec_reason.
+        from test_work_lanes_adoption import _admit_routing_lane
+        await _admit_routing_lane(env, 'wl-promote0000000000000', 'Routing candidate', 'req-promote')
+        write_goal(root, 'wl-promote0000000000000', 'promo')
+        await reconcile(env.store, scanner(root))
+        promoted = await env.op('adopt', {'adoption_key': 'request:promote-me', 'title': 'Promo', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'lane_id': 'wl-promote0000000000000', 'goals': ['epic_promo']},
+            request_id='promote-goalonly', inject_goals=False)
+        assert promoted['lane']['lane_id'] == 'wl-promote0000000000000' and promoted['lane']['no_spec_reason'] is None
+    run(body, str(tmp_path / 'v1goalonly.db'))
+
+
+def test_v2_creation_with_a_goal_is_immediate_and_replayable(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:v2'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        write_goal(root, lane_id, 'ready')
+        await reconcile(env.store, scanner(root))
+        payload = {'adoption_key': key, 'title': 'V2', 'summary': 'g', 'owner_kind': 'operator',
+                   'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+                   'goals': ['epic_ready'], 'no_spec_reason': 'Fixture'}
+        out = await env.op('adopt', payload, request_id='adopt:' + key, inject_goals=False)
+        assert out['lane']['lane_id'] == lane_id
+        # The goal is present the moment the lane exists, with no index pass between.
+        shown = await env.store.get_work_lane(lane_id)
+        assert project_lane(shown['_projection_row'], None, '2026-11-14T00:00:00Z')['goals_total'] == 1
+        # The charter record is fresh and carries no pending key once accepted.
+        def goal_record(conn):
+            from store_work_index import _state_conn
+            return _state_conn(conn)['goal_observations']['epic_ready']
+        record = await env.store.submit(goal_record)
+        assert record['quality'] == 'fresh' and 'pending' not in record
+        # Replaying the same request id returns the stored result, not a new lane.
+        again = await env.op('adopt', payload, request_id='adopt:' + key, inject_goals=False)
+        assert again['duplicate'] is True and again['lane']['lane_id'] == lane_id
+        assert len(await env.store.work_lane_rows()) == 1
+    run(body, str(tmp_path / 'v2.db'))
+
+
+def test_v2_index_pass_after_adoption_keeps_acceptance(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:v2race'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        write_goal(root, lane_id, 'race')
+        source = scanner(root)
+        await reconcile(env.store, source)
+        out = await env.op('adopt', {'adoption_key': key, 'title': 'Race', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'goals': ['epic_race'], 'no_spec_reason': 'Fixture'}, request_id='adopt:' + key, inject_goals=False)
+        assert out['lane']['lane_id'] == lane_id
+        # A full index pass after the adoption keeps the accepted charter fresh for
+        # the lane; the changed-base check in reconcile never overwrites it.
+        await reconcile(env.store, source)
+        def goal_record(conn):
+            from store_work_index import _state_conn
+            return _state_conn(conn)['goal_observations']['epic_race']
+        record = await env.store.submit(goal_record)
+        assert record['quality'] == 'fresh' and record['facts']['lane_id'] == lane_id and 'pending' not in record
+    run(body, str(tmp_path / 'v2race.db'))
+
+
+def test_v2_prepared_snapshot_before_adoption_hits_changed_base_guard(tmp_path, monkeypatch):
+    """F5 (V2) changed-base race, exercised for real. A reconcile whose read-only
+    snapshot was prepared by _prepare_file BEFORE the adoption landed carries a stale
+    known-lanes base (no such lane) and a stale, still-pending goal delta. Releasing
+    it after the adopt must hit the changed-base guard (store_work_index
+    reconcile_work_observations: `current[5] != known_lanes` / changed observation
+    state) and recompute against the post-adopt state, never reverting the acceptance
+    the adopt transaction wrote. Removing that guard reverts it to pending (RED)."""
+    import asyncio as _asyncio
+    import store_work_index as swi
+    root = tmp_path / 'memory'
+    async def body(env):
+        (root / 'work').mkdir(parents=True, exist_ok=True)
+        key = 'stream:v2race'
+        lane_id = derive_lane_id(ASSISTANT, key)
+        write_goal(root, lane_id, 'race')
+        source = scanner(root)
+        await reconcile(env.store, source)                     # epic_race observed pending (no lane)
+        # Prepare the snapshot while the lane is STILL absent: a later scanned_at (so
+        # the apply does not stale-reject it) but a pre-adoption base and goal delta.
+        stale_scan = source.scan_work_observations()
+        last = await env.store.submit(lambda conn: swi._state_conn(conn).get('_last_scan_at', 0.0))
+        stale_scan['scanned_at'] = float(last) + 10.0
+        stale_prepared = await _asyncio.to_thread(
+            swi._prepare_file, env.store.path, stale_scan, settle_s=0, sweep=True)
+        assert lane_id not in stale_prepared[5]                 # the prepared base has no such lane
+        assert 'pending' in stale_prepared[4]['epic_race']      # its goal delta is still pending
+        # Adopt: the goal is accepted fresh in the adopt transaction; the lane exists now.
+        out = await env.op('adopt', {'adoption_key': key, 'title': 'Race', 'summary': 'g',
+            'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
+            'goals': ['epic_race'], 'no_spec_reason': 'Fixture'}, request_id='adopt:' + key, inject_goals=False)
+        assert out['lane']['lane_id'] == lane_id
+        # Release the pre-adoption snapshot through the real reconcile path.
+        monkeypatch.setattr(swi, '_prepare_file', lambda *a, **k: stale_prepared)
+        result = await env.store.reconcile_work_observations(stale_scan, settle_s=0, sweep=True)
+        assert not result.get('stale_scan')                    # it actually ran (guard, not a stale drop)
+        record = await env.store.submit(
+            lambda conn: swi._state_conn(conn)['goal_observations']['epic_race'])
+        assert record['quality'] == 'fresh' and 'pending' not in record
+        assert record['facts']['lane_id'] == lane_id
+    run(body, str(tmp_path / 'v2race.db'))

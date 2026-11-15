@@ -60,10 +60,14 @@ def _seed(state: Path, *, populated=False):
                         "findings": [], "next_action": "Fixture", "ingested_at": "2026-01-01T00:00:00Z"},
                         routing_snapshot=await Ledger(store, sessions=sessions)._report_routing_snapshot("fixture-a:assistant"),
                         announce=False)
+                    from test_work_lanes import seed_pending_goal, synthetic_epic
+                    from _shared.work_goals import derive_lane_id
+                    epic = synthetic_epic("request:captured-fixture")
+                    await seed_pending_goal(store, epic, derive_lane_id(CHAT, "request:captured-fixture"))
                     await composite.operation({"composite_stream_id": CHAT, "operation": "work_lane.adopt",
                         "request_id": "captured-fixture-lane", "payload": {"adoption_key": "request:captured-fixture",
                             "title": "Private fixture lane", "summary": "Fixture", "work_state": "paused",
-                            "owner_kind": "operator", "visible_chat": {"stream_id": CHAT},
+                            "owner_kind": "operator", "visible_chat": {"stream_id": CHAT}, "goals": [epic],
                             "no_spec_reason": "Isolated copied-state fixture"},
                         "_auth_context": {"token_verified": True, "stream_id": "fixture-a:assistant",
                             "session_generation": primary["session_generation"]}}, actor_stream_id="fixture-a:assistant")

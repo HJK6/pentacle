@@ -6,7 +6,9 @@ import pytest
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from sessions import VerbError
+from _shared.work_goals import derive_lane_id
 from test_lifecycle_authority import HOST, OPERATOR, Env, _refused, _until, scenario
+from test_work_lanes import seed_pending_goal
 
 FD = HOST + ":front-desk"
 REASON = "Operator fixture-directive: close absorbed kickoff; custody with FD"
@@ -35,8 +37,11 @@ def close(auth, **extra):
 async def lane(env, *, owner="operator", pointer="chat"):
     composite = env.server.assistant_composite
     await composite.ensure_projection()
+    # A lane cannot be created without an observed goal charter naming it.
+    await seed_pending_goal(env.store, "epic_fdclose", derive_lane_id(HOST + ":assistant", "stream:target"))
     payload = {"adoption_key": "stream:target", "title": "Disposable work", "summary": "Synthetic lane",
                "owner_kind": owner, "work_state": "paused", "no_spec_reason": "Isolated acceptance",
+               "goals": ["epic_fdclose"],
                "visible_chat": {"stream_id": HOST + ":target", "generation": await env.gen("target")}}
     if pointer == "lead":
         await env.store.update_session(HOST, "target", role="lead", provider="codex")
