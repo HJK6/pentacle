@@ -634,8 +634,8 @@ def test_peer_terminating_report_uses_close_retry_once() -> None:
                 "report_id": "report-close-retry",
                 "msg_id": 0,
                 "status": "done",
-                "summary": "peer complete",
-                "findings": [],
+                "summary": "peer complete (test report body)",
+                "findings": [], "no_findings": True,
                 "next_action": "none",
                 "terminate": True,
             })

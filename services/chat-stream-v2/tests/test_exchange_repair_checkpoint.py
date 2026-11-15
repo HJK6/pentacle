@@ -693,7 +693,7 @@ def test_socket_restart_keeps_replay_identity_and_never_redelivers(tmp_path):
                         assert told["duplicate"] and told["ledger_row_id"] == first_tell["ledger_row_id"]
                     report = await rpc(dict(type="report", request_id="report-request", report_id="socket-report",
                                             from_stream_id="test-host:child", stream_token="child-token",
-                                            msg_id=0, status="progress", summary="Synthetic progress", findings=[], next_action="continue"))
+                                            msg_id=0, status="progress", summary="Synthetic progress (test report body)", findings=[], next_action="continue"))
                     assert report["type"] == "report.ok", report
                     page = await rpc(dict(type="thread.read", request_id="thread-request", child_stream_id="test-host:child",
                                           stream_token="parent-token"))

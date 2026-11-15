@@ -294,7 +294,7 @@ def test_qa_report_producer_bindings_reach_commissioned_store(monkeypatch):
                 args = cli.build_parser().parse_args([
                     "report", "--msg-id", "0", "--status", "done",
                     "--result", json.dumps({
-                        "summary": "Reviewed admission", "findings": [],
+                        "summary": "Reviewed admission (test report body)", "findings": [], "no_findings": True,
                         "next_action": "repair" if verdict == "reject" else "lead_proceed",
                         "extras": {"review_note": "retained"},
                     }),

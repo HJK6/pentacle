@@ -125,8 +125,8 @@ def test_terminal_report_honors_self_close_on_completion() -> None:
                 {
                     "from_stream_id": "hosta:auto-close",
                     "status": "done",
-                    "summary": "finished",
-                    "findings": [],
+                    "summary": "finished (test report body)",
+                    "findings": [], "no_findings": True,
                     "next_action": "done",
                 }
             )

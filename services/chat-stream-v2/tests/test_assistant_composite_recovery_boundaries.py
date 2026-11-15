@@ -73,7 +73,7 @@ def test_real_ledger_report_completes_before_close_and_wakes_once(delegated, ter
                 ledger.ingest = persist_then_replace
             before = set(await store.list_outbound_notice_ids(limit=100, force=True))
             msg = dict(type='report', from_stream_id=LEAD, status='done', report_id='real-terminal',
-                summary='done', findings=[], next_action='continue', terminate=terminate,
+                summary='done (test report body)', findings=[], no_findings=True, next_action='continue', terminate=terminate,
                 extras={'assistant_composite': dict(stream_id=STREAM, lane_id=lane, dispatch_id=dispatch)},
                 _auth_context=auth)
             if stale:

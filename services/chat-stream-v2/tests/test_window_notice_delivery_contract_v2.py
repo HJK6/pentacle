@@ -99,12 +99,12 @@ async def _lineage(store: Store) -> Sessions:
     return sessions
 
 
-def _report(report_id: str, *, summary: str = "finished") -> dict:
+def _report(report_id: str, *, summary: str = "finished the window work") -> dict:
     return {
         "type": "report", "report_id": report_id,
         "from_stream_id": "hosta:child", "caller_stream_id": "hosta:child",
         "msg_id": 7, "status": "done", "summary": summary,
-        "findings": [], "next_action": "continue",
+        "findings": [], "no_findings": True, "next_action": "continue",
     }
 
 
@@ -141,9 +141,9 @@ def test_report_first_replay_conflict_and_canonical_delivery_are_durable() -> No
             assert receipt["delivery_ack_at"]
             assert len(queue.calls) == 2
             with pytest.raises(VerbError) as raised:
-                await ledger.report(_report("report/a", summary="changed"))
+                await ledger.report(_report("report/a", summary="changed the window work"))
             assert raised.value.code == "report_id_replay_conflict"
-            assert (await store.get_report("report/a"))["summary"] == "finished"
+            assert (await store.get_report("report/a"))["summary"] == "finished the window work"
             assert len(queue.calls) == 2
         finally:
             store.stop()
@@ -209,7 +209,7 @@ def test_persisted_legacy_report_receipt_is_reused_only_for_exact_target(legacy_
             row = {
                 "report_id": "legacy/report", "ledger_row_id": 41,
                 "from_stream_id": "hosta:child", "to_stream_id": "hosta:parent",
-                "msg_id": 8, "status": "done", "summary": "legacy",
+                "msg_id": 8, "status": "done", "summary": "legacy report from before",
             }
             legacy_id = _legacy_child_report_ready_tell_id(row["report_id"])
             text = child_report_ready_text(row)

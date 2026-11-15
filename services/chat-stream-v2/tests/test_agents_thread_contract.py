@@ -85,11 +85,11 @@ def test_progress_transition_since_survives_cold_start_and_later_working_change(
             ledger = Ledger(store, sessions=sessions, routing_integrity=RoutingIntegrity(store, sessions))
             clock["now"] = "2026-09-08T00:01:00Z"
             await ledger.report(dict(report_id="blocked", from_stream_id="hosta:child", msg_id=1,
-                                     status="error", reason="need_input", summary="Need input", findings=[], next_action="wait"))
+                                     status="error", reason="need_input", summary="Need input (test report body)", findings=[], next_action="wait"))
             assert sessions.get("hosta:parent")["agents"][0]["state"] == "blocked"
             clock["now"] = "2026-09-08T00:02:00Z"
             await ledger.report(dict(report_id="resumed", from_stream_id="hosta:child", msg_id=1,
-                                     status="progress", summary="Input received", findings=[], next_action="continue"))
+                                     status="progress", summary="Input received (test report body)", findings=[], next_action="continue"))
             # Reading later must preserve the report transition's source time.
             clock["now"] = "2026-09-08T00:02:30Z"
             assert sessions.get("hosta:parent")["agents"][0]["since"] == "2026-09-08T00:02:00Z"

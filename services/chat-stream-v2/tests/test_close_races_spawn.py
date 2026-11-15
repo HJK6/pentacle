@@ -117,7 +117,7 @@ def test_close_reprobes_store_over_self_report(tmp_path, monkeypatch) -> None:
                 "msg_id": 1,
                 "status": "done",
                 "summary": "all ACs checked and children reaped",
-                "findings": [],
+                "findings": [], "no_findings": True,
                 "next_action": "continue",
                 "terminate": True,
                 "ac_claim": {

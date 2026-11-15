@@ -277,8 +277,8 @@ def test_remote_reprobe_alive_cancels_stale_death_episode() -> None:
             report = (await server._dispatch(json.dumps({
                 "type": "report", "request_id": "restart-report",
                 "report_id": "restart-report", "from_stream_id": "hostb:v2-ghost",
-                "msg_id": 0, "status": "done", "summary": "still alive",
-                "findings": [], "next_action": "leader_proceed",
+                "msg_id": 0, "status": "done", "summary": "still alive (test report body)",
+                "findings": [], "no_findings": True, "next_action": "leader_proceed",
             })))[0]
             assert report["type"] == "report.ok"
         finally:
@@ -638,8 +638,8 @@ def test_terminal_report_authorization_is_generation_scoped() -> None:
             )
             await Ledger(store, sessions=sessions, outbound=AsyncMock()).ingest({
                 "report_id": "terminal-child", "from_stream_id": "hostb:v2-ghost",
-                "msg_id": 1, "status": "done", "summary": "complete",
-                "findings": [], "next_action": "leader_proceed",
+                "msg_id": 1, "status": "done", "summary": "complete (test report body)",
+                "findings": [], "no_findings": True, "next_action": "leader_proceed",
             })
             await reconciler.reconcile_once()
             await reconciler.reconcile_once()
@@ -1215,8 +1215,8 @@ def test_reconciled_remote_row_can_restore_and_still_supports_tell_report() -> N
             report = (await wire_server._dispatch(json.dumps({
                 "type": "report", "request_id": "restore-report",
                 "report_id": "restore-report", "from_stream_id": "hostb:v2-ghost",
-                "msg_id": 0, "status": "done", "summary": "restored comms",
-                "findings": [], "next_action": "leader_proceed",
+                "msg_id": 0, "status": "done", "summary": "restored comms (test report body)",
+                "findings": [], "no_findings": True, "next_action": "leader_proceed",
             })))[0]
             assert tell["type"] == "tell.ok"
             assert report["type"] == "report.ok"
@@ -1405,7 +1405,7 @@ def test_unknown_envelope_field_records_rejection_for_self_close_seat() -> None:
                 await ledger.ingest({
                     "report_id": "rejection-env", "from_stream_id": "hosta:env-seat",
                     "caller_stream_id": "hosta:env-seat", "msg_id": 1, "status": "done",
-                    "summary": "done", "findings": [], "next_action": "leader_proceed",
+                    "summary": "done (test report body)", "findings": [], "no_findings": True, "next_action": "leader_proceed",
                     "bounce_required": True,  # unknown envelope field
                 })
             row = await store.fetch_session("hosta", "env-seat")

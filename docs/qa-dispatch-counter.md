@@ -70,7 +70,7 @@ reviewed scope and the SHA-256 of durable gate/review evidence:
 
 ```sh
 agent-orch report --msg-id 7 --status done \
-  --result '{"summary":"Reviewed admission","findings":[],"next_action":"lead_proceed"}' \
+  --result '{"summary":"Reviewed admission","findings":[],"no_findings":true,"next_action":"lead_proceed"}' \
   --qa-verdict accept --target-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --qa-reviewed-scope 'admission acceptance criteria' \
   --qa-gate-evidence-digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \

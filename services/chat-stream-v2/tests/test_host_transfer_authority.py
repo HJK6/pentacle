@@ -695,7 +695,7 @@ async def governed_close(store,server,row,auth,*,report=False):
         from routing_integrity import RoutingIntegrity
         snapshot=await RoutingIntegrity(store,server.sessions).report_write_snapshot(ADVISOR)
         await store.put_report({'report_id':'governed-report','from_stream_id':ADVISOR,'msg_id':0,'status':'done','ingested_at':time.time(),
-            'summary':'Synthetic retained completion','findings':[],'next_action':'Parent disposition'},
+            'summary':'Synthetic retained completion','findings':[], 'no_findings': True,'next_action':'Parent disposition'},
             routing_snapshot=snapshot,announce=False)
     msg={'type':'close','host':'node-a','session_name':'advisor','request_id':'governed-close',
         'reason':'Synthetic manager closure','expected_generation':gen,'operator_confirm':True}

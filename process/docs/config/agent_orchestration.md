@@ -105,7 +105,7 @@ Non-QA completion carries `summary`, `findings` and `next_action`; it does not c
 
 ```sh
 agent-orch report --status done \
-  --result '{"summary":"Owned implementation and focused checks complete","findings":[],"next_action":"Parent integrates and commissions final independent QA"}'
+  --result '{"summary":"Owned implementation and focused checks complete","findings":[],"no_findings":true,"next_action":"Parent integrates and commissions final independent QA"}'
 ```
 
 Independent QA binds the candidate, reviewed scope and evidence digest, then reports before its END tell:
@@ -114,7 +114,7 @@ Independent QA binds the candidate, reviewed scope and evidence digest, then rep
 agent-orch report --status done --qa-verdict accept \
   --target-sha "$CANDIDATE_SHA" --qa-reviewed-scope "$REVIEWED_SCOPE" \
   --qa-gate-evidence-digest "$GATE_DIGEST" \
-  --result '{"summary":"Frozen acceptance reviewed","findings":[],"next_action":"Owner consumes scoped QA evidence"}'
+  --result '{"summary":"Frozen acceptance reviewed","findings":[],"no_findings":true,"next_action":"Owner consumes scoped QA evidence"}'
 ```
 
 Use `--qa-verdict reject` for a violated acceptance criterion with reproducible findings. A non-QA lead may claim readiness only after consuming a real independent accepting report for the candidate:
@@ -124,7 +124,7 @@ agent-orch report --status done --completion-kind implementation_ready \
   --target-sha "$CANDIDATE_SHA" \
   --qa-attestation-stream-id "$INDEPENDENT_QA_STREAM" \
   --qa-attestation-report-id "$INDEPENDENT_QA_REPORT" \
-  --result '{"summary":"Independent final QA consumed","findings":[],"next_action":"Parent validates readiness and integrates"}'
+  --result '{"summary":"Independent final QA consumed","findings":[],"no_findings":true,"next_action":"Parent validates readiness and integrates"}'
 ```
 
 The daemon checks the distinct QA stream, shared spec binding and prior durable accepting QA row. Readiness is consumable only when the daemon-owned attestation validation state is `verified`; reporter-written extras do not establish it. `PENTACLE_QA_ATTESTATION_MODE=warn` is the default: incomplete readiness may be persisted with an unverified warning. `enforce` rejects unverified readiness before insertion; `off` disables that rollout check. Ordinary terminal payload and QA-role field validation still apply. A written ACCEPT or END tell does not replace the typed report. File-based independent review remains valid when no daemon is installed; store the candidate, scope, verdict and evidence alongside the private spec.

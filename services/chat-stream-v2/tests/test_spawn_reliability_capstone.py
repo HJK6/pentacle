@@ -467,7 +467,7 @@ def test_bare_spawn_send_report_terminate_closes_the_row() -> None:
                     "msg_id": 0,
                     "status": "done",
                     "summary": "bare worker finished",
-                    "findings": [],
+                    "findings": [], "no_findings": True,
                     "next_action": "done",
                     "qa_verdict": "accept",
                     "target_sha": "0" * 40,

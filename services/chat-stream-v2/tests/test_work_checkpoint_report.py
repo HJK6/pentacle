@@ -36,7 +36,7 @@ async def ledger_with(owner_fields):
 
 def report(status, report_id):
     return {"report_id": report_id, "from_stream_id": f"{HOST}:owner", "msg_id": 0, "status": status,
-            "summary": "checkpoint", "findings": [], "next_action": "continue"}
+            "summary": "checkpoint (test report body)", "findings": [], "no_findings": True, "next_action": "continue"}
 
 
 NOT_PLAIN = LABELLED.replace("**Status** — Cut.", "**Status** — Cut; glue next.")
@@ -124,9 +124,9 @@ async def test_new_readiness_requires_current_checkpoint_and_verified_qa_then_re
         replay = await ledger.report(ready)
         assert replay["work_checkpoint"] == snapshot
         with pytest.raises(VerbError):
-            await ledger.report({**ready, "summary": "changed payload"})
+            await ledger.report({**ready, "summary": "changed payload (test report body)"})
         error = _report("progress-still-allowed", READY, status="error")
-        error.update(reason="Source unavailable", findings=[], next_action="Repair the source")
+        error.update(reason="Source unavailable", findings=[], no_findings=True, next_action="Repair the source")
         assert (await ledger.report(error))["work_checkpoint"]["state"] == "unverifiable"
     finally:
         store.stop()

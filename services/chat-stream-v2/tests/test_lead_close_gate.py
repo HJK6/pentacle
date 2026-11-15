@@ -324,7 +324,7 @@ def test_fd_parent_closes_reported_literal_work_without_extra_disposition(role, 
             stream = f"{HOST}:{row['session_name']}"
             report = {"report_id": "reported-" + role + "-" + status, "from_stream_id": stream,
                 "msg_id": 0, "status": "done", "summary": "Assigned review or planning work finished",
-                "findings": [], "next_action": "Parent reviews the existing disposition",
+                "findings": [], "no_findings": True, "next_action": "Parent reviews the existing disposition",
                 "_auth_context": {"token_verified": True, "stream_id": stream,
                                   "session_generation": row["session_generation"]}}
             if role == "qa":

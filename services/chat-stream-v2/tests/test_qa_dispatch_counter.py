@@ -49,7 +49,7 @@ def send_msg(name, msg_id=0, **overrides):
 def report_msg(name, **overrides):
     return {'report_id': f'reject-{name}', 'from_stream_id': f'localhost:{name}',
             'msg_id': 0, 'status': 'done', 'qa_verdict': 'reject', 'target_sha': SHA,
-            'summary': 'In-scope admission defect', 'findings': [], 'next_action': 'repair',
+            'summary': 'In-scope admission defect', 'findings': [], 'no_findings': True, 'next_action': 'repair',
             'extras': {'qa_review': {'reviewed_scope': 'admission', 'candidate_identity': SHA,
                                      'gate_evidence_digest': 'b' * 64}}, **overrides}
 
