@@ -5,7 +5,7 @@
       "path": "tests/fixtures/front_desk_ingress_v1_cases.json",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "d86614aad7342da82c485ea979415608721e1c5e087bcb5adfd58249d6ae9e49"
+      "sha256": "8de918745b85d623b35bb4a744c9e10f1397d236f2c073d3781a86da023099d1"
     },
     {
       "path": "tests/front_desk_ingress_replay.py",
