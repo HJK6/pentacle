@@ -1637,9 +1637,10 @@ class _RoutingStoreMixin:
                 prior_payload = json.loads(prior[0]) if prior else None
                 strip_fields = (prior_payload is not None and not ({"note_type", "ref"} & prior_payload.keys())) if prior else not strict
                 if proactive_binding_name is not None and strip_fields:
-                    saved_payload = {k: v for k, v in canonical_payload.items() if k not in {"note_type", "ref"}}
-                    saved_event = {k: v for k, v in event.items() if k not in {"note_type", "ref"}}
-                    saved_event["raw"] = {k: v for k, v in event["raw"].items() if k not in {"note_type", "ref"}}
+                    from strict_publication import NOTE_FIELDS
+                    saved_payload = {k: v for k, v in canonical_payload.items() if k not in NOTE_FIELDS}
+                    saved_event = {k: v for k, v in event.items() if k not in NOTE_FIELDS}
+                    saved_event["raw"] = {k: v for k, v in event["raw"].items() if k not in NOTE_FIELDS}
                 stored = _record_publication_conn(
                     conn, stream_id=stream_id, publication_key=publication_key,
                     dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,

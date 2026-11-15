@@ -208,6 +208,8 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
         for field in ('note_type', 'ref'):
             if getattr(args, field, None) is not None:
                 payload[field] = getattr(args, field)
+        if getattr(args, 'why', None) is not None:
+            payload['note_reason'] = args.why
         for field in ('reply_to_question_id', 'response_state'):
             if getattr(args, field, None):
                 payload[field] = getattr(args, field)
@@ -234,9 +236,10 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
             'attachment_invalid', 'publish_correlation_invalid', 'publish_replay_conflict',
             'assistant_publish_note_type_required', 'assistant_publish_ref_required',
             'assistant_publish_ref_not_found', 'assistant_publish_ref_kind_not_allowed',
-            'assistant_publish_duplicate_text', 'assistant_publish_desk_dispatch') else 'publish_failed'
+            'assistant_publish_duplicate_text', 'assistant_publish_desk_dispatch',
+            'assistant_publish_reason_required', 'assistant_publish_repeat') else 'publish_failed'
         result = {'type': 'assistant.publish.error', 'error_code': safe, 'upload_id': upload_id}
-        if code == 'assistant_publish_duplicate_text' and isinstance(response.get('error'), str):
+        if code in ('assistant_publish_duplicate_text', 'assistant_publish_repeat') and isinstance(response.get('error'), str):
             prefix, _, event_id = response['error'].partition(':')
             if prefix == code and event_id.isdecimal():
                 result['previous_event_id'] = int(event_id)

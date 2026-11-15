@@ -4,21 +4,50 @@ import re
 import time
 import unicodedata
 
+NOTE_TYPES = {"result", "problem", "reminder", "relay", "started", "change", "other"}
+NOTE_FIELDS = ("note_type", "ref", "note_reason")
+REPEAT_WINDOW_S = 24 * 3600
+# Range reads pinned to idx_v2_assistant_publications_window: bounded by the
+# window, never by the composite's total history (the dispatch index would be).
+REPEAT_GUARD_SQL = ("SELECT event_id,canonical_payload_json FROM v2_assistant_composite_publications "
+                    "INDEXED BY idx_v2_assistant_publications_window "
+                    "WHERE stream_id=? AND created_at>? AND dispatch_id=''")
+OTHER_NOTES_SQL = ("SELECT created_at,event_id,json_extract(canonical_payload_json,'$.ref'),"
+                   "json_extract(canonical_payload_json,'$.note_reason') FROM v2_assistant_composite_publications "
+                   "INDEXED BY idx_v2_assistant_publications_window "
+                   "WHERE stream_id=? AND created_at>? AND dispatch_id='' "
+                   "AND json_extract(canonical_payload_json,'$.note_type')='other' ORDER BY created_at DESC")
+
 
 def normalize(text):
     return " ".join(re.sub(r"[*_~]", "", unicodedata.normalize("NFKC", text).lower()).split())
 
 
+def window_start(seconds, now=None):
+    """The publications.created_at stamp (sub-second ISO) `seconds` before now."""
+    now = time.time() if now is None else now
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now - seconds)) + ".000000Z"
+
+
+def recent_proactive_notes(conn, stream_id, now=None):
+    return conn.execute(REPEAT_GUARD_SQL, (stream_id, window_start(REPEAT_WINDOW_S, now))).fetchall()
+
+
 def validate(conn, stream_id, payload):
     note_type = payload.get("note_type")
-    if not isinstance(note_type, str) or note_type not in {"result", "problem", "reminder", "relay"}:
+    if not isinstance(note_type, str) or note_type not in NOTE_TYPES:
         raise ValueError("assistant_publish_note_type_required")
+    reason = payload.get("note_reason")
+    if (note_type == "other") != ("note_reason" in payload) or note_type == "other" and (
+            not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 200):
+        raise ValueError("assistant_publish_reason_required")
     ref = payload.get("ref")
     if not isinstance(ref, str) or not re.fullmatch(r"(?:message|lane|report|wake|tell):\S+", ref):
         raise ValueError("assistant_publish_ref_required")
     kind, record_id = ref.split(":", 1)
     if (note_type == "reminder" and kind not in {"wake", "message"}
-            or note_type == "relay" and kind not in {"tell", "message"}):
+            or note_type == "relay" and kind not in {"tell", "message"}
+            or note_type == "started" and kind not in {"tell", "message", "lane"}):
         raise ValueError("assistant_publish_ref_kind_not_allowed")
     if kind == "message":
         from retention import history_query
@@ -40,6 +69,11 @@ def validate(conn, stream_id, payload):
         found = any(conn.execute(query, args).fetchone() for query, args in queries[kind])
     if not found:
         raise ValueError("assistant_publish_ref_not_found")
+    if note_type in {"started", "change"}:
+        for row in recent_proactive_notes(conn, stream_id):
+            prior = json.loads(row["canonical_payload_json"])
+            if prior.get("note_type") == note_type and prior.get("ref") == ref:
+                raise ValueError(f"assistant_publish_repeat:{row['event_id']}")
     target = normalize(payload.get("message") or "")
     rows = conn.execute(
         "SELECT p.event_id,e.event_json FROM v2_assistant_composite_publications p "

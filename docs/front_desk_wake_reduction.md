@@ -30,6 +30,14 @@ sent. Wake inputs arrive alone and do not flush held items. The queue's normal
 five-second sweep bounds scheduling precision; its existing transport and proof
 recovery govern the resulting notice. Held inputs survive daemon restarts.
 
+A tell from a seat the operator is working in also wakes the desk, with any
+prefix. The sender is the token-verified tell sender (a different claimed
+`from_stream_id` never qualifies), and that session's `operator_activity_at`
+must be finite, not in the future, at most 12 hours old, and from its current
+generation, which the token's generation must also match. Text or headers that
+claim operator activity do not count. A caller-keyed tell's retained hold is
+still checked first, so a retry of a held tell stays held.
+
 Delivered and persisted-suppressed START/GATE/BLOCKER/END tells from an open
 lead or nexus also update the sender's status card with the first 300 characters
 of the milestone body, after any peer header. Other tells leave it untouched;

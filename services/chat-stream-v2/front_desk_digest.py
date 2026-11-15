@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -23,6 +24,8 @@ DIGEST_TOKEN = object()
 # Set in-process by the notice queue for an immediate work-lane alert (lost lead);
 # no wire input can carry this object.
 WAKE_TOKEN = object()
+# A tell from a seat the operator typed in within this window wakes the desk.
+OPERATOR_CHAT_WINDOW_S = 12 * 3600
 
 
 def legacy_sanitize_source(msg, body):
@@ -41,9 +44,10 @@ def legacy_sanitize_source(msg, body):
 
 
 class FrontDeskDigest:
-    def __init__(self, store, config):
+    def __init__(self, store, config, sessions=lambda: None):
         self.store = store
         self.config = config
+        self.sessions = sessions
 
     def binding(self):
         cfg = self.config()
@@ -108,6 +112,7 @@ class FrontDeskDigest:
                 return None
         auth = msg.get('_auth_context') or {}
         wake = (auth.get('operator_authenticated') is True
+                or (verb == 'tell' and self._from_operator_chat(msg, auth))
                 or msg.get('_assistant_operator_authenticated') is True
                 or (verb == 'tell' and msg.get('from_stream_id') == SCREEN_MONITOR_ACTOR
                     and isinstance(original, str)
@@ -138,6 +143,27 @@ class FrontDeskDigest:
         log.info('subsystem=front_desk_digest bug_ref=front_desk_wake_reduction action=%s target=%s',
                  'drop' if drop else 'hold', target_stream_id)
         return self._held_reply(verb, None if drop else nid)
+
+    def _from_operator_chat(self, msg, auth):
+        """Whether the token-verified sender is a seat the operator typed in recently.
+
+        Only the authenticated sender context counts; a claimed `from_stream_id`
+        that differs from it, or any text/header, never does. The activity must
+        be finite, not in the future, inside the window and from the sender's
+        current generation, which the token's generation must also match."""
+        sender = str(auth.get('stream_id') or '') if auth.get('token_verified') is True else ''
+        sessions = self.sessions()
+        if not sender or str(msg.get('from_stream_id') or sender) != sender or sessions is None:
+            return False
+        row = sessions.operator_activity(sender)
+        if not row:
+            return False
+        generation, at = row.get('session_generation'), row.get('operator_activity_at')
+        if (not generation or row.get('operator_activity_generation') != generation
+                or auth.get('session_generation') != generation
+                or isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at)):
+            return False
+        return 0 <= time.time() - at <= OPERATOR_CHAT_WINDOW_S
 
     @staticmethod
     def _held_id(target, verb, identity):

@@ -650,6 +650,7 @@ def test_repeat_guard_read_is_bounded_by_the_window():
             steps = [0]
             def tick():
                 steps[0] += 1
+            strict_publication.recent_proactive_notes(conn, ASSISTANT)  # prepare outside the count
             conn.set_progress_handler(tick, 1)
             try:
                 strict_publication.recent_proactive_notes(conn, ASSISTANT)
@@ -666,7 +667,7 @@ def test_repeat_guard_read_is_bounded_by_the_window():
         _, before = await h.store.submit(work)
         await h.store.submit(seed)
         plan, after = await h.store.submit(work)
-        assert "USING INDEX" in plan and "stream_id=? AND created_at>?" in plan, plan
+        assert "USING INDEX idx_v2_assistant_publications_window (stream_id=? AND created_at>?)" in plan, plan
         assert after == before
     run(body, strict=True)
 

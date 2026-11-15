@@ -481,7 +481,10 @@ and the distinction between fixture, browser and live release evidence.
 The primary composite defaults to strict publication: front-desk turn text is
 not projected into chat. Explicit publications deliver dispatch replies or
 proactive notes; the latter carry a note type and a reference to an existing
-record and are checked for duplicate normalized text over 60 minutes. A landed
+record and are checked for duplicate normalized text over 60 minutes. Note
+types are `result`, `problem`, `reminder`, `relay`, `started`, `change` and
+`other`; `other` carries a stored, unrendered `note_reason`, and `started` or
+`change` is accepted once per ref per 24 hours. A landed
 operator dispatch without a publish receives an immediate `dispatch_no_reply`
 notice and, after 300 seconds, an `unanswered` chat event tied to the input.
 Desk-originated dispatches receive neither. `inspect_stream` reports the setting

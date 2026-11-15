@@ -1871,6 +1871,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_event "
                          "ON v2_assistant_composite_publications(event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_window "
+                         "ON v2_assistant_composite_publications(stream_id,created_at)")
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
             conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)

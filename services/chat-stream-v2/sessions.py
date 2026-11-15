@@ -625,6 +625,13 @@ class Sessions:
                 result["agents"] = next(r["agents"] for r in self.list_open() if r["stream_id"] == stream_id)
             return result
 
+    def operator_activity(self, stream_id: str) -> dict[str, Any] | None:
+        """The current generation and operator-typing stamp, without projection."""
+        with self._inventory_context():
+            row = self._inv.get(stream_id)
+            return None if row is None else {key: row.get(key) for key in (
+                "session_generation", "operator_activity_at", "operator_activity_generation")}
+
     async def apply_report_state(self, report):
         with self._inventory_context():
             row = self._inv.get(report["from_stream_id"])

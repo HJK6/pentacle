@@ -441,14 +441,40 @@ omits the stamp and the wider scope; it never fails hello or a list. Lane
 The current bound seat may publish a `prose` or `status` note with
 `assistant publish --proactive`, or `send-file --to <assistant-stream>
 --proactive`. With strict publication enabled, pass `--note-type` as `result`,
-`problem`, `reminder`, or `relay`, and `--ref <kind>:<id>` naming an existing
-`message`, `lane`, `report`, `wake`, or `tell`. A reminder refers to a wake or
-message; a relay refers to a tell or message. The publication and chat event
-retain both fields. A proactive note whose NFKC-normalized, lower-cased text
+`problem`, `reminder`, `relay`, `started`, `change`, or `other`, and
+`--ref <kind>:<id>` naming an existing `message`, `lane`, `report`, `wake`, or
+`tell`. A reminder refers to a wake or message; a relay refers to a tell or
+message; a started note refers to a tell, message or lane. An `other` note
+requires `--why` (stored as `note_reason`, 1–200 characters after trimming);
+any other type refuses it, both with `assistant_publish_reason_required`. The
+publication and chat event retain these fields; clients do not render them.
+At most one `started` and one `change` note per ref is accepted from the
+composite in 24 hours; a repeat is refused with `assistant_publish_repeat` and
+the earlier event id. That check reads only the window, through
+`idx_v2_assistant_publications_window`. A proactive note whose NFKC-normalized, lower-cased text
 matches a publication in the previous 60 minutes after Markdown emphasis and
 whitespace normalization is refused with `assistant_publish_duplicate_text`
 and the earlier event id. An identical request-key replay returns its receipt.
 The daemon verifies the bound seat and its generation on every publish.
+
+The advisor lists recent `other` notes and their reasons with a read-only,
+index-bounded query (here the last seven days; it never reads `kv`):
+
+```sh
+python3 - ~/.local/share/pentacle-stream/sessions.db bart:assistant <<'PY'
+import sqlite3, sys, time
+SQL = """
+SELECT created_at,event_id,json_extract(canonical_payload_json,'$.ref'),json_extract(canonical_payload_json,'$.note_reason')
+FROM v2_assistant_composite_publications INDEXED BY idx_v2_assistant_publications_window
+WHERE stream_id=? AND created_at>? AND dispatch_id=''
+AND json_extract(canonical_payload_json,'$.note_type')='other' ORDER BY created_at DESC
+"""
+since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 7 * 86400))
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+for row in db.execute(SQL, (sys.argv[2], since)):
+    print(*row, sep="\t")
+PY
+```
 
 ## Working with your assistant (coordination practices)
 

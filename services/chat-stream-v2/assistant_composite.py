@@ -381,7 +381,7 @@ class AssistantComposite:
         self.store = store
         self.sessions = sessions
         from front_desk_digest import FrontDeskDigest
-        self.front_desk_digest = FrontDeskDigest(store, lambda: self.config)
+        self.front_desk_digest = FrontDeskDigest(store, lambda: self.config, lambda: self.sessions)
         self.env_config = config
         self.config = config
         self.router = router
@@ -1719,7 +1719,7 @@ class AssistantComposite:
             "type", "request_id", "composite_stream_id", "dispatch_id",
             "reply_to_message_id", "reply_to_question_id", "publish_kind", "message",
             "attachment_ids", "evidence_refs", "response_state", "reply_to_message_ids",
-            "note_type", "ref",
+            "note_type", "ref", "note_reason",
         }
         if {str(key) for key in msg if not str(key).startswith("_")} - publish_fields:
             raise ValueError("assistant_publish_payload_invalid")
@@ -1833,9 +1833,10 @@ class AssistantComposite:
             "attachment_ids": attachment_ids,
             "evidence_refs": evidence_refs,
         }
-        for field in ("note_type", "ref"):
-            if field in msg:
-                canonical_payload[field] = msg[field]
+        # A trimmed `note_reason` is stored but never rendered (strict_publication).
+        notes = {field: msg[field].strip() if field == "note_reason" and isinstance(msg[field], str) else msg[field]
+                 for field in ("note_type", "ref", "note_reason") if field in msg}
+        canonical_payload.update(notes)
         if response_state is not None:
             canonical_payload["response_state"] = response_state
         if reply_to_message_ids is not None:
@@ -1870,9 +1871,8 @@ class AssistantComposite:
             # Mirror correlation matches a turn's proactive publication by seat and generation.
             event["raw"]["actor_generation"] = actor_generation
             event["raw"]["published_by"] = {"stream_id": actor_stream_id, "generation": actor_generation}
-            for field in ("note_type", "ref"):
-                if field in msg:
-                    event[field] = event["raw"][field] = msg[field]
+            for field, value in notes.items():
+                event[field] = event["raw"][field] = value
         stored = await self.store.record_assistant_composite_publication(
             stream_id=self.config.stream_id, publication_key=publication_key,
             dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,
