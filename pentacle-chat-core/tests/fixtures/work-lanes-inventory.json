@@ -5236,7 +5236,7 @@
           "open_estimated": 0,
           "estimate_complete": false,
           "freshness_at": null,
-          "completion_pending": false,
+          "completion_pending": null,
           "lead_reported_done": null,
           "stale": false,
           "goals": [
@@ -5411,7 +5411,7 @@
       "open_estimated": 0,
       "estimate_complete": false,
       "freshness_at": null,
-      "completion_pending": false,
+      "completion_pending": null,
       "lead_reported_done": null,
       "stale": false,
       "goals": [

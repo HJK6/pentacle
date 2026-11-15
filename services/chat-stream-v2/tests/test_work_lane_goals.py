@@ -310,7 +310,7 @@ def test_maximum_goal_envelope_and_correlated_full_frame_budgets():
 def test_source_membership_replacement_clears_completion_episode_even_if_still_terminal(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
-        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        lane = await adopt_with_goal(env, state='paused', owner='operator')
         write_goal(root, lane['lane_id'])
         write_item(root, 'first', status='completed')
         source = scanner(root)
