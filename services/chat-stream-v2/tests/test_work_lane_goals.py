@@ -618,8 +618,9 @@ def test_v1_goal_less_creation_refused_writes_nothing(tmp_path):
         await refused('work_lane_goal_unresolved', ['epic_unobserved'])
         # A valid charter that names a different lane is unresolved for this one.
         write_goal(root, derive_lane_id(ASSISTANT, 'stream:elsewhere'), 'other')
-        # An invalid charter (bad frontmatter) and a duplicated id leave no pending facts.
-        _write_raw_goal(root, 'broken', '---\nnot: valid\n---\n')
+        # An invalid charter observed under its own id (names no lane, no Goal
+        # section) and a duplicated id both leave no pending facts for this lane.
+        _write_raw_goal(root, 'broken', '---\nid: epic_broken\ntype: epic\ntitle: Broken\nsummary: S\n---\nNo goal section.\n')
         _write_raw_goal(root, 'twinA', '---\nid: epic_twin\ntype: epic\ntitle: T\nsummary: S\nlane_id: '
                         + lane_id + '\n---\n## Goal\n\nDone.\n')
         _write_raw_goal(root, 'twinB', '---\nid: epic_twin\ntype: epic\ntitle: T\nsummary: S\nlane_id: '
