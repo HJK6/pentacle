@@ -787,33 +787,44 @@ def test_v2_index_pass_after_adoption_keeps_acceptance(tmp_path):
     run(body, str(tmp_path / 'v2race.db'))
 
 
-def test_v2_held_scan_prepared_before_adoption_does_not_revert_acceptance(tmp_path):
-    """F5: the changed-base protection. A scan computed while the goal is still
-    pending (lane not yet created) must not, when applied after the adoption,
-    revert the acceptance written in the adopt transaction."""
+def test_v2_prepared_snapshot_before_adoption_hits_changed_base_guard(tmp_path, monkeypatch):
+    """F5 (V2) changed-base race, exercised for real. A reconcile whose read-only
+    snapshot was prepared by _prepare_file BEFORE the adoption landed carries a stale
+    known-lanes base (no such lane) and a stale, still-pending goal delta. Releasing
+    it after the adopt must hit the changed-base guard (store_work_index
+    reconcile_work_observations: `current[5] != known_lanes` / changed observation
+    state) and recompute against the post-adopt state, never reverting the acceptance
+    the adopt transaction wrote. Removing that guard reverts it to pending (RED)."""
+    import asyncio as _asyncio
+    import store_work_index as swi
     root = tmp_path / 'memory'
     async def body(env):
         (root / 'work').mkdir(parents=True, exist_ok=True)
-        key = 'stream:v2held'
+        key = 'stream:v2race'
         lane_id = derive_lane_id(ASSISTANT, key)
-        write_goal(root, lane_id, 'held')
+        write_goal(root, lane_id, 'race')
         source = scanner(root)
-        await reconcile(env.store, source)  # epic_held observed as pending (lane absent)
-        pre = await env.store.submit(lambda conn: __import__('store_work_index')._state_conn(conn)
-                                     ['goal_observations']['epic_held'])
-        assert 'pending' in pre  # the charter is pending before the lane exists
-        # Prepare a scan snapshot BEFORE the adoption and hold it unapplied.
-        held = source.scan_work_observations()
-        out = await env.op('adopt', {'adoption_key': key, 'title': 'Held', 'summary': 'g',
+        await reconcile(env.store, source)                     # epic_race observed pending (no lane)
+        # Prepare the snapshot while the lane is STILL absent: a later scanned_at (so
+        # the apply does not stale-reject it) but a pre-adoption base and goal delta.
+        stale_scan = source.scan_work_observations()
+        last = await env.store.submit(lambda conn: swi._state_conn(conn).get('_last_scan_at', 0.0))
+        stale_scan['scanned_at'] = float(last) + 10.0
+        stale_prepared = await _asyncio.to_thread(
+            swi._prepare_file, env.store.path, stale_scan, settle_s=0, sweep=True)
+        assert lane_id not in stale_prepared[5]                 # the prepared base has no such lane
+        assert 'pending' in stale_prepared[4]['epic_race']      # its goal delta is still pending
+        # Adopt: the goal is accepted fresh in the adopt transaction; the lane exists now.
+        out = await env.op('adopt', {'adoption_key': key, 'title': 'Race', 'summary': 'g',
             'owner_kind': 'operator', 'work_state': 'paused', 'visible_chat': {'stream_id': ASSISTANT},
-            'goals': ['epic_held'], 'no_spec_reason': 'Fixture'}, request_id='adopt:' + key, inject_goals=False)
+            'goals': ['epic_race'], 'no_spec_reason': 'Fixture'}, request_id='adopt:' + key, inject_goals=False)
         assert out['lane']['lane_id'] == lane_id
-        # Applying the pre-adoption snapshot recomputes against the post-adopt
-        # state and leaves the acceptance fresh (never reverts it to pending).
-        await env.store.reconcile_work_observations(held, settle_s=0, sweep=True)
-        def goal_record(conn):
-            from store_work_index import _state_conn
-            return _state_conn(conn)['goal_observations']['epic_held']
-        record = await env.store.submit(goal_record)
-        assert record['quality'] == 'fresh' and record['facts']['lane_id'] == lane_id and 'pending' not in record
-    run(body, str(tmp_path / 'v2held.db'))
+        # Release the pre-adoption snapshot through the real reconcile path.
+        monkeypatch.setattr(swi, '_prepare_file', lambda *a, **k: stale_prepared)
+        result = await env.store.reconcile_work_observations(stale_scan, settle_s=0, sweep=True)
+        assert not result.get('stale_scan')                    # it actually ran (guard, not a stale drop)
+        record = await env.store.submit(
+            lambda conn: swi._state_conn(conn)['goal_observations']['epic_race'])
+        assert record['quality'] == 'fresh' and 'pending' not in record
+        assert record['facts']['lane_id'] == lane_id
+    run(body, str(tmp_path / 'v2race.db'))
