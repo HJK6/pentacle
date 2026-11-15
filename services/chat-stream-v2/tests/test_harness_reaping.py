@@ -173,6 +173,79 @@ def _descendant_commands(root_pid: int) -> list[str]:
     return commands
 
 
+def _observe_no_forbidden_descendants(root_pid: int, *, window_s: float = 60.0,
+                                      min_samples: int = 30, now=time.monotonic,
+                                      sleep=time.sleep) -> int:
+    """Scan the daemon's descendants across the full observation window, asserting no
+    ssh or claude child ever appears, and return the count of successful samples.
+
+    A transient ``ps`` TimeoutExpired under host load is skipped rather than fatal: an
+    unsuccessful sample is not evidence that no forbidden descendant exists, so it is
+    not counted. The window still runs to its deadline and a minimum number of
+    successful samples is required, so a genuinely unobservable run (sustained load)
+    fails instead of passing on no evidence."""
+    deadline = now() + window_s
+    samples = 0
+    while now() < deadline:
+        try:
+            descendants = _descendant_commands(root_pid)
+        except subprocess.TimeoutExpired:
+            continue
+        assert not any("ssh " in command for command in descendants)
+        assert not any(
+            "claude" in command and "stub_cli.py" not in command
+            for command in descendants
+        )
+        samples += 1
+        sleep(1.0)
+    assert samples >= min_samples, (
+        f"only {samples} successful ps observations in a {window_s:.0f}s window "
+        f"(need >= {min_samples}); the host was too loaded to observe descendants")
+    return samples
+
+
+def test_observe_tolerates_transient_ps_timeout(monkeypatch):
+    """C1: one transient ps TimeoutExpired inside the window is skipped (not fatal),
+    the window still runs to its deadline, and a minimum successful-sample count is
+    enforced. Without the tolerance this raises TimeoutExpired on the first sample."""
+    calls = {"n": 0}
+
+    def flaky(_pid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise subprocess.TimeoutExpired(["ps", "axww"], 2)
+        return ["python synthetic-daemon --disable-hosts"]
+
+    monkeypatch.setattr(sys.modules[__name__], "_descendant_commands", flaky)
+    clock = {"t": 0.0}
+
+    def now():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    samples = _observe_no_forbidden_descendants(
+        4242, window_s=6.0, min_samples=2, now=now, sleep=lambda _s: None)
+    assert samples >= 2 and calls["n"] >= 3  # first call timed out and was skipped
+
+
+def test_observe_requires_a_minimum_successful_sample_count(monkeypatch):
+    """C1: a run that cannot take enough successful samples fails rather than passing
+    on no evidence (an unsuccessful ps sample is not evidence of absence)."""
+    def always_timeout(_pid):
+        raise subprocess.TimeoutExpired(["ps", "axww"], 2)
+
+    monkeypatch.setattr(sys.modules[__name__], "_descendant_commands", always_timeout)
+    clock = {"t": 0.0}
+
+    def now():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    with pytest.raises(AssertionError, match="successful ps observations"):
+        _observe_no_forbidden_descendants(
+            4242, window_s=6.0, min_samples=2, now=now, sleep=lambda _s: None)
+
+
 def _process_command(pid: int) -> str:
     """Read the complete argv without ps's default output-width truncation."""
     proc_cmdline = Path(f"/proc/{pid}/cmdline")
@@ -334,15 +407,7 @@ def test_hermetic_soak_child_env_makes_no_remote_calls(
             ):
                 assert str(path) in command
             assert str(Path.home() / ".local" / "share" / "pentacle-stream") not in command
-            deadline = time.monotonic() + 60.0
-            while time.monotonic() < deadline:
-                descendants = _descendant_commands(daemon.proc.pid)
-                assert not any("ssh " in command for command in descendants)
-                assert not any(
-                    "claude" in command and "stub_cli.py" not in command
-                    for command in descendants
-                )
-                time.sleep(1.0)
+            _observe_no_forbidden_descendants(daemon.proc.pid)
         finally:
             daemon.kill()
     finally:
