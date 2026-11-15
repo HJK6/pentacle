@@ -412,3 +412,36 @@ def test_delivery_bookkeeping_stays_bounded_for_many_advisor_requests():
         finally:
             sqlite_store.stop()
     asyncio.run(go())
+
+
+def test_unconfirmed_advisor_baseline_does_not_wedge_later_tells(tmp_path, monkeypatch):
+    # Live 2026-11-15: one baseline stayed committed_pending_proof (role-baseline
+    # input is SYSTEM, so retained proof never matches) and every later tell was refused.
+    from sessions import VerbError
+    files(tmp_path, monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(ag.time, 'time', lambda: now[0])
+    async def go():
+        tmux = RecordingClaude()
+        comms, store, sessions = _comms(tmux)
+        try:
+            await sessions.open(HOST, NAME, provider='claude')
+            binding = Rulings(STREAM_ID)
+            generation = binding.current['generation'] = (await store.fetch_session(HOST, NAME))['session_generation']
+            service = ag.AssistantGuidelines(store, Composite(), binding, comms, env={'PENTACLE_ASSISTANT_GUIDELINES_ENABLED': 'on'})
+            comms.guidelines = service
+            await service.advisor_record(STREAM_ID, generation, 'old', 'guidelines:stuck', 'committed_pending_proof')
+            await comms.tell({'to_stream_id': STREAM_ID, 'message': 'first', 'tell_id': 'p1', 'from_stream_id': PEER, '_auth_context': PEER_AUTH})
+            assert len(tmux.pastes) == 2 and 'advisor one' in tmux.pastes[0] and tmux.pastes[1].endswith('first')
+            assert (await service.inspect(STREAM_ID))['delivery_status'] == 'delivered'
+            # Input that may still sit unsubmitted holds advisor tells for a bounded window only.
+            await service.advisor_record(STREAM_ID, generation, 'old', 'guidelines:typed', 'pasted_unsubmitted')
+            with pytest.raises(VerbError, match='guidelines delivery is unconfirmed'):
+                await comms.tell({'to_stream_id': STREAM_ID, 'message': 'second', 'tell_id': 'p2', 'from_stream_id': PEER, '_auth_context': PEER_AUTH})
+            assert len(tmux.pastes) == 2
+            now[0] += 601
+            await comms.tell({'to_stream_id': STREAM_ID, 'message': 'third', 'tell_id': 'p3', 'from_stream_id': PEER, '_auth_context': PEER_AUTH})
+            assert len(tmux.pastes) == 4 and tmux.pastes[3].endswith('third')
+        finally:
+            store.stop()
+    asyncio.run(go())
