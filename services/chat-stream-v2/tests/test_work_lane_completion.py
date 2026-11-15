@@ -383,21 +383,86 @@ def test_v4_missing_goal_charter_holds_lane_uncertain(tmp_path):
     run(body, str(tmp_path / 'v4miss.db'))
 
 
-def test_v5_uncertainty_never_completes(tmp_path):
+def test_v4_moved_last_goal_charter_holds_lane_uncertain(tmp_path):
+    """A lane's last goal charter re-observed naming a DIFFERENT lane is quality='error'
+    for this lane, so lane_work_status is uncertain and the lane neither completes nor
+    reopens -- the SAME hold as a missing/deleted/invalid charter (test above), because
+    the observation layer cannot distinguish 'the work moved' from 'the source broke'
+    for this lane. Whether the disposition's 'a fresh move-away permits completion'
+    requires a behavior change here is a finding carried to the front desk."""
     root = tmp_path / 'memory'
     async def body(env):
-        lane = await build_lane(env, root, key='stream:v5', goal='g', items=[('i1', 'completed')])
+        lane = await build_lane(env, root, key='stream:v4mv', goal='g', items=[('i1', 'in_progress')])
         lid = lane['lane_id']
-        # Index unavailable leaves the otherwise-complete lane open.
-        await env.store.mark_work_index_pending()
-        await lifecycle(env)
-        assert (await lane_now(env, lid))['work_state'] == 'paused'
-        # A stale member (charter made invalid after acceptance) also blocks completion.
-        path = root / 'epics' / 'g.md'
-        path.write_text('---\nnot: valid\n---\n')
+        other = derive_lane_id(ASSISTANT, 'stream:v4mv-elsewhere')
+        write_goal(root, other, 'g')  # epics/g.md re-observed naming `other` (a fresh move-away)
         await reconcile(env.store, scanner(root))
+        record = await env.store.submit(lambda conn: __import__('store_work_index')._state_conn(conn)
+                                        ['goal_observations']['epic_g'])
+        assert record['quality'] == 'error'  # fresh, but names another lane -> error for this lane
+        result = await lifecycle(env)
+        assert lid not in result['completed']
+        assert (await lane_now(env, lid))['work_state'] != 'done'  # held uncertain, not completed
+    run(body, str(tmp_path / 'v4mv.db'))
+
+
+def test_v4_preexisting_completed_episode_alerts_once_no_repeats(tmp_path):
+    """A lane's auto-completion opens exactly one completed episode; draining it alerts
+    once, and neither a further lifecycle refresh nor a repeated episode reconcile
+    re-alerts for it -- exactly one completed episode row exists for the lane."""
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = await build_lane(env, root, key='stream:v4ep', goal='g', items=[('i1', 'completed')])
+        lid = lane['lane_id']
+        await lifecycle(env)  # completes -> opens the completed episode
+        first = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(first)
+        assert sum(c['kind'] == 'completed' and c.get('lane_id') == lid for c in first.calls) == 1
+        # A second lifecycle refresh and a second drain alert zero more times for it.
         await lifecycle(env)
-        assert (await lane_now(env, lid))['work_state'] == 'paused'
+        second = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(second)
+        assert all(c.get('lane_id') != lid for c in second.calls)
+        # Exactly one completed episode row exists for the lane (no repeats opened).
+        kinds = await env.store.submit(lambda conn: [r[0] for r in conn.execute(
+            "SELECT kind FROM v2_work_lane_episodes WHERE lane_id=? AND kind='completed'", (lid,))])
+        assert kinds == ['completed']
+    run(body, str(tmp_path / 'v4ep.db'))
+
+
+def test_v5_uncertainty_prevents_completion_reopening_and_settling(tmp_path):
+    """V5: while the daemon is uncertain (the work index is unavailable, so neither the
+    goal records nor the member observations are fresh) it takes NONE of the three
+    lifecycle transitions. A complete-looking open lane is not auto-completed, a
+    hand-closed finished lane is not settled, and a settled lane with genuinely new
+    work is not reopened, because completion and settling require a certain `finished`
+    status and reopening a certain `unfinished` one, and `uncertain` is neither. V7
+    covers the affirmative settle/reopen once certainty returns."""
+    root = tmp_path / 'memory'
+    async def body(env):
+        # (3) first, in isolation: a SETTLED (auto-completed, goals_done) lane with real
+        # new work, so settling it here does not also complete the lanes added below.
+        settled = await build_lane(env, root, key='stream:v5r', goal='r', items=[('r1', 'completed')])
+        sid = settled['lane_id']
+        await lifecycle(env)  # auto-completes v5r -> done/goals_done (settled); only v5r exists yet
+        assert (await lane_now(env, sid))['work_state_reason'] == 'goals_done'
+        write_item(root, 'r2', status='in_progress', epic='epic_r')  # a real unfinished item under the goal
+        # (1) an otherwise-complete OPEN lane, and (2) a hand-closed finished lane, both
+        # built AFTER the settling lifecycle so neither has been through a certain pass.
+        complete = await build_lane(env, root, key='stream:v5c', goal='c', items=[('c1', 'completed')])
+        handclosed = await build_lane(env, root, key='stream:v5s', goal='s', items=[('s1', 'completed')])
+        hc = handclosed['lane_id']
+        await env.op('set_state', {'to': 'done', 'outcome': 'Closed by hand', 'reason': 'FD closes'},
+                     lane=hc, version=handclosed['version'])
+        assert (await lane_now(env, hc))['work_state_reason'] == 'fd'
+        # Now make the daemon uncertain and run the lifecycle: nothing moves.
+        await env.store.mark_work_index_pending()
+        result = await lifecycle(env)
+        assert result == {'completed': [], 'settled': [], 'reopened': []}
+        assert (await lane_now(env, complete['lane_id']))['work_state'] != 'done'   # not completed
+        assert (await lane_now(env, hc))['work_state_reason'] == 'fd'               # not settled
+        st = await lane_now(env, sid)
+        assert st['work_state'] == 'done' and st['work_state_reason'] == 'goals_done'  # not reopened
     run(body, str(tmp_path / 'v5.db'))
 
 
