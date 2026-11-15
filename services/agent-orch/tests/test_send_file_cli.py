@@ -405,3 +405,24 @@ def test_proactive_replay_conflict_code(monkeypatch, wire, capsys):
     out = capsys.readouterr().out
     assert json.loads(out) == {'type': 'assistant.publish.error', 'error_code': 'publish_replay_conflict', 'upload_id': 'synthetic-upload'}
     assert 'DO_NOT_PRINT' not in out
+
+
+@pytest.mark.parametrize('note_type', ['started', 'change', 'other'])
+def test_proactive_file_forwards_new_note_types_and_reason(wire, note_type):
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant', '--proactive',
+                              '--note-type', note_type, '--ref', 'tell:t-1', '--why', 'operator wants it')) == 0
+    assert wire[0][1]['note_type'] == note_type and wire[0][1]['note_reason'] == 'operator wants it'
+
+
+@pytest.mark.parametrize('code,error,previous', [
+    ('assistant_publish_reason_required', 'assistant_publish_reason_required', None),
+    ('assistant_publish_repeat', 'assistant_publish_repeat:77', 77),
+])
+def test_proactive_file_reports_reason_and_repeat_codes(monkeypatch, wire, capsys, code, error, previous):
+    async def publish(_config, _payload, **_kw):
+        return {'type': 'assistant.publish.error', 'error_code': code, 'error': error}
+    monkeypatch.setattr(cli, 'assistant_once', publish)
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant',
+                              '--proactive', '--note-type', 'started', '--ref', 'tell:t-1')) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['error_code'] == code and result.get('previous_event_id') == previous

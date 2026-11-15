@@ -1803,6 +1803,9 @@ def _assistant_call(args: argparse.Namespace, payload: dict[str, object]) -> int
     return 0 if str(response.get("type") or "").endswith(".ok") else 1
 
 
+NOTE_TYPES = ("result", "problem", "reminder", "relay", "started", "change", "other")
+
+
 def _publication_ref(value: str) -> str:
     if not re.fullmatch(r"(?:message|lane|report|wake|tell):\S+", value):
         raise argparse.ArgumentTypeError("expected <message|lane|report|wake|tell>:<id>")
@@ -1857,6 +1860,8 @@ def assistant_publish(args: argparse.Namespace) -> int:
     for field in ("note_type", "ref"):
         if getattr(args, field, None) is not None:
             payload[field] = getattr(args, field)
+    if getattr(args, "why", None) is not None:
+        payload["note_reason"] = args.why
     return _assistant_call(args, payload)
 
 
@@ -5732,8 +5737,9 @@ def build_parser() -> argparse.ArgumentParser:
     send_file_parser.add_argument("--to", help="Target assistant composite for authorized publication")
     send_file_parser.add_argument("--proactive", action="store_true",
         help="With --to: publish prose/status without dispatch/reply IDs from the current direct-primary binding; request ID defaults to send-file:<upload-id>")
-    send_file_parser.add_argument("--note-type", choices=("result", "problem", "reminder", "relay"))
+    send_file_parser.add_argument("--note-type", choices=NOTE_TYPES)
     send_file_parser.add_argument("--ref", type=_publication_ref)
+    send_file_parser.add_argument("--why", help="With --note-type other: the one-line reason (1-200 characters), logged and never shown")
     send_file_parser.add_argument("--dispatch-id")
     send_file_parser.add_argument("--reply-to-message-id")
     send_file_parser.add_argument("--reply-to-question-id")
@@ -5812,8 +5818,9 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_publish_parser.add_argument("--request-id", required=True)
     assistant_publish_parser.add_argument("--composite-stream-id", required=True)
     assistant_publish_parser.add_argument("--proactive", action="store_true", help="publish prose/status, optionally with attachments, from the current direct-primary binding")
-    assistant_publish_parser.add_argument("--note-type", choices=("result", "problem", "reminder", "relay"))
+    assistant_publish_parser.add_argument("--note-type", choices=NOTE_TYPES)
     assistant_publish_parser.add_argument("--ref", type=_publication_ref)
+    assistant_publish_parser.add_argument("--why", help="With --note-type other: the one-line reason (1-200 characters), logged and never shown")
     assistant_publish_parser.add_argument("--dispatch-id")
     assistant_publish_parser.add_argument("--reply-to-message-id")
     assistant_publish_parser.add_argument(

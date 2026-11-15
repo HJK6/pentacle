@@ -11,6 +11,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+- Let the front desk send `started`, `change` and `other` notes (`other` with a logged `--why` reason, one `started` or `change` per record per day), and wake it at once for tells from a chat the operator is working in.
 - Make coordinated deploy restoration wait up to 60 s for a satellite host to reconnect after the daemon restarts, instead of failing the release.
 - Let a seat acquire and clear one maintenance hold with a server-verified operator dispatch and advisor ruling, without operator privileges.
 

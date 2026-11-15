@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import asyncio
 
 from agent_orch import cli
@@ -211,3 +212,26 @@ def test_assistant_proactive_publish_carries_attachments(monkeypatch):
         captured.clear()
         args = parsed(*extra)
         assert args.func(args) == 2 and captured == {}
+
+
+@pytest.mark.parametrize('note_type', ['started', 'change', 'other'])
+def test_assistant_new_note_types_and_why_are_forwarded(monkeypatch, note_type):
+    args = cli.build_parser().parse_args([
+        'assistant', 'publish', '--proactive', '--request-id', 'note',
+        '--composite-stream-id', 'fixture:assistant', '--publish-kind', 'status', '--message', 'progress',
+        '--note-type', note_type, '--ref', 'tell:one', '--why', 'operator wants to know'])
+    captured = {}
+    monkeypatch.setattr(cli, '_assistant_call', lambda args, payload: captured.update(payload) or 0)
+    assert args.func(args) == 0
+    assert captured['note_type'] == note_type and captured['note_reason'] == 'operator wants to know'
+
+
+def test_assistant_publish_omits_reason_without_why(monkeypatch):
+    args = cli.build_parser().parse_args([
+        'assistant', 'publish', '--proactive', '--request-id', 'note',
+        '--composite-stream-id', 'fixture:assistant', '--publish-kind', 'status', '--message', 'progress',
+        '--note-type', 'result', '--ref', 'tell:one'])
+    captured = {}
+    monkeypatch.setattr(cli, '_assistant_call', lambda args, payload: captured.update(payload) or 0)
+    assert args.func(args) == 0
+    assert 'note_reason' not in captured
