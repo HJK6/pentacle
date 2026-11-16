@@ -22,7 +22,7 @@ not an arbitrary global brand palette.
 
 ### Bring your own logo
 
-Replace the PNGs below, keeping their filenames and dimensions. The browser
+Replace the PNGs below, keeping their dimensions. The browser
 favicon, home-screen icon and installed PWA icons are separate assets; replace
 all of them for consistent branding.
 
@@ -30,14 +30,17 @@ all of them for consistent branding.
 | --- | --- | --- |
 | `favicon.png` | 64 × 64 | Browser favicon |
 | `favicon-180.png` | 180 × 180 | Apple touch icon |
-| `icon-192.png`, `icon-512.png` | 192 × 192, 512 × 512 | PWA icons |
-| `icon-maskable-192.png`, `icon-maskable-512.png` | 192 × 192, 512 × 512 | Maskable PWA icons |
+| `icon-192.190346b196f7.png`, `icon-512.cc3a9b2722fb.png` | 192 × 192, 512 × 512 | PWA icons |
+| `icon-maskable-192.eab637afeda6.png`, `icon-maskable-512.60ecebec5929.png` | 192 × 192, 512 × 512 | Maskable PWA icons |
 
 Use square PNGs. Ordinary icons may have transparency; maskable icons should
 have a full background with the important artwork inside the central safe
 area, so a platform's crop preserves it. `renderer/index.html` references the
 favicon and touch icon; `renderer/manifest.webmanifest` references the PWA
-icons. Keep those paths if replacing files in place. The manifest's `name`,
+icons. When changing PWA artwork, put the first 12 characters of the new PNG's
+SHA256 in its filename and update the manifest URL. Chrome can skip downloading
+icons when manifest metadata is unchanged, even if the bytes at the old URL
+changed. Keep the app identity and start URL unchanged. The manifest's `name`,
 `short_name`, `background_color` and `theme_color`, and the HTML `theme-color`
 meta tag, control installation labels and browser chrome separately from UI
 colors. These assets do not replace host sigils or provider badges. The in-app
