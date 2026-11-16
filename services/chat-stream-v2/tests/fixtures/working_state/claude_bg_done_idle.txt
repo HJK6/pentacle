@@ -1,6 +1,0 @@
-● Agent "Footer probe subagent 2" completed
-
-────────────────────────────────────────────────────────────────────────────────
-❯ 
-────────────────────────────────────────────────────────────────────────────────
-  ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · esc to interrupt · ← 1 agent

@@ -1,3 +1,0 @@
-# E2E walk artifacts are ephemeral evidence; do not commit run output.
-*
-!.gitignore

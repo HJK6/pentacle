@@ -1,6 +1,0 @@
-● Task "Run candidate final gates serially" still running in background
-
-────────────────────────────────────────────────────────────────────────────────
-❯ 
-────────────────────────────────────────────────────────────────────────────────
-  ⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage

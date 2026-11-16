@@ -576,7 +576,7 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
     )
 
 
-def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None) -> list[dict[str, Any]]:
+def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None, external_config=None) -> list[dict[str, Any]]:
     states = WORK_STATES if include_done else OPEN_WORK_STATES
     ids_snapshot = effective_membership_ids_conn(conn)
     index_available = bool(ids_snapshot["state"]["available"])
@@ -591,7 +591,10 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
     named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
     snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
     route_dispatch_map = resolved_route_dispatch_map(conn)
+    from store_external_work import current_packets_conn
+    external = current_packets_conn(conn, config=external_config)
     for lane in lanes:
+        lane["_external_packets"] = external
         lane["_members"] = members_conn(conn, lane, snapshot)
         enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
@@ -683,7 +686,7 @@ class _WorkLanesStoreMixin:
                         "event_id": e["publication_event_id"], "ts": e["created_at"],
                         "source_id": e["source_id"]} for e in events if e.get("update_kind")]
             prepare_hues_conn(conn, [lane_id])
-            row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id)), None)
+            row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id, external_config=getattr(self, "external_work_config", None))), None)
             lane = lane_row_conn(conn, lane_id)
             internal_members = row["_members"] if row is not None else members_conn(conn, lane)
             # Public Store members retain the observation contract. Projection
@@ -727,7 +730,7 @@ class _WorkLanesStoreMixin:
         """
         def _op(conn):
             with hue_transaction(conn):
-                rows = work_lane_rows_conn(conn, include_done=include_done)
+                rows = work_lane_rows_conn(conn, include_done=include_done, external_config=getattr(self, "external_work_config", None))
                 if select_rows is not None:
                     selected = select_rows(rows)
                     prepare_hues_conn(conn, [row["lane_id"] for row in selected])

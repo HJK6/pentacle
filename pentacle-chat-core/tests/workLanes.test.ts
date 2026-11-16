@@ -238,3 +238,24 @@ test('park record is additive and malformed values never drop a lane', () => {
   assert.deepEqual(normalizeWorkLanesInventory(cell.inventory_frame)!.lanes[0].parked,
     cell.inventory_frame.lanes[0].parked);
 });
+
+
+test('external lane and member facts survive while older frames omit them', () => {
+  const cell = fixture.spec_details_v1;
+  const raw = structuredClone(cell.show_projection);
+  const verified_at = '2026-11-15T17:08:01Z';
+  raw.external = { label: 'Dot', working: 1, queued: 1, review: 1, verified_at };
+  raw.members[0].external = [
+    { label: 'Dot', ref: 'working-packet', state: 'working', verified_at },
+    { label: 'Dot', ref: 'review-packet', state: 'review', verified_at },
+    { label: 'Dot', ref: 'queued-packet', state: 'queued', verified_at },
+  ];
+  const lane = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0];
+  assert.deepEqual(lane.progress!.members[0].external, raw.members[0].external);
+  assert.deepEqual(lane.external, raw.external);
+  delete raw.external;
+  delete raw.members[0].external;
+  const old = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0];
+  assert.equal('external' in old, false);
+  assert.equal('external' in old.progress!.members[0], false);
+});

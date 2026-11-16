@@ -862,3 +862,28 @@ sets an explicit icon; `--clear-icon` sends null and restores title fallback.
 These flags are mutually exclusive and may accompany `--title` or `--summary`.
 At least one text/icon flag is required. The daemon validates unknown keys as
 `work_lane_icon_invalid`; expected-version and request-id semantics are unchanged.
+
+
+## External packet work
+
+Inventory, list and show add optional lane `external`:
+
+```json
+{"label":"Dot","working":1,"queued":0,"review":1,"verified_at":"2026-11-15T17:08:01Z"}
+```
+
+Counts cover current packets on effective lane members, not distinct items.
+`verified_at` is their latest evidence timestamp, UTC to the second. No current
+packets means no key. A done lane receives the key when the call projects that
+lane; inventory still excludes done lanes.
+
+Show with members adds optional member `external`, a list of at most four
+`{label, ref, state, verified_at}` records, ordered working, review, queued.
+`ref` is the packet tag. Inventory member previews omit it.
+
+Current means enabled-watch open packets excluding indexed completed/deprecated
+items, with no age expiry. Working packets contribute to the same distinct-item
+working set as seats, including goal classes, lead working presence and
+lane/selected-goal working counts. A seat and packet on one item count once.
+Queued/review packets do not make an item working. These optional facts change no
+lane state policy and do not require older clients to display them.

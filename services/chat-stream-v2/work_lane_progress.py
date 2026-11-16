@@ -77,7 +77,9 @@ def working_spec_ids(lane: dict[str, Any], sessions: list[dict[str, Any]]) -> se
     # Residual execution on terminal/unresolved work stays observable. It grants
     # no ownership or admission, both of which have independent policy checks.
     members = {member["spec_id"] for member in lane.get("_members") or []}
-    return {effective_assignment(row) for row in sessions if seat_working(row, descendants=False)} & members
+    external = {row["spec_id"] for row in (lane.get("_external_packets") or {}).get("packets", [])
+                if row["state"] == "working"}
+    return ({effective_assignment(row) for row in sessions if seat_working(row, descendants=False)} | external) & members
 
 
 def seat_live(row: dict[str, Any] | None) -> bool:
