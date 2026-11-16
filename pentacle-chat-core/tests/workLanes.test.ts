@@ -282,6 +282,8 @@ test('lane activity words and unknown future values survive normalization', () =
     const lane = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0];
     assert.equal(lane.activity, activity);
   }
-  const lane = normalizeWorkLanesInventory(cell.inventory_frame)!.lanes[0];
+  const olderFrame = structuredClone(cell.inventory_frame);
+  delete olderFrame.lanes[0].activity;
+  const lane = normalizeWorkLanesInventory(olderFrame)!.lanes[0];
   assert.equal('activity' in lane, false);
 });
