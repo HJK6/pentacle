@@ -202,8 +202,15 @@ def _write_stamp(repo: Path, service: ServiceConfig, stamp: dict[str, object]) -
     try:
         fd = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(stamp, indent=2, sort_keys=True) + "\n")
+            stream.write(json.dumps(stamp, indent=2, sort_keys=True, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary_path, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -1901,6 +1908,7 @@ def _apply_post_activation(
     verify_boot: Callable[..., BootReadback] = verify_fresh_daemon_log_line,
     verify_runtime: Callable[..., tuple[bool, dict[str, object]]] = _verify_runtime_sha,
     activated_plist_digest: str | None = None, restoration_runtime=None,
+    inherited_receipt_sha256: str | None = None,
 ) -> None:
     """Only boot and target-commit readbacks decide whether to restore."""
     stamp["serving"] = False
@@ -1941,6 +1949,9 @@ def _apply_post_activation(
                     stamp["disposition"] = "active with failed checks"
                     run_post_release_checks(service, repo, sha, stamp, runner=runner,
                         prior_log_size=prior_log_size, prior_pid=prior_pid, prior_start=prior_start, boot=boot)
+                    if stamp.get("coordinated_receipt") and stamp.get("fleet_smoke", {}).get("outcome") == "passed":
+                        from deploy.restoration import complete_ordinary_qualification
+                        complete_ordinary_qualification(stamp, inherited_receipt_sha256)
     except Exception as exc:
         stamp["post_activation_error"] = f"{type(exc).__name__}: {exc}"
         if stamp["serving"]:
@@ -2290,6 +2301,12 @@ def _deploy_ordinary(
     if not helper_identity_equal:
         raise DeployError("code identity changes require an admitted coordinated plan before checkout mutation")
 
+    inherited_seal = None
+    if ancestry and not rollback:
+        from deploy.restoration import inherited_receipt_seal
+        inherited_seal = inherited_receipt_seal(ancestry)
+        if prior_stamp.get('sha') != prior_sha or prior_stamp.get('coordinated_receipt') != ancestry:
+            raise DeployError('inherited receipt/source conflicts with retained prior stamp')
     restoration_runtime = None
     if service.name == "chat-streamd-v2":
         from deploy.restoration import qualified_prior, qualification_stamp
@@ -2486,6 +2503,7 @@ def _deploy_ordinary(
             boot_wait_seconds=boot_wait_seconds,
             runner=runner,
             activated_plist_digest=activated_plist_digest,
+            inherited_receipt_sha256=inherited_seal,
             **({"restoration_runtime":restoration_runtime} if restoration_runtime is not None else {}),
         )
         if not stamp.get("serving"):

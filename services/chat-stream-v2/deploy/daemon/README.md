@@ -438,3 +438,80 @@ rows may include `backups` with `device` to traverse retained managed generation
 A missing or mismatched receipt fails as `attribution_ambiguous`. Retained
 pre-marker failures stay in the packet receipt and do not clear or condemn the
 new generation. Runtime rollback remains an explicit deployment-owner action.
+
+## Ordinary deployment qualification provenance (version 1)
+
+The ordinary writer can inherit coordinated ancestry without confusing a receipt
+whose target equals the new target with a direct coordinated activation. It writes
+`ordinary_provenance` only after fresh target boot/runtime and a complete passed
+prompted/promptless smoke population, in the same atomic replacement as that
+qualification. Before activation it validates and retains the existing receipt's
+full seal; it rereads and compares that seal before final publication. It does not
+turn the old stamp into a qualification or fabricate a seal.
+
+The exact record fields are `version` (integer `1`), `kind`
+(`ordinary_inherited`), `sha`, `prior_sha`, `receipt`, `receipt_sha256` and
+`qualification_sha256`. Source SHAs are full lowercase 40-hex values; receipt and
+qualification digests are full SHA-256 values. Resulting SHA must match the outer
+stamp and runtime readback. Prior SHA must match the outer `prior_sha`, retained
+`prior_qualification.sha` and retained witness source; the inherited receipt path
+must match that witness and the outer pointer. A top-level direct `receipt_sha256`
+is contradictory in this shape and is refused.
+
+The qualification digest is SHA-256 of UTF-8 Python JSON encoding with sorted keys,
+compact separators, ASCII escaping and nonfinite numbers forbidden, over exactly
+`sha`, `daemon_runtime_readback`, `daemon_boot_readback` and `fleet_smoke` from the
+resulting stamp. The complete values are included, including every smoke cell and
+binding field, in their original list order. The record/digest itself is excluded.
+Every cell must pass and each exact host/provider/alias/generation/executable
+SHA-256/version binding must have exactly one prompted and one promptless cell.
+The verifier additionally requires every selected binding's existing exact checks.
+The full payload is retained by `qualification_stamp`; bounded prior source/path
+linkage is retained without recursively nesting history.
+
+Under the existing trusted authorized writer/uid model, seals and metadata prove
+consistency and linkage, **not authentication against an arbitrary same-uid
+editor**, nor independent authorization. Identical records receive identical
+verdicts. There are no new keys, credentials or privileged trust services.
+
+Direct coordinated qualifications remain distinct: their top-level seal must
+match their receipt and exact target. A direct claim plus ordinary prior-witness
+metadata is contradictory. Valid version 1 and version 2 coordinated receipt
+linkage remains readable. Unsupported ordinary record versions, missing records,
+stripped direct seals, altered receipt bytes, stale source/path/seal/digest,
+malformed or incomplete cells and ambiguous unversioned ordinary history all
+refuse. In particular, legacy ordinary history is no longer accepted merely
+because the receipt target differs from the resulting SHA. The historical
+same-target failed-nested-smoke shape remains rejected.
+
+Stamp writes fsync the complete temporary file, atomically replace the destination,
+and fsync the directory. A process dying during the temporary write or before
+replacement leaves the earlier stamp, not a success marker. After replacement a
+new controller must revalidate the complete record; a leftover temporary file or
+missing/truncated record is never evidence of success. This is process-crash and
+consistency protection, not proof against storage hardware failure.
+
+### Bootstrap and restoration boundary
+
+Only separately authorized fleet work may bootstrap from ambiguous history. The
+supported ordinary entry is the pinned reviewed controller's
+`deploy.py chat-streamd-v2 --release-checkout <runtime> --ref <exact-candidate>
+--gate-evidence <exact-candidate-gate> --deployer-stream-id <owner>` with applicable
+read-timing evidence. Before that entry, fleet must prove exact candidate versus
+active ancestry equality using the actual `code_identity_at` algorithm, validate
+receipt/state/bindings and preserve durable preimages. Any drift or missing proof
+stops for FD. This offline change supplies no runtime proof or bootstrap GO.
+
+Ordinary guard recovers the ancestry pointer without calling `qualified_prior` on
+ambiguous history; this writer additionally refuses a pointer/source conflict with
+the retained prior stamp. It performs fresh forward qualification. Explicit
+ordinary `--rollback` uses retained `restored_qualification` and the actual
+zero-input restoration route, revalidating the forward witness and bindings. It
+does not claim fresh full-fleet forward acceptance. Coordinated rollback validates
+the same receipt and original saved qualification before restoring its byte-exact
+stamp; an inherited receipt is not a new ordinary operation's recovery receipt.
+
+**Bootstrap remains held:** serving-but-unqualified and ordinary controller-loss
+recovery still lack a durable ordinary replay entry. See the bounded
+[recovery gap packet and offline rehearsal](../ORDINARY_RECOVERY.md). Source tests
+cover this limitation rather than presenting in-memory preimages as crash-safe.

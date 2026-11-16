@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import ast
+import copy
+import re
 import json
 import time
 import uuid
@@ -26,18 +28,93 @@ def _satellite_not_current(exc):
             and frame.get('reason') == 'satellite_not_current')
 
 
+BINDING_FIELDS = ('host', 'provider', 'alias', 'generation', 'executable_sha256', 'version')
+QUALIFICATION_FIELDS = ('sha', 'daemon_runtime_readback', 'daemon_boot_readback', 'fleet_smoke')
+PROVENANCE_FIELDS = {'version', 'kind', 'sha', 'prior_sha', 'receipt', 'receipt_sha256', 'qualification_sha256'}
+
+
 def qualification_stamp(stamp):
-    """Keep the production witness without recursively nesting deploy history."""
-    result = {k: stamp[k] for k in ('sha','daemon_runtime_readback','daemon_boot_readback',
-              'coordinated_receipt','receipt_sha256') if k in stamp}
-    smoke = stamp.get('fleet_smoke', {})
-    result['fleet_smoke'] = {'outcome':smoke.get('outcome'), 'cells':[
-        {k:r[k] for k in ('host','provider','prompt_mode','outcome','account_binding') if k in r}
-        for r in smoke.get('cells', [])]}
+    """Retain the exact forward payload and bounded provenance, not recursive history."""
+    result = {k: copy.deepcopy(stamp[k]) for k in (*QUALIFICATION_FIELDS,
+              'coordinated_receipt', 'receipt_sha256', 'ordinary_provenance', 'prior_sha') if k in stamp}
+    prior = stamp.get('prior_qualification')
+    if isinstance(prior, dict) and isinstance(prior.get('stamp'), dict):
+        result['prior_qualification'] = {'sha': prior.get('sha'), 'stamp': {
+            k: prior['stamp'][k] for k in ('sha', 'coordinated_receipt') if k in prior['stamp']}}
     return result
 
 
+def inherited_receipt_seal(path):
+    """Validate existing receipt bytes; never manufacture an inherited seal."""
+    return _inherited_receipt(path)['receipt_sha256']
+
+
+def _inherited_receipt(path):
+    receipt = read_json(path)
+    sealed = dict(receipt)
+    seal = sealed.pop('receipt_sha256', None)
+    if (receipt.get('schema') not in ('pentacle.coordinated-deploy.receipt.v1',
+                                     'pentacle.coordinated-deploy.receipt.v2')
+            or seal != digest(sealed)):
+        raise Invalid('prior production receipt reference invalid')
+    if (receipt.get('receipt_path', path) != path
+            or not re.fullmatch('[0-9a-f]{40}', str(receipt.get('intent', {}).get('target_sha', '')))):
+        raise Invalid('prior production receipt reference invalid')
+    return receipt
+
+
+def _ordinary_record(stamp, seal):
+    """Canonical v1 linkage under the trusted writer/uid consistency boundary."""
+    try:
+        sha, prior_sha = stamp['sha'], stamp['prior_sha']
+        prior = stamp['prior_qualification']
+        pointer = stamp['coordinated_receipt']
+        if (not all(isinstance(v, str) and re.fullmatch('[0-9a-f]{40}', v) for v in (sha, prior_sha))
+                or prior['sha'] != prior_sha or prior['stamp']['sha'] != prior_sha
+                or prior['stamp']['coordinated_receipt'] != pointer
+                or 'receipt_sha256' in stamp or not isinstance(pointer, str) or not pointer):
+            raise ValueError()
+        payload = {k: stamp[k] for k in QUALIFICATION_FIELDS}
+        smoke = payload['fleet_smoke']
+        if (payload['daemon_runtime_readback']['sha'] != sha
+                or payload['daemon_boot_readback']['outcome'] != 'observed'
+                or smoke['outcome'] != 'passed' or not smoke['cells']):
+            raise ValueError()
+        modes = {}
+        for row in smoke['cells']:
+            binding = row['account_binding']
+            if (row['outcome'] != 'passed' or row['prompt_mode'] not in ('prompted', 'promptless')
+                    or any(not isinstance(binding[k], str) or not binding[k] for k in BINDING_FIELDS)
+                    or row['host'] != binding['host'] or row['provider'] != binding['provider']
+                    or not re.fullmatch('[0-9a-f]{64}', binding['executable_sha256'])):
+                raise ValueError()
+            key = tuple(binding[k] for k in BINDING_FIELDS)
+            modes.setdefault(key, []).append(row['prompt_mode'])
+        if any(sorted(value) != ['prompted', 'promptless'] for value in modes.values()):
+            raise ValueError()
+        return {'version': 1, 'kind': 'ordinary_inherited', 'sha': sha, 'prior_sha': prior_sha,
+                'receipt': pointer, 'receipt_sha256': seal, 'qualification_sha256': digest(payload)}
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise Invalid('invalid ordinary inherited qualification') from exc
+
+
+def complete_ordinary_qualification(stamp, expected_seal):
+    """Prepare the complete record before atomic publication; receipt drift refuses."""
+    seal = inherited_receipt_seal(stamp.get('coordinated_receipt'))
+    if seal != expected_seal:
+        raise Invalid('inherited receipt changed during ordinary deployment')
+    stamp['ordinary_provenance'] = _ordinary_record(stamp, seal)
+
+
 def qualified_prior(stamp, sha, bindings):
+    """Malformed records are refusals, not partially accepted references."""
+    try:
+        return _qualified_prior(stamp, sha, bindings)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise Invalid('malformed prior production qualification') from exc
+
+
+def _qualified_prior(stamp, sha, bindings):
     """Bind rollback to the prior's existing production forward qualification."""
     smoke = stamp.get('fleet_smoke', {})
     if (stamp.get('sha') != sha or smoke.get('outcome') != 'passed'
@@ -55,22 +132,30 @@ def qualified_prior(stamp, sha, bindings):
                 raise Invalid('prior production qualification does not cover selected binding')
     reference = {'sha': sha, 'stamp_sha256': digest(stamp), 'bindings': [
         {k: b[k] for k in ('host','provider','alias','generation')} for b in bindings]}
+    prior = stamp.get('prior_qualification')
+    witness = prior.get('stamp') if isinstance(prior, dict) else None
+    claims_ancestry = isinstance(witness, dict) and bool(witness.get('coordinated_receipt'))
+    if ('ordinary_provenance' in stamp or 'receipt_sha256' in stamp or claims_ancestry) and not stamp.get('coordinated_receipt'):
+        raise Invalid('prior production receipt reference invalid')
     if stamp.get('coordinated_receipt'):
-        receipt = read_json(stamp['coordinated_receipt'])
-        sealed = dict(receipt); seal = sealed.pop('receipt_sha256', None)
-        if seal != digest(sealed):
-            raise Invalid('prior production receipt reference invalid')
-        if receipt.get('intent', {}).get('target_sha') == sha:
-            if seal != stamp.get('receipt_sha256'):
-                raise Invalid('prior production receipt reference invalid')
-            reference.update(receipt=stamp['coordinated_receipt'], receipt_sha256=seal)
-        else:
-            prior = stamp.get('prior_qualification')
-            witness = prior.get('stamp') if isinstance(prior, dict) else None
-            if ('receipt_sha256' in stamp or not isinstance(witness, dict)
-                    or witness.get('coordinated_receipt') != stamp['coordinated_receipt']):
-                raise Invalid('prior production receipt reference invalid')
-            reference.update(ancestry_receipt=stamp['coordinated_receipt'], ancestry_receipt_sha256=seal)
+        try:
+            receipt = _inherited_receipt(stamp['coordinated_receipt'])
+            seal = receipt['receipt_sha256']
+            if 'ordinary_provenance' in stamp:
+                record = stamp['ordinary_provenance']
+                if (not isinstance(record, dict) or set(record) != PROVENANCE_FIELDS
+                        or type(record['version']) is not int
+                        or record != _ordinary_record(stamp, seal)):
+                    raise Invalid('invalid ordinary inherited qualification')
+                reference.update(ancestry_receipt=stamp['coordinated_receipt'], ancestry_receipt_sha256=seal)
+            else:
+                # Direct origin is an explicit seal claim, never SHA equality alone.
+                if ('prior_qualification' in stamp or receipt.get('intent', {}).get('target_sha') != sha
+                        or seal != stamp.get('receipt_sha256')):
+                    raise Invalid('prior production receipt reference invalid')
+                reference.update(receipt=stamp['coordinated_receipt'], receipt_sha256=seal)
+        except Invalid as exc:
+            raise Invalid('prior production receipt reference invalid') from exc
     return reference
 
 

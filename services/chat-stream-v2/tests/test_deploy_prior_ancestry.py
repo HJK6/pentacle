@@ -36,11 +36,10 @@ def test_live_shape_plain_prior_with_inherited_ancestry_pointer(tmp_path):
     """Inherited pointer, no receipt_sha256, genuine receipt targeting an ancestor, nested witness matches."""
     receipt = sealed_receipt(tmp_path/'receipt.json', ANCESTOR)
     stamp = with_ancestry(forward_qualified(PRIOR), str(tmp_path/'receipt.json'))
-    ref = qualified_prior(stamp, PRIOR, [BINDING])
-    assert ref['sha'] == PRIOR and ref['stamp_sha256'] == c.digest(stamp)
-    assert ref['ancestry_receipt'] == stamp['coordinated_receipt']
-    assert ref['ancestry_receipt_sha256'] == receipt['receipt_sha256']
-    assert 'receipt' not in ref and 'receipt_sha256' not in ref
+    # Amendment 1 deliberately retires the ambiguous unversioned shape,
+    # even when the receipt target differs from the current source.
+    with pytest.raises(c.Invalid, match=REFUSAL):
+        qualified_prior(stamp, PRIOR, [BINDING])
 
 def test_malformed_ancestry_seal_refuses(tmp_path):
     """Only the seal is wrong: no seal claim, inheritance matches, foreign target."""
