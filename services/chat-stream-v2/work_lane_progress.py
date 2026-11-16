@@ -103,7 +103,9 @@ def working_spec_ids(lane: dict[str, Any], sessions: list[dict[str, Any]]) -> se
     # Residual execution on terminal/unresolved work stays observable. It grants
     # no ownership or admission, both of which have independent policy checks.
     members = {member["spec_id"] for member in lane.get("_members") or []}
-    return {effective_assignment(row) for row in sessions if seat_working(row, descendants=False)} & members
+    external = {row["spec_id"] for row in (lane.get("_external_packets") or {}).get("packets", [])
+                if row["state"] == "working"}
+    return ({effective_assignment(row) for row in sessions if seat_working(row, descendants=False)} | external) & members
 
 
 def seat_live(row: dict[str, Any] | None) -> bool:
@@ -174,7 +176,7 @@ def lane_lead_lost(lane: dict[str, Any]) -> bool:
     while their lead does not qualify; a qualifying lead clears it either way."""
     state = lane.get("work_state")
     legacy = state == "paused" and lane.get("work_state_reason") == "lead_lost"
-    return (state == "active" or legacy) and not lane.get("_qualifies") and not lane.get("_has_work_seat")
+    return (state == "active" or legacy) and not lane.get("_qualifies") and not lane.get("_has_work_seat") and not lane.get("_has_external_work")
 
 
 def lane_progress(lane: dict[str, Any], *, all_members: bool = False,

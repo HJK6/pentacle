@@ -74,3 +74,21 @@ def test_rpc_helper_attaches_seat_identity_and_refuses_other_verbs(monkeypatch):
     with pytest.raises(ValueError, match="external_work_verb_invalid"):
         asyncio.run(wsclient.external_work_once(object(), {"type": "tell"}))
     assert {"external_work.show", "external_work.record"} <= wsclient.RPC_RETRY_ELIGIBLE_TYPES
+
+@pytest.mark.parametrize(('words','expected'), [
+    (['open','Tag','--spec-id','spec_demo'], {'op':'open','tag':'Tag','spec_id':'spec_demo'}),
+    (['open','Tag','--spec-id','spec_demo','--queued'], {'op':'open','tag':'Tag','spec_id':'spec_demo','state':'queued'}),
+    *[([state,'Tag'], {'op':'set','tag':'Tag','state':state}) for state in ('working','queued','review')],
+    *[([op,'Tag'], {'op':op,'tag':'Tag'}) for op in ('close','ignore')],
+])
+def test_packet_commands(monkeypatch, capsys, words, expected):
+    sent = _wire(monkeypatch, {'type':'external_work.packet.ok','ok':True,'packet':{'tag':'tag'}})
+    assert _run(['external-work','packet',*words]) == 0
+    assert sent == [{'type':'external_work.packet', **expected}]
+    assert json.loads(capsys.readouterr().out)['packet']['tag'] == 'tag'
+
+
+def test_packet_refusal_nonzero(monkeypatch, capsys):
+    _wire(monkeypatch, {'type':'external_work.error','ok':False,'error_code':'packet_unknown'})
+    assert _run(['external-work','packet','close','missing']) == 1
+    assert json.loads(capsys.readouterr().out)['error_code'] == 'packet_unknown'

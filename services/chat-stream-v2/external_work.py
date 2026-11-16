@@ -16,6 +16,9 @@ import math
 import os
 import re
 import time
+import unicodedata
+
+from _shared.specs_service import spec_resolution_view
 
 from assistant_composite import AssistantCompositeConfig
 from outbound_notices import NOTICE_KIND_EXTERNAL_WORK_DUE, NoticeDecision
@@ -45,9 +48,28 @@ STATE_KEYS = frozenset({
 ERROR_CODES = frozenset({
     "not_authenticated", "fd_not_current", "unavailable", "disabled", "config_invalid", "invalid_request",
     "observation_stale", "idempotency_conflict", "version_conflict",
+    "operator_required", "packet_unknown", "packet_conflict", "packet_limit", "packet_spec_unplaced", "packets_required", "packets_unlinked",
 })
 _WATCH_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+OPEN_PACKET_STATES = frozenset({"working", "queued", "review"})
+
+
+class PacketError(ValueError):
+    def __init__(self, code, *, tags=None):
+        super().__init__(code)
+        self.tags = tags
+
+
+def validate_tag(value):
+    if not isinstance(value, str):
+        raise PacketError("invalid_request")
+    value = value.strip().lower()
+    if not 1 <= len(value) <= 64 or "]" in value or any(unicodedata.category(c) == "Cc" for c in value):
+        raise PacketError("invalid_request")
+    return value
 
 
 @dataclass(frozen=True)
@@ -186,7 +208,7 @@ def notice_id(watch_id, episode, sequence, recipient) -> str:
 def install(server, store, sessions, outbound, composite, environ=None) -> "ExternalWork":
     """Daemon startup wiring: load the private config once and serve the verbs."""
     runtime = ExternalWork(store, sessions, outbound, config=load_config(environ),
-                           env_binding=composite._env_binding)
+                           env_binding=composite._env_binding, specs=getattr(getattr(server, "work_lanes", None), "specs", None))
     server.external_work = runtime
     server.handlers.update(runtime.wire_handlers())
     return runtime
@@ -195,9 +217,11 @@ def install(server, store, sessions, outbound, composite, environ=None) -> "Exte
 class ExternalWork:
     """Wire verbs, the outbox tick and the delivery guard for the one configured watch."""
 
-    def __init__(self, store, sessions, outbound=None, *, config, env_binding=None, clock=time.time):
+    def __init__(self, store, sessions, outbound=None, *, config, env_binding=None, clock=time.time, specs=None):
         self.store, self.sessions, self.config, self.clock = store, sessions, config, clock
         self._env_binding = env_binding
+        self.specs = specs
+        self.store.external_work_config = config
         if outbound is not None:
             # Registered even when disabled, so a queued reminder is refused rather than delivered.
             outbound.register_kind(NOTICE_KIND_EXTERNAL_WORK_DUE, guard=self.delivery_guard,
@@ -208,7 +232,8 @@ class ExternalWork:
         return dict(self._env_binding() or {}) if callable(self._env_binding) else {}
 
     def wire_handlers(self):
-        return {"external_work.show": self.handle, "external_work.record": self.handle}
+        return {"external_work.show": self.handle, "external_work.record": self.handle,
+                "external_work.packet": self.handle, "external_work.mail": self.handle_mail}
 
     async def handle(self, message):
         verb = str(message.get("type") or "").rpartition(".")[2]
@@ -232,6 +257,30 @@ class ExternalWork:
                           generation=session["session_generation"], now=self.clock())
             if verb == "show":
                 result = await self.store.external_work_show(**caller)
+            elif verb == "packet":
+                op, tag = message.get("op"), validate_tag(message.get("tag"))
+                state, spec_id = message.get("state"), message.get("spec_id")
+                if op not in {"open", "set", "close", "ignore"}:
+                    raise PacketError("invalid_request")
+                if op == "open":
+                    if not _text(spec_id, 512) or state not in (None, "working", "queued"):
+                        raise PacketError("invalid_request")
+                    try:
+                        if self.specs is None:
+                            raise RuntimeError("no resolver")
+                        view = await spec_resolution_view(self.specs)
+                        details = view.resolve_for_spawn(spec_id)
+                    except Exception:
+                        raise PacketError("unavailable") from None
+                    if not isinstance(details, dict) or details.get("resolution") != "resolved" or not details.get("canonical_spec_id"):
+                        raise PacketError("packet_spec_unplaced")
+                    spec_id = details["canonical_spec_id"]
+                elif op == "set":
+                    if state not in OPEN_PACKET_STATES or spec_id is not None:
+                        raise PacketError("invalid_request")
+                elif state is not None or spec_id is not None:
+                    raise PacketError("invalid_request")
+                result = await self.store.external_work_packet(op=op, tag=tag, spec_id=spec_id, state=state, **caller)
             else:
                 if validate_record(record)["request_id"] != request_id:
                     raise ValueError("invalid_request")
@@ -245,7 +294,31 @@ class ExternalWork:
             reply = {"type": "external_work.error", "ok": False, "error_code": code}
             if request_id is not None:
                 reply["request_id"] = request_id
+            if getattr(exc, "tags", None) is not None:
+                reply["tags"] = exc.tags
             return reply
+
+    async def handle_mail(self, message):
+        """Evidence-only ingestion, reserved to an authenticated operator credential."""
+        try:
+            auth = message.get("_auth_context") or {}
+            principal = str(auth.get("operator_principal") or "")
+            if auth.get("operator_authenticated") is not True or not principal.startswith("operator:") or not principal[9:].strip():
+                raise PacketError("operator_required")
+            if not self.config.enabled:
+                raise PacketError(self.config.status)
+            tag = validate_tag(message.get("tag"))
+            mail_id, at, now = message.get("mail_id"), message.get("at"), self.clock()
+            if not _text(mail_id, 128) or type(at) is not int or at < 0 or at > now + 300:
+                raise PacketError("invalid_request")
+            result = await self.store.external_work_mail(config=self.config, tag=tag, mail_id=mail_id, at=at, now=now)
+            reply = {"type": "external_work.mail.ok", "ok": True, **result}
+        except ValueError as exc:
+            reply = {"type": "external_work.error", "ok": False,
+                     "error_code": str(exc) if str(exc) in ERROR_CODES else "unavailable"}
+        if message.get("request_id") is not None:
+            reply["request_id"] = message["request_id"]
+        return reply
 
     async def tick(self):
         """One bounded store transaction on the existing outbox pass; no network or file reads."""

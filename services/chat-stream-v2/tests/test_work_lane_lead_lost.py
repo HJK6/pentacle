@@ -301,3 +301,28 @@ def test_parallel_member_owners_share_projection_fault_and_stale_predicate(store
         assert presented(row)["state_reason"] != "members_working"
         assert all(item["cleared_at"] for item in await episodes(env.store, facts["lid"], "stale"))
     run(restarted, path)
+
+
+def test_current_packet_clears_lead_lost_episode():
+    from external_work import ExternalWorkConfig
+    from test_work_owed import observe
+    async def body(env):
+        spec = 'spec_demo__packet_lead_loss'
+        await observe(env.store, 'in_progress', 'packet-lead-loss', 100, identity=spec)
+        lead = await env.seat('packet-lead', role='lead', parent_stream_id=FD)
+        lane = (await env.adopt(key='stream:packet-lead-loss', lead=lead, members=[spec]))['lane']
+        await env.store.mark_closed('host-a', 'packet-lead', closed_at='2026-10-07T20:00:00Z',
+                                    pane_status='pane_dead', close_kind='manager_close')
+        await drain(env.store)
+        assert (await episodes(env.store, lane['lane_id']))[0]['cleared_at'] is None
+        env.store.external_work_config = ExternalWorkConfig(status='enabled', watch_id='dot', label='Dot')
+        def insert(conn):
+            conn.execute('INSERT INTO v2_external_work_packets VALUES (?,?,?,?,?,?,?,?)',
+                         ('dot', 'packet', spec, 'review', 1, 1, 1, None))
+            conn.commit()
+        await env.store.submit(insert)
+        await drain(env.store)
+        assert (await episodes(env.store, lane['lane_id']))[0]['cleared_at'] is not None
+        row = next(r for r in await env.store.work_lane_rows() if r['lane_id'] == lane['lane_id'])
+        assert presented(row)['state_reason'] != 'lead_lost'
+    run(body)

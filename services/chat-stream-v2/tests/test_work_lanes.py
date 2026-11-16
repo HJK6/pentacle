@@ -909,3 +909,52 @@ def test_done_lane_activates_without_lead_when_work_seat_exists():
         active = (await env.op('set_state', {'to': 'active', 'reason': 'New work'}, lane=lane['lane_id'], version=done['version']))['lane']
         assert active['work_state'] == 'active'
     run(body)
+
+@pytest.mark.parametrize('packet_state', ['working', 'queued', 'review'])
+def test_external_packet_resumes_and_allows_activation_without_lead(packet_state):
+    from external_work import ExternalWorkConfig
+    from test_work_owed import observe
+    async def body(env):
+        spec = 'spec_demo__external_resume'
+        await observe(env.store, 'in_progress', 'external-resume', 100, identity=spec)
+        lane = (await env.adopt(key='stream:external-resume', state='paused', owner='operator', members=[spec]))['lane']
+        env.store.external_work_config = ExternalWorkConfig(status='enabled', watch_id='dot', label='Dot')
+        def insert(conn):
+            conn.execute('INSERT INTO v2_external_work_packets VALUES (?,?,?,?,?,?,?,?)',
+                         ('dot', 'packet', spec, packet_state, 1, 1, 1, None))
+            conn.commit()
+        await env.store.submit(insert)
+        result = await env.op('set_state', {'to': 'active', 'reason': 'Work started'}, lane=lane['lane_id'], version=lane['version'])
+        assert result['lane']['work_state'] == 'active'
+        rows = await env.store.work_lane_rows()
+        assert next(x for x in rows if x['lane_id'] == lane['lane_id'])['_has_external_work']
+        paused = (await env.op('set_state', {'to': 'paused', 'reason': 'Paused', 'next_action': 'Resume work'}, lane=lane['lane_id'], version=result['lane']['version']))['lane']
+        reconciled = await env.store.reconcile_lane_lifecycle()
+        assert lane['lane_id'] in reconciled['resumed']
+        after = (await env.store.get_work_lane(lane['lane_id']))['lane']
+        assert after['work_state'] == 'active' and after['work_state_reason'] == 'work_started'
+        assert after['version'] == paused['version'] + 1
+    run(body)
+
+
+def test_packet_allows_done_lane_activation_but_preserves_member_conflict():
+    from external_work import ExternalWorkConfig
+    from test_work_owed import observe
+    async def body(env):
+        spec = 'spec_demo__packet_conflict'
+        await observe(env.store, 'in_progress', 'packet-conflict', 100, identity=spec)
+        lane = (await env.adopt(key='stream:packet-done', state='paused', owner='operator', members=[spec]))['lane']
+        confirm = env.confirm('packet-done-confirm', lane['lane_id'], 'set_state:done')
+        done = (await env.op('set_state', {'to':'done', 'outcome':'Prior work', 'operator_confirmation':confirm},
+                             lane=lane['lane_id'], version=lane['version']))['lane']
+        await env.adopt(key='stream:packet-conflict', state='paused', owner='operator', members=[spec])
+        env.store.external_work_config = ExternalWorkConfig(status='enabled', watch_id='dot', label='Dot')
+        def insert(conn):
+            conn.execute('INSERT INTO v2_external_work_packets VALUES (?,?,?,?,?,?,?,?)',
+                         ('dot', 'packet', spec, 'queued', 1, 1, 1, None))
+            conn.commit()
+        await env.store.submit(insert)
+        with pytest.raises(ValueError, match='work_lane_member_conflict'):
+            await env.op('set_state', {'to':'active', 'reason':'Start'}, lane=lane['lane_id'], version=done['version'])
+        assert (await env.store.get_work_lane(lane['lane_id']))['lane']['work_state'] == 'done'
+    run(body)

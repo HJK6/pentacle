@@ -50,6 +50,17 @@ def cmd_record(args: argparse.Namespace) -> int:
     })
 
 
+def cmd_packet(args):
+    payload = {"type": "external_work.packet", "op": args.packet_op, "tag": args.tag}
+    if args.packet_op == "open":
+        payload["spec_id"] = args.spec_id
+        if args.queued:
+            payload["state"] = "queued"
+    elif args.packet_op in {"working", "queued", "review"}:
+        payload.update(op="set", state=args.packet_op)
+    return _call(args, payload)
+
+
 def add_parser(subparsers: Any) -> None:
     parser = subparsers.add_parser("external-work", help="front-desk external-work liveness check")
     sub = parser.add_subparsers(dest="external_work_command", required=True)
@@ -60,3 +71,14 @@ def add_parser(subparsers: Any) -> None:
     record.add_argument("--file", required=True, help="JSON file holding the record payload")
     record.add_argument("--timeout", type=float, default=30.0)
     record.set_defaults(func=cmd_record)
+
+    packet = sub.add_parser("packet", help="manage the external packet ledger")
+    operations = packet.add_subparsers(dest="packet_op", required=True)
+    for op in ("open", "working", "queued", "review", "close", "ignore"):
+        command = operations.add_parser(op)
+        command.add_argument("tag")
+        command.add_argument("--timeout", type=float, default=30.0)
+        if op == "open":
+            command.add_argument("--spec-id", required=True)
+            command.add_argument("--queued", action="store_true")
+        command.set_defaults(func=cmd_packet)

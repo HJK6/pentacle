@@ -601,7 +601,7 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
     )
 
 
-def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None) -> list[dict[str, Any]]:
+def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None, external_config=None) -> list[dict[str, Any]]:
     states = WORK_STATES if include_done else OPEN_WORK_STATES
     ids_snapshot = effective_membership_ids_conn(conn)
     index_available = bool(ids_snapshot["state"]["available"])
@@ -616,12 +616,16 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
     named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
     snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
     route_dispatch_map = resolved_route_dispatch_map(conn)
+    from store_external_work import current_packets_conn
+    external = current_packets_conn(conn, config=external_config)
     for lane in lanes:
+        lane["_external_packets"] = external
         lane["_members"] = members_conn(conn, lane, snapshot)
         enrich_latest_reports_conn(conn, lane["_members"])
         enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
         lane["_has_work_seat"] = _has_work_seat_conn(conn, lane)
+        lane["_has_external_work"] = _has_external_work(lane)
         marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
         fd_stamp = conn.execute(
             f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",
@@ -678,7 +682,8 @@ class _WorkLanesStoreMixin:
                                      lane_id=lane_id, expected=expected_lane_version, payload=payload,
                                      actor=actor_stream_id, generation=actor_generation,
                                      binding_name=binding_name, env_binding=env_binding,
-                                     confirmation=confirmation, digest=digest, fault=fault, live_sessions=live_sessions)
+                                     confirmation=confirmation, digest=digest, fault=fault, live_sessions=live_sessions,
+                                     external_config=getattr(self, "external_work_config", None))
                 conn.commit()
                 return result
             except BaseException:
@@ -710,7 +715,7 @@ class _WorkLanesStoreMixin:
                         "event_id": e["publication_event_id"], "ts": e["created_at"],
                         "source_id": e["source_id"]} for e in events if e.get("update_kind")]
             prepare_hues_conn(conn, [lane_id])
-            row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id)), None)
+            row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id, external_config=getattr(self, "external_work_config", None))), None)
             lane = lane_row_conn(conn, lane_id)
             internal_members = row["_members"] if row is not None else members_conn(conn, lane)
             # Public Store members retain the observation contract. Projection
@@ -743,7 +748,7 @@ class _WorkLanesStoreMixin:
 
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         # Internal attendance/episode/aggregation readers never allocate hues.
-        return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done))
+        return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done, external_config=getattr(self, "external_work_config", None)))
 
     async def work_lane_snapshot(self, *, include_done: bool = False,
                                  select_rows: Callable | None = None):
@@ -754,7 +759,7 @@ class _WorkLanesStoreMixin:
         """
         def _op(conn):
             with hue_transaction(conn):
-                rows = work_lane_rows_conn(conn, include_done=include_done)
+                rows = work_lane_rows_conn(conn, include_done=include_done, external_config=getattr(self, "external_work_config", None))
                 if select_rows is not None:
                     selected = select_rows(rows)
                     prepare_hues_conn(conn, [row["lane_id"] for row in selected])
@@ -837,7 +842,7 @@ class _WorkLanesStoreMixin:
         def _op(conn):
             conn.execute("BEGIN IMMEDIATE")
             try:
-                result = _reconcile_lane_lifecycle_conn(conn)
+                result = _reconcile_lane_lifecycle_conn(conn, external_config=getattr(self, "external_work_config", None))
                 conn.commit()
                 return result
             except BaseException:
@@ -929,14 +934,19 @@ def _has_work_seat_conn(conn, lane: dict[str, Any]) -> bool:
 
 
 def _require_lead_or_work_seat(lane, conn):
-    if not _has_work_seat_conn(conn, lane):
+    if not _has_work_seat_conn(conn, lane) and not _has_external_work(lane):
         _require_qualifying_lead(lane, conn)
+
+
+def _has_external_work(lane):
+    ids = {m["spec_id"] for m in lane.get("_members") or []}
+    return any(row["spec_id"] in ids for row in (lane.get("_external_packets") or {}).get("packets", []))
 
 
 def _lead_lost_conn(lane: dict[str, Any], conn) -> bool:
     lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
     return lane_lead_lost({**lane, "_qualifies": work_lane_lead_qualifies(lane, lead),
-                           "_has_work_seat": _has_work_seat_conn(conn, lane)})
+                           "_has_work_seat": _has_work_seat_conn(conn, lane), "_has_external_work": _has_external_work(lane)})
 
 
 def _override_audit(actor: str, generation: str, action: str, prior: str, nxt: str,
@@ -957,7 +967,7 @@ def _lane_work_status_conn(conn, lane_id: str) -> str:
 
 
 def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, payload, actor, generation,
-                binding_name, env_binding, confirmation, digest, fault, live_sessions=()) -> dict[str, Any]:
+                binding_name, env_binding, confirmation, digest, fault, live_sessions=(), external_config=None) -> dict[str, Any]:
     from store_assistant_binding import _binding_conn
     binding = _binding_conn(conn, env_binding or {}, name=binding_name, include_target=False)
     if (not actor or not generation or binding.get("stream_id") != actor
@@ -988,6 +998,10 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         lane = lane_row_conn(conn, lane_id)
         if lane is None or lane["stream_id"] != stream_id or lane.get("work_state") is None:
             raise ValueError("work_lane_not_found")
+        if operation == "set_state":
+            enriched = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id, external_config=external_config)), None)
+            if enriched:
+                lane.update({key: enriched[key] for key in ("_members", "_external_packets", "_has_work_seat", "_has_external_work")})
         _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor)
         if expected != int(lane["version"]):
             raise ValueError("assistant_lane_version_conflict")
@@ -1509,7 +1523,7 @@ def _reopen_lane_conn(conn, lane: dict[str, Any], stamp: str) -> bool:
     return True
 
 
-def _lifecycle_lane_rows_conn(conn) -> list[dict[str, Any]]:
+def _lifecycle_lane_rows_conn(conn, external_config=None) -> list[dict[str, Any]]:
     """Every product lane with just the inputs the lifecycle rule needs.
 
     Lighter than ``work_lane_rows_conn``: only membership, goals and index
@@ -1520,22 +1534,25 @@ def _lifecycle_lane_rows_conn(conn) -> list[dict[str, Any]]:
         "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL")]
     named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
     snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
+    from store_external_work import current_packets_conn
+    external = current_packets_conn(conn, config=external_config)
     for lane in lanes:
         lane.pop("hue_open_order", None)
         lane["_members"] = members_conn(conn, lane, snapshot)
+        lane["_external_packets"] = external
         enrich_latest_reports_conn(conn, lane["_members"])
         enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
     return lanes
 
 
-def _reconcile_lane_lifecycle_conn(conn) -> dict[str, Any]:
+def _reconcile_lane_lifecycle_conn(conn, external_config=None) -> dict[str, Any]:
     stamp = _now()
     completed: list[str] = []
     settled: list[str] = []
     reopened: list[str] = []
     resumed: list[str] = []
-    for lane in _lifecycle_lane_rows_conn(conn):
+    for lane in _lifecycle_lane_rows_conn(conn, external_config):
         # Spec F's reversible archive mark is skipped by settling and reopening.
         if lane.get("archived_at"):
             continue
@@ -1546,7 +1563,7 @@ def _reconcile_lane_lifecycle_conn(conn) -> dict[str, Any]:
             if status == "finished":
                 _complete_lane_conn(conn, lane, stamp)
                 completed.append(lane["lane_id"])
-            elif state == "paused" and not lane.get("parked_at") and _has_work_seat_conn(conn, lane):
+            elif state == "paused" and not lane.get("parked_at") and (_has_work_seat_conn(conn, lane) or _has_external_work(lane)):
                 version = int(lane["version"]) + 1
                 cur = conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='active', work_state_reason='work_started', version=?, updated_at=? WHERE lane_id=? AND version=?",
                                    (version, stamp, lane["lane_id"], lane["version"]))

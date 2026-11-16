@@ -163,7 +163,7 @@ class WorkLaneEpisodesStoreMixin:
                 # write and the pending drain below stay unconditional.
                 open_episode_lanes = {r[0] for r in conn.execute(
                     "SELECT DISTINCT lane_id FROM v2_work_lane_episodes WHERE cleared_at IS NULL")}
-                for lane in work_lane_rows_conn(conn, include_done=True):
+                for lane in work_lane_rows_conn(conn, include_done=True, external_config=getattr(self, "external_work_config", None)):
                     conn.execute("UPDATE v2_assistant_composite_lanes SET lead_reported_done=? WHERE lane_id=?",
                                  (lane["_lead_reported_done"], lane["lane_id"]))
                     if lane["work_state"] == "done" and lane["lane_id"] not in open_episode_lanes:

@@ -78,7 +78,24 @@ export type WorkLaneProgressEntry =
   | { at: string; spec_id: string; kind: 'done' }
   | { at: string; spec_id: string; kind: 'blocked'; text: string | null };
 
+export type WorkLaneExternal = {
+  label: string;
+  working: number;
+  queued: number;
+  review: number;
+  verified_at: string;
+};
+
+export type WorkLaneMemberExternal = {
+  label: string;
+  ref: string;
+  state: 'working' | 'queued' | 'review';
+  verified_at: string;
+};
+
 export type WorkLaneMember = {
+  /** Detail-only current external packets; inventory previews omit this key. */
+  external?: WorkLaneMemberExternal[];
   /** Optional released policy fields survive normalization, including retired fields. */
   [key: string]: unknown;
   spec_id: string;
@@ -162,6 +179,10 @@ export type WorkIndexStatus = {
 };
 
 export type WorkLane = {
+  /** Daemon activity, with unknown future words preserved. */
+  activity?: string | null;
+  /** Current external packets on effective members; absent when there are none. */
+  external?: WorkLaneExternal;
   visibility_counts?: Record<string, unknown>;
   selected_goal?: WorkLaneGoal & Record<string, unknown> & { summary_line?: string | null; recent?: WorkLaneProgressEntry[] };
   lane_id: string;
@@ -381,6 +402,13 @@ function normalizeGoal(raw: unknown): WorkLaneGoal | null {
       ? raw.icon as LaneIconKey : null } : {}) };
 }
 
+function normalizeExternal(raw: unknown): WorkLaneExternal | null {
+  if (!isRec(raw) || typeof raw.label !== 'string' || typeof raw.verified_at !== 'string'
+    || ![raw.working, raw.queued, raw.review].every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0)) return null;
+  return { label: raw.label, working: raw.working as number, queued: raw.queued as number,
+    review: raw.review as number, verified_at: raw.verified_at };
+}
+
 function normalizeMember(raw: unknown): WorkLaneMember | null {
   if (!isRec(raw)) return null;
   const specId = nonEmpty(raw.spec_id);
@@ -488,6 +516,8 @@ function normalizeLane(raw: unknown): WorkLane | null {
   const counts = Array.isArray(raw.goal_counts) && raw.goal_counts.length === 4 ? raw.goal_counts.map(count) : null;
   return {
     lane_id: laneId,
+    ...(normalizeExternal(raw.external) ? { external: normalizeExternal(raw.external)! } : {}),
+    ...('activity' in raw ? { activity: str(raw.activity) } : {}),
     ...(isRec(raw.visibility_counts) ? { visibility_counts: raw.visibility_counts } : {}),
     ...(isRec(raw.selected_goal) && normalizeGoal(raw.selected_goal)
       ? { selected_goal: { ...raw.selected_goal, ...normalizeGoal(raw.selected_goal)!,
