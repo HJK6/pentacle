@@ -5,6 +5,16 @@ The supplied 1024×1024 logo is retained at `renderer/assets/pentacle-logo-sourc
 Derive required sizes with Lanczos filtering; preserve the artwork and colors.
 
 Web favicon sizes are 64 and 180 pixels; PWA icons are 192 and 512 pixels.
+PWA filenames include the first 12 characters of each PNG's SHA256. When the
+artwork changes, rename the file and update its manifest URL. Chrome can skip
+icon downloads when the manifest metadata is unchanged; replacing bytes at the
+same URL can leave existing installations with the old artwork. Keep the app's
+identity and start URL unchanged. `test/web_manifest_icons.test.js` checks that
+the filenames match the artwork.
+Versioned URLs let the browser detect the update. A large visual logo change
+can still require the browser's app-identity confirmation before it replaces
+the installed icon; verify that step as well as a fresh installation.
+
 Maskable variants inset the original square to 80% on its original corner color
 so the pentacle fits inside the safe circle. The in-app titlebar displays the
 text wordmark **Pentacle**; browser tabs, asset popouts and installed apps use
