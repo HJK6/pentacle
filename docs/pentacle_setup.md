@@ -22,16 +22,16 @@ not an arbitrary global brand palette.
 
 ### Bring your own logo
 
-Replace the PNGs below, keeping their dimensions. The browser
+Use the mobile source and generator described in [branding](branding.md). The browser
 favicon, home-screen icon and installed PWA icons are separate assets; replace
 all of them for consistent branding.
 
 | File under `renderer/assets/` | Size | Use |
 | --- | --- | --- |
-| `favicon.png` | 64 × 64 | Browser favicon |
-| `favicon-180.png` | 180 × 180 | Apple touch icon |
-| `icon-192.190346b196f7.png`, `icon-512.cc3a9b2722fb.png` | 192 × 192, 512 × 512 | PWA icons |
-| `icon-maskable-192.eab637afeda6.png`, `icon-maskable-512.60ecebec5929.png` | 192 × 192, 512 × 512 | Maskable PWA icons |
+| `favicon.<sha256>.png` | 64 × 64 | Browser favicon |
+| `favicon-180.<sha256>.png` | 180 × 180 | Apple touch icon |
+| `icon-192.<sha256>.png`, `icon-512.<sha256>.png` | 192 × 192, 512 × 512 | PWA icons |
+| `icon-maskable-192.<sha256>.png`, `icon-maskable-512.<sha256>.png` | 192 × 192, 512 × 512 | Maskable PWA icons |
 
 Use square PNGs. Ordinary icons may have transparency; maskable icons should
 have a full background with the important artwork inside the central safe
@@ -95,7 +95,8 @@ copy any existing custom artwork somewhere safe. To reset only branding,
 restore the files you changed from that commit, for example:
 
 ```sh
-git restore --source=<defaults-commit> -- renderer/assets/favicon.png renderer/app.js renderer/styles.css
+git restore --source=<defaults-commit> -- renderer/assets/mobile-launcher-source.png renderer/assets/mobile-adaptive-source.png renderer/assets/mobile-icon-sources.json
+python3 scripts/generate_web_icons.py
 npm run build:web
 ```
 

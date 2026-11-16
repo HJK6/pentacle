@@ -1,24 +1,30 @@
 # Pentacle branding
 
-The supplied 1024×1024 logo is retained at `renderer/assets/pentacle-logo-source.png`. Its SHA256 is
-`6f6533d7585b3532e63ec8226b218e3c47658d212734e3c9ff181f8be7c35117`.
-Derive required sizes with Lanczos filtering; preserve the artwork and colors.
+Web icons use the mobile app's actual launcher and adaptive derivatives from
+[the public mobile repository](https://github.com/HJK6/pentacle-mobile/tree/cfccc24c6b3a7315f43c24aa9100ce7287909325/assets/images).
+`renderer/assets/mobile-icon-sources.json` pins their commit, paths and SHA256s.
+The two source PNGs are byte-exact copies: the full canvas, background, spacing
+and artwork are preserved. Mobile's launcher already centers the original
+artwork by translating it 2 pixels right and 29 pixels down at 1024 pixels.
+The unchanged original `pentacle-logo-source.png` is archival, not the resize input.
 
-Web favicon sizes are 64 and 180 pixels; PWA icons are 192 and 512 pixels.
-PWA filenames include the first 12 characters of each PNG's SHA256. When the
-artwork changes, rename the file and update its manifest URL. Chrome can skip
-icon downloads when the manifest metadata is unchanged; replacing bytes at the
-same URL can leave existing installations with the old artwork. Keep the app's
-identity and start URL unchanged. `test/web_manifest_icons.test.js` checks that
-the filenames match the artwork.
-Versioned URLs let the browser detect the update. A large visual logo change
-can still require the browser's app-identity confirmation before it replaces
-the installed icon; verify that step as well as a fresh installation.
+Run `python3 scripts/generate_web_icons.py` with Pillow 13.0.0 to regenerate.
+It resizes the mobile launcher with Lanczos to the 64/180-pixel favicon/touch
+icons and 192/512-pixel ordinary PWA icons. Maskable sizes resize mobile's
+adaptive foreground, preserving its existing two-thirds inset. No additional
+padding, recoloring, corner mask or recentering is applied. Native platforms
+may apply their own outer icon shape.
 
-Maskable variants inset the original square to 80% on its original corner color
-so the pentacle fits inside the safe circle. The in-app titlebar displays the
-text wordmark **Pentacle**; browser tabs, asset popouts and installed apps use
-the logo. These display surfaces have separate browser and installation caches.
+Every generated PNG filename contains its SHA256 prefix. The generator updates
+all HTML favicon/touch links and manifest icon URLs without changing the app's
+identity or start URL. Chrome can skip icon downloads when manifest metadata
+is unchanged; replacing bytes at the same URL can leave installed apps stale.
+The URL checks in `test/web_manifest_icons.test.js` cover both manifest and HTML
+consumers. A large logo change can require Chrome's app-identity confirmation;
+verify both an existing installation and a fresh one.
+
+The in-app titlebar displays the text wordmark **Pentacle**; browser tabs, asset
+popouts and installed apps use the logo. These surfaces have separate caches.
 
 Rebuilding does not update a running web host's frozen snapshot. After an
 authorized host restart, compare the served icon bytes with the built files
