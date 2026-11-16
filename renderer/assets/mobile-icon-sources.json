@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/HJK6/pentacle-mobile",
+  "commit": "cfccc24c6b3a7315f43c24aa9100ce7287909325",
+  "sources": {
+    "launcher": {
+      "file": "mobile-launcher-source.png",
+      "upstream_path": "assets/images/icon.png",
+      "sha256": "70a5e492f68f0300f8405025435637065e254fda99e2e681419fb9005a667681"
+    },
+    "adaptive": {
+      "file": "mobile-adaptive-source.png",
+      "upstream_path": "assets/images/adaptive-icon.png",
+      "sha256": "e08da61537995f6ef819a65c99a8f58956e115aadf4a601f83f1f04e204ee5d2"
+    }
+  }
+}

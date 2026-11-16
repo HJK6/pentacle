@@ -9,23 +9,23 @@
   "theme_color": "#18181f",
   "icons": [
     {
-      "src": "assets/icon-192.190346b196f7.png",
+      "src": "assets/icon-192.63b255f53d3a.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "assets/icon-512.cc3a9b2722fb.png",
+      "src": "assets/icon-512.3c8001205553.png",
       "sizes": "512x512",
       "type": "image/png"
     },
     {
-      "src": "assets/icon-maskable-192.eab637afeda6.png",
+      "src": "assets/icon-maskable-192.ce564e317746.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "assets/icon-maskable-512.60ecebec5929.png",
+      "src": "assets/icon-maskable-512.30aa76361489.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

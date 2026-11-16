@@ -5,7 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const ROOT = path.resolve(__dirname, '../../..');
-const MASTER = '6f6533d7585b3532e63ec8226b218e3c47658d212734e3c9ff181f8be7c35117';
+const MASTER = '70a5e492f68f0300f8405025435637065e254fda99e2e681419fb9005a667681';
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const mimeEssence = value => String(value || '').split(';', 1)[0].trim().toLowerCase();
 
@@ -45,7 +45,7 @@ async function branding(ctx) {
     await session.eval('window.__brandingNavigationPending = true');
     await session.send('Page.navigate', { url });
     await waitForDocument(session, url, cdp);
-    report.ok('approved branding master is unchanged', sha(fs.readFileSync(path.join(ROOT, 'renderer/assets/pentacle-logo-source.png'))) === MASTER);
+    report.ok('approved mobile launcher derivative is unchanged', sha(fs.readFileSync(path.join(ROOT, 'renderer/assets/mobile-launcher-source.png'))) === MASTER);
     const links = await session.eval(`[...document.querySelectorAll('link[rel="icon"],link[rel="apple-touch-icon"],link[rel="manifest"]')].map(l => ({rel:l.rel,url:l.href}))`);
     report.ok('page declares favicon, touch icon and manifest', ['icon', 'apple-touch-icon', 'manifest'].every(rel => links.some(l => l.rel === rel)));
     const manifestLink = links.find(l => l.rel === 'manifest');
