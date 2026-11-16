@@ -5000,7 +5000,9 @@
           "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
           "checkpoint_first_observed_at": null,
           "estimate_first": null,
-          "checkpoint_deficiencies": []
+          "checkpoint_deficiencies": [],
+          "latest_event": null,
+          "status_behind": false
         }
       ],
       "members_total": 1,
@@ -5394,7 +5396,9 @@
           "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
           "checkpoint_first_observed_at": null,
           "estimate_first": null,
-          "checkpoint_deficiencies": []
+          "checkpoint_deficiencies": [],
+          "latest_event": null,
+          "status_behind": false
         }
       ],
       "members_total": 1,
@@ -6117,7 +6121,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road1",
@@ -6154,7 +6160,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road2",
@@ -6191,7 +6199,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road3",
@@ -6228,7 +6238,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road4",
@@ -6265,7 +6277,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road5",
@@ -6302,7 +6316,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road6",
@@ -6339,7 +6355,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road7",
@@ -6376,7 +6394,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road8",
@@ -6413,7 +6433,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         },
         {
           "spec_id": "spec_demo__road9",
@@ -6450,7 +6472,9 @@
           "goal_source": null,
           "checkpoint_revision": null,
           "checkpoint_first_observed_at": null,
-          "unblocks": []
+          "unblocks": [],
+          "latest_event": null,
+          "status_behind": false
         }
       ],
       "members_total": 10,
