@@ -17,7 +17,6 @@ import tempfile
 import uuid
 
 from deploy import coordinated as c
-from deploy.restoration import inherited_receipt_seal
 
 ACTIVE = contextvars.ContextVar('ordinary_recovery_writer', default=None)
 SCHEMA = 'pentacle.ordinary-recovery.v1'
@@ -385,6 +384,8 @@ class OrdinaryRuntime:
                              script=str(self.repo/'services/chat-stream-v2/provider_account_host.py'))
         daemon_proof = self.daemon_proof(daemon_helper,accounts,identity,prior)
         self.d.verify_deploy_guard(self.service,self.stream,self.runner,repo=self.repo,sha=target)
+        # Keep standalone deploy/check-release imports free of runtime-only tools.
+        from deploy.restoration import inherited_receipt_seal
         seal=inherited_receipt_seal(ancestry) if ancestry else None
         process=self.process()
         if process['sha'] != prior: raise c.Invalid('ordinary recovery prior serving identity unavailable')
@@ -449,6 +450,7 @@ print(json.dumps(result))
         self.runtime.checked(('git','clone','--bare',str(archive),str(self.source_repo)))
 
     def validate(self, bundle):
+        from deploy.restoration import inherited_receipt_seal
         from deploy.coordinated_runtime import code_identity_at
         m=bundle['metadata']
         if (self.controller == self.repo or self.git('rev-parse','HEAD',repo=self.controller) != m['controller_sha']
