@@ -1119,6 +1119,80 @@
     "not_applicable": null
   },
   {
+    "command": "external-work packet open",
+    "argv": [
+      "external-work",
+      "packet",
+      "open",
+      "fixture-tag",
+      "--spec-id",
+      "spec_fixture__triage"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_packet",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
+    "command": "external-work packet working",
+    "argv": [
+      "external-work",
+      "packet",
+      "working",
+      "fixture-tag"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_packet",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
+    "command": "external-work packet queued",
+    "argv": [
+      "external-work",
+      "packet",
+      "queued",
+      "fixture-tag"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_packet",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
+    "command": "external-work packet review",
+    "argv": [
+      "external-work",
+      "packet",
+      "review",
+      "fixture-tag"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_packet",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
+    "command": "external-work packet close",
+    "argv": [
+      "external-work",
+      "packet",
+      "close",
+      "fixture-tag"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_packet",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
+    "command": "external-work packet ignore",
+    "argv": [
+      "external-work",
+      "packet",
+      "ignore",
+      "fixture-tag"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_packet",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
     "command": "prompt ask",
     "argv": [
       "prompt",
