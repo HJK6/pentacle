@@ -1,0 +1,241 @@
+[
+  {
+    "name": "recording_id 0",
+    "input": {
+      "version": 1,
+      "recording_id": null,
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 1",
+    "input": {
+      "version": 1,
+      "recording_id": false,
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 2",
+    "input": {
+      "version": 1,
+      "recording_id": 1,
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 3",
+    "input": {
+      "version": 1,
+      "recording_id": [],
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 4",
+    "input": {
+      "version": 1,
+      "recording_id": {},
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 5",
+    "input": {
+      "version": 1,
+      "recording_id": "",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 6",
+    "input": {
+      "version": 1,
+      "recording_id": " \t\n",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 7",
+    "input": {
+      "version": 1,
+      "recording_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id 8",
+    "input": {
+      "version": 1,
+      "recording_id": " aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "recording_id missing",
+    "input": {
+      "version": 1,
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
+  }
+]

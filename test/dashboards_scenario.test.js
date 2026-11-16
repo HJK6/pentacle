@@ -1,0 +1,310 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { JSDOM } = require('jsdom');
+const { SCENARIOS } = require('./e2e/lib/web_scenarios');
+const { readDashboardObservation, listChecks, viewerChecks, configChecks, chatChecks } = require('./e2e/lib/dashboard_scenario');
+const { startModelerFixture } = require('./e2e/lib/modeler_fixture_server');
+const catalogFixtures = require('./e2e/lib/dashboard_catalog_fixture');
+const { writeProfile } = require('./e2e/web_gate');
+const fixtureUrl = 'http://127.0.0.1:9031/modeler_viewer.html';
+function observation() {
+  return { visible: true, ids: ['shared-demo', 'modeler-3d'], state: 'unconfigured', text: 'Set dashboards.modeler3d.url',
+    frameUrl: null, sandbox: null, open: true, reload: true };
+}
+function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', frameUrl: fixtureUrl, sandbox: 'allow-scripts allow-same-origin allow-popups', allow: 'xr-spatial-tracking; fullscreen', loading: 'lazy', referrerPolicy: 'no-referrer' }; }
+function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
+
+test('web gate collects the dashboard scenarios before destructive journeys', () => {
+  assert.ok(SCENARIOS.some(([name]) => name === 'design-gallery'));
+  assert.ok(SCENARIOS.some(([name]) => name === 'composer-draft-per-chat'));
+  const names = SCENARIOS.map(([name]) => name);
+  const optimistic = names.indexOf('optimistic-reload');
+  assert.ok(optimistic >= 0 && optimistic < names.indexOf('closed-chat-slot'));
+  assert.ok(names.indexOf('provider-visibility') > names.indexOf('branding'));
+  assert.ok(names.indexOf('provider-visibility') < names.indexOf('closed-chat-slot'));
+  assert.ok(names.includes('cross-origin-boundary'));
+  assert.ok(names.indexOf('summary-fallback-formatting') > names.indexOf('chat-transcript-paint'));
+  assert.ok(names.indexOf('summary-fallback-formatting') < names.indexOf('closed-chat-slot'));
+  assert.ok(names.indexOf('installed-client-seam') > names.indexOf('summary-fallback-formatting'));
+  assert.ok(names.indexOf('installed-client-seam') < names.indexOf('closed-chat-slot'));
+  assert.ok(names.indexOf('sidebar-preview-plain-text') > names.indexOf('sidebar-from-inventory'));
+  assert.ok(names.indexOf('sidebar-preview-plain-text') < names.indexOf('closed-chat-slot'));
+  assert.equal(names[0], 'default-pane-assistant');
+  assert.ok(names.indexOf('branding') > names.indexOf('transport-and-config'));
+  assert.ok(names.indexOf('branding') < names.indexOf('closed-chat-slot'));
+  assert.ok(names.indexOf('pane-count-selector') < names.indexOf('closed-chat-slot'));
+  assert.ok(names.indexOf('chat-first-style') < names.indexOf('closed-chat-slot'));
+  const index = names.indexOf('web-dashboards-revamp');
+  assert.ok(index >= 0 && index < names.indexOf('closed-chat-slot'));
+  const catalog = names.indexOf('dashboard_catalog');
+  assert.ok(catalog > index && catalog < names.indexOf('closed-chat-slot'));
+  assert.equal(names[names.length - 1], 'host-restart-restores-input');
+});
+test('dashboard gate accepts complete synthetic observations for both states and the chat round trip', () => {
+  for (const [name, pass] of [...listChecks(observation(), true), ...viewerChecks(observation()), ...viewerChecks(loaded(), fixtureUrl), ...chatChecks(chat())]) assert.equal(pass, true, name);
+});
+for (const [label, group, index, mutate] of [
+  ['hidden dashboard view', 'list', 0, o => { o.visible = false; }],
+  ['retired foreclosure visible', 'list', 2, o => { o.ids.push('foreclosure-pipeline'); }],
+  ['retired scraper visible', 'list', 2, o => { o.ids.push('scraper-bot'); }],
+  ['missing modeler', 'list', 3, o => { o.ids = ['shared-demo']; }],
+  ['wrong unconfigured state', 'unconfigured', 0, o => { o.state = 'loaded'; }],
+  ['missing setup key', 'unconfigured', 0, o => { o.text = 'not configured'; }],
+  ['unexpected unconfigured frame', 'unconfigured', 0, o => { o.frameUrl = fixtureUrl; }],
+  ['viewer stuck loading', 'loaded', 0, o => { o.state = 'loading'; }],
+  ['wrong configured URL', 'loaded', 0, o => { o.frameUrl = 'http://127.0.0.1:9031/other'; }],
+  ['missing open link', 'loaded', 1, o => { o.open = false; }],
+  ['missing reload', 'loaded', 1, o => { o.reload = false; }],
+  ['missing XR/fullscreen permission', 'loaded', 2, o => { o.allow = null; }],
+  ['missing lazy loading', 'loaded', 2, o => { o.loading = null; }],
+  ['missing referrer protection', 'loaded', 2, o => { o.referrerPolicy = null; }],
+  ['expanded sandbox', 'loaded', 2, o => { o.sandbox += ' allow-top-navigation'; }],
+  ['recreated chat nodes', 'chat', 0, o => { o.sameNodes = false; }],
+  ['changed chat identity', 'chat', 0, o => { o.sameStream = false; }],
+  ['changed transcript', 'chat', 1, o => { o.sameTranscript = false; }],
+  ['lost unsent draft', 'chat', 1, o => { o.sameDraft = false; }],
+  ['hidden chats', 'chat', 2, o => { o.chatsVisible = false; }],
+  ['visible dashboards after exit', 'chat', 2, o => { o.dashboardsHidden = false; }],
+  ['leaked iframe', 'chat', 2, o => { o.frames = 1; }],
+]) test(`dashboard oracle rejects ${label}`, () => {
+  const value = group === 'chat' ? chat() : group === 'loaded' ? loaded() : observation();
+  mutate(value);
+  const checks = group === 'list' ? listChecks(value, true) : group === 'chat' ? chatChecks(value) : viewerChecks(value, group === 'loaded' ? fixtureUrl : null);
+  assert.equal(checks[index][1], false, label);
+});
+test('retired-absent cannot pass through missing adapter registration', () => {
+  assert.equal(listChecks(observation(), false)[1][1], false);
+});
+test('real DOM reader observes visible state, actual frame attributes and controls', t => {
+  const dom = new JSDOM(`<!doctype html><section id="panel-dashboards"><div id="dashboard-list"><button data-dashboard-id="modeler-3d">3D Modeler</button></div></section>
+    <main id="dashboard-content"><section data-modeler-state="loaded"><a data-modeler-open>Open in new window</a><button data-modeler-reload>Reload</button>
+      <iframe src="${fixtureUrl}" sandbox="allow-scripts allow-same-origin allow-popups" allow="xr-spatial-tracking; fullscreen" loading="lazy" referrerpolicy="no-referrer"></iframe></section></main>`);
+  t.after(() => dom.window.close());
+  const seen = readDashboardObservation(dom.window.document);
+  assert.equal(seen.visible, true); assert.deepEqual(seen.ids, ['modeler-3d']);
+  for (const [name, pass] of viewerChecks(seen, fixtureUrl)) assert.equal(pass, true, name);
+  dom.window.document.getElementById('panel-dashboards').style.display = 'none';
+  dom.window.document.querySelector('iframe').remove();
+  assert.equal(readDashboardObservation(dom.window.document).visible, false);
+  assert.equal(readDashboardObservation(dom.window.document).frameUrl, null);
+});
+test('hermetic profile enables dashboards and uses catalog membership without a Modeler profile override', t => {
+  // require() caches by real path; macOS tmpdir is a symlink, so resolve it before
+  // evicting the cache entry or the second read returns the stale profile.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-profile-')));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  function read(catalog) {
+    const profile = writeProfile(dir, 19031, fixtureUrl, catalog);
+    delete require.cache[profile]; return require(profile);
+  }
+  const off = read(null);
+  assert.equal(off.features.dashboards, true); assert.equal(off.dashboards?.modeler3d?.url, undefined);
+  assert.equal(off.dashboardHub.scraperBotUrl, fixtureUrl);
+  const on = read({ specId: 'example__catalog', root: '/scratch/catalog' });
+  assert.equal(on.dashboards.catalogSpecId, 'example__catalog');
+  assert.equal(on.dashboards.catalogRoot, '/scratch/catalog');
+  assert.equal(on.dashboards.modeler3d, undefined);
+  assert.equal(read(null).dashboards?.catalogSpecId, undefined);
+});
+test('viewer server binds loopback and serves only the actual self-contained fixture', async t => {
+  const fixture = await startModelerFixture(); t.after(() => fixture.close());
+  const url = new URL(fixture.url); assert.equal(url.hostname, '127.0.0.1');
+  const response = await fetch(url);
+  assert.equal(response.status, 200); assert.match(response.headers.get('content-type'), /text\/html/);
+  assert.equal(await response.text(), fs.readFileSync(path.join(__dirname, 'fixtures/modeler_viewer.html'), 'utf8'));
+  assert.equal((await fetch(new URL('/unknown', url))).status, 404);
+});
+
+test('default gate catalog seeds both versions through the production HTTPS validator', t => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-catalog-seed-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const fixture = catalogFixtures.buildCatalogFixture(scratch);
+  for (let index = 0; index < fixture.versions.length; index++) {
+    const hosted = fixture.versions[index].catalog.boards.find(board => board.kind === 'hosted-view');
+    assert.equal(new URL(hosted.hosted.url).protocol, 'https:');
+    const result = catalogFixtures.publishCatalog(fixture, {
+      python: process.env.PENTACLE_PYTHON || 'python3', assetsDb: path.join(scratch, 'assets.db'), scratch,
+    }, index);
+    assert.equal(result.asset_id, 'dashboard-catalog');
+  }
+});
+
+test('dashboard oracle rejects a profile URL that never reached the renderer bridge', () => {
+  assert.equal(configChecks(undefined, fixtureUrl)[0][1], false);
+  assert.equal(configChecks(fixtureUrl, fixtureUrl)[0][1], true);
+});
+
+for (const scenarioName of ['web-dashboards-revamp', 'dashboard_catalog']) {
+  for (const initialState of [undefined, 'loading', 'unknown', 'final', 'no files']) {
+    test(`${scenarioName} snapshots only settled file labels: ${initialState ?? 'not hydrated'}`, async t => {
+      const fixture = { streamId: 'local:dashboard-files', transcript: [{ text: 'fixture transcript' }] };
+      const states = ['ready', 'unavailable', 'failed'];
+      const labels = ['12 bytes · Download', 'File expired or unavailable', 'Download failed · click filename to retry'];
+      const dom = new JSDOM(`<!doctype html><div id="header-fixture"><button data-mode="chat"></button></div>
+        <div class="grid"><div class="slot-chat-shell">
+          <div class="slot-chat-list" data-stream-id="${fixture.streamId}">fixture transcript</div>
+          <textarea class="slot-chat-compose-input">previous draft</textarea></div></div>
+        <div class="slot-chat-list" data-stream-id="other"><a class="slot-chat-file-download">Other pending file</a></div>
+        <section id="panel-dashboards"><div id="dashboard-list"></div></section><main id="dashboard-content"></main>`,
+      { runScripts: 'outside-only' });
+      t.after(() => dom.window.close());
+      const { window } = dom;
+      const list = window.document.querySelector(`[data-stream-id="${fixture.streamId}"]`);
+      const files = initialState === 'no files' ? [] : states.map((state, index) => {
+        const attachment = window.document.createElement('span');
+        attachment.innerHTML = '<a class="slot-chat-file-download">File</a><span class="slot-chat-file-status"></span>';
+        list.append(attachment);
+        const file = attachment.firstChild;
+        if (initialState !== undefined) file.dataset.fileState = initialState === 'final' ? state : initialState;
+        attachment.lastChild.textContent = initialState === 'final' ? labels[index] : 'Loading file';
+        return file;
+      });
+      let configured = false; let hideStatic = false; let snapshot; let fileChecks = 0;
+      const waits = []; const pendingStates = []; const stopAfterSnapshot = new Error('snapshot captured');
+      window.focusStreamId = () => {};
+      window.DASHBOARDS = [{ id: 'shared-demo' }, { id: 'modeler-3d' }];
+      window.__dashboardCatalogGate = { lists: [] };
+      window.cc = {
+        getChatStreamState: async () => ({ connected: true, sessions: [{ stream_id: fixture.streamId }] }),
+        promptList: async () => ({ questions: [{ state: 'answered', answer: 'fixture answer' }] }),
+        getConfig: async () => ({ dashboards: configured ? { catalogSpecId: 'fixture-catalog' } : {} }),
+      };
+      const session = {
+        async send(method, params) {
+          if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+            hideStatic = params.source.endsWith('(true)');
+            return { identifier: 'fixture-script' };
+          }
+          if (method === 'Page.reload') delete window.__dashboardReloadMarker;
+          return {};
+        },
+        async eval(expression) {
+          const value = await window.eval(expression);
+          const before = window.__dashboardChatBefore || window.__catalogChatBefore;
+          if (before && !snapshot) {
+            snapshot = { transcript: before.transcript, states: files.map(file => file.dataset.fileState) };
+            throw stopAfterSnapshot;
+          }
+          return value;
+        },
+        async waitFor(expression, options) {
+          assert.equal(options, undefined, 'snapshot readiness keeps the default wait timeout');
+          waits.push(expression);
+          for (;;) {
+            const ready = await window.eval(expression);
+            if (ready === true) return;
+            if (expression.includes('slot-chat-v3-answer-entry')) {
+              list.insertAdjacentHTML('beforeend', '<div class="slot-chat-v3-answer-entry">fixture answer</div>');
+              continue;
+            }
+            // Progress one real DOM label only after the condition observed it
+            // pending. No timer, arbitrary eval response or snapshot interception
+            // can supply a passing readiness result.
+            const index = files.findIndex(file => !states.includes(file.dataset.fileState));
+            assert.ok(index >= 0, `unexpected unsatisfied wait: ${expression}`);
+            pendingStates.push(files.map(file => file.dataset.fileState));
+            fileChecks++;
+            files[index].dataset.fileState = states[index];
+            files[index].nextSibling.textContent = labels[index];
+          }
+        },
+        async click(selector) {
+          assert.equal(selector, '#view-dashboards', 'only catalog prerequisites precede the snapshot');
+          // Minimal catalog prerequisites, unrelated to the transcript oracle.
+          window.document.getElementById('dashboard-list').innerHTML = hideStatic || scenarioName === 'dashboard_catalog' ? ''
+            : '<button data-dashboard-id="shared-demo"></button><button data-dashboard-id="modeler-3d"></button>';
+          const content = window.document.getElementById('dashboard-content');
+          content.dataset.boardState = hideStatic || scenarioName === 'dashboard_catalog' ? 'empty' : 'ready';
+          content.textContent = hideStatic || scenarioName === 'dashboard_catalog' ? 'No dashboards configured' : '';
+        },
+      };
+      const ctx = { session, fixture, modelerFixtureUrl: fixtureUrl, configureModeler: async () => {},
+        cdp: { sleep: async () => { throw new Error('reload should already be ready'); } },
+        report: { ok: (name, pass) => assert.equal(pass, true, name) },
+        catalog: { fixture: { specId: 'fixture-catalog', versions: [{ version: 'v1' }, { version: 'v2' }] },
+          publish() {}, seedReports() {}, remove() {}, configure: async value => { configured = value; } } };
+      const scenario = SCENARIOS.find(([name]) => name === scenarioName)[1];
+      await assert.rejects(() => scenario(ctx), error => error === stopAfterSnapshot);
+      assert.deepEqual(snapshot.states, files.length ? states : [], 'snapshot must wait for every file to reach a final state');
+      assert.equal(snapshot.transcript, list.textContent, 'snapshot keeps the whole settled transcript text');
+      assert.ok(snapshot.transcript.includes('fixture answer'), 'answered entries settle before file labels');
+      for (const label of files.length ? labels : []) assert.ok(snapshot.transcript.includes(label), label);
+      assert.equal(fileChecks, initialState === 'final' || !files.length ? 0 : 3);
+      if (fileChecks) assert.deepEqual(pendingStates[0], [initialState, initialState, initialState]);
+      const connected = waits.findIndex(expression => expression.includes('getChatStreamState'));
+      const transcript = waits.findIndex(expression => expression.includes('textContent.includes'));
+      const answered = waits.findIndex(expression => expression.includes('slot-chat-v3-answer-entry'));
+      assert.ok(connected < transcript && transcript < answered, 'existing readiness waits retain their order');
+    });
+  }
+}
+
+const TRANSIENT_RELOAD_ERRORS = ['Execution context was destroyed. (-32000)', 'Cannot find context with specified id (-32000)', 'Inspected target navigated or closed (-32000)'];
+for (const message of TRANSIENT_RELOAD_ERRORS) {
+  test(`dashboard reload retries a transient context rollover: ${message}`, async () => {
+    const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+    let evaluations = 0; let reloads = 0;
+    const session = { send: async method => { if (method === 'Page.reload') reloads++; return { identifier: 'fresh' }; }, eval: async expression => {
+      if (expression === 'window.__dashboardReloadMarker = true') return true;
+      if (++evaluations === 1) throw new Error(message);
+      return true;
+    } };
+    await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 });
+    assert.equal(reloads, 1); assert.equal(evaluations, 2);
+  });
+}
+for (const message of TRANSIENT_RELOAD_ERRORS) {
+  test(`dashboard reload re-arms after a previous navigation is still settling: ${message}`, async () => {
+    const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+    let arms = 0; let reloads = 0;
+    const session = { send: async method => { if (method === 'Page.reload') reloads++; return { identifier: 'fresh' }; }, eval: async expression => {
+      if (expression === 'window.__dashboardReloadMarker = true' && ++arms === 1) throw new Error(message);
+      return true;
+    } };
+    await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 });
+    assert.equal(arms, 2); assert.equal(reloads, 1);
+  });
+}
+test('dashboard reload starts the next document with a fresh workspace unless asked to keep it', async () => {
+  const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+  const calls = [];
+  const session = { send: async (method, params) => { calls.push([method, params]); return { identifier: 'fresh-1' }; }, eval: async () => true };
+  await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 });
+  assert.deepEqual(calls.map(([method]) => method),
+    ['Page.addScriptToEvaluateOnNewDocument', 'Page.reload', 'Page.removeScriptToEvaluateOnNewDocument']);
+  assert.match(calls[0][1].source, /pentacle\.workspace\.v1/);
+  assert.deepEqual(calls[2][1], { identifier: 'fresh-1' });
+  calls.length = 0;
+  await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 }, { keepWorkspace: true });
+  assert.deepEqual(calls.map(([method]) => method), ['Page.reload']);
+});
+test('dashboard reload waits for the old document marker to disappear', async () => {
+  const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+  let evaluations = 0;
+  const session = { send: async () => {}, eval: async expression => {
+    if (expression === 'window.__dashboardReloadMarker = true') return true;
+    assert.match(expression, /__dashboardReloadMarker !== true/);
+    return ++evaluations > 1;
+  } };
+  await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 });
+  assert.equal(evaluations, 2);
+});
+test('dashboard reload fails within its bound when the fresh document never becomes ready', async () => {
+  const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+  const session = { send: async () => {}, eval: async expression => expression === 'window.__dashboardReloadMarker = true' };
+  await assert.rejects(() => reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 0 }), /fresh dashboard document/i);
+});
+test('dashboard reload fails promptly on unrelated CDP errors', async () => {
+  const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+  let evaluations = 0;
+  const session = { send: async () => {}, eval: async expression => {
+    if (expression === 'window.__dashboardReloadMarker = true') return true;
+    evaluations++; throw new Error('Target closed');
+  } };
+  await assert.rejects(() => reloadDashboardPage({ session, cdp: { sleep: async () => { throw Error('must not retry'); } }, timeoutMs: 1000 }), /Target closed/);
+  assert.equal(evaluations, 1);
+});

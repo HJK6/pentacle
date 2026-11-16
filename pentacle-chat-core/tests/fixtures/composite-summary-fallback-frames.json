@@ -1,0 +1,206 @@
+{
+  "mirror": {
+    "events": [
+      {
+        "attachments": [],
+        "daemon_seq": 1,
+        "kind": "USER",
+        "message_id": "input-1",
+        "optimistic_id": "input-1",
+        "provider": "composite",
+        "raw": {
+          "actor_stream_id": null,
+          "assistant_composite": true,
+          "attachments": [],
+          "input_identity": "input-1",
+          "input_request_id": "rpc-1",
+          "reply_to_message_id": null,
+          "reply_to_question_id": null
+        },
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "stream_id": "fixture-chat:assistant",
+        "text": "Please pin the build.",
+        "timestamp": "2026-10-30T16:24:45.632555Z"
+      },
+      {
+        "attachments": [],
+        "daemon_seq": 2,
+        "kind": "ASSIST_TEXT",
+        "message_id": "publication:publish:1",
+        "provider": "composite",
+        "publish_kind": "prose",
+        "raw": {
+          "actor_generation": "77af073fe1d3400c96dde940f84919b5",
+          "actor_stream_id": "fixture-root:visible",
+          "assistant_composite": true,
+          "attachment_ids": [],
+          "dispatch_id": "",
+          "evidence_refs": [],
+          "publish_kind": "prose",
+          "published_by": {
+            "generation": "77af073fe1d3400c96dde940f84919b5",
+            "stream_id": "fixture-root:visible"
+          },
+          "reply_to_message_id": null,
+          "reply_to_question_id": null,
+          "response_state": "final"
+        },
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "stream_id": "fixture-chat:assistant",
+        "text": "Pinning now.\n\n- one\n- two",
+        "timestamp": "2026-10-30T16:24:45.634266Z"
+      },
+      {
+        "attachments": [],
+        "daemon_seq": 4,
+        "kind": "ASSIST_TEXT",
+        "message_id": "publication:mirror:3",
+        "provider": "composite",
+        "publish_kind": "status",
+        "raw": {
+          "assistant_composite": true,
+          "attachment_ids": [],
+          "dispatch_id": "",
+          "evidence_refs": [],
+          "mirrored_from": {
+            "event_id": 3,
+            "event_ts": "2026-10-30T16:24:45.635207Z",
+            "generation": "77af073fe1d3400c96dde940f84919b5",
+            "stream_id": "fixture-root:visible"
+          },
+          "publish_kind": "status"
+        },
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "stream_id": "fixture-chat:assistant",
+        "text": "Mirrored final.",
+        "timestamp": "2026-10-30T16:24:45.635207Z"
+      }
+    ],
+    "session": {
+      "created_at": "2026-10-30T16:24:45.630128Z",
+      "host": "fixture-chat",
+      "last_event_at": "2026-10-30T16:24:45.635207Z",
+      "last_kind": "ASSIST_TEXT",
+      "last_text": "Mirrored final.",
+      "online": null,
+      "provider": "composite",
+      "session_kind": null,
+      "session_name": "assistant",
+      "stream_id": "fixture-chat:assistant",
+      "title": "Zephyr",
+      "working": false
+    }
+  },
+  "reply_publication": {
+    "events": [
+      {
+        "attachments": [],
+        "daemon_seq": 1,
+        "kind": "USER",
+        "message_id": "input-1",
+        "optimistic_id": "input-1",
+        "provider": "composite",
+        "raw": {
+          "actor_stream_id": null,
+          "assistant_composite": true,
+          "attachments": [],
+          "input_identity": "input-1",
+          "input_request_id": "rpc-1",
+          "reply_to_message_id": null,
+          "reply_to_question_id": null
+        },
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "stream_id": "fixture-chat:assistant",
+        "text": "Please pin the build.",
+        "timestamp": "2026-10-30T16:24:45.632555Z"
+      },
+      {
+        "attachments": [],
+        "daemon_seq": 2,
+        "kind": "ASSIST_TEXT",
+        "message_id": "publication:publish:1",
+        "provider": "composite",
+        "publish_kind": "prose",
+        "raw": {
+          "actor_generation": "77af073fe1d3400c96dde940f84919b5",
+          "actor_stream_id": "fixture-root:visible",
+          "assistant_composite": true,
+          "attachment_ids": [],
+          "dispatch_id": "",
+          "evidence_refs": [],
+          "publish_kind": "prose",
+          "published_by": {
+            "generation": "77af073fe1d3400c96dde940f84919b5",
+            "stream_id": "fixture-root:visible"
+          },
+          "reply_to_message_id": null,
+          "reply_to_question_id": null,
+          "response_state": "final"
+        },
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "stream_id": "fixture-chat:assistant",
+        "text": "Pinning now.\n\n- one\n- two",
+        "timestamp": "2026-10-30T16:24:45.634266Z"
+      }
+    ],
+    "session": {
+      "created_at": "2026-10-30T16:24:45.630128Z",
+      "host": "fixture-chat",
+      "last_event_at": "2026-10-30T16:24:45.634266Z",
+      "last_kind": "ASSIST_TEXT",
+      "last_text": "Pinning now.\n\n- one\n- two",
+      "online": null,
+      "provider": "composite",
+      "session_kind": null,
+      "session_name": "assistant",
+      "stream_id": "fixture-chat:assistant",
+      "title": "Zephyr",
+      "working": false
+    }
+  },
+  "user_admission": {
+    "events": [
+      {
+        "attachments": [],
+        "daemon_seq": 1,
+        "kind": "USER",
+        "message_id": "input-1",
+        "optimistic_id": "input-1",
+        "provider": "composite",
+        "raw": {
+          "actor_stream_id": null,
+          "assistant_composite": true,
+          "attachments": [],
+          "input_identity": "input-1",
+          "input_request_id": "rpc-1",
+          "reply_to_message_id": null,
+          "reply_to_question_id": null
+        },
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "stream_id": "fixture-chat:assistant",
+        "text": "Please pin the build.",
+        "timestamp": "2026-10-30T16:24:45.632555Z"
+      }
+    ],
+    "session": {
+      "created_at": "2026-10-30T16:24:45.630128Z",
+      "host": "fixture-chat",
+      "last_event_at": "2026-10-30T16:24:45.632555Z",
+      "last_kind": "USER",
+      "last_text": "Please pin the build.",
+      "online": null,
+      "provider": "composite",
+      "session_kind": null,
+      "session_name": "assistant",
+      "stream_id": "fixture-chat:assistant",
+      "title": "Zephyr",
+      "working": false
+    }
+  }
+}

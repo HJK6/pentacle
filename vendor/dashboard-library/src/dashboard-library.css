@@ -1,0 +1,18 @@
+/* triforce-dashboards — shared design tokens.
+ * Vendored verbatim into each consumer; both surfaces load it and reference
+ * the custom properties from their own profile.css / styles.css. The JS TOKENS
+ * object in triforce-dashboards.js mirrors these for values the render path
+ * needs in JS. Keep the two in sync. */
+:root {
+  --td-shell-bg: #0c1310;
+  --td-card-bg: #121d18;
+  --td-card-border: #1f2e27;
+  --td-text-primary: #e6efe9;
+  --td-text-muted: #8aa097;
+  --td-accent: #56d364;
+
+  /* clamp-based scaling for 1080p–4K kiosks */
+  --td-scale-1: clamp(12px, 0.9vw, 22px);
+  --td-scale-2: clamp(16px, 1.3vw, 30px);
+  --td-gap: clamp(6px, 0.5vw, 14px);
+}

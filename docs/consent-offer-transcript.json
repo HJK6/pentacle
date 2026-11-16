@@ -1,0 +1,17 @@
+{
+  "domain": "pentacle-consent-enroll-offer-v1",
+  "fields": [
+    "offer-fixture",
+    "host-fixture",
+    "phone-fixture",
+    "operator",
+    "operator:issuer-fixture",
+    "challenge-fixture",
+    "nonce-fixture",
+    "1790575500",
+    "",
+    "fixture-spki-base64"
+  ],
+  "base64": "AAAAIHBlbnRhY2xlLWNvbnNlbnQtZW5yb2xsLW9mZmVyLXYxAAAADW9mZmVyLWZpeHR1cmUAAAAMaG9zdC1maXh0dXJlAAAADXBob25lLWZpeHR1cmUAAAAIb3BlcmF0b3IAAAAXb3BlcmF0b3I6aXNzdWVyLWZpeHR1cmUAAAARY2hhbGxlbmdlLWZpeHR1cmUAAAANbm9uY2UtZml4dHVyZQAAAAoxNzkwNTc1NTAwAAAAAAAAABNmaXh0dXJlLXNwa2ktYmFzZTY0",
+  "encoding": "Each field, including domain: uint32 big-endian UTF-8 byte length, then UTF-8 bytes. Expiry is integer Unix seconds in decimal, no fraction; absent prior key is empty string. SPKI uses the exact canonical base64 presented in the reply."
+}

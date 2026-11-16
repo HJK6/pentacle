@@ -1,0 +1,63 @@
+# Capability dashboard boundary
+
+The web client may retain a generic capability dashboard, but a public build must show only data supplied by a reviewed adapter. If the adapter is absent, the dashboard reports `unavailable` instead of reconstructing private project state.
+
+## Public row contract
+
+Rows may contain a stable id, repository label, topic, status, owner-neutral display label, progress summary, and next action. Synthetic rows with unresolved metadata belong in an `Unresolved` section. Unknown statuses belong in an `Other` column so a typo is visible.
+
+## Renderer behavior
+
+Client-side filters may reapply repository, host label, status, and search text to an already-fetched batch. All text is escaped. A primary action is one of `unresolved`, `drive`, or `spawn_additional`; the renderer does not infer authority from a row.
+
+## Capability states
+
+The adapter reports `healthy`, `degraded`, or `disabled` with a bounded explanatory message. A disabled or degraded subsystem does not expose a private watcher, shared-memory path, remote service, or deployment command.
+
+Use synthetic rows and `coordinator` through `satellite` labels in tests. The exact data source and request names belong to the public daemon contract when that adapter is implemented.
+
+## Request identity and commit freshness
+
+Spawn, spec attach/detach, QA and report attestation use request-local identity
+views. Every new capture enumerates permitted work folders and checks file path,
+device, inode, size, mtime and ctime, and captures the actual bytes. A content
+digest controls parsed-identity reuse, so timestamp quantization cannot hide a
+same-size edit. A second content/metadata pass seals the whole capture before
+publication. Unchanged bytes avoid YAML reparsing; completed snapshots never
+reread live identity documents. Polling works without a watcher. Reads remain
+proportional to current input bytes and directory enumeration stays shallow.
+
+The configured memory root is resolved once and exposed as `memory_root`.
+An explicit root resolves its ancestors while its final component remains
+subject to no-follow admission; environment roots retain full resolution.
+Directory and file opens below the admitted root reject symlink redirection.
+Status inputs are captured once per snapshot and sealed after scanning. The
+presentation status loader also checks content. Environment-root JSON retains
+its existing read/decode/extraction fallback and conversion errors; explicit-root
+JSON retains strict row/name/order validation. A stable environment read failure
+uses defaults, while a changed read outcome invalidates the capture. Card and
+catalog freshness otherwise retains its existing presentation behavior.
+
+SpecReader checks the consumed bytes against the scanned identity digest before
+returning identity and text, in addition to descriptor/path/directory and repeated
+consumption checks. Identity parsing preserves universal newlines; returned
+reader text preserves its original UTF-8 line endings.
+
+Overlapping snapshot captures share one rebuild. Async snapshot admission is
+bounded to 16 callers; Store single/batch compatibility resolution has at most
+eight admitted workers and no additional waiting queue. Overload or incomplete
+batch input fails explicitly, with at most one fresh request retry. Single-only
+warn-mode report attestation retains its existing unverified-result behavior.
+
+Store commits compare captured lifecycle, binding and provenance inputs before
+writing. QA commission and spawn intent are committed together, after a read-only
+QA preparation and the existing exclusive claim. A late source race fails without
+writing either. Spawn staging remains an external side effect: a race during that
+stage is a post-staging failure, never authorization to launch a provider.
+
+Error-alert reconciliation reads required notices, crash-recovery links, pending
+rows and explicit folded/predecessor/proof dependencies through measured indexes.
+Typed facts use the existing notification worker, decoder and partial key index;
+reads are fresh after writes. Existing notification/voice retention and schedule
+semantics are unchanged. Runtime/provider/platform validation is separate from
+these synthetic source tests.

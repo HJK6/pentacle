@@ -1,0 +1,237 @@
+'use strict';
+const { micAssistantName } = require('./mic-state');
+const { configuredAssistantRole } = require('./assistant_role');
+const { prepareVoiceSpawn, spawnOutcome } = require('./voice_action_delivery');
+const { roomMicHeader } = require('./room_mic_turns');
+
+const BINDING_REUSE_MS = 2000;
+const BINDING_GRACE_MS = 15000;
+const TRANSIENT_BINDING_CODES = new Set(['server_overloaded', 'assistant_binding_lookup_failed']);
+
+// Reuse the main client's full-snapshot handshake and existing correlated chat
+// lifecycle. A claim owns one utterance; sendTurn must only create one request.
+function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawnAgent, getSpawnCatalog, onRoomMicTurn = () => {}, onStatus = () => {}, now = Date.now }) {
+  let busy = false;
+  let held = null;
+  let epoch = 0;
+  let generation;
+  let muted = false;
+  let lastAttemptedId;
+  let note = '';
+  const role = () => configuredAssistantRole(config.features);
+  const pinnedIdentity = () => typeof config.mic?.wakeTargetStreamId === 'string' && config.mic.wakeTargetStreamId.trim();
+  const enabled = () => config.features?.mic === true && (!!role() || !!pinnedIdentity() || typeof getBinding === 'function')
+    && (!!config.mic?.wakeTargetHost || typeof getBinding === 'function')
+    && config.chatStream?.snapshot !== false;
+  // The idle note may reuse a recent binding and ride out a transient lookup
+  // failure. Delivery always reads fresh: assistant.rebind leaves the old seat
+  // open, so only a fresh read can tell a replaced binding from the current one.
+  let cached = null;
+  let cacheEpoch = 0;
+  const lookup = async () => {
+    if (typeof getBinding !== 'function') return { value: { source: 'unsupported' } };
+    try {
+      const result = await getBinding();
+      if (result?.ok === false && result.error_code === 'unsupported_in_v2') return { value: { source: 'unsupported' } };
+      if (result?.ok === false || !['durable', 'env', 'unconfigured'].includes(result?.source)) {
+        return { value: { source: 'error' }, transient: result?.ok === false && TRANSIENT_BINDING_CODES.has(result.error_code) };
+      }
+      return { value: result, success: true };
+    } catch (error) {
+      return error?.error_code === 'unsupported_in_v2'
+        ? { value: { source: 'unsupported' } } : { value: { source: 'error' }, transient: true };
+    }
+  };
+  const binding = async ({ idle = false } = {}) => {
+    if (idle && cached && now() - cached.at < BINDING_REUSE_MS) return cached.value;
+    const started = cacheEpoch;
+    const { value, success, transient } = await lookup();
+    if (success && started === cacheEpoch) cached = { at: now(), value };
+    if (idle && transient && cached && now() - cached.at <= BINDING_GRACE_MS) return cached.value;
+    return value;
+  };
+  function invalidateBinding() {
+    cacheEpoch += 1;
+    cached = null;
+  }
+  const target = (state, effectiveBinding) => {
+    if (!state?.connected || !Array.isArray(state.sessions)) return null;
+    if (effectiveBinding?.source === 'error') return null;
+    if (effectiveBinding?.source === 'durable' || effectiveBinding?.source === 'env') {
+      const streamId = effectiveBinding.stream_id;
+      const generation = effectiveBinding.generation;
+      if (!streamId || !generation) return null;
+      const matches = state.sessions.filter(s => s.stream_id === streamId
+        && s.session_generation === generation && s.status === 'open'
+        && !s.closed_at && s.pane_status === 'pane_alive');
+      return matches.length === 1 ? streamId : null;
+    }
+    if (effectiveBinding?.source !== 'unconfigured' && effectiveBinding?.source !== 'unsupported') return null;
+    const root = pinnedIdentity();
+    if (root) {
+      // These rows come from the authenticated daemon snapshot. Titles and
+      // roles cannot establish a successor; only its explicit handoff link can.
+      const lineage = new Set([root]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of state.sessions) {
+          if (row.stream_id && row.host === config.mic.wakeTargetHost
+            && lineage.has(row.handoff_from_stream_id) && !lineage.has(row.stream_id)) {
+            lineage.add(row.stream_id);
+            changed = true;
+          }
+        }
+      }
+      // Reject cyclic or contradictory lineage rather than guess an owner.
+      for (const row of state.sessions.filter(s => lineage.has(s.stream_id))) {
+        const seen = new Set([row.stream_id]);
+        let previous = row.handoff_from_stream_id;
+        while (previous && lineage.has(previous)) {
+          if (seen.has(previous)) return null;
+          seen.add(previous);
+          previous = state.sessions.find(s => s.stream_id === previous)?.handoff_from_stream_id;
+        }
+      }
+      const matches = state.sessions.filter(s => lineage.has(s.stream_id)
+        && s.host === config.mic.wakeTargetHost && s.status === 'open'
+        && !s.closed_at && s.pane_status === 'pane_alive');
+      return matches.length === 1 ? matches[0].stream_id : null;
+    }
+    const matches = state.sessions.filter(s => s.role === role()
+      && s.host === config.mic.wakeTargetHost && s.status === 'open'
+      && !s.closed_at && s.pane_status === 'pane_alive' && s.stream_id);
+    return matches.length === 1 ? matches[0].stream_id : null;
+  };
+  function cancel() {
+    invalidateBinding();
+    epoch += 1;
+    held = null;
+    muted = true;
+    note = '';
+  }
+  function observe(status) {
+    const next = status?.wake?.generation;
+    if (next && next !== generation) {
+      cancel();
+      muted = false;
+    }
+    if (next) generation = next;
+    if (status && status.mode !== 'on') cancel();
+  }
+  function message(status) {
+    const name = micAssistantName(status);
+    if (!status?.wake?.enabled || status.mode !== 'on') return '';
+    if (!enabled()) return 'Wake delivery is unavailable in this client.';
+    if (status.local_actions?.enabled && status.local_actions?.last?.state === "speaking") return "Speaking a local reply…";
+    if (status.capture_origin === 'followup') return 'Recording your answer — say over.';
+    if (status.capture_origin === 'answer') return `Recording your answer for ${name} — say over.`;
+    if (status.speaker?.answer_window?.waiting) return status.speaker.answer_window.ready
+      ? `Ready for ${name}’s answer — say over.` : `Getting ready for ${name}’s answer…`;
+    if (status.speaker?.silent) return `Silent mode is on — ${name} answers in chat. Say “Hey ${name}” to speak.`;
+    if (status.local_actions?.pending?.state === 'waiting') return status.local_actions.pending.ready === true ? 'Ready for your answer — say over to finish.' : 'Getting ready for your answer…';
+    if (status.local_actions?.pending?.state === 'in_flight') return 'Processing your answer…';
+    return status.wake.error || note || (held ? 'Wake message waiting for the current assistant.'
+      : status.capture_origin === 'local_action' ? 'Recording local action — say over.'
+        : status.capture_origin === 'wake' ? `Recording for ${name} — say over to send.`
+        : status.wake.pending_count ? 'Wake message pending.' : status.local_actions?.enabled
+          ? (status.local_actions.wake_policy === 'separate' ? `Hey ${name} for chat; Hey Pentacle for actions. Say over to finish.` : `Hey ${name} for chat or local actions. Say over to finish.`)
+          : `Say “Hey ${name}” to speak; “over” to send.`);
+  }
+  async function tick(status) {
+    observe(status);
+    if (!enabled() || !status?.wake?.enabled || status.mode !== 'on' || muted || busy) return;
+    if (!held && !status.wake.pending_count && !pinnedIdentity()) return;
+    busy = true;
+    const idle = !held && !status.wake.pending_count;
+    const current = epoch;
+    const valid = () => epoch === current && !muted;
+    try {
+      const [initialState, initialBinding] = await Promise.all([getState(), binding({ idle })]);
+      const initialTarget = target(initialState, initialBinding);
+      if (!valid()) return;
+      if (idle) {
+        note = initialTarget ? '' : 'No wake target: connect a unique current assistant.';
+        return;
+      }
+      if (!initialTarget && !(status.local_actions?.enabled && initialState?.connected && spawnAgent && getSpawnCatalog)) {
+        note = 'No wake target: connect a unique current assistant.';
+        return;
+      }
+      if (!held) {
+        const response = await api('POST', '/wake/claim', spawnAgent && getSpawnCatalog ? { actions_version: 2 } : {});
+        if (!valid()) return;
+        if (!response || response.error || !Object.hasOwn(response, 'claim')) {
+          note = 'Wake claim unconfirmed. Latest claim is available in the local mic service for review.';
+          return;
+        }
+        held = response.claim;
+      }
+      if (!held) return;
+      if (held.generation !== generation || held.id === lastAttemptedId) {
+        held = null;
+        return;
+      }
+      // Off/generation and identity are read again after the destructive claim.
+      const [latestStatus, latestState, latestBinding] = await Promise.all([api('GET', '/status'), getState(), binding()]);
+      observe(latestStatus);
+      if (!valid() || !latestStatus || latestStatus.mode !== 'on'
+        || latestStatus.wake?.generation !== held?.generation) return;
+      if (held.action) {
+        const capture = held;
+        let request;
+        try {
+          if (!spawnAgent || !getSpawnCatalog) throw new Error('This client cannot execute local actions');
+          request = prepareVoiceSpawn(capture, await getSpawnCatalog());
+        } catch {
+          held = null;
+          lastAttemptedId = capture.id;
+          note = 'Local spawn configuration unavailable.';
+          await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome: 'unavailable' });
+          return;
+        }
+        if (!valid()) return;
+        const beforeSpawn = await api('GET', '/status');
+        observe(beforeSpawn);
+        if (!valid() || beforeSpawn?.mode !== 'on' || beforeSpawn.wake?.generation !== capture.generation) return;
+        if (!(await getState())?.connected || !valid()) return;
+        held = null;
+        lastAttemptedId = capture.id;
+        let outcome = 'unconfirmed';
+        let result;
+        try { result = await spawnAgent(request); outcome = spawnOutcome(result); } catch { /* No new key or automatic retry. */ }
+        note = outcome === 'spawned' ? 'Voice agent started.' : outcome === 'queued' ? 'Voice agent queued.' : 'Voice spawn unconfirmed; inspect Pentacle before repeating.';
+        const receipt = { stream_id: result?.streamId || result?.stream_id || result?.session?.stream_id || null, state: result?.state || 'unconfirmed', idempotency_key: request.idempotencyKey, host: request.host, model: request.model, effort: request.effort, effort_source: capture.action.effort_source || 'explicit' };
+        await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome, receipt });
+        return;
+      }
+      const latestTarget = target(latestState, latestBinding);
+      if (!valid()) return;
+      if (!latestTarget || latestTarget !== initialTarget) {
+        note = 'Wake message waiting for the current assistant.';
+        return;
+      }
+      const capture = held;
+      const text = roomMicHeader(capture.conversation_id, capture.text, capture.voice_reply, capture.answer_to);
+      if (!text) {
+        note = 'Wake conversation unavailable. Waiting for a valid microphone claim.';
+        return;
+      }
+      held = null;
+      lastAttemptedId = capture.id;
+      note = '';
+      // Normal same-request reconnect replay belongs to ChatStore, not here.
+      const optimisticId = await sendTurn(latestTarget, text);
+      onRoomMicTurn({streamId:latestTarget,conversationId:capture.conversation_id,optimisticId,text});
+    } catch (error) {
+      note = lastAttemptedId && !held
+        ? 'Wake send unconfirmed. Check the chat send status; no new automatic send will be created.'
+        : 'Wake delivery waiting for the connection. Latest claimed message stays in memory.';
+    } finally {
+      busy = false;
+      onStatus(message(status));
+    }
+  }
+  return { tick, cancel, message, invalidateBinding };
+}
+module.exports = { createWakeDelivery };

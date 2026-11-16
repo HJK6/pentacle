@@ -1,0 +1,1094 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_key": "immediate-acceptance",
+      "scenario": 1,
+      "cells": [
+        {
+          "cell_key": "queued-to-routing",
+          "routes": [
+            {
+              "route_id": "route-immediate",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-immediate",
+              "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "input_request_id": "request-immediate",
+              "event_id": 1,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "classifying",
+              "delivery_state": "intent",
+              "dispatch_id": "dispatch-immediate",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": "fixture-router",
+              "lease_until": 4102444800.0,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.100Z"
+            }
+          ],
+          "publications": [],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-immediate": {
+              "message_id": "activity-immediate",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": null,
+              "final_visible_at": null,
+              "reply_latency_ms": null,
+              "final_latency_ms": null,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": null,
+              "delivery_recorded_at": null,
+              "queue_latency_ms": 100,
+              "routing_latency_ms": null,
+              "response_state": "routing",
+              "work_state": "unknown",
+              "error_code": null,
+              "dispatch_id": "dispatch-immediate",
+              "lane_ids": [],
+              "publication_ids": []
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 1,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": "2026-09-20T00:00:00.000Z",
+            "has_more": false
+          },
+          "cell_sha256": "4ec2fe2f4a6bbbef22a820a51a0b0d701b9a04fd0e71ba36d2780e12d0bd0727"
+        }
+      ],
+      "case_sha256": "a255d7ed8e3810afaf9edc66197bf7b3074f75b5862eeda12d81779380244714"
+    },
+    {
+      "case_key": "overlap-two-inputs",
+      "scenario": 2,
+      "cells": [
+        {
+          "cell_key": "two-unanswered-routes",
+          "routes": [
+            {
+              "route_id": "route-overlap-first",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-overlap-first",
+              "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "input_request_id": "request-overlap-first",
+              "event_id": 2,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "classifying",
+              "delivery_state": "intent",
+              "dispatch_id": "dispatch-overlap-first",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": "fixture-router",
+              "lease_until": 4102444800.0,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.100Z"
+            },
+            {
+              "route_id": "route-overlap-second",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-overlap-second",
+              "payload_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "input_request_id": "request-overlap-second",
+              "event_id": 3,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "queued",
+              "delivery_state": null,
+              "dispatch_id": "dispatch-overlap-second",
+              "route_target": null,
+              "route_target_generation": null,
+              "route_json": {
+                "timings": {}
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.500Z",
+              "updated_at": "2026-09-20T00:00:00.500Z"
+            }
+          ],
+          "publications": [],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-overlap-first": {
+              "message_id": "activity-overlap-first",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": null,
+              "final_visible_at": null,
+              "reply_latency_ms": null,
+              "final_latency_ms": null,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": null,
+              "delivery_recorded_at": null,
+              "queue_latency_ms": 100,
+              "routing_latency_ms": null,
+              "response_state": "routing",
+              "work_state": "unknown",
+              "error_code": null,
+              "dispatch_id": "dispatch-overlap-first",
+              "lane_ids": [],
+              "publication_ids": []
+            },
+            "activity-overlap-second": {
+              "message_id": "activity-overlap-second",
+              "accepted_at": "2026-09-20T00:00:00.500Z",
+              "first_visible_at": null,
+              "final_visible_at": null,
+              "reply_latency_ms": null,
+              "final_latency_ms": null,
+              "routing_started_at": null,
+              "routed_at": null,
+              "delivery_recorded_at": null,
+              "queue_latency_ms": null,
+              "routing_latency_ms": null,
+              "response_state": "queued",
+              "work_state": "unknown",
+              "error_code": null,
+              "dispatch_id": "dispatch-overlap-second",
+              "lane_ids": [],
+              "publication_ids": []
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 2,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": "2026-09-20T00:00:00.000Z",
+            "has_more": false
+          },
+          "cell_sha256": "fbe890f7de9951b0403701bbd1a1378462d2f904521aff5f1a6fa49930d335b6"
+        }
+      ],
+      "case_sha256": "346f05d42eecb57a0cfd8a6204cefde2cd1e3eb2de124ee4cf496c08911379e0"
+    },
+    {
+      "case_key": "acknowledgment-then-final",
+      "scenario": 3,
+      "cells": [
+        {
+          "cell_key": "ack-final-distinct-timestamps",
+          "routes": [
+            {
+              "route_id": "route-ack-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-ack-final",
+              "payload_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "input_request_id": "request-ack-final",
+              "event_id": 4,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-ack-final",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:01.500Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-ack",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "canonical_payload_json": {
+                "response_state": "acknowledged"
+              },
+              "dispatch_id": "dispatch-ack-final",
+              "reply_to_message_id": "activity-ack-final",
+              "reply_to_question_id": null,
+              "publish_kind": "prose",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 5,
+              "created_at": "2026-09-20T00:00:00.500Z"
+            },
+            {
+              "publication_key": "publication-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-ack-final",
+              "reply_to_message_id": "activity-ack-final",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 6,
+              "created_at": "2026-09-20T00:00:01.500Z"
+            }
+          ],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-ack-final": {
+              "message_id": "activity-ack-final",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.500Z",
+              "final_visible_at": "2026-09-20T00:00:01.500Z",
+              "reply_latency_ms": 500,
+              "final_latency_ms": 1500,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "answered",
+              "work_state": "unknown",
+              "error_code": null,
+              "dispatch_id": "dispatch-ack-final",
+              "lane_ids": [],
+              "publication_ids": ["publication-ack", "publication-final"]
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "7d3917764510480911b97380327580748d55b0a7563d6e2fb3fec9bacca1b92a"
+        }
+      ],
+      "case_sha256": "a3adbc41e1c081da739c7516afc4c2b25e55507ba8700d35f7f3f43df9a99e06"
+    },
+    {
+      "case_key": "uncertainty-and-error",
+      "scenario": 4,
+      "cells": [
+        {
+          "cell_key": "uncertain-delivery-wins-over-final-marker",
+          "routes": [
+            {
+              "route_id": "route-uncertain",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-uncertain",
+              "payload_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+              "input_request_id": "request-uncertain",
+              "event_id": 7,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "uncertain",
+              "dispatch_id": "dispatch-uncertain",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": "delivery_evidence_required",
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-uncertain-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-uncertain",
+              "reply_to_message_id": "activity-uncertain",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 8,
+              "created_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-uncertain": {
+              "message_id": "activity-uncertain",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.400Z",
+              "final_visible_at": "2026-09-20T00:00:00.400Z",
+              "reply_latency_ms": 400,
+              "final_latency_ms": 400,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "uncertain",
+              "work_state": "unknown",
+              "error_code": "delivery_evidence_required",
+              "dispatch_id": "dispatch-uncertain",
+              "lane_ids": [],
+              "publication_ids": ["publication-uncertain-final"]
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "895f6081ce131f5705ce9c3e28eac2bf4c829c2df04c687e4caba872c1cd7488"
+        },
+        {
+          "cell_key": "routing-error-wins-over-final-marker",
+          "routes": [
+            {
+              "route_id": "route-failed",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-failed",
+              "payload_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+              "input_request_id": "request-failed",
+              "event_id": 9,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "routing_failed",
+              "delivery_state": "failed",
+              "dispatch_id": "dispatch-failed",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": "router_rejected",
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-failed-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-failed",
+              "reply_to_message_id": "activity-failed",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 10,
+              "created_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-failed": {
+              "message_id": "activity-failed",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.400Z",
+              "final_visible_at": "2026-09-20T00:00:00.400Z",
+              "reply_latency_ms": 400,
+              "final_latency_ms": 400,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "failed",
+              "work_state": "unknown",
+              "error_code": "router_rejected",
+              "dispatch_id": "dispatch-failed",
+              "lane_ids": [],
+              "publication_ids": ["publication-failed-final"]
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "aee1259c56f540258c9f51fe0d690ecc0256688131b5041196893b499cdce051"
+        }
+      ],
+      "case_sha256": "5cc2c857ba7da1f9ef68eea0eaa25abc659427dd8eaff1cbbe382f2f339dbfe5"
+    },
+    {
+      "case_key": "question-wait-cancel-resume",
+      "scenario": 5,
+      "cells": [
+        {
+          "cell_key": "question-wait",
+          "routes": [
+            {
+              "route_id": "route-question-wait",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-question-wait",
+              "payload_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+              "input_request_id": "request-question-wait",
+              "event_id": 11,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-question-wait",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "lane_id": "lane-question-wait",
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-question-wait",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+              "canonical_payload_json": {},
+              "dispatch_id": "dispatch-question-wait",
+              "reply_to_message_id": "activity-question-wait",
+              "reply_to_question_id": "question-1",
+              "publish_kind": "question",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 12,
+              "created_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "lanes": [
+            {
+              "lane_id": "lane-question-wait",
+              "stream_id": "fixture-host-chat:assistant",
+              "parent_lane_id": null,
+              "phase": "waiting",
+              "bound_stream_id": "fixture-host-conversation:conversation",
+              "bound_generation": "generation-fixture",
+              "bound_backend_kind": "assistant_conversation",
+              "completion_report_id": null,
+              "summary": "fixture wait",
+              "pending_question_id": "question-1",
+              "question_bridge_operation_id": "question-op-1",
+              "version": 3,
+              "created_at": "2026-09-20T00:00:00.200Z",
+              "updated_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "operations": [
+            {
+              "operation_id": "operation-question-admit",
+              "stream_id": "fixture-host-chat:assistant",
+              "dispatch_id": "dispatch-question-wait",
+              "lane_id": "lane-question-wait",
+              "reply_to_message_id": "activity-question-wait",
+              "operation": "lane.admit",
+              "payload_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+              "payload_json": {
+                "request_message_id": "activity-question-wait"
+              },
+              "evidence_refs_json": [],
+              "expected_lane_version": 1,
+              "actor_stream_id": "fixture-host-authority:authority",
+              "prior_phase": "discussion",
+              "next_phase": "discussion",
+              "created_at": "2026-09-20T00:00:00.200Z"
+            }
+          ],
+          "expected_inputs": {
+            "activity-question-wait": {
+              "message_id": "activity-question-wait",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.400Z",
+              "final_visible_at": null,
+              "reply_latency_ms": 400,
+              "final_latency_ms": null,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "waiting_for_operator",
+              "work_state": "waiting",
+              "error_code": null,
+              "dispatch_id": "dispatch-question-wait",
+              "lane_ids": ["lane-question-wait"],
+              "publication_ids": ["publication-question-wait"]
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 1,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "d8a0670963cddb74dad986319323c1d0f7624f0cee575a2b2623f62c05b8dc17"
+        },
+        {
+          "cell_key": "cancelled-lane",
+          "routes": [
+            {
+              "route_id": "route-cancelled",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-cancelled",
+              "payload_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+              "input_request_id": "request-cancelled",
+              "event_id": 13,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-cancelled",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "lane_id": "lane-cancelled",
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "publications": [],
+          "lanes": [
+            {
+              "lane_id": "lane-cancelled",
+              "stream_id": "fixture-host-chat:assistant",
+              "parent_lane_id": null,
+              "phase": "cancelled",
+              "bound_stream_id": "fixture-host-conversation:conversation",
+              "bound_generation": "generation-fixture",
+              "bound_backend_kind": "assistant_conversation",
+              "completion_report_id": null,
+              "summary": "fixture cancelled",
+              "pending_question_id": null,
+              "question_bridge_operation_id": null,
+              "version": 2,
+              "created_at": "2026-09-20T00:00:00.200Z",
+              "updated_at": "2026-09-20T00:00:00.400Z"
+            }
+          ],
+          "operations": [
+            {
+              "operation_id": "operation-cancel-admit",
+              "stream_id": "fixture-host-chat:assistant",
+              "dispatch_id": "dispatch-cancelled",
+              "lane_id": "lane-cancelled",
+              "reply_to_message_id": "activity-cancelled",
+              "operation": "lane.admit",
+              "payload_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+              "payload_json": {
+                "request_message_id": "activity-cancelled"
+              },
+              "evidence_refs_json": [],
+              "expected_lane_version": 1,
+              "actor_stream_id": "fixture-host-authority:authority",
+              "prior_phase": "discussion",
+              "next_phase": "discussion",
+              "created_at": "2026-09-20T00:00:00.200Z"
+            }
+          ],
+          "expected_inputs": {
+            "activity-cancelled": {
+              "message_id": "activity-cancelled",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": null,
+              "final_visible_at": null,
+              "reply_latency_ms": null,
+              "final_latency_ms": null,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "cancelled",
+              "work_state": "cancelled",
+              "error_code": null,
+              "dispatch_id": "dispatch-cancelled",
+              "lane_ids": ["lane-cancelled"],
+              "publication_ids": []
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "f372f2575e8ffb5abb5341c5944d1f7365a0aea755cd66965b174469e1821375"
+        },
+        {
+          "cell_key": "answered-question-resumes-execution",
+          "routes": [
+            {
+              "route_id": "route-question-resume",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-question-resume",
+              "payload_digest": "abababababababababababababababababababababababababababababababab",
+              "input_request_id": "request-question-resume",
+              "event_id": 14,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-question-resume",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "lane_id": "lane-question-resume",
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-question-resumed",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "canonical_payload_json": {},
+              "dispatch_id": "dispatch-question-resume",
+              "reply_to_message_id": "activity-question-resume",
+              "reply_to_question_id": "question-2",
+              "publish_kind": "question",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 15,
+              "created_at": "2026-09-20T00:00:00.400Z"
+            },
+            {
+              "publication_key": "publication-question-resume-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-question-resume",
+              "reply_to_message_id": "activity-question-resume",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 16,
+              "created_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "lanes": [
+            {
+              "lane_id": "lane-question-resume",
+              "stream_id": "fixture-host-chat:assistant",
+              "parent_lane_id": null,
+              "phase": "execution",
+              "bound_stream_id": "fixture-host-conversation:conversation",
+              "bound_generation": "generation-fixture",
+              "bound_backend_kind": "assistant_conversation",
+              "completion_report_id": null,
+              "summary": "fixture resumed",
+              "pending_question_id": null,
+              "question_bridge_operation_id": null,
+              "version": 4,
+              "created_at": "2026-09-20T00:00:00.200Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "operations": [
+            {
+              "operation_id": "operation-resume-admit",
+              "stream_id": "fixture-host-chat:assistant",
+              "dispatch_id": "dispatch-question-resume",
+              "lane_id": "lane-question-resume",
+              "reply_to_message_id": "activity-question-resume",
+              "operation": "lane.admit",
+              "payload_digest": "1212121212121212121212121212121212121212121212121212121212121212",
+              "payload_json": {
+                "request_message_id": "activity-question-resume"
+              },
+              "evidence_refs_json": [],
+              "expected_lane_version": 1,
+              "actor_stream_id": "fixture-host-authority:authority",
+              "prior_phase": "discussion",
+              "next_phase": "discussion",
+              "created_at": "2026-09-20T00:00:00.200Z"
+            }
+          ],
+          "expected_inputs": {
+            "activity-question-resume": {
+              "message_id": "activity-question-resume",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.400Z",
+              "final_visible_at": "2026-09-20T00:00:00.900Z",
+              "reply_latency_ms": 400,
+              "final_latency_ms": 900,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "answered",
+              "work_state": "in_progress",
+              "error_code": null,
+              "dispatch_id": "dispatch-question-resume",
+              "lane_ids": ["lane-question-resume"],
+              "publication_ids": ["publication-question-resumed", "publication-question-resume-final"]
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "75b6c42ce0d7d59936b65a312af4322cb5fccfe5fa7c85b607561c8b1533617a"
+        }
+      ],
+      "case_sha256": "daed6c8f6cc2e3517226193b132300266b6bbff2ec693ccc9c9581374d890bbe"
+    },
+    {
+      "case_key": "partial-multi-lane-completion",
+      "scenario": 6,
+      "cells": [
+        {
+          "cell_key": "execution-and-completed-lanes",
+          "routes": [
+            {
+              "route_id": "route-partial",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-partial",
+              "payload_digest": "1313131313131313131313131313131313131313131313131313131313131313",
+              "input_request_id": "request-partial",
+              "event_id": 17,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-partial",
+              "route_target": "fixture-host-conversation:conversation",
+              "route_target_generation": "generation-fixture",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-partial-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-partial",
+              "reply_to_message_id": "activity-partial",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 18,
+              "created_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "lanes": [
+            {
+              "lane_id": "lane-exec",
+              "stream_id": "fixture-host-chat:assistant",
+              "parent_lane_id": null,
+              "phase": "execution",
+              "bound_stream_id": "fixture-host-conversation:conversation",
+              "bound_generation": "generation-fixture",
+              "bound_backend_kind": "assistant_conversation",
+              "completion_report_id": null,
+              "summary": "fixture active",
+              "pending_question_id": null,
+              "question_bridge_operation_id": null,
+              "version": 2,
+              "created_at": "2026-09-20T00:00:00.200Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            },
+            {
+              "lane_id": "lane-done",
+              "stream_id": "fixture-host-chat:assistant",
+              "parent_lane_id": null,
+              "phase": "completed",
+              "bound_stream_id": "fixture-host-conversation:conversation",
+              "bound_generation": "generation-fixture",
+              "bound_backend_kind": "assistant_conversation",
+              "completion_report_id": "report-done",
+              "summary": "fixture completed",
+              "pending_question_id": null,
+              "question_bridge_operation_id": null,
+              "version": 3,
+              "created_at": "2026-09-20T00:00:00.200Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "operations": [
+            {
+              "operation_id": "operation-partial-exec-admit",
+              "stream_id": "fixture-host-chat:assistant",
+              "dispatch_id": "dispatch-partial",
+              "lane_id": "lane-exec",
+              "reply_to_message_id": "activity-partial",
+              "operation": "lane.admit",
+              "payload_digest": "1515151515151515151515151515151515151515151515151515151515151515",
+              "payload_json": {
+                "request_message_id": "activity-partial"
+              },
+              "evidence_refs_json": [],
+              "expected_lane_version": 1,
+              "actor_stream_id": "fixture-host-authority:authority",
+              "prior_phase": "discussion",
+              "next_phase": "discussion",
+              "created_at": "2026-09-20T00:00:00.200Z"
+            },
+            {
+              "operation_id": "operation-partial-done-admit",
+              "stream_id": "fixture-host-chat:assistant",
+              "dispatch_id": "dispatch-partial",
+              "lane_id": "lane-done",
+              "reply_to_message_id": "activity-partial",
+              "operation": "lane.admit",
+              "payload_digest": "1616161616161616161616161616161616161616161616161616161616161616",
+              "payload_json": {
+                "request_message_id": "activity-partial"
+              },
+              "evidence_refs_json": [],
+              "expected_lane_version": 1,
+              "actor_stream_id": "fixture-host-authority:authority",
+              "prior_phase": "discussion",
+              "next_phase": "discussion",
+              "created_at": "2026-09-20T00:00:00.200Z"
+            }
+          ],
+          "expected_inputs": {
+            "activity-partial": {
+              "message_id": "activity-partial",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.900Z",
+              "final_visible_at": "2026-09-20T00:00:00.900Z",
+              "reply_latency_ms": 900,
+              "final_latency_ms": 900,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "answered",
+              "work_state": "in_progress",
+              "error_code": null,
+              "dispatch_id": "dispatch-partial",
+              "lane_ids": ["lane-done", "lane-exec"],
+              "publication_ids": ["publication-partial-final"]
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "3fff9f1ab78b41cb0f8ad8b385a02a0809a920bc891cca5fe4cedaa6108db95c"
+        }
+      ],
+      "case_sha256": "609326e2275b11ad8acaec3757b9f5fb327ef6d78beb40081ef3519eaee7b2a2"
+    },
+    {
+      "case_key": "external-owner-without-lane",
+      "scenario": 7,
+      "cells": [
+        {
+          "cell_key": "answered-with-unknown-work",
+          "routes": [
+            {
+              "route_id": "route-external-owner",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-external-owner",
+              "payload_digest": "1717171717171717171717171717171717171717171717171717171717171717",
+              "input_request_id": "request-external-owner",
+              "event_id": 19,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-external-owner",
+              "route_target": "fixture-host-owner:owner",
+              "route_target_generation": "generation-owner",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-external-owner-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "1818181818181818181818181818181818181818181818181818181818181818",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-external-owner",
+              "reply_to_message_id": "activity-external-owner",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 20,
+              "created_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-external-owner": {
+              "message_id": "activity-external-owner",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.900Z",
+              "final_visible_at": "2026-09-20T00:00:00.900Z",
+              "reply_latency_ms": 900,
+              "final_latency_ms": 900,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "answered",
+              "work_state": "unknown",
+              "error_code": null,
+              "dispatch_id": "dispatch-external-owner",
+              "lane_ids": [],
+              "publication_ids": ["publication-external-owner-final"]
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "33fc72d449b86ed44226bba7871c03d645b06fdc2f2bf81ccb06f8538b11c4cd"
+        }
+      ],
+      "case_sha256": "36e48376e669a6463befc56bdd41be5e09fba0a0b86fd49527f5111cb97cb5b1"
+    }
+  ]
+}

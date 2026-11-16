@@ -1,0 +1,89 @@
+{
+  "healthy": {
+    "limits": [
+      {
+        "id": "claude",
+        "label": "Claude",
+        "pct": 17,
+        "resets_at_iso": null,
+        "resets_text": "Friday",
+        "upstream_reported_at": null,
+        "probed_at": null
+      },
+      {
+        "id": "fable",
+        "label": "Fable",
+        "pct": 10,
+        "resets_at_iso": null,
+        "resets_text": "Friday",
+        "upstream_reported_at": null,
+        "probed_at": null
+      },
+      {
+        "id": "codex",
+        "label": "Codex",
+        "pct": 26,
+        "resets_at_iso": null,
+        "resets_text": "Friday",
+        "upstream_reported_at": "2026-09-10T05:00:00Z",
+        "probed_at": "2026-09-10T05:00:01Z"
+      }
+    ],
+    "limits_health": {
+      "schema_version": 1,
+      "claude": {
+        "attempted_at": "2026-09-10T05:00:01Z",
+        "outcome": "ok",
+        "error": null,
+        "upstream_reported_at": "2026-09-10T05:00:01Z",
+        "probed_at": "2026-09-10T05:00:01Z",
+        "stale_after_seconds": 600
+      }
+    }
+  },
+  "failed": {
+    "limits": [
+      {
+        "id": "claude",
+        "label": "Claude",
+        "pct": 17,
+        "resets_at_iso": null,
+        "resets_text": "Friday",
+        "upstream_reported_at": null,
+        "probed_at": null
+      },
+      {
+        "id": "fable",
+        "label": "Fable",
+        "pct": 10,
+        "resets_at_iso": null,
+        "resets_text": "Friday",
+        "upstream_reported_at": null,
+        "probed_at": null
+      },
+      {
+        "id": "codex",
+        "label": "Codex",
+        "pct": 26,
+        "resets_at_iso": null,
+        "resets_text": "Friday",
+        "upstream_reported_at": "2026-09-10T05:00:00Z",
+        "probed_at": "2026-09-10T05:01:00Z"
+      }
+    ],
+    "limits_health": {
+      "schema_version": 1,
+      "claude": {
+        "attempted_at": "2026-09-10T05:01:00Z",
+        "outcome": "provider_error",
+        "error": {
+          "code": "claude_usage_provider_error",
+          "message": "probe denied <retry> & retained"
+        },
+        "upstream_reported_at": "2026-09-10T05:00:01Z",
+        "probed_at": "2026-09-10T05:00:01Z",
+        "stale_after_seconds": 600
+      }
+    }
+  }
+}

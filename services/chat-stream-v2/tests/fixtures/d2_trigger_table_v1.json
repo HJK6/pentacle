@@ -1,0 +1,44 @@
+{
+  "schema": "watch_triggers_v1",
+  "idle_seconds": 900,
+  "idle_comparison": "strictly_greater",
+  "default_triggers": [
+    "end",
+    "blocker",
+    "idle"
+  ],
+  "default_repeat": [
+    "blocker",
+    "idle"
+  ],
+  "registration": "each admitted parent generation; startup/recovery is idempotent; no_watch opts out",
+  "triggers": {
+    "end": {
+      "reports": [
+        "done",
+        "aborted"
+      ],
+      "also": "confirmed close without a notice-owning terminal report in the same episode",
+      "rearm": "never within a generation"
+    },
+    "blocker": {
+      "reports": [
+        "error"
+      ],
+      "rearm": "new activity or accepted progress followed by a new error report",
+      "precedence": "error is blocker, not also end"
+    },
+    "idle": {
+      "condition": "working false continuously >900s",
+      "reset": "working true or genuine_activity_at advancement",
+      "rearm": "new activity or working transition"
+    },
+    "quiet=N": {
+      "condition": "no genuine activity advance for N positive minutes from registration/activity baseline",
+      "rearm": "new genuine activity"
+    }
+  },
+  "coalescence": "one source fact satisfies matching subscriptions through one keyed notice identity",
+  "delivery": "one transaction consumes triggers and inserts or finds a keyed notice; urgent delivery is opt-in",
+  "rollback": "retire triggers and settle unsupported pending notices before rollback; do not replay overdue notices after re-enable"
+}

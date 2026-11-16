@@ -1,0 +1,527 @@
+"""uiverbs.py - the UI-sent verb group (mobile/desktop day-1), lifted per
+`v1_code_reuse_map.md` (K; review H2: omitting these breaks mobile enrollment/
+push/interrupt + the desktop specs pane on cutover day 1).
+
+Each verb is classified by the reuse-map's liftability analysis and handled at
+the honest level v2 can support this increment:
+
+  CLEANLY LIFTED (pure/near-pure, byte-identical):
+    - `spawn_catalog_get` (CLI `models`): echoes `_shared.spawn_profiles.catalog()`,
+      the same static catalog v1 returns. No store, no panes.
+    - `grant_token` (CLI `grant-self-token`): mint -> sha256 hash -> bootstrap-once
+      conditional set on the OPEN `sessions` row (`store.grant_stream_token`);
+      plaintext returned exactly once. v1 vocabulary: invalid_request /
+      stream_unknown / token_already_set.
+    - `register_push`: refreshes v1's DynamoDB `PushTokens` registry with the
+      same item shape, 90-day TTL, and active field.
+
+  FUNCTIONAL-DEGRADED (the action runs; the confirm that needs the tmux mirror
+  does not, so the outcome is honestly labelled, never faked):
+    - `send.interrupt`: injects Escape into a verified local pane or a
+      configured peer's exact SSH tmux pane. Remote calls require the selected
+      row generation and recheck its durable/live identity before the key.
+      Without mirror landing proof, a live pane reports `interrupt_unconfirmed`.
+
+  HONEST-DEGRADED (the backing subsystem is a REDESIGN-out or not-yet-built
+  plane; v2 returns v1's own error for that state rather than a fake success):
+    - `close.cancel`: v2 has no deferred-close plane (close is synchronous +
+      bounded, lane 3), so there is never a matching intent -> `close_intent_not_found`,
+      exactly what v1 returns for an absent intent.
+    - `question.dismiss`: answers the terminal-SCRAPED question that lives on the
+      session summary (mirror, lane 4). v2 has no scrape cache yet -> `stale_question`,
+      v1's error when no active scraped question matches.
+    - `specs.list/get/capabilities/drive`: the full specs UI remains degraded,
+      while the session binding path uses the shared catalog only to resolve
+      explicit attach requests.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from contextlib import asynccontextmanager
+
+from store_qa import spec_binding_source, SpecInputsUnavailable
+
+import asyncio
+import hashlib
+import logging
+import os
+import re
+import secrets
+import sys
+import time
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+import boto3
+
+from sessions import VerbError
+from enrollment import EnrollmentError, EnrollmentRegistry
+from seat_token_telemetry import SeatTokenTelemetry
+from store import UNASSIGNED, normalize_spec_binding_provenance, normalize_spec_ids, effective_assignment
+from v2_runtime import iso_now
+
+SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
+if SERVICES_ROOT not in sys.path:
+    sys.path.insert(0, SERVICES_ROOT)
+
+from _shared.spawn_profiles import catalog as spawn_catalog  # noqa: E402
+from _shared.specs_service import spec_resolution_view, SpecResolutionUnavailable  # noqa: E402
+
+log = logging.getLogger("chat_streamd_v2.uiverbs")
+
+PUSH_TTL_SECONDS = 90 * 24 * 60 * 60
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+PUSH_TOKENS_TABLE = os.environ.get("PUSH_TOKENS_TABLE", "PushTokens")
+#: A stream-scoped credential (Cosmo) registers into a SEPARATE table so the
+#: legacy PushTokens readers never see the operator's device (see spec D).
+COSMO_PUSH_TOKENS_TABLE = os.environ.get("COSMO_PUSH_TOKENS_TABLE", "CosmoPushTokens")
+SPEC_ID_RE = re.compile(r"^[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
+
+
+class UIVerbs:
+    def __init__(
+        self,
+        store: Any,
+        sessions: Any,
+        spawnctl: Any,
+        *,
+        specs: Any = None,
+        enrollment_registry: EnrollmentRegistry | None = None,
+    ) -> None:
+        self.store = store
+        self.sessions = sessions
+        self.spawnctl = spawnctl
+        self.capacity_retry = None
+        self.queued_send_now = None
+        self._spec_catalog = specs
+        self.enrollment_registry = enrollment_registry or EnrollmentRegistry()
+        self.token_telemetry = (
+            getattr(spawnctl, "token_telemetry", None) or SeatTokenTelemetry()
+        )
+
+    def wire_handlers(self) -> dict[str, Callable[[dict[str, Any]], Awaitable[Any]]]:
+        return {
+            "spawn_catalog_get": self.spawn_catalog_get,
+            "grant_token": self.grant_token,
+            "register_push": self.register_push,
+            "send.interrupt": self.send_interrupt,
+            "close.cancel": self.close_cancel,
+            "question.dismiss": self.question_dismiss,
+            "enroll": self.enroll,
+            "specs.list": self.specs,
+            "specs.get": self.specs,
+            "specs.capabilities": self.specs,
+            "specs.drive": self.specs,
+            "session.spec_update": self.session_spec_update,
+        }
+
+    # -- cleanly lifted ----------------------------------------------------
+
+    async def spawn_catalog_get(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        response = {"type": "spawn_catalog_get.ok", "request_id": rid, **spawn_catalog()}
+        context = msg.get("_auth_context")
+        if isinstance(context, dict) and context.get("connection_client") == "pentacle-mobile":
+            available = response.get("available_models")
+            if isinstance(available, dict):
+                # Older mobile clients reject additive providers in this optional narrowing.
+                response["available_models"] = {
+                    provider: models for provider, models in available.items() if provider in {"claude", "codex"}
+                }
+        return response
+
+    async def grant_token(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        stream_id = str(msg.get("stream_id") or "")
+        if ":" not in stream_id:
+            return _err("grant_token", rid, "invalid_request", message="stream_id must be host:session")
+        host, name = self.sessions.split(stream_id)
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        from store import STREAM_TOKEN_HASH_VERSION
+        result = await self.store.grant_stream_token(host, name, token_hash, STREAM_TOKEN_HASH_VERSION)
+        if result == "stream_unknown":
+            return _err("grant_token", rid, "stream_unknown", message="no open session for stream_id")
+        if result == "token_already_set":
+            return _err("grant_token", rid, "token_already_set", message="stream token already granted")
+        self.token_telemetry.record_issuance(
+            stream_id=stream_id,
+            operation="grant_token",
+        )
+        # Plaintext returned exactly once (never stored).
+        return {"type": "grant_token.ok", "request_id": rid, "stream_id": stream_id,
+                "stream_token": token, "token_hash_version": STREAM_TOKEN_HASH_VERSION}
+
+    async def register_push(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        push_token = str(msg.get("push_token") or "").strip()
+        if not push_token:
+            return {"type": "register_push.error", "request_id": rid, "error": "push_token is required"}
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("scoped_principal"):
+            # Scoped (Cosmo) device -> the separate CosmoPushTokens audience,
+            # bound to the credential and its one scope stream.  Legacy readers
+            # never see it.
+            item = {
+                "push_token": push_token,
+                "credential_id": str(auth.get("credential_id") or ""),
+                "scope_stream": str(auth.get("scope_stream") or ""),
+                "platform": str(msg.get("platform") or "ios"),
+                "device_name": str(msg.get("device_name") or ""),
+                "registered_at": iso_now(),
+                "active": True,
+                "ttl": int(time.time()) + PUSH_TTL_SECONDS,
+            }
+            await asyncio.to_thread(
+                lambda: boto3.resource("dynamodb", region_name=AWS_REGION)
+                .Table(COSMO_PUSH_TOKENS_TABLE).put_item(Item=item)
+            )
+            return {"type": "register_push.ok", "request_id": rid}
+        item = {
+            "push_token": push_token,
+            "platform": str(msg.get("platform") or "ios"),
+            "device_name": str(msg.get("device_name") or ""),
+            "registered_at": iso_now(),
+            "active": True,
+            "ttl": int(time.time()) + PUSH_TTL_SECONDS,
+        }
+        await asyncio.to_thread(
+            lambda: boto3.resource("dynamodb", region_name=AWS_REGION)
+            .Table(PUSH_TOKENS_TABLE).put_item(Item=item)
+        )
+        return {"type": "register_push.ok", "request_id": rid}
+
+    # -- functional-degraded ----------------------------------------------
+
+    @asynccontextmanager
+    async def _maintenance_guard(self,host,name):
+        runtime=getattr(self.spawnctl,"account_runtime",None)
+        if runtime is None:
+            yield
+            return
+        from provider_accounts import AccountError
+        try:
+            row=await self.store.fetch_session(host,name) or {"host":host,"stream_id":host+":"+name}
+            async with runtime.maintenance_guard(row):yield
+        except AccountError as exc:raise VerbError(str(exc),str(exc),**exc.context) from None
+
+    async def send_interrupt(self, msg: dict[str, Any]) -> dict[str, Any]:
+        host=str(msg.get("host") or "").strip();name=str(msg.get("session_name") or "").strip()
+        # Refuse ingress before queue/capacity policy changes, then recheck at
+        # the physical key boundary after any remote identity preparation.
+        if host and name:
+            async with self._maintenance_guard(host,name):pass
+        if msg.get("queued_send_now") is not None:
+            if getattr(self, "queued_send_now", None) is None:
+                raise VerbError("queued_send_now_unsupported", "Queued Send now is unavailable on this daemon")
+            return await self.queued_send_now.send(msg)
+        policy = self.capacity_retry
+        if policy is not None:
+            host = str(msg.get("host") or "").strip()
+            name = str(msg.get("session_name") or "").strip()
+            expected = str(msg.get("expected_session_generation") or "").strip()
+            msg = {**msg, "host": host, "session_name": name,
+                   "expected_session_generation": expected}
+            if host and name:
+                if host != self.sessions.local_host:
+                    hosts = getattr(self.spawnctl, "hosts", None)
+                    if not expected or hosts is None or host not in getattr(hosts, "peers", {}):
+                        # Preserve original admission before any durable hold.
+                        return await self._send_interrupt_locked(msg)
+                sid = f"{host}:{name}"
+                async with policy.locks(sid):
+                    row = await self.store.fetch_session(host, name)
+                    if expected and (not row or expected != row.get("session_generation")):
+                        return {"type": "send.interrupt.error", "request_id": msg.get("request_id"),
+                                "error_code": "stale_session_generation", "error": "selected generation changed"}
+                    # A stale remote selection must not hold a replacement.
+                    if row and row.get("status") == "open":
+                        await policy.interrupt(sid, row["session_generation"])
+                    return await self._send_interrupt_locked(msg)
+        return await self._send_interrupt_locked(msg)
+
+    async def _send_interrupt_locked(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        host = str(msg.get("host") or "").strip()
+        name = str(msg.get("session_name") or "").strip()
+        if not host or not name:
+            return {"type": "send.interrupt.error", "request_id": rid,
+                    "error": "host and session_name are required"}
+        if host != self.sessions.local_host:
+            return await self._send_remote_interrupt(rid, host, name, msg)
+        try:
+            self.sessions.assert_local(host, "send.interrupt")
+        except VerbError as exc:
+            return {"type": "send.interrupt.error", "request_id": rid, "error": f"{exc.code}: {exc}"}
+        tmux = self.spawnctl.tmux
+        if not (tmux and await tmux.has_session(name)):
+            return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
+                    "interrupted": False, "landed": False, "confirm": "pane_unavailable", "coalesced": False}
+        if getattr(self, "queued_send_now", None) is not None:
+            row = await self.store.fetch_session(host, name) or {}
+            expected = str(msg.get("expected_session_generation") or "")
+            if expected and expected != row.get("session_generation"):
+                raise VerbError("stale_session_generation", "Selected generation changed")
+            await self.queued_send_now.cancel_locked(f"{host}:{name}", row.get("session_generation"))
+        # The interrupt itself: one Escape into the pane (v1's B6 mechanism). The
+        # `Interrupted` landing marker is scraped from the transcript by the
+        # mirror (lane 4); without it v2 reports the honest `interrupt_unconfirmed`
+        # rather than claiming a confirmed landing.
+        async with self._maintenance_guard(host,name):
+            await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+        return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
+                "interrupted": True, "landed": False, "confirm": "interrupt_unconfirmed", "coalesced": False}
+
+    async def _send_remote_interrupt(
+        self, rid: str, host: str, name: str, msg: dict[str, Any],
+    ) -> dict[str, Any]:
+        def error(code: str, detail: str = "") -> dict[str, Any]:
+            return {"type": "send.interrupt.error", "request_id": rid,
+                    "error_code": code, "error": f"{code}: {detail}" if detail else code}
+
+        hosts = getattr(self.spawnctl, "hosts", None)
+        # Hosts.tmux_for falls back to LOCAL for unknown peers. Admission must
+        # precede transport selection, even when the caller omitted generation.
+        if hosts is None or host not in getattr(hosts, "peers", {}):
+            return error("unsupported_host", f"{host} is not a configured peer")
+        expected = str(msg.get("expected_session_generation") or "").strip()
+        if not expected:
+            return error("generation_required", "remote interrupt needs the selected session generation")
+
+        async def row_matches(pid: str | None = None) -> bool:
+            row = await self.store.fetch_session(host, name)
+            return bool(
+                isinstance(row, dict)
+                and row.get("status") == "open"
+                and str(row.get("session_generation") or "") == expected
+                and str(row.get("pane_pid") or "")
+                and (pid is None or str(row.get("pane_pid") or "") == pid)
+            )
+
+        row = await self.store.fetch_session(host, name)
+        if not isinstance(row, dict) or row.get("status") != "open" or str(row.get("session_generation") or "") != expected:
+            return error("stale_session_generation", "the selected session is no longer open")
+        stored_pid = str(row.get("pane_pid") or "")
+        if not stored_pid:
+            return error("pane_identity_unavailable", "open row has no pane PID")
+        try:
+            await hosts.ensure_reachable(host, "send.interrupt")
+            tmux = hosts.tmux_for(host)
+            state = await tmux.session_state(name)
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if state == "gone":
+            return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
+                    "interrupted": False, "landed": False, "confirm": "pane_unavailable", "coalesced": False}
+        if state != "alive":
+            return error("host_unreachable", "remote pane liveness was not observed")
+        try:
+            identity = await tmux.pane_identity(name)
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if not isinstance(identity, dict) or not identity.get("pane_id"):
+            return error("pane_identity_unavailable", "remote pane identity was not observed")
+        if identity.get("session_name") != name or identity.get("pane_pid") != stored_pid:
+            return error("pane_identity_changed", "remote pane differs from the selected row")
+
+        # The durable row and live pane may change while SSH is in flight. Read
+        # both again immediately before one key, then target the checked pane ID
+        # rather than resolving a possibly reused session name a third time.
+        try:
+            final_identity = await tmux.pane_identity(name)
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if final_identity != identity:
+            return error("pane_identity_changed", "remote pane changed before interrupt")
+        if not await row_matches(stored_pid):
+            return error("stale_session_generation", "selected session changed before interrupt")
+        try:
+            async with self._maintenance_guard(host,name):
+                rc, output = await tmux.run("send-keys", "-t", str(identity["pane_id"]), "Escape")
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if rc != 0:
+            return error("interrupt_transport_failed", output.strip() or f"tmux exited {rc}")
+        return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
+                "interrupted": True, "landed": False, "confirm": "interrupt_unconfirmed", "coalesced": False}
+
+    # -- honest-degraded ---------------------------------------------------
+
+    async def close_cancel(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        # v2 has no deferred-close plane, so no intent ever matches. v1 returns
+        # this same code for an absent intent, and re-cancels are idempotent.
+        return {"type": "close.cancel.error", "request_id": rid,
+                "error": "close_intent_not_found", "error_code": "close_intent_not_found"}
+
+    async def question_dismiss(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        # The scraped-question cache lives in the tmux mirror (lane 4). Until it
+        # exists v2 cannot validate `question_key` or map an answer to an option,
+        # so it returns v1's own "no matching active question" error.
+        return {"type": "question.dismiss.error", "request_id": rid,
+                "error_code": "stale_question", "error": "stale_question"}
+
+    async def enroll(self, msg: dict[str, Any]) -> dict[str, Any]:
+        # Enrollment replies intentionally carry no request_id; that is the
+        # established mobile wire contract. The registry owns code validation,
+        # atomic one-use consumption, and v2 credential issuance.
+        try:
+            return self.enrollment_registry.exchange(msg)
+        except EnrollmentError as exc:
+            return {"type": "enroll.error", "error": str(exc)}
+
+    async def specs(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        verb = str(msg.get("type") or "")
+        if verb == "specs.drive":
+            # drive spawns a session — the spawn subsystem is owned elsewhere.
+            return {"type": "specs.error", "request_id": rid,
+                    "error": "unsupported_in_v2", "error_code": "unsupported_in_v2"}
+        # list/get/capabilities: the configured memory work/ tree + watcher are not
+        # wired this increment; v1 degrades to exactly this when the root is absent.
+        return {"type": "specs.error", "request_id": rid,
+                "error": "specs_not_configured", "error_code": "specs_not_configured"}
+
+    async def session_spec_update(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Attach/detach using a fresh source CAS and at most one recapture."""
+        msg = deepcopy(msg)
+        for attempt in range(2):
+            try:
+                return await self._session_spec_update_once(msg)
+            except (SpecInputsUnavailable, SpecResolutionUnavailable):
+                if attempt:
+                    raise VerbError("spec_unavailable", "spec identity or session binding changed") from None
+
+    async def _session_spec_update_once(self, msg: dict[str, Any]) -> dict[str, Any]:
+        rid = str(msg.get("request_id") or "")
+        action = str(msg.get("action") or "").strip()
+        host = str(msg.get("host") or "").strip()
+        name = str(msg.get("session_name") or "").strip()
+        spec_id = str(msg.get("spec_id") or "").strip()
+        if action not in {"attach", "detach", "assign", "unassign"}:
+            raise VerbError("invalid_action", "action must be attach, detach, assign or unassign")
+        if not host or not name:
+            raise VerbError("invalid_stream_id", "host and session_name are required")
+        if action == "unassign":
+            # Only the work assignment ends; authority tags are untouched.
+            if await self.store.fetch_session(host, name) is None:
+                raise VerbError("session_not_found", "session does not exist", stream_id=f"{host}:{name}")
+            async with self.sessions._graph_lock:
+                source = await self.store.fetch_session(host, name)
+                updated = await self.store.update_session(
+                    host, name, expected_spec_source=spec_binding_source(source),
+                    assigned_spec_id=UNASSIGNED,
+                )
+            self.sessions.apply_durable(f"{host}:{name}", assigned_spec_id=UNASSIGNED)
+            return {"type": "session.spec_update.ok", "request_id": rid, "action": action, "session": updated}
+        if not SPEC_ID_RE.fullmatch(spec_id):
+            raise VerbError("invalid_spec_id", "spec_id must match <repo>__<topic>")
+        resolver = getattr(self._spec_catalog, "resolution_for", None) if self._spec_catalog is not None else None
+        if not callable(resolver):
+            raise VerbError(
+                "spec_unresolved",
+                "requested spec-id cannot be resolved because the catalog is unavailable",
+                spec_id=spec_id, spec_resolution=None,
+            )
+        stream_id = f"{host}:{name}"
+        source = await self.store.fetch_session(host, name)
+        if source is None:
+            raise VerbError("session_not_found", "session does not exist", stream_id=stream_id)
+        source_check = spec_binding_source(source)
+        # One tree walk, in a worker thread, serves every comparison below.
+        view = await spec_resolution_view(self._spec_catalog)
+        resolver = getattr(view, "resolution_for", resolver)
+        resolution = resolver(spec_id)
+        if resolution != "resolved":
+            raise VerbError(
+                "spec_unresolved",
+                f"spec-id {spec_id} is not catalog-resolved ({resolution or 'unknown'})",
+                spec_id=spec_id, spec_resolution=resolution,
+            )
+        canonicalizer = getattr(view, "canonical_spec_identity", None)
+        canonical_spec_id = canonicalizer(spec_id) if callable(canonicalizer) else None
+        if not canonical_spec_id:
+            raise VerbError(
+                "spec_unresolved",
+                "spec-id resolved without a canonical document identity",
+                spec_id=spec_id,
+                spec_resolution="canonical_identity_missing",
+            )
+        spec_id = str(canonical_spec_id)
+
+        spec_ids = normalize_spec_ids(source.get("spec_ids"), source.get("spec_id"))
+        bindings = normalize_spec_binding_provenance(
+            source.get("spec_binding_provenance"), spec_ids=spec_ids
+        )
+        def canonical_identity(value: str | None) -> str | None:
+            if not callable(canonicalizer):
+                return None
+            try:
+                identity = canonicalizer(value)
+            except Exception:
+                return None
+            normalized = str(identity or "").strip()
+            return normalized or None
+
+        def same(left: str, right: str) -> bool:
+            left_identity = canonical_identity(left)
+            right_identity = canonical_identity(right)
+            return bool(left_identity and left_identity == right_identity)
+
+        assigned = source.get("assigned_spec_id")
+        if action == "assign":
+            assigned = spec_id
+        if action in {"attach", "assign"}:
+            if not any(same(existing, spec_id) for existing in spec_ids):
+                spec_ids.append(spec_id)
+            if not any(same(binding["spec_id"], spec_id) for binding in bindings):
+                bindings.append({
+                    "spec_id": spec_id,
+                    "provenance": "operator_v2",
+                    "granting_principal": str(msg.get("from_stream_id") or "operator").strip() or "operator",
+                    "granted_at": iso_now(),
+                })
+        else:
+            spec_ids = [existing for existing in spec_ids if not same(existing, spec_id)]
+            bindings = [binding for binding in bindings if not same(binding["spec_id"], spec_id)]
+            if assigned and same(assigned, spec_id):
+                assigned = UNASSIGNED
+
+        first_spec_id = spec_ids[0] if spec_ids else None
+        async with self.sessions._graph_lock:
+            updated = await self.store.update_session(
+                host,
+                name,
+                expected_spec_source=source_check,
+                spec_id=first_spec_id,
+                spec_ids=spec_ids,
+                spec_resolution=resolver(first_spec_id) if first_spec_id else None,
+                spec_binding_provenance=bindings,
+                assigned_spec_id=assigned,
+            )
+        if updated is None:
+            raise VerbError("session_not_found", "session disappeared during spec update", stream_id=stream_id)
+        self.sessions.apply_durable(
+            stream_id,
+            **{key: value for key, value in updated.items() if key != "stream_id"},
+        )
+        reply = {
+            "type": "session.spec_update.ok",
+            "request_id": rid,
+            "action": action,
+            "session": updated,
+        }
+        if action == "assign":
+            checkpoint = await self.spawnctl.work_checkpoint_warning(msg, stream_id)
+            if checkpoint is not None:
+                reply["work_checkpoint"] = checkpoint  # a warning, never a refusal (FD GO)
+        return reply
+
+
+def _err(verb: str, rid: str, error: str, *, message: str = "") -> dict[str, Any]:
+    reply = {"type": f"{verb}.error", "request_id": rid, "error": error}
+    if message:
+        reply["message"] = message
+    return reply

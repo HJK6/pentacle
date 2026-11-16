@@ -1,0 +1,331 @@
+'use strict';
+const { fetchBlobReply } = require('./blob_fetch_reply');
+
+// ── Shared `window.cc` handler registration ──────────────────────────────────
+// Handlers use an `(event, ...args)` signature. The web host passes a
+// per-connection stand-in for `event.sender`, which is what gives
+// `main/terminal_adapter.js` — whose slots are keyed by `event.sender.id` —
+// correct per-socket isolation and per-socket pty output for free.
+//
+const path = require('node:path');
+const os = require('node:os');
+const fs = require('node:fs');
+
+const { registerAssetIpcHandlers } = require('./asset_ipc_bridge');
+const { registerScheduleIpcHandlers } = require('./schedule_ipc_bridge');
+const { registerNotificationIpcHandlers } = require('./notification_ipc_bridge');
+const { registerTerminalIpc } = require('./terminal_adapter');
+const { isProtectedAssistantRename } = require('./assistant_role_guard');
+const { probeMicServer } = require('./mic-url');
+const { createMicRequest } = require('./mic_request');
+
+// Channels the browser answers itself rather than sending to the host. The
+// clipboard is the important one: a round trip would read the SERVER's
+// clipboard, not the viewer's. The websocket dispatcher refuses these, so a
+// shim that forgets to implement one fails loudly instead of silently reading
+// the wrong machine.
+// Each entry carries the channel's mode, because a refusal must obey
+// the same contract as a real dispatch: answering a `send` channel would push
+// an unsolicited frame at a caller that never asked for one.
+const WEB_LOCAL = {
+  'clipboard:read-text': { mode: 'invoke', reason: 'the viewer\'s own clipboard, via navigator.clipboard' },
+  'clipboard:write-text': { mode: 'invoke', reason: 'the viewer\'s own clipboard, via navigator.clipboard' },
+  'open-external': { mode: 'invoke', reason: 'the browser opens the tab itself' },
+  'app:reload': { mode: 'send', reason: 'location.reload()' },
+};
+
+// Channels with no host-side browser equivalent: the host still refuses them
+// (a safety net if anything reaches this transport), but the *web layer*
+// (renderer/web_cc.js) now answers each with a browser behavior — the reason
+// records what that is. `context-menu` renders an HTML menu that fires the same
+// assign-slot/action events; `meeting:open` toasts.
+const WEB_UNSUPPORTED = {
+  'context-menu': { mode: 'send', reason: 'native Menu popup — web: HTML context menu (web_cc.js) firing assign-slot/action' },
+  'meeting:open': { mode: 'send', reason: 'native window — web: "not available in web mode" toast' },
+  'meeting:close': { mode: 'send', reason: 'native window — web: no-op' },
+};
+
+// Host → renderer push channels sent as `{event, args}` frames.
+const PUSH_EVENTS = [
+  'pty:data',
+  'pty:exit',
+  'assign-slot',
+  'action',
+  'chat-stream:frame',
+  'asset-popout:init',
+  'asset:dock',
+  'chat:popout-dock',
+];
+
+const UNIMPLEMENTED = {
+  'chat-stream:chat-pop-out': 'no handler on either transport; web popout (window.open) deferred to the web-mode popout follow-up spec',
+  'chat-stream:chat-dock': 'no handler on either transport; paired with chat-pop-out, deferred to the web-mode popout follow-up spec',
+  'dashboard:pipeline-stats': 'no dashboard provider in the public desktop',
+  'dashboard:business-stats': 'no dashboard provider in the public desktop',
+  'dashboard:pentacle-mobile-testing-stats': 'no dashboard provider in the public desktop',
+  'dashboard:set-batch-gate': 'no dashboard provider in the public desktop',
+  'dashboard:0dte-stats': 'no dashboard provider in the public desktop',
+  'dashboard:0dte-list-traders': 'no dashboard provider in the public desktop',
+};
+
+// Handlers with no `window.cc` caller. `dashboard:list` is the board-discovery
+// channel the renderer does not consume yet.
+const UNCALLED = {
+  'dashboard:list': 'registered for board discovery; no window.cc method calls it yet',
+};
+
+function safeString(value, fallback = '') { return String(value ?? '').trim() || fallback; }
+function nowIso() { return new Date().toISOString(); }
+function normalizeChatStreamError(error) {
+  for (const value of [error?.error, error?.message, error]) {
+    if (typeof value === 'string' && value) return value;
+  }
+  if (error?.error_code === 'server_overloaded' || error?.code === 'server_overloaded') {
+    return 'Server is busy. Try sending again.';
+  }
+  // Some daemon refusal frames carry only an error_code. Never coerce the
+  // frame itself (or a nested error object) into user-visible text.
+  return typeof error?.error_code === 'string' && error.error_code
+    ? error.error_code.replace(/_/g, ' ') : 'Daemon unavailable';
+}
+function resultError(message) { return { ok: false, error: normalizeChatStreamError(message) }; }
+
+function householdErrorCode(error) {
+  if (typeof error?.error_code === 'string' && error.error_code) return error.error_code;
+  if (error?.error === 'timed_out') return 'timed_out';
+  // Client connection rejections use the RPC prefix; daemon errors include the verb.
+  if (error?.type === 'household.error') return 'disconnected';
+  return 'unknown_outcome';
+}
+
+async function command(action) {
+  try { return { ok: true, ...await action() }; }
+  catch (error) {
+    const code = error?.code || error?.error_code;
+    if (code === 'server_overloaded') {
+      console.warn('[chat-stream.command-rejected]', {
+        subsystem: 'web_composer',
+        bug_ref: 'spec_pentacle__web_composer_attachment_precommit_failure_2026_10',
+        code: 'server_overloaded',
+      });
+    }
+    return { ...resultError(error), code, remediation: error?.remediation };
+  }
+}
+
+/**
+ * Build the portable half of the `window.cc` surface.
+ *
+ * `register(target)` takes the websocket collector's `handle`/`on` interface
+ * and returns the terminal adapter's stop
+ * function, which the caller wires to its own shutdown.
+ */
+function createCcHandlers({
+  CONFIG,
+  chatStreamClient,
+  assetPopouts = null,
+  configError = null,
+  configWarnings = [],
+  harness = process.env.PENTACLE_HARNESS === '1',
+  terminalOptions = undefined,
+  startMicServer = null,
+  micRequest = null,
+  buildId = null,
+  hostedDashboardAuthMode = 'unknown',
+}) {
+  const telemetry = [];
+
+  function publicConfig() {
+    const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
+    const { startCommand, ...mic } = CONFIG.mic || {};
+    // The private catalog root is a host filesystem path; the browser only
+    // needs the catalog spec id.
+    const { catalogRoot, designLibraryRoot, ...dashboards } = CONFIG.dashboards || {};
+    return { ...CONFIG, mic, chatStream, ...(CONFIG.dashboards ? { dashboards } : {}), hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
+      hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings,
+      buildId, hostedDashboardAuthMode };
+  }
+
+  function protectedAssistantRenameError(host, sessionName) {
+    return isProtectedAssistantRename(CONFIG, chatStreamClient.snapshot(), host, sessionName)
+      ? resultError('This configured assistant cannot be renamed')
+      : null;
+  }
+
+  function register(target) {
+    target.handle('get-config', () => publicConfig());
+    // The build id of the currently-running host (update-available refresh).
+    target.handle('get-build', () => ({ buildId }));
+
+    target.handle('chat-stream:get-state', () => chatStreamClient.snapshot({ includeEvents: false }));
+    target.handle('chat-stream:assistant-binding', async () => {
+      try { return { ok: true, ...await chatStreamClient.assistantBinding() }; }
+      catch (error) {
+        return { ok: false, error_code: error?.error_code || error?.code || 'assistant_binding_lookup_failed',
+          error: normalizeChatStreamError(error) };
+      }
+    });
+    target.handle('chat-stream:spawn-catalog', () => command(async () => {
+      const [catalog, accounts] = await Promise.all([
+        chatStreamClient.getSpawnCatalog(),
+        chatStreamClient.getProviderAccounts?.().catch(error => {
+          // Keep protocol refusals visible instead of presenting a default-only picker.
+          if (error?.type === 'account.error' || error?.error_code || error?.code) throw error;
+          return null;
+        }),
+      ]);
+      return { catalog: accounts ? { ...catalog, account_status: accounts } : catalog };
+    }));
+    target.handle('chat-stream:spawn', async (_event, request, legacyHostId) => {
+      const input = request && typeof request === 'object' ? request : { provider: request, host: legacyHostId };
+      const spawnProfile = input.spawnProfile || input.spawn_profile;
+      if (spawnProfile === 'desktop_manual' && (!input.model || !input.effort)) return resultError('A model and effort are required');
+      return command(async () => {
+        const response = await chatStreamClient.spawnSession({ ...input, host: input.hostId || input.host || 'local', spawnProfile });
+        if (response?.state === 'queued') return { ...response, streamId: response.stream_id };
+        const session = response.session || response;
+        return { ...response, session, streamId: response.stream_id || session?.stream_id,
+          requested: session?.requested_launch_tuple, resolved: session?.resolved_launch_tuple,
+          actualLaunch: session?.actual_launch_tuple };
+      });
+    });
+    target.handle('chat-stream:send', (_event, host, sessionName, text, requestId, optimisticId, attachments, reply = {}) =>
+      command(async () => {
+        // Operator IPC always uses ordinary intake, including requests from stale tabs.
+        // Intentional agent/CLI/wake urgency remains below this producer boundary.
+        if (reply?.urgent === true) console.info('[send_now]', {
+          subsystem: 'send_now', bug_ref: 'send_now_interrupt_loss_2026_10_28',
+          origin: 'operator_ipc', action: 'drop_urgency', route: 'ordinary_intake', cancel_dispatches: 0,
+          request_hash: require('node:crypto').createHash('sha256').update(String(requestId || '')).digest('hex').slice(0, 16),
+        });
+        const receipt = await chatStreamClient.sendMessage({ host, sessionName, streamId: reply?.stream_id, text, requestId, optimisticId, attachments, meta: reply?.meta, replyToMessageId: reply?.reply_to_message_id, replyToQuestionId: reply?.reply_to_question_id });
+        return { ...receipt, ok: receipt.delivery === 'landed' || receipt.action_committed === true,
+          ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
+      }));
+    target.handle('chat-stream:request-stream-events', (_event, args) => command(() => chatStreamClient.requestStreamEvents(args)));
+    target.handle('chat-stream:queued-send-now', (_event, host, sessionName, originalRequestId, optimisticId, expectedSessionGeneration) =>
+      command(() => chatStreamClient.queuedSendNow({ host, sessionName, originalRequestId, optimisticId, expectedSessionGeneration })));
+    target.handle('chat-stream:interrupt', (_event, host, sessionName, expectedSessionGeneration) =>
+      command(() => chatStreamClient.interruptMessage({ host, sessionName, expectedSessionGeneration })));
+    target.handle('chat-stream:dismiss-question', (_event, host, sessionName, payload = {}) =>
+      command(() => chatStreamClient.dismissQuestion({ host, sessionName, questionKey: payload.questionKey || payload.question_key, text: payload.text })));
+    target.handle('chat-stream:rename', (_event, host, sessionName, displayName) => {
+      const protectedError = protectedAssistantRenameError(host, sessionName);
+      return protectedError || command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' }));
+    });
+    target.handle('chat-stream:close', (_event, host, sessionName, options) => command(() => chatStreamClient.closeSession({ ...options, host, sessionName })));
+    target.handle('chat-stream:kill', (_event, args) => command(() => chatStreamClient.killSessionRpc(args)));
+    target.handle('chat-stream:consent-key', (_event,args)=>command(()=>chatStreamClient.consentKey(args||{})));
+    target.handle('chat-stream:lifecycle-authority', (_event, args) => command(() => chatStreamClient.lifecycleAuthority(args || {})));
+    target.handle('chat-stream:household', async (_event, verb, fields) => {
+      try { return { ok: true, reply: await chatStreamClient.householdCommand(verb, fields || {}) }; }
+      catch (error) {
+        return { ok: false, error_code: householdErrorCode(error), error: normalizeChatStreamError(error) };
+      }
+    });
+    target.handle('chat-stream:upload-blob', (_event, payload) => command(() => {
+      const encoded = typeof payload?.dataBase64 === 'string' ? payload.dataBase64 : payload?.data;
+      const maxBytes = 25 * 1024 * 1024;
+      if (typeof encoded === 'string' && (encoded.length > Math.ceil(maxBytes / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded))) {
+        throw new Error('Only JPEG or PNG images up to 25 MiB are supported.');
+      }
+      const data = typeof encoded === 'string' ? Buffer.from(encoded, 'base64') : Buffer.isBuffer(encoded) ? encoded : Buffer.from(encoded || []);
+      if (!data.length || data.length > maxBytes || (typeof encoded === 'string' && data.toString('base64') !== encoded)) {
+        throw new Error('Image data is empty, invalid or exceeds 25 MiB.');
+      }
+      return chatStreamClient.uploadBlob({ ...payload, data, sizeHintBytes: data.length });
+    }));
+    target.handle('chat-stream:transcribe-blob', async (_event, payload) => {
+      try { return { ...(await chatStreamClient.transcribeBlob(payload || {})), ok: true }; }
+      catch (error) { return { ok: false, error_code: error?.error_code || error?.code || normalizeChatStreamError(error) }; }
+    });
+    for (const [channel, call] of [
+      ['chat-stream:outbound-commit', payload => chatStreamClient.outboundCommit(payload || {})],
+      ['chat-stream:outbound-get', operationId => chatStreamClient.outboundGet(operationId)],
+      ['chat-stream:outbound-cancel', operationId => chatStreamClient.outboundCancel(operationId)],
+    ]) {
+      target.handle(channel, async (_event, arg) => {
+        try { return { ...(await call(arg)), ok: true }; }
+        catch (error) { return { ok: false, error_code: error?.error_code || error?.code || normalizeChatStreamError(error) }; }
+      });
+    }
+    target.handle('chat-stream:fetch-blob', (_event, blobSha) => fetchBlobReply(chatStreamClient, blobSha));
+
+    registerAssetIpcHandlers(target, chatStreamClient, normalizeChatStreamError, assetPopouts);
+    registerScheduleIpcHandlers(target, chatStreamClient, normalizeChatStreamError);
+    registerNotificationIpcHandlers(target, chatStreamClient, normalizeChatStreamError);
+
+    target.handle('tmux:kill-session', (_event, host, sessionName) => command(() => chatStreamClient.killSessionRpc({ host, sessionName })));
+    target.handle('tmux:set-window-title', (_event, host, sessionName, displayName) => {
+      const protectedError = protectedAssistantRenameError(host, sessionName);
+      return protectedError || command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' }));
+    });
+    if (harness) target.handle('harness:force-reconnect', () => { chatStreamClient.forceReconnect('harness'); return { ok: true }; });
+
+    const stopTerminals = registerTerminalIpc(target, CONFIG, chatStreamClient, terminalOptions);
+
+    target.handle('pty:save-image', (_event, base64Data) => {
+      try {
+        const value = Buffer.from(safeString(base64Data), 'base64');
+        const filePath = path.join(os.tmpdir(), 'desktop-paste-' + Date.now() + '.png');
+        fs.writeFileSync(filePath, value);
+        return { ok: true, path: filePath };
+      } catch {
+        return resultError('could not save image');
+      }
+    });
+
+    target.handle('dashboard:list', () => ({ ok: true, boards: [] }));
+    target.handle('ui-review:list-artifacts', () => []);
+    target.handle('specs:list', (_event, filter) => command(() => chatStreamClient.specsList(filter)));
+    target.handle('specs:get', (_event, id) => command(() => chatStreamClient.specsGet(id)));
+    target.handle('specs:drive', (_event, id, options, caller) => command(() => chatStreamClient.specsDrive(id, options, caller)));
+    target.handle('specs:capabilities', () => command(() => chatStreamClient.specsCapabilities()));
+
+    // Microphone service ownership stays external to the public desktop.
+    target.handle('mic:start-server', () => startMicServer ? startMicServer() : probeMicServer(CONFIG));
+    const requestMic = micRequest || createMicRequest(CONFIG);
+    target.handle('mic:request', (_event, method, path, body) => requestMic(method, path, body));
+
+    target.on('perf-telemetry:record', (_event, value) => {
+      if (telemetry.length >= 1000) telemetry.shift();
+      telemetry.push({ at: nowIso(), event: safeString(value && value.event, 'unknown') });
+    });
+    target.handle('perf-telemetry:state', () => ({
+      enabled: false,
+      log_path: null,
+      buffered_events: telemetry.length,
+    }));
+
+    return async () => {
+      stopTerminals();
+    };
+  }
+
+  return { register, publicConfig, telemetry };
+}
+
+/**
+ * Record handlers into a table: 'invoke' answers, 'send' does not.
+ */
+function createCollector(table = {}) {
+  return {
+    table,
+    handle(channel, fn) { table[channel] = { mode: 'invoke', handler: fn }; },
+    on(channel, fn) { table[channel] = { mode: 'send', handler: fn }; },
+  };
+}
+
+module.exports = {
+  createCcHandlers,
+  createCollector,
+  WEB_LOCAL,
+  WEB_UNSUPPORTED,
+  UNIMPLEMENTED,
+  UNCALLED,
+  PUSH_EVENTS,
+  safeString,
+  normalizeChatStreamError,
+  resultError,
+  command,
+};

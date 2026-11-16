@@ -1,0 +1,911 @@
+// Phase 4 (desktop_chat_ui_mobile_parity): shared-core transcript view renderer.
+//
+// This is the desktop transcript rendering path (Phase 7 cutover: the ONLY
+// path). Given a `streamId` + a container element, it reads
+// `window.PentacleChatStore.selectSessionDetail(streamId)` (the shared
+// pentacle-chat-core chat-model selector) and renders the resulting
+// `transcriptItems` into the desktop `slot-chat-*` DOM so `renderer/styles.css`
+// supplies the base styles. Core disclosure metadata selects compact expandable
+// tool and subagent surfaces; view options can add resolved durable answers.
+//
+// app.js delegates a slot's transcript rendering to
+// `renderTranscriptTimelineHtml` (via window.PentacleChatView) unconditionally.
+//
+// displayRule -> DOM map:
+//   bubble:user      -> <article.slot-chat-row.is-user><div.slot-chat-user-bubble> (text ESCAPED)
+//   bubble:assistant -> <article.slot-chat-row><div.slot-chat-assistant-card> (parsed blocks, ESCAPED)
+//   bubble:agent / tool disclosure -> compact preview and native details
+//   activity:code-block -> exact preformatted code
+//   other activity:* -> compact activity row (ESCAPED)
+//   terminal:divider -> <div.slot-chat-terminal-divider>
+//   system:compacted -> <div.slot-chat-compacted>
+//   hidden:*         -> NOT rendered (the selector already drops these before
+//                       they reach transcriptItems; we additionally guard here)
+//   draft:composer   -> NOT rendered (drafts live outside the committed transcript)
+
+import { createFileDownloads } from '../file_downloads';
+const fileDownloads = createFileDownloads({ fetchBlob: (key: string) => (globalThis as any).cc.chatFetchBlob(key) });
+export function hydrateFileAttachments(root: HTMLElement): Promise<void> {
+  return fileDownloads.hydrate(root);
+}
+
+import type {
+  PentacleSessionDetail,
+  PentacleSendState,
+  PentacleTranscriptItem,
+  MdBlock,
+  MdInline,
+  ChatAttachment,
+} from 'pentacle-chat-core';
+import { formatAssistantActivity, parseMarkdown, parsePentacleQuestionAnswerText, interpretPentacleEvent } from 'pentacle-chat-core';
+import { validVoiceMetadata } from './voice_metadata';
+
+// Chrome colors are a DESKTOP concern (legacy `chat_ui_state.js#hostChrome`),
+// not part of the shared core's host theme. app.js already computes chrome via
+// `chatUi.hostChrome(...)` for the legacy path; it passes the same object in
+// here so the new path is chromatically identical.
+export type ViewChrome = {
+  header: string;
+  accent: string;
+  surface: string;
+  border: string;
+  title: string;
+};
+
+export type TranscriptRenderOptions = {
+  showTurnDuration?: boolean;
+  streamId?: string;
+  allowReplies?: boolean;
+  allowQueuedSendNow?: boolean;
+  resolvedQuestions?: readonly ResolvedQuestionRecord[];
+};
+
+export type ResolvedQuestionRecord = {
+  notification_id?: string;
+  state?: string;
+  resolved_at?: string;
+  resolution?: { at?: string };
+  question?: {
+    question_id?: string;
+    state?: string;
+    answered_at?: string;
+    options?: { label?: string; value?: unknown }[];
+    answer?: { selections?: unknown[]; text?: string; custom_text?: string; note?: string; value?: unknown; at?: string };
+  };
+};
+
+// Durable answers can arrive without an event echo (including on reload).
+// Interleave by immutable resolution time, then suppress only a matching identity.
+export function withResolvedQuestionAnswers(items: readonly PentacleTranscriptItem[], records: readonly ResolvedQuestionRecord[] = []): PentacleTranscriptItem[] {
+  const result = [...items];
+  const echoed = new Set(items.filter(item => item.eventCase === 'agent-question-answer').map(item => item.notificationId));
+  const seen = new Set<string>();
+  const time = (record: ResolvedQuestionRecord) => record.resolved_at || record.question?.answered_at || record.resolution?.at || record.question?.answer?.at || '';
+  const ordered = [...records].sort((a, b) => (Date.parse(time(a)) || Infinity) - (Date.parse(time(b)) || Infinity) || String(a.notification_id).localeCompare(String(b.notification_id)));
+  for (const record of ordered) {
+    const id = record.notification_id;
+    const question = record.question;
+    const answer = question?.answer;
+    if (!id || !answer || echoed.has(id) || seen.has(id) || record.state === 'open' || question?.state === 'open') continue;
+    seen.add(id);
+    const values = answer.selections || (answer.value !== undefined ? [answer.value] : []);
+    const selections = values.map(value => question?.options?.find(option => String(option.value) === String(value))?.label || String(value));
+    const text = answer.custom_text || answer.text || '';
+    if (!text && !selections.length) continue;
+    const timestamp = time(record);
+    const interpreted = interpretPentacleEvent({
+      daemon_seq: Number.NaN, host: '', provider: '', stream_id: '', session_id: '', session_name: '', timestamp,
+      kind: 'USER', text: JSON.stringify({ type: 'notification.answer', answer: { notification_id: id, text, selections, note: answer.note } }),
+    });
+    const row: PentacleTranscriptItem = {
+      id: `answer:${id}:${question?.question_id || ''}`, timestamp, timestampLabel: '', label: interpreted.label,
+      tone: interpreted.tone, provider: '', source: 'durable-question', text: interpreted.text,
+      kind: 'USER', isUser: false, eventCase: interpreted.caseId, displayRule: interpreted.displayRule, notificationId: id,
+    };
+    const ms = Date.parse(timestamp);
+    let at = Number.isFinite(ms) ? result.findIndex(item => Date.parse(item.timestamp || '') > ms) : -1;
+    if (!Number.isFinite(ms)) {
+      const ask = result.findIndex(item => item.notificationId === id);
+      if (ask >= 0) at = ask + 1;
+    }
+    result.splice(at < 0 ? result.length : at, 0, row);
+  }
+  return result;
+}
+
+const DEFAULT_CHROME: ViewChrome = {
+  header: '#101a16',
+  accent: '#7ef0ba',
+  surface: '#101a16',
+  border: '#356150',
+  title: 'Agent',
+};
+
+// Mirror of chat_ui_state.js#escapeHtml — escape ALL user-controlled text so a
+// `<script>`-ish payload can never reach innerHTML un-escaped.
+function escapeHtml(str: unknown): string {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderCopyButton(text: string, label: string, className = ''): string {
+  const classes = ['slot-chat-copy-btn', className].filter(Boolean).join(' ');
+  return `<button type="button" class="${classes}" data-copy-text="${escapeHtml(text)}" aria-label="${escapeHtml(label)}">Copy</button>`;
+}
+
+// Mirror of chat_ui_state.js#splitActivityText: first line is the title, the
+// rest is a clamped detail.
+function splitActivityText(text: string): { title: string; detail: string } {
+  const lines = String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const title = lines[0] || 'Activity';
+  const detail = lines.slice(1).join('\n');
+  return {
+    title,
+    detail: detail.length <= 220 ? detail : `${detail.slice(0, 217).trim()}...`,
+  };
+}
+
+function summarizeCommandOutput(output: string): string {
+  if (!output) return '';
+  const lines = String(output).split('\n').map((line) => line.trimEnd());
+  if (lines.length <= 3) return lines.join('\n').trim();
+  const visible = lines.slice(0, 3).join('\n').trim();
+  const hiddenCount = lines.length - 3;
+  return `${visible}\n+${hiddenCount} more line${hiddenCount === 1 ? '' : 's'}`;
+}
+
+type AssistantBlock =
+  | { type: 'edit'; action: string; title: string; meta: string; body: string }
+  | { type: 'command'; command: string; output: string }
+  | { type: 'text'; text: string };
+
+// Mirror of chat_ui_state.js#parseAssistantBlocks.
+function parseAssistantBlocks(text: string): AssistantBlock[] {
+  return String(text || '')
+    .split(/\n{2,}/)
+    .map((chunk) => chunk.trimStart())
+    .filter((chunk) => chunk.trim().length > 0)
+    .map((chunk): AssistantBlock => {
+      const lines = chunk.split('\n');
+      const first = lines[0] || '';
+      const rest = lines.slice(1).join('\n');
+      if (/^(Edited|Created|Added|Updated|Deleted) /.test(first)) {
+        const action = first.split(' ')[0];
+        const match = first.match(/^\w+\s+(.+?)\s+\((.+)\)$/);
+        return {
+          type: 'edit',
+          action,
+          title: match?.[1] || first.replace(/^\w+\s+/, ''),
+          meta: match?.[2] || '',
+          body: rest,
+        };
+      }
+      if (first.startsWith('Ran ')) {
+        return {
+          type: 'command',
+          command: first.replace(/^Ran\s+/, ''),
+          output: summarizeCommandOutput(rest.replace(/^└\s*/gm, '').trim()),
+        };
+      }
+      return { type: 'text', text: chunk.trim() };
+    });
+}
+
+// Render a shared-core markdown inline token tree to escaped HTML. Every leaf
+// (text / code value / link href) is escapeHtml'd here — the parser emits RAW
+// substrings and never HTML, so this is the single escape boundary that keeps a
+// `<script>` payload inert. Link hrefs are already safe-scheme filtered by the
+// parser; we still escape the attribute value.
+function renderMarkdownInlineHtml(nodes: MdInline[]): string {
+  return nodes
+    .map((node) => {
+      switch (node.type) {
+        case 'text':
+          return escapeHtml(node.value);
+        case 'strong':
+          return `<strong>${renderMarkdownInlineHtml(node.children)}</strong>`;
+        case 'em':
+          return `<em>${renderMarkdownInlineHtml(node.children)}</em>`;
+        case 'code':
+          return `<code class="slot-chat-md-icode">${escapeHtml(node.value)}</code>`;
+        case 'link':
+          return `<a class="slot-chat-md-link" href="${escapeHtml(node.href)}" target="_blank" rel="noopener noreferrer">${renderMarkdownInlineHtml(node.children)}</a>`;
+        case 'break':
+          return '<br>';
+        default:
+          return '';
+      }
+    })
+    .join('');
+}
+
+// Render shared-core markdown block tokens to desktop `slot-chat-*` HTML.
+// Paragraphs reuse `.slot-chat-line` so prose looks identical to the pre-
+// markdown renderer; headings/lists/code/hr get dedicated `.slot-chat-md-*`
+// classes styled in renderer/styles.css.
+function renderMarkdownBlocksHtml(blocks: MdBlock[]): string {
+  return blocks
+    .map((block) => {
+      switch (block.type) {
+        case 'heading':
+          return `<div class="slot-chat-md-heading slot-chat-md-h${block.level}">${renderMarkdownInlineHtml(block.children)}</div>`;
+        case 'paragraph':
+          // The reference treats leading milestone words as metadata, while
+          // the rest of the paragraph keeps the normal escaped markdown path.
+          const first = block.children[0];
+          const match = first?.type === 'text' ? /^(GATE|BLOCKER|DONE|REJECT)\s*[—–-]\s*/i.exec(first.value) : null;
+          if (match && first?.type === 'text') {
+            const status = match[1].toUpperCase();
+            const children: MdInline[] = [{ ...first, value: first.value.slice(match[0].length) }, ...block.children.slice(1)];
+            return `<div class="slot-chat-line"><span class="slot-chat-v3-status is-${status.toLowerCase()}">${status}</span>${renderMarkdownInlineHtml(children)}</div>`;
+          }
+          return `<div class="slot-chat-line">${renderMarkdownInlineHtml(block.children)}</div>`;
+        case 'code_block':
+          return `<pre class="slot-chat-md-code"${block.lang ? ` data-lang="${escapeHtml(block.lang)}"` : ''}>${renderCopyButton(block.text, 'Copy code block', 'slot-chat-code-copy')}<code>${escapeHtml(block.text)}</code></pre>`;
+        case 'list': {
+          const tag = block.ordered ? 'ol' : 'ul';
+          const items = block.items
+            .map((item) => `<li>${renderMarkdownInlineHtml(item)}</li>`)
+            .join('');
+          return `<${tag} class="slot-chat-md-list">${items}</${tag}>`;
+        }
+        case 'table': {
+          const alignStyle = (idx: number) => {
+            const align = block.align[idx];
+            return align ? ` style="text-align:${align}"` : '';
+          };
+          const header = block.header
+            .map((cell, idx) => `<th${alignStyle(idx)}>${renderMarkdownInlineHtml(cell)}</th>`)
+            .join('');
+          const rows = block.rows
+            .map((row) => `<tr>${row.map((cell, idx) => `<td${alignStyle(idx)}>${renderMarkdownInlineHtml(cell)}</td>`).join('')}</tr>`)
+            .join('');
+          return `<div class="slot-chat-md-table-wrap"><table class="slot-chat-md-table"><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`;
+        }
+        case 'hr':
+          return '<hr class="slot-chat-md-hr">';
+        default:
+          return '';
+      }
+    })
+    .join('');
+}
+
+// Assistant prose renderer. The chat-specific non-prose lines (suppressed
+// `Working (...)` / `Waiting` noise, the `Messages to be submitted` annotation,
+// `↳`/`→` pending bodies, `------`/`worked for` timing dividers, bare tool
+// labels, and `└├│` tree-char log items) are still handled line-by-line exactly
+// as before. The REMAINING prose lines (incl. their blank separators) are
+// buffered and rendered through the shared markdown parser, so `## Done`,
+// `**bold**`, lists, fenced code, etc. render formatted instead of literally.
+function shouldShowTurnDuration(options: TranscriptRenderOptions = {}): boolean {
+  return options.showTurnDuration === true;
+}
+
+function renderChatBody(text: string, options: TranscriptRenderOptions = {}): string {
+  const raw = String(text || '');
+  if (/[─│┌┐└┘├┤┬┴┼━┃┏┓┗┛┣┫┳┻╋]/.test(raw) && !/^(Explored|Ran|Viewed Image|Edited|Read|Search|Searched|Updated|Monitor|Waited for background terminal)\n/i.test(raw)) return renderCodeBody(raw);
+  const commandMatch = raw.match(/^Ran ([^\n]+)(?:\n|$)/);
+  if (commandMatch) {
+    return `<div class="slot-chat-line">Ran ${escapeHtml(commandMatch[1])}</div>`;
+  }
+  const lines = raw.split('\n');
+  const rendered: string[] = [];
+  let inList = false;
+  let prose: string[] = [];
+
+  const closeList = () => {
+    if (inList) {
+      rendered.push('</div>');
+      inList = false;
+    }
+  };
+  // Flush buffered prose lines through the markdown parser. Leading/trailing
+  // blank lines are trimmed so a single special line between prose runs does
+  // not inject empty paragraphs.
+  const flushProse = () => {
+    if (!prose.length) return;
+    const chunk = prose.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+    prose = [];
+    if (chunk.trim()) rendered.push(renderMarkdownBlocksHtml(parseMarkdown(chunk)));
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      // Blank lines belong to the prose run (the markdown parser uses them to
+      // split paragraphs) unless we are mid tree-char log list.
+      if (inList) {
+        closeList();
+      } else {
+        prose.push('');
+      }
+      continue;
+    }
+    if (/^[•⎿]?\s*Working \([^)]*\).*\/ps to view.*\/stop to close/i.test(trimmed)) continue;
+    if (/^[•⎿]?\s*Waiting for background terminal \([^)]*\).*\/ps to view.*\/stop to close/i.test(trimmed)) continue;
+    if (/^Messages to be submitted after next tool call/i.test(trimmed)) {
+      flushProse();
+      closeList();
+      rendered.push('<div class="slot-chat-annotation is-pending">Queued for next tool call</div>');
+      continue;
+    }
+    if (/^[↳→]\s*/.test(trimmed)) {
+      flushProse();
+      closeList();
+      rendered.push(`<div class="slot-chat-pending-body">${escapeHtml(trimmed.replace(/^[↳→]\s*/, ''))}</div>`);
+      continue;
+    }
+    if (/^[─━═-]{6,}$/.test(trimmed) || /worked for \d+/i.test(trimmed)) {
+      flushProse();
+      closeList();
+      if (!shouldShowTurnDuration(options)) continue;
+      const label = trimmed.replace(/^[─━═-]+\s*/, '').replace(/\s*[─━═-]+$/, '');
+      rendered.push(`<div class="slot-chat-annotation is-timing">${escapeHtml(label)}</div>`);
+      continue;
+    }
+    if (/^(Explored|Ran|Viewed Image|Edited|Read|Search|Searched|Updated|Monitor|Waited for background terminal)$/i.test(trimmed)) {
+      flushProse();
+      closeList();
+      rendered.push(`<div class="slot-chat-annotation is-label">${escapeHtml(trimmed)}</div>`);
+      continue;
+    }
+    if (/^[└├│]/.test(trimmed)) {
+      flushProse();
+      if (!inList) {
+        rendered.push('<div class="slot-chat-loglist">');
+        inList = true;
+      }
+      rendered.push(`<div class="slot-chat-logitem">${escapeHtml(trimmed)}</div>`);
+      continue;
+    }
+    // Prose line — buffer it for markdown rendering. Keep the raw (untrimmed)
+    // line so fenced code-block indentation survives.
+    prose.push(line);
+  }
+
+  flushProse();
+  closeList();
+  return rendered.join('');
+}
+
+// B1 (chat_send_turn_lifecycle_batch2): the status line under an optimistic
+// user bubble. "sending…" while unconfirmed; a failed/cancelled label on
+// terminal non-delivery. Kept tiny + text-only (no fabricated timer per the
+// operator's ask). Confirmed rows pass sendState undefined and render nothing.
+const ACTIONABLE_ASSISTANT_STATES = new Set(['waiting_for_operator', 'waiting_for_dependency', 'uncertain', 'failed', 'cancelled']);
+
+function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string, streamId?: string, allowSendNow = false): string {
+  const label = sendState === 'indeterminate' ? 'Delivery uncertain' : sendState === 'sent' ? 'Sent' : sendState === 'queued'
+    ? 'Queued'
+    : sendState === 'sending'
+      ? 'sending…'
+      : sendState === 'cancelled'
+        ? 'Cancelled'
+        : 'Failed to send';
+  const retry = (sendState === 'failed' || sendState === 'indeterminate') && optimisticId
+    ? `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}">Retry</button>`
+    : '';
+  const sendNow = sendState === 'queued' && allowSendNow && optimisticId && streamId
+    ? `<button type="button" class="slot-chat-send-now" data-stream-id="${escapeHtml(streamId)}" data-optimistic-id="${escapeHtml(optimisticId)}">Send now</button>` : '';
+  return `<div class="slot-chat-send-status is-${sendState}">${label}${retry}${sendNow}</div>`;
+}
+
+type RenderAttachment = ChatAttachment & {
+  uri?: string;
+  localUri?: string;
+  name?: string;
+  filename?: string;
+  size?: number;
+};
+
+function attachmentImageSrc(attachment: RenderAttachment): string {
+  return String(attachment.uri || attachment.localUri || '');
+}
+
+function renderAttachmentHtml(attachment: RenderAttachment, index: number): string {
+  const src = attachmentImageSrc(attachment);
+  const key = String(attachment.key || '');
+  const alt = attachment.name || `Image attachment ${index + 1}`;
+  const mime = String(attachment.mime || '').toLowerCase();
+  const fileTypes = ['application/pdf', 'application/zip', 'model/3mf', 'model/stl', 'model/step', 'application/x-openscad'];
+  const fileSize = Number(attachment.size ?? attachment.bytes);
+  if (fileTypes.includes(mime) && /^[0-9a-f]{64}$/.test(key) && Number.isSafeInteger(fileSize) && fileSize > 0 && fileSize <= 25 * 1024 * 1024) {
+    const name = String(attachment.filename || attachment.name || 'Attachment').split(/[\\/]/).pop()!.replace(/[\u0000-\u001f\u007f]/g, '') || 'Attachment';
+    const size = fileSize;
+    return `<div class="slot-chat-file-attachment"><a class="slot-chat-file-download" data-attachment-key="${escapeHtml(key)}" data-attachment-mime="${escapeHtml(mime)}"${Number.isSafeInteger(size) && size >= 0 ? ` data-attachment-size="${size}"` : ''} download="${escapeHtml(name)}" aria-disabled="true" tabindex="0">${escapeHtml(name)}</a> <span class="slot-chat-file-type">${escapeHtml(mime)}</span><span class="slot-chat-file-status" role="status">Loading file</span></div>`;
+  }
+  if (mime !== 'image/jpeg' && mime !== 'image/png') {
+    return `<span class="slot-chat-media-unsupported" data-attachment-mime="${escapeHtml(mime)}">${escapeHtml(attachment.name || 'Unsupported attachment')} · unavailable preview</span>`;
+  }
+  const width = Number(attachment.width);
+  const height = Number(attachment.height);
+  const ratioStyle = Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+    ? ` style="aspect-ratio:${width}/${height}"`
+    : '';
+  return `<button type="button" class="slot-chat-media-button"${src ? ` data-viewer-src="${escapeHtml(src)}"` : ''}${key ? ` data-attachment-key="${escapeHtml(key)}"` : ''} data-attachment-mime="${escapeHtml(attachment.mime || '')}" aria-label="${escapeHtml(alt)}"${ratioStyle}>
+    <img class="slot-chat-media-img"${src ? ` src="${escapeHtml(src)}"` : ' data-needs-blob="1"'} alt="${escapeHtml(alt)}" loading="lazy">
+    ${!src && key ? '<span class="slot-chat-media-loading">Loading image</span>' : ''}
+  </button>`;
+}
+
+function renderAttachmentsHtml(attachments: RenderAttachment[] | undefined): string {
+  if (!Array.isArray(attachments) || attachments.length === 0) return '';
+  return `<div class="slot-chat-media-grid">${attachments.map(renderAttachmentHtml).join('')}</div>`;
+}
+
+function renderCodeBody(text: string): string {
+  return `<pre class="slot-chat-md-code">${renderCopyButton(text, 'Copy code block', 'slot-chat-code-copy')}<code>${escapeHtml(text)}</code></pre>`;
+}
+
+function renderAnswerBody(text: string): string {
+  const answer = parsePentacleQuestionAnswerText(text);
+  if (!answer) return escapeHtml(text);
+  return answer.items.map(item => `<section class="slot-chat-answer-item"><b>${escapeHtml(item.header)}</b><div>${escapeHtml(item.selectedLabels?.join(', ') || item.text || '')}</div>${item.note ? `<p class="slot-chat-answer-note">${escapeHtml(item.note)}</p>` : ''}</section>`).join('');
+}
+
+function disclosureKey(item: PentacleTranscriptItem, options: TranscriptRenderOptions, block = 'body'): string {
+  return escapeHtml(JSON.stringify([options.streamId || '', item.id, block]));
+}
+
+function renderDisclosure(item: PentacleTranscriptItem, options: TranscriptRenderOptions, label: string, expandedLabel: string): string {
+  const disclosure = item.disclosure;
+  const preview = disclosure?.previewText || item.text;
+  const body = disclosure?.expandedText ?? item.text;
+  const heading = `<span class="slot-chat-disclosure-label">${escapeHtml(label)}</span><span class="slot-chat-disclosure-preview">${escapeHtml(preview)}</span>${disclosure?.previewTail ? `<span class="slot-chat-disclosure-tail">${escapeHtml(disclosure.previewTail)}</span>` : ''}`;
+  return disclosure?.expandable
+    ? `<details class="slot-chat-disclosure" data-disclosure-key="${disclosureKey(item, options)}"><summary aria-label="${escapeHtml(expandedLabel)}">${heading}</summary>${renderCodeBody(body)}</details>`
+    : `<div class="slot-chat-disclosure">${heading}${renderCopyButton(body, 'Copy message', 'slot-chat-message-copy')}</div>`;
+}
+
+// Keys survive same-stream HTML refreshes; a different stream has a separate namespace.
+export function replaceTranscriptHtml(container: HTMLElement, html: string): void {
+  const open = new Set([...container.querySelectorAll<HTMLDetailsElement>('details[open][data-disclosure-key]')].map(el => el.dataset.disclosureKey));
+  container.innerHTML = html;
+  for (const el of container.querySelectorAll<HTMLDetailsElement>('details[data-disclosure-key]')) {
+    el.open = open.has(el.dataset.disclosureKey);
+  }
+}
+
+const LANE_UPDATE_KIND_LABEL: Record<string, string> = {
+  lane_started: 'Lane started',
+  lane_completed: 'Completed',
+  lane_blocked: 'Blocked',
+  lane_unblocked: 'Unblocked',
+  major_decision: 'Decision',
+  milestone: 'Milestone',
+};
+
+// Typed lane-update card (spec_pentacle__first_class_work_lanes_2026_10 D6/D8). The daemon
+// publishes it into the primary assistant's timeline; `summary` is also the event text, so clients that
+// do not branch on publish_kind 'lane_update' still show the prose.
+function renderLaneUpdateCard(update: NonNullable<PentacleTranscriptItem['laneUpdate']>): string {
+  const label = LANE_UPDATE_KIND_LABEL[update.kind] || update.kind;
+  const title = update.title ? `<span class="lane-update-title">${escapeHtml(update.title)}</span>` : '';
+  return `<article class="slot-chat-row slot-chat-lane-update is-${escapeHtml(update.kind)}" aria-label="${escapeHtml(`Lane update: ${label}`)}" data-copy-kind="message" data-lane-id="${escapeHtml(update.lane_id)}" data-update-id="${escapeHtml(update.update_id)}" data-update-kind="${escapeHtml(update.kind)}">
+    <div class="lane-update-card">
+      <div class="lane-update-head"><span class="lane-update-kind">${escapeHtml(label)}</span>${title}</div>
+      <p class="lane-update-summary">${escapeHtml(update.summary)}</p>
+    </div>
+  </article>`;
+}
+
+// Render ONE transcript item to an HTML string, mapping displayRule -> desktop
+// DOM. Returns '' for items that must not produce a row (hidden:*, draft:*).
+function renderTranscriptItemBodyHtml(
+  item: PentacleTranscriptItem,
+  chrome: ViewChrome = DEFAULT_CHROME,
+  options: TranscriptRenderOptions = {},
+): string {
+  if (!item) return '';
+  const rule = String(item.displayRule || '');
+
+  // hidden:* / draft:composer never render. The shared selector already drops
+  // hidden rows before they reach transcriptItems, but guard defensively so a
+  // future selector change can't leak a row through this path.
+  if (rule.startsWith('hidden:') || rule === 'draft:composer') return '';
+
+  if (item.isUser || rule === 'bubble:user') {
+    // B1 (chat_send_turn_lifecycle_batch2): an optimistic (client-origin) row
+    // carries a sendState — show a "sending…" affordance while unconfirmed and
+    // a failed/cancelled affordance on terminal non-delivery, instead of an
+    // immediate "sent" bubble. A confirmed row (sendState undefined) renders as
+    // an ordinary bubble, exactly as before.
+    const sendState = item.sendState;
+    const rowClass = sendState ? ` is-${sendState}` : '';
+    const receipt = sendState === 'cancelled' || sendState === 'failed' || sendState === 'indeterminate'
+      ? sendState : item.providerQueued ? 'queued' : item.receiptCaption || (sendState === 'queued' ? 'sending' : sendState);
+    const invalidVoiceAnswers = item.voiceAnswersInvalid === true && sendState === 'failed';
+    const droppedVoiceAnswers = item.voiceAnswersStatus?.state === 'dropped';
+    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId, options.streamId, item.providerQueued === true && options.allowQueuedSendNow === true) : '';
+    const plainVoice = invalidVoiceAnswers && item.optimisticId
+      ? `<button type="button" data-question-voice-plain data-optimistic-id="${escapeHtml(item.optimisticId)}">Send as plain voice note</button>` : '';
+    const voiceAnswersStatus = invalidVoiceAnswers || droppedVoiceAnswers
+      ? `<div class="slot-chat-send-status${invalidVoiceAnswers ? ' is-failed' : ''}"><span data-voice-answers-status role="status">Couldn't attach questions</span>${plainVoice}</div>` : '';
+    const count = item.voiceAnswersItemCount;
+    const voiceAnswersCount = !item.text.trim() && !droppedVoiceAnswers && item.voiceAnswersInvalid !== true && typeof count === 'number' && Number.isSafeInteger(count) && count > 0
+      ? `<div class="slot-chat-user-bubble" data-voice-answers-count role="status">ANSWERS ${count} QUESTIONS</div>` : '';
+    // Progress and latency are shown by the slot working indicator; only a
+    // pending operator action or a delivery failure is labelled per message.
+    const activity = item.assistantActivity;
+    const activityLabel = activity && ACTIONABLE_ASSISTANT_STATES.has(activity.response_state) ? formatAssistantActivity(activity) : '';
+    const activityStatus = activityLabel ? `<div class="slot-chat-assistant-activity" role="status">${escapeHtml(activityLabel)}</div>` : '';
+
+    const attachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
+    const voice = validVoiceMetadata((item as PentacleTranscriptItem & { voice?: unknown }).voice);
+    const seconds = voice ? Math.floor(voice.duration_s) : 0;
+    const duration = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+    const voiceCaption = voice && item.text.trim() ? `<div class="slot-chat-voice-caption" aria-label="Transcribed from voice, ${duration}"><svg class="voice-mic-glyph" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>${duration}</span></div>` : '';
+    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : voiceAnswersCount}${voiceCaption}${status}${voiceAnswersStatus}${activityStatus}</article>`;
+  }
+  if (rule === 'terminal:divider' || rule === 'activity:turn-summary') {
+    if (!shouldShowTurnDuration(options)) return '';
+    return `<div class="slot-chat-terminal-divider${rule === 'activity:turn-summary' ? ' slot-chat-activity' : ''}" role="separator"><span></span><b>${escapeHtml(item.text)}</b><span></span></div>`;
+  }
+  if (rule === 'system:compacted') {
+    return `<article class="slot-chat-compacted" aria-label="Compacted transcript"><span>↘</span>${escapeHtml(item.text)}</article>`;
+  }
+  if (item.laneUpdate) return renderLaneUpdateCard(item.laneUpdate);
+  if (rule === 'bubble:agent' || item.tone === 'agent') {
+    return `<article class="slot-chat-row is-agent" aria-label="${escapeHtml(`Subagent${item.label ? ` · ${item.label}` : ''}`)}">${renderDisclosure(item, options, `Subagent${item.label ? ` · ${item.label}` : ''}`, `Show full ${item.label || 'subagent'} output`)}</article>`;
+  }
+  if (item.tone === 'tool' && item.disclosure?.mode === 'collapsed-preview') {
+    return `<article class="slot-chat-row is-tool" aria-label="Tool result">${renderDisclosure(item, options, 'Tool result', 'Show full tool result')}</article>`;
+  }
+  if (rule === 'activity:code-block') return `<article class="slot-chat-row" aria-label="Code block">${renderCodeBody(item.text)}</article>`;
+  if (rule === 'activity:tool-batch') return `<article class="slot-chat-row" aria-label="Tool activity"><div class="slot-chat-activity"><span class="slot-chat-activity-dot"></span><span>${escapeHtml(item.text)}</span></div></article>`;
+  if (rule.startsWith('activity:')) {
+    const activity = splitActivityText(item.text);
+    return `<article class="slot-chat-row" aria-label="${escapeHtml(activity.title)}"><div class="slot-chat-activity" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};">
+      <span class="slot-chat-activity-dot"></span>
+      <div class="slot-chat-activity-body">
+        <b>${escapeHtml(activity.title)}</b>
+        ${activity.detail ? `<p>${escapeHtml(activity.detail)}</p>` : ''}
+      </div>
+    </div></article>`;
+  }
+  // bubble:assistant (and any unmapped fallback) -> assistant card.
+  // An agent-authored image (the send_image path) rides as an assistant event
+  // carrying attachments: render the same media button+img the operator's own
+  // user-attachment bubble uses (line ~468) so the shared image viewer opens
+  // identically from either side.
+  const assistantAttachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
+  const blocks = parseAssistantBlocks(item.text);
+  return `<article class="slot-chat-row" data-copy-kind="message"><div class="slot-chat-assistant-card">
+    ${blocks.map((block, index) => {
+      if (block.type === 'edit') {
+        return `<article class="slot-chat-file-card" aria-label="File ${escapeHtml(block.action)} ${escapeHtml(block.title)}" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};"><b>${escapeHtml(block.action)} ${escapeHtml(block.title)}</b>${block.meta ? `<p>${escapeHtml(block.meta)}</p>` : ''}${block.body ? `<details class="slot-chat-file-body" data-disclosure-key="${disclosureKey(item, options, String(index))}"><summary aria-label="Show file body"><span>File details</span><pre>${escapeHtml(block.body.split('\n').slice(0, 6).join('\n'))}</pre></summary>${renderCodeBody(block.body)}</details>` : ''}</article>`;
+      }
+      if (block.type === 'command') {
+        return `<div class="slot-chat-command-card" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};"><b>${escapeHtml(block.command)}</b>${block.output ? `<pre>${escapeHtml(block.output)}</pre>` : ''}</div>`;
+      }
+      return renderChatBody(block.text, options);
+    }).join('')}${assistantAttachments}
+  </div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}</article>`;
+}
+
+export function renderTranscriptItemHtml(
+  item: PentacleTranscriptItem,
+  chrome: ViewChrome = DEFAULT_CHROME,
+  options: TranscriptRenderOptions = {},
+): string {
+  let html = renderTranscriptItemBodyHtml(item, chrome, options);
+  if (!item || !html) return '';
+  // Assistant messages carry no Reply control: the assistant infers
+  // conversational references, and pending questions keep their own cards.
+  if (options.allowReplies && item.messageId && !item.pending && item.displayRule === 'bubble:user') {
+    const reply = `<button type="button" class="slot-chat-reply-btn" data-reply-message-id="${escapeHtml(item.messageId)}"${item.replyToQuestionId ? ` data-reply-question-id="${escapeHtml(item.replyToQuestionId)}"` : ''} aria-label="Reply to message">Reply</button>`;
+    html = html.replace(/<\/article>$/, `${reply}</article>`);
+  }
+  return html.replace(/^(<(?:article|div)\b[^>]*)(>)/, (_match, open, close) => `${open} data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}"${item.timestamp ? ` title="${escapeHtml(item.timestamp)}"` : ''}${close}`);
+}
+
+function isAnswer(item: PentacleTranscriptItem): boolean {
+  return item.eventCase === 'agent-question-answer' || /^Operator answered:/i.test(item.text || '');
+}
+
+function isSubagent(item: PentacleTranscriptItem): boolean {
+  return item.displayRule === 'bubble:agent' || item.tone === 'agent';
+}
+
+function statusFromText(text: string): string {
+  return /^(GATE|BLOCKER|DONE|REJECT)\s*[—–:-]/i.exec(text.trim())?.[1]?.toUpperCase() || '';
+}
+
+function exactTime(item: PentacleTranscriptItem): string {
+  const time = Date.parse(item.timestamp || '');
+  return Number.isFinite(time) ? new Date(time).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : (item.timestampLabel || '');
+}
+
+function renderSubagent(item: PentacleTranscriptItem, options: TranscriptRenderOptions): string {
+  const status = statusFromText(item.text || '');
+  const firstLine = (item.disclosure?.previewText || item.text || '').split('\n')[0].trim();
+  const id = /v2-[a-z0-9]+/i.exec(item.label || item.text || '')?.[0] || item.label || 'Subagent';
+  const key = escapeHtml(JSON.stringify([options.streamId || '', item.id, 'subagent']));
+  return `<details class="slot-chat-v3-subagent" data-disclosure-key="${key}" data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}">
+    <summary title="${escapeHtml(item.timestamp || '')}" aria-label="Show full subagent update ${escapeHtml(id)}">
+      <span class="slot-chat-v3-dot is-${escapeHtml(status.toLowerCase() || 'neutral')}"></span>
+      <span class="slot-chat-v3-agent-id">${escapeHtml(id)}</span>
+      ${status ? `<span class="slot-chat-v3-agent-status is-${status.toLowerCase()}">${status}</span>` : ''}
+      <span class="slot-chat-v3-agent-summary">${escapeHtml(firstLine)}</span>
+      <time>${escapeHtml(exactTime(item))}</time><span class="slot-chat-v3-chevron" aria-hidden="true">›</span>
+    </summary><div class="slot-chat-v3-subagent-body"><pre>${escapeHtml(item.disclosure?.expandedText ?? item.text)}</pre>${renderCopyButton(item.disclosure?.expandedText ?? item.text, 'Copy message', 'slot-chat-message-copy')}</div>
+  </details>`;
+}
+
+function renderSubagents(items: PentacleTranscriptItem[], options: TranscriptRenderOptions): string {
+  if (items.length === 1) return renderSubagent(items[0], options);
+  const blockers = items.filter(item => statusFromText(item.text || '') === 'BLOCKER').length;
+  const last = items[items.length - 1];
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, last.id, 'subagent-group']));
+  return `<details class="slot-chat-v3-subagent-group" data-disclosure-key="${key}" data-transcript-key="${key}">
+    <summary title="${escapeHtml(last.timestamp || '')}" aria-label="Show ${items.length} subagent updates">
+      <span class="slot-chat-v3-group-dots" aria-hidden="true">${items.slice(0, 3).map(item => `<i class="slot-chat-v3-dot is-${escapeHtml(statusFromText(item.text || '').toLowerCase() || 'neutral')}"></i>`).join('')}</span>
+      <span>${items.length} subagent updates</span>${blockers ? `<span class="slot-chat-v3-blocker-count">${blockers} blocker${blockers === 1 ? '' : 's'}</span>` : ''}
+      <time>${escapeHtml(exactTime(last))}</time><span class="slot-chat-v3-chevron" aria-hidden="true">›</span>
+    </summary><div class="slot-chat-v3-subagent-group-body">${items.map(item => renderSubagent(item, options)).join('')}</div>
+  </details>`;
+}
+
+function renderAnswers(items: PentacleTranscriptItem[], options: TranscriptRenderOptions): string {
+  const answers = items.flatMap(item => {
+    const raw = item.text || '';
+    if (item.notificationAnswerText !== undefined) {
+      return [{ item, answer: item.notificationAnswerText, note: '', header: '' }];
+    }
+    const structured = parsePentacleQuestionAnswerText(raw);
+    if (structured?.items?.length) return structured.items.map(part => ({
+      item, answer: part.selectedLabels?.join(', ') || part.text || part.header,
+      note: part.note || '', header: part.header,
+    }));
+    const [head, ...tail] = raw.split('\n');
+    return [{ item, answer: head.replace(/^Operator answered:\s*/i, '').trim() || head.trim(), note: tail.join('\n').replace(/^\s*Note:\s*/i, '').trim(), header: '' }];
+  });
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, items[items.length - 1].id, 'answers']));
+  return `<details class="slot-chat-v3-answers" data-disclosure-key="${key}" data-transcript-key="${key}">
+    <summary title="${escapeHtml(items[items.length - 1].timestamp || '')}" aria-label="Show ${answers.length} answered question${answers.length === 1 ? '' : 's'}">
+      <span class="slot-chat-v3-answer-check" aria-hidden="true">✓</span><span>You answered ${answers.length} question${answers.length === 1 ? '' : 's'}</span>
+      <span class="slot-chat-v3-chevron" aria-hidden="true">›</span>
+    </summary><div class="slot-chat-v3-answer-body">${answers.map(({ item, answer, note, header }) => `<div class="slot-chat-v3-answer-entry" title="${escapeHtml(item.timestamp || '')}" data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}">${header ? `<b>${escapeHtml(header)}</b>` : ''}<div${item.notificationAnswerText !== undefined ? ' class="slot-chat-v3-answer-text"' : ''}>${escapeHtml(answer)}</div>${note ? `<p>${escapeHtml(note)}</p>` : ''}${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}</div>`).join('')}</div>
+  </details>`;
+}
+
+// Build the full transcript timeline HTML for a session detail, mirroring
+// chat_ui_state.js#renderTranscriptTimeline (per-minute timestamp dividers for
+// non-user rows).
+export function renderTranscriptTimelineHtml(
+  detail: PentacleSessionDetail | null | undefined,
+  chrome: ViewChrome = DEFAULT_CHROME,
+  options: TranscriptRenderOptions = {},
+): string {
+  options = { ...options, streamId: detail?.streamId || options.streamId,
+    allowQueuedSendNow: detail?.sessionKind !== 'assistant_composite' && options.allowQueuedSendNow !== false };
+  const items = withResolvedQuestionAnswers(detail?.transcriptItems || [], options.resolvedQuestions);
+  if (!items.length) return '';
+  const output: string[] = [];
+  const assistantTurn: string[] = [];
+  const flushTurn = () => {
+    if (assistantTurn.length) output.push(`<div class="slot-chat-v3-turn">${assistantTurn.splice(0).join('')}</div>`);
+  };
+  let lastTime = Number.NaN;
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    const time = Date.parse(item.timestamp || '');
+    if (Number.isFinite(time) && Number.isFinite(lastTime) && time - lastTime >= 5 * 60 * 1000) {
+      flushTurn();
+      output.push(`<div class="slot-chat-timestamp" role="separator" title="${escapeHtml(item.timestamp)}">${escapeHtml(exactTime(item))}</div>`);
+    }
+    if (isAnswer(item)) {
+      flushTurn();
+      const group = [item];
+      while (index + 1 < items.length && isAnswer(items[index + 1])) group.push(items[++index]);
+      output.push(renderAnswers(group, options));
+      lastTime = Date.parse(group[group.length - 1].timestamp || '');
+      continue;
+    }
+    if (item.isUser) {
+      flushTurn();
+      output.push(renderTranscriptItemHtml(item, chrome, options));
+    } else if (isSubagent(item)) {
+      const group = [item];
+      while (index + 1 < items.length && isSubagent(items[index + 1])) group.push(items[++index]);
+      assistantTurn.push(renderSubagents(group, options));
+      lastTime = Date.parse(group[group.length - 1].timestamp || '');
+      continue;
+    } else {
+      const html = renderTranscriptItemHtml(item, chrome, options);
+      if (html) assistantTurn.push(html);
+    }
+    if (Number.isFinite(time)) lastTime = time;
+  }
+  flushTurn();
+  return output.join('');
+}
+
+type StoreLike = {
+  selectSessionDetail: (
+    streamId: string,
+    options?: { visibleCount?: number | 'all'; includeDraft?: boolean; [k: string]: unknown },
+  ) => PentacleSessionDetail | null;
+};
+
+export type RenderStreamTranscriptOptions = {
+  chrome?: ViewChrome;
+  visibleCount?: number | 'all';
+  includeDraft?: boolean;
+  showTurnDuration?: boolean;
+  /** Override the store (tests inject a controller); defaults to the global. */
+  store?: StoreLike;
+  /**
+   * Optional empty-state HTML used when the stream has no transcript rows. When
+   * omitted, the container is simply cleared (app.js owns the surrounding hero +
+   * empty-state chrome for the live path).
+   */
+  emptyHtml?: string;
+};
+
+function resolveStore(explicit?: StoreLike): StoreLike | null {
+  if (explicit) return explicit;
+  const g = (typeof window !== 'undefined' ? (window as unknown as { PentacleChatStore?: StoreLike }) : undefined);
+  return g?.PentacleChatStore ?? null;
+}
+
+// Render a stream's transcript into `container`, reading the detail from the
+// shared store. Returns the rendered `PentacleSessionDetail` (or null when the
+// stream is unknown). app.js can use the return to decide hero/empty chrome.
+export function renderStreamTranscript(
+  streamId: string,
+  container: HTMLElement | null | undefined,
+  options: RenderStreamTranscriptOptions = {},
+): PentacleSessionDetail | null {
+  if (!container) return null;
+  const store = resolveStore(options.store);
+  if (!store) {
+    if (options.emptyHtml !== undefined) container.innerHTML = options.emptyHtml;
+    return null;
+  }
+  const detail = store.selectSessionDetail(streamId, {
+    visibleCount: options.visibleCount ?? 120,
+    includeDraft: options.includeDraft ?? false,
+  });
+  const chrome = options.chrome || DEFAULT_CHROME;
+  const html = renderTranscriptTimelineHtml(detail, chrome, { showTurnDuration: options.showTurnDuration });
+  if (html) {
+    replaceTranscriptHtml(container, html);
+  } else if (options.emptyHtml !== undefined) {
+    container.innerHTML = options.emptyHtml;
+  } else {
+    container.innerHTML = '';
+  }
+  return detail;
+}
+
+// ── Per-slot mount/unmount + version-gated subscription ─────────────
+//
+// A mount binds a `container` to a `streamId` and re-renders ONLY when THAT
+// stream's `eventContentVersionByStream[streamId]` changes (so an unrelated
+// stream's frame never re-renders this slot). The mount subscribes to the
+// store; unmount unsubscribes. app.js drives `setStream`/`render` from its
+// existing per-slot lifecycle.
+
+type SubscribableStore = StoreLike & {
+  subscribe: (listener: (state: unknown) => void) => () => void;
+  getState: () => {
+    eventContentVersionByStream?: Record<string, number>;
+    // B1 (chat_send_turn_lifecycle_batch2): optimistic-send status transitions
+    // (queued→dispatched→acked / failed / cancelled) mutate optimisticSends but
+    // do NOT bump eventContentVersionByStream, so the re-render gate must also
+    // factor in this stream's optimistic-send signature or a sendState change
+    // would never repaint the mount.
+    optimisticSends?: Record<string, { stream_id?: string; status?: string; turn_queued?: boolean }>;
+  };
+};
+
+export type SlotMount = {
+  setStream: (streamId: string | null, chrome?: ViewChrome) => void;
+  render: () => PentacleSessionDetail | null;
+  unmount: () => void;
+};
+
+function resolveSubscribableStore(explicit?: SubscribableStore): SubscribableStore | null {
+  if (explicit) return explicit;
+  const g = (typeof window !== 'undefined' ? (window as unknown as { PentacleChatStore?: SubscribableStore }) : undefined);
+  return g?.PentacleChatStore ?? null;
+}
+
+// The per-stream re-render gate key: the event content-version PLUS a signature
+// of this stream's optimistic-send statuses. A status-only transition (no new
+// event) changes the signature so the mount repaints the row's sendState; an
+// unrelated stream's frame never changes this stream's key.
+function gateKeyForStream(store: SubscribableStore | null, streamId: string | null): string {
+  if (!store || !streamId) return '∅';
+  const state = store.getState();
+  const version = state.eventContentVersionByStream?.[streamId] ?? 0;
+  const sends = state.optimisticSends ?? {};
+  const sig = Object.keys(sends)
+    .filter((id) => sends[id]?.stream_id === streamId)
+    .sort()
+    // Include turn_queued: activateQueuedSend flips it true→false while leaving
+    // status 'queued' (no content-version bump), so without it a queued→sending
+    // transition would not repaint until the later dispatched status change.
+    // provider_queued can land via the send bridge with no status change.
+    .map((id) => `${id}:${sends[id]?.status ?? ''}:${sends[id]?.turn_queued ? 'q' : ''}${sends[id]?.provider_queued ? 'p' : ''}`)
+    .join(',');
+  return `${version}|${sig}`;
+}
+
+export function mountSlotTranscript(
+  container: HTMLElement,
+  initialStreamId: string | null = null,
+  options: { chrome?: ViewChrome; store?: SubscribableStore; visibleCount?: number | 'all'; includeDraft?: boolean; emptyHtml?: string; showTurnDuration?: boolean } = {},
+): SlotMount {
+  const store = resolveSubscribableStore(options.store);
+  let streamId = initialStreamId;
+  let chrome = options.chrome || DEFAULT_CHROME;
+  let lastGate = '';
+
+  const doRender = (): PentacleSessionDetail | null => {
+    if (!streamId) {
+      if (options.emptyHtml !== undefined) container.innerHTML = options.emptyHtml;
+      else container.innerHTML = '';
+      lastGate = '';
+      return null;
+    }
+    lastGate = gateKeyForStream(store, streamId);
+    return renderStreamTranscript(streamId, container, {
+      chrome,
+      store: store || undefined,
+      visibleCount: options.visibleCount,
+      includeDraft: options.includeDraft,
+      emptyHtml: options.emptyHtml,
+      showTurnDuration: options.showTurnDuration,
+    });
+  };
+
+  const onState = () => {
+    if (!streamId) return;
+    const gate = gateKeyForStream(store, streamId);
+    // Re-render ONLY when THIS stream's content version advanced OR one of its
+    // optimistic sends changed status. Frames for other streams change neither
+    // key, so unaffected slots do not re-render.
+    if (gate === lastGate) return;
+    doRender();
+  };
+
+  const unsubscribe = store ? store.subscribe(onState) : () => {};
+
+  // Initial paint.
+  doRender();
+
+  return {
+    setStream(nextStreamId, nextChrome) {
+      streamId = nextStreamId;
+      if (nextChrome) chrome = nextChrome;
+      lastGate = ''; // force a render on stream switch
+      doRender();
+    },
+    render() {
+      // Forced render (e.g. chrome changed, view toggled on) regardless of
+      // the gate. Resets the gate watermark to current.
+      lastGate = gateKeyForStream(store, streamId);
+      return renderStreamTranscript(streamId || '', container, {
+        chrome,
+        store: store || undefined,
+        visibleCount: options.visibleCount,
+        includeDraft: options.includeDraft,
+        emptyHtml: options.emptyHtml,
+        showTurnDuration: options.showTurnDuration,
+      });
+    },
+    unmount() {
+      unsubscribe();
+    },
+  };
+}

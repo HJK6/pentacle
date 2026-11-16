@@ -1,0 +1,4 @@
+42420 1 python synthetic-owner
+42421 42420 python synthetic-daemon --disable-hosts
+42422 42421 python synthetic-stub-cli
+52520 1 python unrelated-synthetic-process

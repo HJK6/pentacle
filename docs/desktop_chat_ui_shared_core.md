@@ -1,0 +1,164 @@
+# Pentacle Web chat UI shared core
+
+The browser chat surface is organized around a small shared state contract. The renderer owns DOM presentation and host integration; a pure store owns normalized session state, transcript rows, optimistic sends, and reconnect reconciliation.
+
+## Boundaries
+
+| Layer | Public responsibility |
+|---|---|
+| transport adapter | opens the websocket and forwards typed frames |
+| store controller | applies snapshots/events and exposes selectors |
+| view helpers | derive display rows, status labels, and question payloads |
+| renderer | mounts HTML, handles user input, and emits accessibility state |
+| host adapter | supplies configuration, theme, and the WebSocket RPC bridge |
+
+`renderer/web_cc.js` supplies `window.cc` over the same-origin `/cc`
+WebSocket. The Node web host uses `main/cc_handlers.js` and a shared daemon
+connection; the browser does not read the host credential file.
+
+The store must not read the DOM or a private filesystem. The renderer must not reach into the daemon's database. This separation makes reducer tests deterministic and lets a fixture transport drive the same UI as a real websocket.
+
+## State model
+
+The public state contains:
+
+- session summaries keyed by stream id;
+- transcript rows in oldest-to-newest order;
+- working and connection status;
+- question payloads and draft answers;
+- optimistic sends keyed by stable optimistic id and request id; and
+- bounded diagnostics suitable for local tests.
+
+Runtime text is treated as untrusted input. HTML helpers escape text, links accept only `http` or `https`, and attachments carry metadata rather than file contents.
+
+## Send lifecycle
+
+An optimistic send starts as `queued`, becomes `dispatched` after the transport accepts it, and ends as `acked`, `echoed`, or `failed`. A reconnect may replay only explicitly retry-safe survivors with the original request id. A brief normal daemon restart can recover an eligible send under its original IDs after authenticated readiness; unresolved ambiguous sends remain visible for explicit recovery. An explicit retry creates a new request id.
+
+## Composer modes on agent chats
+
+The composer sends normally with Enter, Alt+Enter or Send, including while the agent works. The provider owns any native queue; there is no Queue/Steer chooser. Shift+Enter inserts a newline. Stop stays beside Send while a non-composite agent works, even with a draft.
+
+Rows show sending until receipt proof arrives. A genuine `provider_queued` receipt shows Queued; a local working hint does not establish native queueing. Qualified queued rows offer Send now through a separate receipt/generation-bound bridge. Pending actions coalesce; a native echo arriving before the callback prevents dispatch. The queued action never sends a replacement original or clears the web draft. Normal receipt/native proof controls Sent, independently of control acknowledgement or model completion.
+
+The daemon selects the pinned native Claude shortcut or exact-turn Codex interruption/ordinary-continue route described in [chat protocol](chat_protocol.md#session-interrupt). Nonempty/unproven native drafts, unqualified versions and unbound legacy queues fail closed. No persistent unavailable label/reason is rendered. Explicit Stop keeps its generation fence and cancels pending continuation; agent urgency and new-message operator urgency stripping remain unchanged. Composite chats have no queued acceleration or Stop. Old operator tabs require the deployment's authorized refresh/closure disposition.
+
+## Transcript rendering
+
+The view receives a bounded window of rows and renders content-bearing DOM elements. A paint proof should assert the row kind and a bounded text prefix, not merely that a transport event arrived. Question controls are generated from the parsed payload, use accessible labels, and submit one deterministic answer object.
+
+Reply buttons are an opt-in transcript affordance. The renderer suppresses them for assistant composites identified by daemon metadata while preserving opted-in behavior on other streams; this presentation rule does not change reply correlation or send semantics.
+
+The latest user row derives a receipt caption from its correlated durable echo (see the send-receipt design note): a committed-but-unconfirmed receipt reads Sent once the echo has bound, never sticking at Sending. An attachment send's server echo is the daemon's agent-facing wrapper text (`Look at the image file at <path>, then respond…`), not the operator caption; the reducer correlates that wrapper to the optimistic row by its embedded attachment keys and keeps the operator caption as the rendered text across the live, snapshot, and duplicate-replay reconcile paths, so one caption bubble renders rather than a second wrapper row.
+
+Operator USER rows with client origin, an optimistic id, or structured provenance stay visible even when their text matches a Codex starter suggestion. Only legacy rows without that provenance use the starter-suggestion filter, consistently across live events, history, snapshots, rendering and diagnostics. Helper-shaped USER summaries can update the sidebar preview; transient noise remains suppressed.
+
+### Lazy history recovery
+
+A chat slot fetches recent history on demand. A failed fetch or a completed fetch that leaves no transcript rows retries after 1, 2, 4, 8 and 16 seconds while the slot remains on that stream and the host is connected. Switching streams, leaving chat, disconnecting or a successful load with rows cancels stale work; reconnect loads the active slots again. Retry starts a new budget.
+
+The slot shows “Loading messages…” while retries remain. After the budget, a successful empty fetch shows “No messages yet.” and a failed fetch shows “Messages could not be loaded.”; both offer Retry. This status remains visible above durable answered-question groups until ordinary transcript rows arrive. Diagnostic console records use subsystem `chat_history` and the transcript-collapse bug reference.
+
+## Status and navigation
+
+The sidebar orders rows by open question, working state, recent activity, and stable stream id. Status cards render only fields supplied by the daemon. Missing optional fields produce no placeholder claims. The status view exposes a return path to the transcript and a separate update-history region.
+
+## Public adapter contract
+
+The shared core may be supplied by a package or by a small reviewed adapter. The browser entrypoint should depend only on the published reducer, selector, and question-formatting interfaces. A fixture adapter may implement the same functions with synthetic sessions so the renderer can be developed without a private submodule or remote service.
+
+## Shared transcript rendering
+
+Pentacle Web uses `renderer/src/shared_transcript_view.ts`. Tool output and subagent
+messages honor the core disclosure preview and expose the full escaped body
+through keyboard-accessible expansion. Expansion follows the stream and row
+identity across refreshes. File actions retain their body, and code activity and
+box diagrams preserve whitespace. The shared outer parser's blank-paragraph
+split inside fenced code remains a known limitation in both clients.
+
+Images precede captions; image-only messages have no empty bubble or text-copy
+button. History fetches and snapshots retain user attachments even when their
+caption is empty. Recognized Option-B answer text displays question labels, answers and
+notes while copying the original message. Hidden events and composer drafts
+remain outside the transcript.
+
+Delivery captions consume the core receipt; failure and cancellation override a
+stale caption. The renderer never infers Sent from elapsed time or an RPC result.
+Normal assistant text uses Rajdhani at 14.5px/22px and user text uses JetBrains
+Mono at 13px/20px. Compact density remains available at 12px/18px.
+
+## Question completion and recovery
+
+The question overlay lists pane children in their original order followed by
+open durable notifications in creation/id order. Each page retains its draft by
+source identity. Selection bounds apply, custom text replaces selected options
+and their note. The primary action sends complete durable pages immediately and
+keeps incomplete drafts open. Labels are Send answer (one page), Send k of n
+(partial), and Send all answers (all complete). Pane children remain one atomic
+group: none are sent until every pane child is complete.
+Cancel and Escape close the overlay locally. Composer text cannot bypass a
+multi-page or mixed-source group.
+
+A durable unlocked page also offers Skip. It resolves through the ordinary
+answer bridge with `QUESTION_SKIP_TEXT` (`Skipped by operator`), exported from
+chat-core questionAnswerFormat. This reserved text means the operator declined
+the question. It is stored as an answered prompt and reaches the asker through
+the normal answer tell and await path; it is never a cancellation. Errors retain
+the page and use the existing reconciliation and inline warning.
+
+A complete pane group produces one `question.dismiss` call containing all child
+answers. Each durable notification uses the existing `notification.resolve`
+bridge. Successful identities remain locked during partial failures. If a
+resolution reply is lost, Check answer status reconciles `prompt.list` before
+resubmission; reconnect also retries that reconciliation. Existing stale-pane
+and text-send-failure recovery retains the serialized answer in the composer.
+
+Pentacle Web supports the public v2 single question per durable notification and
+multiple simultaneous notifications. Nested durable child-question protocols
+are not assumed. Unsupported entries cannot silently settle a parent.
+
+Resolved durable answers hydrate through `prompt.list` with `open:false`, so an
+answer is visible even without a transcript echo. The view inserts it by immutable
+resolution time, and a core answer row with the same notification identity takes
+precedence. Consumption timestamps do not move old answers later in the chat.
+
+The P6 voice-answer port adds only `voice_answers` and `voice_answers_status`
+wire types, USER-row status projection, and `voiceAnswersItemCount` from the
+pinned mobile shared core. Optimistic rows carry that metadata through the
+existing send/echo lifecycle; a host-refused binding keeps a failed row until
+explicit conversion to a plain voice note. Coverage never closes a question:
+only daemon acknowledgements update cards and counts. See
+[Web voice answers](web_voice_answers.md) for selection, refusal, capture and
+validation boundaries; no unrelated mobile core changes are included.
+
+The existing protocol stores/reports a choice Skip as `custom_text` and a
+free-text Skip as `text`. Both carry the same reserved value. Mobile's canonical
+`prompt.answer` always sends `text`; the daemon maps choice text to the existing
+`custom_text` storage path. Web's existing notification resolver sends that
+choice alias directly. Asking agents recognize either field.
+
+## Recovery during a daemon restart
+
+A normal daemon shutdown (WebSocket code 1001) keeps the current conversation
+view available for up to five seconds while the host reconnects. A send during
+that interval remains recoverable under its original request and optimistic
+message IDs. Reconnect replay waits for the authenticated connection to be
+ready, so an accepted send can recover its durable receipt without a second
+native submission. Opening a socket alone does not trigger replay.
+Authenticated recovery also refetches already-open chats, including messages
+persisted while the daemon connection was unavailable.
+
+The five-second deadline is not renewed by failed reconnect attempts. A longer
+outage shows the existing disconnected state; authentication refusals and
+other socket failures surface immediately. This recovery does not create a
+new send attempt or change the daemon's receipt and idempotency protocol.
+
+A restart's first summary can report `working: false` with
+`capture_liveness: transport_unknown` before observing a live pane. For the
+same generation, this unobserved summary preserves an already-established
+active turn and its sidebar status. A checked idle capture, terminal event,
+removed stream or new generation releases the old active phase. The daemon's
+existing bounded working capture primes each never-observed live generation
+once after boot, even without a new transcript event. Idle or failed priming
+does not create repeated fast captures; normal activity and working captures
+retain their existing refresh rules.

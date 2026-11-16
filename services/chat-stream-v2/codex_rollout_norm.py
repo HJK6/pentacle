@@ -1,0 +1,423 @@
+"""Normalize Codex-style rollout records into provider-neutral events.
+
+The implementation handles the rollout schema's session metadata, messages,
+tool records, and provider setup messages without performing I/O.  It shares
+the conservative user-content classifier with the Claude-style normalizer.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from claude_jsonl_norm import (
+    _classify_user_string,
+    _input_boundary,
+    _defined,
+    _parse_peer_tell,
+    _stamp_jsonl_event_identity,
+    _to_text,
+)
+
+__all__ = [
+    "normalize_codex_rollout_record",
+    "normalize_codex_rollout_records",
+    "codex_session_identity",
+    "codex_is_guardian_review",
+    "codex_is_native_worker",
+]
+
+# `response_item` payload types carrying a tool invocation / its output. Codex
+# splits these two ways (`function_call` for native tools, `custom_tool_call`
+# for the freeform ones); both mean the same thing on the wire.
+_TOOL_CALL_TYPES = ("function_call", "custom_tool_call")
+_TOOL_OUTPUT_TYPES = ("function_call_output", "custom_tool_call_output")
+
+
+def codex_is_guardian_review(record: dict) -> bool:
+    """Recognize an internal review thread from its session header only.
+
+    Guardian requests/verdicts use ordinary user/assistant message envelopes.
+    Their bodies cannot distinguish them from genuine conversation content.
+    """
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return False
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("thread_source") == "guardian_review":
+        return True
+    source = payload.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    return isinstance(subagent, dict) and subagent.get("other") == "guardian"
+
+
+def codex_is_native_worker(record: dict) -> bool:
+    """Recognize a spawned worker from its session header, not chat content.
+
+    Discovery can exclude these from a pane's primary-rollout candidates.
+    Normalization still accepts their messages when explicitly addressed.
+    Unknown subagent kinds remain subject to discovery's ambiguity refusal.
+    """
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return False
+    payload = record.get("payload")
+    source = payload.get("source") if isinstance(payload, dict) else None
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    return isinstance(subagent, dict) and isinstance(subagent.get("thread_spawn"), dict)
+
+
+def codex_session_identity(record: dict) -> str:
+    """The session id a `session_meta` record declares, else "".
+
+    Codex states identity ONCE per transcript instead of stamping every record,
+    so the ingest guard against binding a foreign transcript has to read it here
+    rather than from each line the way the Claude path does.
+    """
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return ""
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("id") or payload.get("session_id") or "")
+
+
+def _is_primary_address(address: str) -> bool:
+    """True for the primary endpoint (`/root`), false for a sub-agent
+    (`/root/<child>`). Codex addresses its own fan-out by path depth, so depth
+    is what separates inbound-to-this-seat from outbound traffic."""
+    cleaned = str(address or "").strip().rstrip("/")
+    return bool(cleaned) and cleaned.count("/") == 1
+
+
+def _payload_text(payload: dict) -> str:
+    """Concatenate a Codex message payload's content items into one string.
+
+    Content is a list of `{type: input_text|output_text|text, text: ...}`; the
+    key varies by item type, so fall back across the shapes the way `_to_text`
+    does for Claude blocks.
+    """
+    content = payload.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        text = _to_text(item.get("text") or item.get("content") or "")
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def normalize_codex_rollout_record(
+    record: dict,
+    *,
+    host: str,
+    session_name: str,
+    session_id: str = "",
+    _preserve_blocks: bool = True,
+) -> list[dict]:
+    """Map one rollout record to zero-or-more wire payloads.
+
+    Mirrors `normalize_claude_jsonl_record`'s contract: payloads carry no
+    `daemon_seq` (the caller stamps that when broadcasting) and the identity
+    fields are stamped by `_stamp_jsonl_event_identity` so the durable dedup
+    index treats a replay as exactly-once.
+    """
+    if not isinstance(record, dict):
+        return []
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return []
+
+    timestamp = str(record.get("timestamp") or "")
+    # `payload.id` is the per-item identity (non-null on every message sampled);
+    # `ordinal` is the transcript-wide monotonic counter. Prefer the former and
+    # fall back to the latter so a payload without an id still dedups.
+    record_uuid = payload.get("id")
+    if record_uuid is None and record.get("ordinal") is not None:
+        record_uuid = f"ordinal:{record.get('ordinal')}"
+
+    base_raw = _defined({
+        "source": "structured",
+        "transport": "codex-rollout",
+        "host": host,
+        "provider": "codex",
+        "session_name": session_name,
+        "source_session_identity": session_id or None,
+        "uuid": payload.get("id"),
+        "ordinal": record.get("ordinal"),
+        "codex_record_type": record.get("type"),
+        "codex_payload_type": payload.get("type"),
+    })
+
+    def make(kind: str, text: str, raw_extra: dict | None = None) -> dict:
+        raw = dict(base_raw)
+        if raw_extra:
+            raw.update(_defined(raw_extra))
+        if (_preserve_blocks and kind in {"USER", "TELL"}
+                and record.get("type") == "response_item" and payload.get("role") == "user"):
+            original = _payload_text(payload)
+            raw.update(native_input_version=1, source_record=record,
+                native_block_ordinals=[0], native_block_spans=[[0, 0, len(original)]],
+                legacy_input_events=normalize_codex_rollout_record(record, host=host,
+                    session_name=session_name, session_id=session_id, _preserve_blocks=False))
+        return {
+            "host": host,
+            "provider": "codex",
+            "session_id": session_id,
+            "session_name": session_name,
+            "stream_id": f"{host}:{session_name}",
+            "timestamp": timestamp,
+            "kind": kind,
+            "text": text,
+            "raw": raw,
+        }
+
+    record_type = record.get("type")
+    payload_type = payload.get("type")
+    turn_control = []
+    if record_type == "event_msg" and payload_type in {"task_started", "task_complete", "turn_aborted"}:
+        turn_id = payload.get("turn_id")
+        if isinstance(turn_id, str) and turn_id and len(turn_id) <= 200 and session_id:
+            # Typed native lifecycle, not the user-role <turn_aborted> text.
+            # Empty content keeps these control observations out of chat prose.
+            turn_control = _stamp_jsonl_event_identity(
+                [make("SYSTEM", "", {"subtype": "provider-turn-control",
+                    "turn_id": turn_id, "native_turn_state": payload_type,
+                    "interrupt_reason": payload.get("reason") if payload_type == "turn_aborted" else None})],
+                f"codex-native-turn:{turn_id}:{payload_type}",
+            )
+
+    if record_type == "event_msg" and payload_type == "task_complete" and payload.get("error"):
+        # A provider failure can end the turn without any final assistant item.
+        # Keep that terminal explanation in both ingest paths, but never expose
+        # arbitrary provider messages/details (which may contain request data).
+        error = payload["error"]
+        code = error.get("codex_error_info") if isinstance(error, dict) else None
+        if code == "server_overloaded":
+            text = "Codex turn failed: selected model is at capacity (server_overloaded)."
+        elif (
+            isinstance(code, dict)
+            and isinstance(code.get("response_too_many_failed_attempts"), dict)
+            and type(code["response_too_many_failed_attempts"].get("http_status_code")) is int
+            and code["response_too_many_failed_attempts"]["http_status_code"] == 429
+        ):
+            code = "provider_throttled"
+            text = "Codex turn failed: provider throttled the request (HTTP 429)."
+        else:
+            code = "unknown"
+            text = "Codex turn failed with a provider error."
+        turn_id = payload.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            turn_id = None
+        # The native turn identity survives a replay with no ordinal. Separate
+        # turns with the same error must still produce separate durable events.
+        identity = f"codex-task-complete:{turn_id}" if turn_id else record_uuid
+        return _stamp_jsonl_event_identity(
+            [make("ERROR", text, {
+                "subtype": "provider-turn-error",
+                "native_turn_state": "task_complete",
+                "provider_error_code": code,
+                "turn_id": turn_id,
+                "subsystem": "codex_rollout",
+                "bug_ref": "spec_pentacle__codex_silent_turn_stall_2026_09",
+            })], identity,
+        )
+
+    if record_type != "response_item":
+        # Other `event_msg` (token counts, item_completed), `turn_context` and
+        # `world_state` are Codex bookkeeping, not conversation. Ingesting them
+        # would inflate every stream's tail with rows no view renders.
+        return turn_control
+
+    if payload_type == "message":
+        role = str(payload.get("role") or "")
+        text = _payload_text(payload)
+        if not text.strip():
+            return []
+        if role == "assistant":
+            return _stamp_jsonl_event_identity(
+                [make("ASSIST_TEXT", text, {"phase": payload.get("phase")})], record_uuid,
+            )
+        if role == "developer":
+            # Injected instruction blocks. Never a turn — see module docstring.
+            return _stamp_jsonl_event_identity(
+                [make("SYSTEM", text, {"subtype": "developer-instructions"})], record_uuid,
+            )
+        if role != "user":
+            return []
+        if _preserve_blocks and isinstance(payload.get("content"), list):
+            legacy = normalize_codex_rollout_record(record, host=host, session_name=session_name,
+                                                   session_id=session_id, _preserve_blocks=False)
+            groups: list[list[tuple[int, str]]] = []
+            for ordinal, item in enumerate(payload["content"]):
+                if not isinstance(item, dict):
+                    continue
+                part = _to_text(item.get("text") or item.get("content") or "")
+                if not part:
+                    continue
+                if groups and not _input_boundary(part) and not _input_boundary(groups[-1][-1][1]):
+                    groups[-1].append((ordinal, part))
+                else:
+                    groups.append([(ordinal, part)])
+            events = []
+            for group in groups:
+                joined = "\n".join(part for _, part in group)
+                child = {**record, "payload": {**payload, "content": joined}}
+                normalized = normalize_codex_rollout_record(child, host=host, session_name=session_name,
+                            session_id=session_id, _preserve_blocks=True)
+                if not normalized:
+                    # Whitespace-only groups emit no event. The full original
+                    # record remains attached to each retained neighboring input.
+                    continue
+                event = normalized[0]
+                event["raw"].update(native_input_version=1, source_record=record,
+                    native_block_ordinals=[ordinal for ordinal, _ in group],
+                    native_block_spans=[[ordinal, 0, len(part)] for ordinal, part in group],
+                    legacy_input_events=legacy)
+                events.append(event)
+            return _stamp_jsonl_event_identity(events, record_uuid)
+        peer_tell = _parse_peer_tell(text if _preserve_blocks else text.strip())
+        if peer_tell is not None and not _preserve_blocks:
+            peer_tell = {**peer_tell, "payload": peer_tell["payload"].strip(), "wire_text": text}
+        if peer_tell is not None:
+            return _stamp_jsonl_event_identity(
+                [make("TELL", peer_tell["payload"], {
+                    "sender": peer_tell["sender"],
+                    "tell_id": peer_tell["tell_id"],
+                    "enqueued_at": peer_tell["enqueued_at"],
+                    "peer_payload": peer_tell["payload"],
+                    "peer_wire_text": peer_tell["wire_text"],
+                })],
+                record_uuid,
+            )
+        if _classify_user_string(text) == "system":
+            # `<environment_context>` and friends: harness injections wearing the
+            # user role. Emitting USER here is the first-turn defect.
+            return _stamp_jsonl_event_identity(
+                [make("SYSTEM", text, {"subtype": "synthetic-user"})], record_uuid,
+            )
+        return _stamp_jsonl_event_identity([make("USER", text)], record_uuid)
+
+    if payload_type == "agent_message":
+        # the provider's own sub-agent protocol (`/root` <-> `/root/<child>`), not a
+        # peer-delivery message. Direction decides: a message addressed TO the
+        # pane's primary agent is inbound work arriving at this seat and counts;
+        # one the primary agent sent outward does not. Dropping these entirely
+        # (an earlier implementation did) makes real inbound messages invisible to the
+        # turn count.
+        text = _payload_text(payload)
+        if not text.strip():
+            return []
+        recipient = str(payload.get("recipient") or "")
+        author = str(payload.get("author") or "")
+        directed = {"author": author, "recipient": recipient}
+        if _is_primary_address(recipient):
+            return _stamp_jsonl_event_identity(
+                [make("TELL", text, {"sender": author, "peer_payload": text, **directed})],
+                record_uuid,
+            )
+        return _stamp_jsonl_event_identity(
+            [make("SYSTEM", text, {"subtype": "agent-message-outbound", **directed})],
+            record_uuid,
+        )
+
+    if payload_type == "reasoning":
+        summary = payload.get("summary")
+        parts: list[str] = []
+        if isinstance(summary, list):
+            for item in summary:
+                if isinstance(item, dict):
+                    text = _to_text(item.get("text") or "")
+                    if text:
+                        parts.append(text)
+        thinking = "\n".join(parts)
+        return _stamp_jsonl_event_identity(
+            [make("THINKING", thinking or "Thinking", {"thinking": thinking})], record_uuid,
+        )
+
+    if payload_type in _TOOL_CALL_TYPES:
+        name = str(payload.get("name") or "Tool")
+        tool_input = payload.get("arguments")
+        if tool_input is None:
+            tool_input = payload.get("input")
+        return _stamp_jsonl_event_identity(
+            [make("TOOL_USE", name, {
+                "tool_use_id": payload.get("call_id") or payload.get("id"),
+                "tool_name": name,
+                "tool_input": tool_input,
+            })],
+            record_uuid,
+        )
+
+    if payload_type in _TOOL_OUTPUT_TYPES:
+        output = payload.get("output")
+        text = _to_text(output if not isinstance(output, dict) else output.get("content") or "")
+        return _stamp_jsonl_event_identity(
+            [make("TOOL_RESULT", text, {
+                "tool_use_id": payload.get("call_id") or payload.get("id"),
+                "tool_content": text,
+            })],
+            record_uuid,
+        )
+
+    return []
+
+
+def normalize_codex_rollout_records_grouped(
+    records: list[dict],
+    *,
+    host: str,
+    session_name: str,
+    session_id: str = "",
+) -> list[list[dict]]:
+    """Per-record grouping of :func:`normalize_codex_rollout_records`.
+
+    Returns one payload list per input record — empty for a `session_meta` (it
+    only updates `session_id`) or any record that yields nothing — aligned 1:1
+    with `records`. A byte-accurate tail zips this against per-record end offsets
+    to advance past exactly the records it consumed.
+    """
+    groups: list[list[dict]] = []
+    internal_review = False
+    for record in records:
+        if isinstance(record, dict) and record.get("type") == "session_meta":
+            internal_review = codex_is_guardian_review(record)
+        found = codex_session_identity(record)
+        if found:
+            session_id = found
+            groups.append([])
+            continue
+        if internal_review:
+            groups.append([])
+            continue
+        groups.append(normalize_codex_rollout_record(
+            record, host=host, session_name=session_name, session_id=session_id,
+        ))
+    return groups
+
+
+def normalize_codex_rollout_records(
+    records: list[dict],
+    *,
+    host: str,
+    session_name: str,
+    session_id: str = "",
+) -> list[dict]:
+    """Normalize an ordered Codex rollout span.
+
+    `session_meta` appears only at the head of a transcript, so a span read from
+    a later offset has no identity of its own. The caller seeds `session_id`
+    with what it already learned (ingest keeps it per stream); a `session_meta`
+    inside this span overrides it.
+    """
+    return [
+        payload
+        for group in normalize_codex_rollout_records_grouped(
+            records, host=host, session_name=session_name, session_id=session_id,
+        )
+        for payload in group
+    ]

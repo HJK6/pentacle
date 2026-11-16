@@ -1,0 +1,14 @@
+<!doctype html><title>Console capture fixture</title>
+<script>
+function emitFixture() {
+  console.log('plain string');
+  console.log({nested:{token:'synthetic-token',secret:'synthetic-secret',password:'synthetic-password',dsn:'synthetic-dsn',authorization:'synthetic-auth',cookie:'synthetic-cookie'}, zero:0, no:false, nil:null});
+  console.log({large:'x'.repeat(3000)});
+  console.log({a:{b:{c:{d:'deep'}}}});
+  const cyclic = {}; cyclic.self = cyclic; console.log(cyclic);
+  console.log(0, false, null);
+  console.log('[HARNESS] {"seq":1,"event":"fixture"}');
+  console.log('[HARNESS] malformed');
+  setTimeout(() => { throw new Error('fixture uncaught exception'); }, 0);
+}
+</script>

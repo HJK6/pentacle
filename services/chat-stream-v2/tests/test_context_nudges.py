@@ -1,0 +1,515 @@
+"""Context crossing journeys through the real ledger/store/tell path."""
+from __future__ import annotations
+
+import asyncio
+import time
+
+import pytest
+
+from context_adapters import ContextReading, context_fields
+from test_nudges import HOST, Harness, _new_store, _iso
+from ledger import NudgeConfig
+from routing_integrity import RoutingIntegrity
+
+
+def test_hidden_compact_crossing_advises_seat_and_live_parent():
+    async def run():
+        store = _new_store()
+        try:
+            h = Harness(store)
+            await h.open('parent', visibility='hidden', user_event_count=0)
+            await h.open('child', visibility='hidden', parent_stream_id=f'{HOST}:parent', user_event_count=0)
+            await h.observe()
+            await RoutingIntegrity(store, h.sessions).observe_context(
+                HOST, 'child', provider='claude',
+                reading=ContextReading(700_000, model='claude-fable-5-1'),
+                observed_at=_iso(time.time()), expected_generation=None)
+            result = await h.job.run_pass()
+            assert result.sent == 2
+            assert {name for name, text in h.tmux.pasted_by_name} == {'parent', 'child'}
+            assert all('context_advisory' in text for name, text in h.tmux.pasted_by_name)
+            child_advisory = next(text for name, text in h.tmux.pasted_by_name if name == 'child')
+            assert 'carry the Operator directives register verbatim' in child_advisory
+            assert all('context_handoff' not in text for name, text in h.tmux.pasted_by_name)
+            assert len(await store.nudge_states()) >= 1
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('tokens,expected', [(250_000,'none'),(399_999,'none'),(400_000,'advisory'),(499_999,'advisory'),(500_000,'compact'),(600_000,'compact')])
+def test_claude_threshold_contract(tokens, expected, monkeypatch):
+    for key in ('ADVISORY_ABS','COMPACT_ABS','ADVISORY_PCT','COMPACT_PCT'):
+        monkeypatch.delenv('PENTACLE_CONTEXT_'+key, raising=False)
+    assert context_fields('claude', ContextReading(tokens, model='claude-fable-5-1'))[2] == expected
+
+
+async def _context_harness(store, *, parent=True, config=None):
+    # Legacy notification fixtures isolate advisory delivery. Dedicated
+    # compaction tests enable pane input and its durable proof path explicitly.
+    h = Harness(store, config or NudgeConfig(compact_enabled=False))
+    if parent:
+        await h.open('parent', visibility='hidden', user_event_count=0)
+    await h.open('child', visibility='hidden', user_event_count=0,
+                 parent_stream_id=f'{HOST}:parent' if parent else None)
+    await h.observe()
+    return h
+
+
+async def _read(h, tokens, at, *, provider='claude', name='child'):
+    return await RoutingIntegrity(h.store, h.sessions).observe_context(
+        HOST, name, provider=provider,
+        reading=ContextReading(tokens, model='claude-fable-5-1', model_context_window=1_000_000),
+        observed_at=_iso(at))
+
+
+def test_ingestion_preserves_inter_sweep_advisory_and_restart_epochs(tmp_path):
+    import json
+    from ledger import NudgeJob
+    async def run():
+        store = _new_store(str(tmp_path/'episodes.db'))
+        try:
+            h = await _context_harness(store); now=time.time()
+            await _read(h, 450_000, now-100)
+            assert (await h.job.run_pass()).sent == 2
+            first=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
+            await _read(h, 480_000, now-90)
+            h.job=NudgeJob(h.sessions,h.comms,store)
+            assert (await h.job.run_pass()).sent == 0
+            assert json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])['epoch']==first['epoch']
+            # Both observations happen without a nudge sweep in between.
+            await _read(h,100_000,now-70)
+            await _read(h,450_000,now-60)
+            assert (await h.job.run_pass()).sent==2
+            await _read(h,100_000,now-50)
+            await _read(h,450_000,now-40)
+            assert (await h.job.run_pass()).sent==2
+            assert len(h.tmux.pasted)==6
+            assert all('480,000' not in text for text in h.tmux.pasted)
+            # Reopen the SQLite worker as well as the job, not just an object.
+            store.stop(); store.start(); await h.sessions.refresh()
+            h.job=NudgeJob(h.sessions,h.comms,store)
+            assert (await h.job.run_pass()).sent==0
+        finally: store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('fields', [
+    {'context_updated_at':None}, {'context_updated_at':'not-a-date'},
+    {'context_updated_at':'2026-08-01T00:00:00Z'},
+    {'context_updated_at':'2999-01-01T00:00:00Z'},
+    {'context_tokens':None}, {'context_tokens':-1}, {'context_tokens':float('nan')},
+    {'model_context_window':0}, {'host_status':'offline'},
+    {'pane_status':'pane_dead'}, {'routing_integrity':'mismatch'}, {'status':'closed'},
+])
+def test_context_suppression_never_claims_or_delivers(fields):
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store);await _read(h,700_000,time.time()-10)
+            if set(fields) <= {'host_status', 'pane_status'}:
+                h.sessions.apply_live(f'{HOST}:child',**fields)
+            else:
+                await store.update_session(HOST,'child',**fields)
+                await h.sessions.refresh()
+            result=await h.job.run_pass()
+            assert result.sent==0 and result.attempted==0
+            assert not h.tmux.pasted
+        finally: store.stop()
+    asyncio.run(run())
+
+
+def test_working_hidden_child_needs_no_operator_turn_or_card():
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store);await _read(h,700_000,time.time()-10)
+            h.sessions.apply_live(f'{HOST}:child',working=True)
+            assert (await h.job.run_pass()).sent==2
+        finally: store.stop()
+    asyncio.run(run())
+
+
+def test_cap_counts_each_recipient_and_preserves_deferred_parent():
+    from ledger import NudgeConfig
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store,config=NudgeConfig(max_per_pass=1))
+            await _read(h,700_000,time.time()-10)
+            result=await h.job.run_pass()
+            assert result.sent==1 and result.capped
+            assert [n for n,_ in h.tmux.pasted_by_name]==['child']
+            assert (await h.job.run_pass()).sent==1
+            assert [n for n,_ in h.tmux.pasted_by_name]==['child','parent']
+            assert (await h.job.run_pass()).sent==0
+        finally: store.stop()
+    asyncio.run(run())
+
+
+def test_parentless_context_uses_real_notify_dedup_card(tmp_path):
+    from notify import Notify
+    async def run():
+        store=_new_store();notify=Notify(db_path=str(tmp_path/'notifications.db'))
+        await notify.start()
+        try:
+            h=await _context_harness(store,parent=False);h.job.notify=notify
+            await _read(h,700_000,time.time()-10)
+            assert (await h.job.run_pass()).sent==2
+            assert (await h.job.run_pass()).sent==0
+            cards=(await notify.notification({'type':'notification.list'}))['notifications']
+            assert len(cards)==1 and cards[0]['producer']=='context_nudge'
+            assert f'{HOST}:child' in cards[0]['body']
+        finally: await notify.stop();store.stop()
+    asyncio.run(run())
+
+
+def test_parent_unavailable_is_not_operator_fallback_and_reparent_is_independent():
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store)
+            await _read(h,700_000,time.time()-10)
+            h.sessions.apply_live(f'{HOST}:parent',host_status='offline')
+            assert (await h.job.run_pass()).sent==1
+            await h.open('new-parent',visibility='hidden',user_event_count=0)
+            await h.observe()
+            await store.update_session(HOST,'child',parent_stream_id=f'{HOST}:new-parent')
+            await h.sessions.refresh()
+            assert (await h.job.run_pass()).sent==1
+            assert [n for n,_ in h.tmux.pasted_by_name]==['child','new-parent']
+        finally: store.stop()
+    asyncio.run(run())
+
+
+def test_out_of_order_ingestion_cannot_rearm_or_replace_telemetry():
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store);now=time.time()
+            await _read(h,700_000,now-10)
+            assert (await h.job.run_pass()).sent==2
+            assert await _read(h,100_000,now-20) is None
+            assert h.sessions.get(f'{HOST}:child')['context_tokens']==700_000
+            assert (await h.job.run_pass()).sent==0
+        finally: store.stop()
+    asyncio.run(run())
+
+
+def test_codex_high_context_never_enters_the_nudge_or_receipt_path(monkeypatch):
+    # Codex compacts automatically, so a high-context codex seat is never
+    # nudged: even through real Comms with a scripted codex pane nothing is
+    # pasted and there is no pending receipt to reconcile. Tokens stay tracked
+    # for display. spec_pentacle__codex_context_handoff_policy_2026_09.
+    import comms as comms_module
+    from test_tell_immediate_delivery import ScriptedCodex
+    monkeypatch.setattr(comms_module,'SUBMISSION_EVIDENCE_TIMEOUT_S',.01)
+    monkeypatch.setattr(comms_module,'SUBMISSION_EVIDENCE_POLL_S',.001)
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store)
+            await store.update_session(HOST,'child',provider='codex')
+            await h.sessions.refresh()
+            await _read(h,800_000,time.time()-10,provider='codex')
+            # Real Comms runs; only its external pane is scripted.
+            pane=ScriptedCodex(submit_on_retry=False)
+            h.spawnctl.tmux=pane
+            result=await h.job.run_pass()
+            assert result.sent==0 and result.attempted==0 and result.pending==0
+            assert len(pane.pastes)==0
+            row=h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens']==800_000 and row['context_level']=='none'
+            assert await store.nudge_state(f'{HOST}:child','context_handoff') is None
+        finally: store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('window,tokens,expected', [(200_000,139_999,'none'),(200_000,140_000,'advisory'),(200_000,170_000,'compact')])
+def test_small_claude_window_keeps_percentage_caps(window,tokens,expected,monkeypatch):
+    for key in ('ADVISORY_ABS','COMPACT_ABS','ADVISORY_PCT','COMPACT_PCT'):
+        monkeypatch.delenv('PENTACLE_CONTEXT_'+key,raising=False)
+    assert context_fields('claude',ContextReading(tokens,model='claude-haiku-4-5'))==(tokens,window,expected)
+
+
+def test_threshold_environment_overrides_and_codex_contract(monkeypatch):
+    monkeypatch.setenv('PENTACLE_CONTEXT_ADVISORY_ABS','200000')
+    monkeypatch.setenv('PENTACLE_CONTEXT_COMPACT_ABS','300000')
+    assert context_fields('claude',ContextReading(250_000,model='claude-fable-5-1'))[2]=='advisory'
+    # Codex compacts automatically: it reports real tokens+window for display but
+    # never an advisory/handoff level, at any usage and regardless of env caps.
+    for tokens in (499_999,500_000,750_000,999_999):
+        assert context_fields('codex',ContextReading(tokens,model_context_window=1_000_000))==(tokens,1_000_000,'none')
+
+
+def test_unconfirmed_claude_paste_is_not_counted_as_delivered(monkeypatch):
+    import comms as comms_module
+    from test_tell_immediate_delivery import ScriptedClaude
+    monkeypatch.setattr(comms_module,'SUBMISSION_EVIDENCE_TIMEOUT_S',.01)
+    monkeypatch.setattr(comms_module,'SUBMISSION_EVIDENCE_POLL_S',.001)
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store)
+            h.sessions.apply_live(f'{HOST}:parent',host_status='offline')
+            await _read(h,700_000,time.time()-10)
+            pane=ScriptedClaude(start='❯ ',submit_on_paste=False);h.spawnctl.tmux=pane
+            result=await h.job.run_pass()
+            assert result.sent==0 and result.pending==1
+            assert (await h.job.run_pass()).attempted==0
+            assert len(pane.pastes)==1
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_precommit_route_failure_retries_same_identity_after_cooldown(monkeypatch):
+    import json
+    from ledger import NudgeConfig
+    from sessions import VerbError
+    class Hosts:
+        blocked=True
+        def is_local(self, host):return False
+        async def ensure_reachable(self, host, verb):
+            if self.blocked:raise VerbError('host_offline','injected pre-input refusal')
+        def tmux_for(self,host):return self.tmux
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store,config=NudgeConfig(cooldown_s=1,compact_enabled=False))
+            now=time.time();await _read(h,700_000,now-10)
+            hosts=Hosts();hosts.tmux=h.tmux;h.comms.hosts=hosts
+            result=await h.job.run_pass();assert result.errors==2 and not h.tmux.pasted
+            before=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
+            assert (await h.job.run_pass()).attempted==0
+            hosts.blocked=False;monkeypatch.setattr('ledger.time.time',lambda:now+2)
+            await _read(h,710_000,now+1)
+            assert (await h.job.run_pass()).sent==2
+            after=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
+            assert {k:v['tell_id'] for k,v in before['deliveries'].items()}=={k:v['tell_id'] for k,v in after['deliveries'].items()}
+            assert all('700,000' in text and '710,000' not in text for text in h.tmux.pasted)
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_cancel_after_paste_without_receipt_never_blindly_resends():
+    from ledger import NudgeJob
+    from test_nudges import RecordingTmux
+    class InterruptedPane(RecordingTmux):
+        async def paste(self,name,text):
+            await super().paste(name,text)
+            if name=='child':raise asyncio.CancelledError()
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store);await _read(h,700_000,time.time()-10)
+            pane=InterruptedPane();h.spawnctl.tmux=pane
+            with pytest.raises(asyncio.CancelledError):await h.job.run_pass()
+            h.job=NudgeJob(h.sessions,h.comms,store)
+            assert (await h.job.run_pass()).sent==1
+            assert [name for name,_ in pane.pasted_by_name]==['child','parent']
+            assert (await h.job.run_pass()).attempted==0
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_crash_after_receipt_before_episode_stamp_reconciles_without_resend():
+    from store import Store
+    from ledger import NudgeJob
+    class CrashStore(Store):
+        armed=True
+        async def record_nudge(self, sid,kind,at,basis=''):
+            if self.armed and '"outcome": "delivered"' in basis:
+                self.armed=False
+                raise RuntimeError('injected crash after durable tell receipt')
+            return await super().record_nudge(sid,kind,at,basis)
+    async def run():
+        store=CrashStore(':memory:');store.start()
+        try:
+            h=await _context_harness(store);await _read(h,700_000,time.time()-10)
+            with pytest.raises(RuntimeError,match='injected crash'):await h.job.run_pass()
+            assert [n for n,_ in h.tmux.pasted_by_name]==['child']
+            h.job=NudgeJob(h.sessions,h.comms,store)
+            assert (await h.job.run_pass()).sent==1
+            assert [n for n,_ in h.tmux.pasted_by_name]==['child','parent']
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_compact_band_keeps_advisory_episode_until_below_advisory_rearm():
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store);now=time.time()
+            await _read(h,700_000,now-20)
+            assert (await h.job.run_pass()).sent==2
+            await _read(h,450_000,now-10)
+            assert (await h.job.run_pass()).sent==0
+            await _read(h,100_000,now-5);await _read(h,450_000,now-1)
+            assert (await h.job.run_pass()).sent==2
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_reopened_source_generation_starts_a_new_episode(monkeypatch):
+    import json
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store);now=time.time()
+            await _read(h,700_000,now-10)
+            assert (await h.job.run_pass()).sent==2
+            old=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
+            await store.update_session(HOST,'child',status='closed')
+            await h.sessions.refresh()
+            await h.open('child',visibility='hidden',parent_stream_id=f'{HOST}:parent',user_event_count=0)
+            await h.observe()
+            now=time.time()
+            monkeypatch.setattr('ledger.time.time',lambda:now+2)
+            await _read(h,700_000,now+1)
+            assert (await h.job.run_pass()).sent==2
+            new=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
+            assert old['generation']!=new['generation'] and old['epoch']!=new['epoch']
+            assert len(h.tmux.pasted)==4
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_observation_and_episode_transaction_roll_back_together():
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store);now=time.time()
+            await _read(h,450_000,now-20)
+            def install_failure(conn):
+                conn.execute("CREATE TRIGGER fail_context BEFORE INSERT ON v2_nudge_state WHEN NEW.kind='context_compact' BEGIN SELECT RAISE(ABORT,'injected episode write'); END")
+            await store.submit(install_failure)
+            import sqlite3
+            with pytest.raises(sqlite3.IntegrityError,match='injected episode write'):
+                await _read(h,700_000,now-10)
+            assert (await store.fetch_session(HOST,'child'))['context_tokens']==450_000
+            assert (await h.job.run_pass()).sent==2  # advisory was not superseded by failed write
+            assert all('context_advisory' in text for text in h.tmux.pasted)
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_close_prunes_ingestion_episodes_even_when_nudge_job_never_runs():
+    async def run():
+        store=_new_store()
+        try:
+            h=await _context_harness(store)
+            await _read(h,700_000,time.time()-10)
+            assert len(await store.nudge_states())==2
+            await store.mark_closed(HOST,'child',closed_at=_iso(time.time()),pane_status='pane_dead')
+            assert await store.nudge_states()=={}
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_codex_context_level_never_nudges_or_rotates():
+    """Codex compacts its context automatically, so it receives no routine
+    context-threshold pressure: context_fields reports the real tokens+window
+    (for display) but always level 'none', which suppresses the nudge and never
+    arms a nudge basis, while a Claude seat at the same pressure still fires and
+    seat-declared handoff_planned is untouched.
+    spec_pentacle__codex_context_handoff_policy_2026_09."""
+    # Unit: codex classification is always 'none' regardless of usage, and the
+    # real tokens/window are still reported so the context badge keeps showing.
+    for tokens in (500_000, 750_000, 990_000):
+        t, w, level = context_fields('codex', ContextReading(tokens, model_context_window=1_000_000))
+        assert (t, w) == (tokens, 1_000_000)
+        assert level == 'none'
+    # A Claude seat at comparable pressure now classifies compact.
+    assert context_fields('claude', ContextReading(900_000, model='claude-fable-5-1'))[2] == 'compact'
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(store)
+            await store.update_session(HOST, 'child', provider='codex')
+            await h.sessions.refresh()
+            # Well past the retired 75% codex handoff line.
+            await _read(h, 900_000, time.time() - 10, provider='codex')
+            row = h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens'] == 900_000        # tokens tracked for display
+            assert row['model_context_window'] == 1_000_000
+            assert row['context_level'] == 'none'          # no advisory/handoff level
+            # No nudge basis armed for either level.
+            assert await store.nudge_state(f'{HOST}:child', 'context_handoff') is None
+            assert await store.nudge_state(f'{HOST}:child', 'context_advisory') is None
+            # No nudge delivered, nothing attempted.
+            result = await h.job.run_pass()
+            assert result.sent == 0 and result.attempted == 0
+            assert not h.tmux.pasted
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_codex_file_batch_ingestion_tracks_tokens_without_nudging(tmp_path, monkeypatch):
+    """Codex rollout FD ingestion still updates displayed telemetry across a
+    compaction dip-and-rise, but arms no nudge basis and delivers no nudge:
+    codex compacts automatically. spec_pentacle__codex_context_handoff_policy_2026_09."""
+    import json
+    from ingest import Ingest, _close_stream
+
+    async def run():
+        store = _new_store()
+        ingest = None
+        try:
+            h = Harness(store)
+            rollout = tmp_path / 'rollout.jsonl'
+            now = time.time()
+
+            def reading(tokens, at):
+                return json.dumps({
+                    'type': 'event_msg', 'timestamp': _iso(at),
+                    'payload': {'type': 'token_count', 'info': {
+                        'last_token_usage': {'total_tokens': tokens},
+                        'model_context_window': 1_000_000,
+                    }},
+                }) + '\n'
+
+            rollout.write_text(json.dumps({
+                'type': 'session_meta',
+                'payload': {'id': '01a000b9-60a7-7a51-9e9a-bfed1711c4fb'},
+            }) + '\n' + reading(800_000, now - 90))
+            await h.open('parent', visibility='hidden', user_event_count=0)
+            await h.open('child', provider='codex', visibility='hidden',
+                         parent_stream_id=f'{HOST}:parent', user_event_count=0,
+                         jsonl_path=str(rollout))
+            await h.observe()
+            ingest = Ingest(store, h.sessions, h.tmux, lambda _: asyncio.sleep(0),
+                            local_host=HOST, recent_limit=20,
+                            routing_integrity=RoutingIntegrity(store, h.sessions))
+            assert await ingest.run_pass() == 0  # bookkeeping is not a chat event
+            # Telemetry tracked for display; no level, no armed basis, no nudge.
+            row = h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens'] == 800_000
+            assert row['model_context_window'] == 1_000_000
+            assert row['context_level'] == 'none'
+            assert await store.nudge_state(f'{HOST}:child', 'context_handoff') is None
+            assert await store.nudge_state(f'{HOST}:child', 'context_advisory') is None
+            assert (await h.job.run_pass()).sent == 0
+            # A dip and rise in one FD read updates the displayed tokens but still
+            # arms nothing and pastes nothing.
+            with rollout.open('a') as stream:
+                stream.write(reading(100_000, now - 80) + reading(800_000, now - 70))
+            assert await ingest.run_pass() == 0
+            row = h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens'] == 800_000 and row['context_level'] == 'none'
+            assert await store.nudge_state(f'{HOST}:child', 'context_handoff') is None
+            assert (await h.job.run_pass()).sent == 0
+            assert len(h.tmux.pasted) == 0
+        finally:
+            if ingest is not None:
+                for state in ingest._streams.values():
+                    _close_stream(state)
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_haiku_5_5_window_is_its_own_not_the_deployment_default(monkeypatch):
+    monkeypatch.setenv('PENTACLE_CONTEXT_DEFAULT_WINDOW', '200000')
+    assert context_fields('claude', ContextReading(1, model='claude-haiku-5-5'))[1] == 1_000_000

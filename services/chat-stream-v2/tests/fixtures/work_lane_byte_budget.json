@@ -1,0 +1,23 @@
+{
+  "member_new_field_bytes": 800,
+  "representative": {
+    "lanes": 16,
+    "members": 8,
+    "max_bytes": 327680
+  },
+  "stress": {
+    "lanes": 64,
+    "members": 8,
+    "max_bytes": 1310720
+  },
+  "measurement": {
+    "date": "2026-11-08",
+    "live_inventory_bytes": 80123,
+    "p95_lane_title_chars": 37,
+    "p95_member_title_chars": 86,
+    "p95_status_text_chars": 280,
+    "p95_next_action_text_chars": 280,
+    "p95_seat_json_bytes": 189,
+    "p95_status_card_json_bytes": 523
+  }
+}

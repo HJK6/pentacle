@@ -1,0 +1,239 @@
+"""Real schedule persistence/fire into the real QA admission path."""
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+import uuid
+
+import pytest
+
+import launch
+from sessions import VerbError
+from spawnctl import SpawnCtl
+from window_schedule import WindowSchedule
+from test_spec_binding_provenance import SpawnTmux
+from test_window_schedule_contract import RouteProbeSpecs
+from work_lane_link import link_specs
+from test_qa_dispatch_counter import SPEC, LEAD, TOKEN, META, state, two_rejects, issue, send_msg, report_msg
+
+
+def message(verb, **extra):
+    return {
+        "type": verb,
+        "request_id": str(uuid.uuid4()),
+        "from_stream_id": LEAD,
+        "stream_token": TOKEN,
+        "_auth_context": {"stream_id": LEAD, "token_verified": True},
+        **extra,
+    }
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "rejects",
+        "scheduled_fire_refuses_pending",
+        "stale",
+        "owner_generation",
+        "replay",
+        "rearm",
+        "worker",
+        "untagged_qa",
+        "restart",
+        "planner",
+        "planner_unassigned_at_fire",
+        "lane_paused_at_fire",
+        "lane_orphaned_at_fire",
+    ],
+)
+def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case):
+
+    async def run():
+        store, sessions, _, comms, ledger, server = await state(
+            tmp_path / "schedule.db"
+        )
+
+        class ScheduledTmux(SpawnTmux):
+            async def stage_text(self, path, data):
+                pass  # provider token counterpart; never write a real token file
+
+            async def capture(self, name):
+                return "❯ \n⏵⏵ bypass permissions"
+
+        tmux = ScheduledTmux()
+        machine = launch.local_machine(
+            "localhost",
+            cwd=str(tmp_path),
+            claude_bin="/test/claude",
+            projects_root=str(tmp_path),
+            agent_orch_bin_dir="/test/bin",
+        )
+        ctl = SpawnCtl(
+            store, sessions, tmux=tmux, machine=machine, specs=RouteProbeSpecs()
+        )
+        schedule = WindowSchedule(store, sessions, comms, ctl, local_host="localhost")
+        schedule.mark_store_ready()
+        # Scheduled ownership requires qualified provenance, as in production.
+        await store.update_session(
+            "localhost",
+            "lead",
+            spec_id=SPEC,
+            spec_ids=[SPEC],
+            spec_binding_provenance=[
+                {
+                    "spec_id": SPEC,
+                    "provenance": "spawn_explicit",
+                    "granting_principal": "operator",
+                    "granted_at": "2026-09-12T00:00:00Z",
+                }
+            ],
+        )
+        # Sessions' projection otherwise still has the pre-update fixture.
+        await sessions.refresh()
+        await link_specs(store, SPEC)  # item (1): a scheduled commission names a lane-linked spec
+        try:
+            fields = dict(META)
+            if case.startswith("planner"):
+                await store.update_session("localhost", "lead", role="planner")
+                await sessions.refresh()
+                fields["phase"] = "spec"
+            if case in ("worker", "untagged_qa"):
+                fields = {}
+            insert = message(
+                "schedule.insert",
+                objective="Review scheduled QA surface",
+                fires_at_utc=(
+                    datetime.now(timezone.utc) + timedelta(minutes=10)
+                ).isoformat(),
+                target_host="localhost",
+                provider="claude",
+                model="claude-opus-4-8",
+                effort="high",
+                role="worker" if case == "worker" else "qa",
+                spec_ids=[SPEC],
+                parent_stream_id=LEAD,
+                **fields
+            )
+            inserted = await schedule.schedule_insert(insert)
+            row = inserted["schedule"]
+            sid = row["schedule_id"]
+            if fields:
+                assert (
+                    row["qa_spec_id"] == SPEC
+                    and row["qa_surface"] == "admission"
+                    and row["qa_cycle"] == 1
+                )
+                assert (
+                    row["qa_owner_generation"]
+                    == (await store.fetch_session("localhost", "lead"))[
+                        "session_generation"
+                    ]
+                )
+            assert (await issue(server, "show"))[
+                "commissions"
+            ] == []  # insertion reserved no QA pass
+            if case == "restart":
+                from store import Store
+
+                store.stop()
+                reopened = Store(str(tmp_path / "schedule.db"))
+                reopened.start()
+                try:
+                    restored = WindowSchedule(
+                        reopened, sessions, comms, ctl, local_host="localhost"
+                    )
+                    restored.mark_store_ready()
+                    actual = (
+                        await restored.schedule_get(
+                            message("schedule.get", schedule_id=sid)
+                        )
+                    )["schedule"]
+                    assert {k: actual[k] for k in (*META, "qa_owner_generation")} == {
+                        k: row[k] for k in (*META, "qa_owner_generation")
+                    }
+                finally:
+                    reopened.stop()
+                return
+            if case in ("rejects", "stale", "rearm", "worker", "untagged_qa"):
+                await two_rejects(comms, ledger, server)
+            if case == "scheduled_fire_refuses_pending":
+                for name in ("qa1", "qa2"):
+                    assert (await comms.send(send_msg(name)))["delivery"] == "landed"
+                    await ledger.ingest(report_msg(name))
+            if case == "stale":
+                await issue(
+                    server,
+                    "diagnose",
+                    diagnosis_id="scheduled-pivot",
+                    diagnosis="cause",
+                    pivot="repair",
+                )
+            if case == "owner_generation":
+                await store.update_session("localhost", "lead", status="closed")
+                await sessions.open(
+                    "localhost",
+                    "lead",
+                    role="lead",
+                    spec_id=SPEC,
+                    session_generation="reopened-owner",
+                )
+            if case == "rearm":
+                row = (
+                    await schedule.schedule_reschedule(
+                        message(
+                            "schedule.reschedule",
+                            schedule_id=sid,
+                            fires_at_utc=(
+                                datetime.now(timezone.utc) + timedelta(minutes=20)
+                            ).isoformat(),
+                        )
+                    )
+                )["schedule"]
+                assert row["generation"] == 2
+            if case == "planner_unassigned_at_fire":
+                await store.update_session("localhost", "lead", assigned_spec_id="")
+            if case.startswith("lane_"):
+                # Change lane state after real admission; the schedule remains executable.
+                def lose_lane(conn):
+                    if case == "lane_paused_at_fire":
+                        conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='paused'")
+                    else:
+                        conn.execute("UPDATE v2_assistant_composite_lanes SET bound_generation='lost'")
+                    conn.commit()
+                await store.submit(lose_lane)
+            run_msg = message("schedule.run", schedule_id=sid)
+            if case in ("rejects", "rearm", "owner_generation", "scheduled_fire_refuses_pending"):
+                with pytest.raises(VerbError) as exc:
+                    await schedule._fire_schedule(sid)
+                result = exc.value.extra.get("spawn", {})
+                expected = "qa_unauthorized" if case == "owner_generation" else "qa_dispatch_reject_limit"
+                if case == "scheduled_fire_refuses_pending":
+                    expected = "qa_adjudication_required"
+                    assert result["report_ids"] == ["reject-qa1", "reject-qa2"]
+                    assert len(result["commands"]) == 2
+                    persisted = (await schedule.schedule_get(message("schedule.get", schedule_id=sid)))["schedule"]
+                    assert persisted["state"] == "indeterminate"
+                    assert persisted["last_error_code"] == expected
+                    assert len((await issue(server, "show"))["commissions"]) == 2
+                assert result.get("error_code") == expected, (
+                    exc.value.code,
+                    exc.value.extra,
+                )
+                assert not tmux.live
+            else:
+                fired = await schedule.schedule_run(run_msg)
+                assert fired["schedule"]["state"] == "fired", fired
+                count = len(tmux.live)
+                replay = await schedule.schedule_run(run_msg)
+                assert replay == fired
+                assert len(tmux.live) == count == 1
+                if case == "planner":
+                    assert (await issue(server, "show"))["commissions"][0]["phase"] == "spec"
+                if case == "replay":
+                    assert len((await issue(server, "show"))["commissions"]) == 1
+        finally:
+            await asyncio.gather(*tuple(ctl._background_spawns), return_exceptions=True)
+            for name in tuple(tmux.live):
+                await tmux.kill_session(name)
+            store.stop()
+
+    asyncio.run(run())

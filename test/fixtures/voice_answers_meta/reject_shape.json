@@ -1,0 +1,27 @@
+[
+  {
+    "name": "None",
+    "input": null,
+    "expected": null
+  },
+  {
+    "name": "False",
+    "input": false,
+    "expected": null
+  },
+  {
+    "name": "1",
+    "input": 1,
+    "expected": null
+  },
+  {
+    "name": "'binding'",
+    "input": "binding",
+    "expected": null
+  },
+  {
+    "name": "[]",
+    "input": [],
+    "expected": null
+  }
+]

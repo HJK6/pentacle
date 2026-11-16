@@ -1,0 +1,134 @@
+{
+  "server_received_at": "2026-01-15T09:59:55Z",
+  "updated_at": "2026-01-15T09:59:55Z",
+  "freshness_ttl_sec": 120,
+  "data": {
+    "batch": "sample-2026-01",
+    "scraped": 24,
+    "deduped": 21,
+    "enriched": 19,
+    "qualified": 12,
+    "promoted": 7,
+    "skipped": 2,
+    "by_area": {
+      "North": { "scraped": 14, "qualified": 7, "promoted": 4 },
+      "South": { "scraped": 10, "qualified": 5, "promoted": 3 }
+    },
+    "by_source": {
+      "catalog": { "scraped": 15, "qualified": 8, "promoted": 5 },
+      "upload": { "scraped": 9, "qualified": 4, "promoted": 2 }
+    },
+    "pipeline_stages": [
+      { "stage": "scrape", "state": "complete", "started_at": "2026-01-15T09:00:00Z", "completed_at": "2026-01-15T09:10:00Z", "metrics": { "scraped": 24 }, "error": null, "owner": "runner", "updated_at": "2026-01-15T09:10:00Z" },
+      { "stage": "enrich", "state": "complete", "started_at": "2026-01-15T09:10:00Z", "completed_at": "2026-01-15T09:20:00Z", "metrics": { "deduped": 21 }, "error": null, "owner": "runner", "updated_at": "2026-01-15T09:20:00Z" },
+      { "stage": "qualify", "state": "running", "started_at": "2026-01-15T09:20:00Z", "completed_at": null, "metrics": { "qualified": 12 }, "error": null, "owner": "runner", "updated_at": "2026-01-15T09:59:55Z" },
+      { "stage": "promote", "state": "waiting", "started_at": null, "completed_at": null, "metrics": {}, "error": null, "owner": null, "updated_at": null }
+    ],
+    "pipeline_summary": {
+      "state_machine_batch": "sample-2026-01",
+      "current_stage": "qualify",
+      "current_state": "running",
+      "blocked": false
+    },
+    "scraper_queue": {
+      "pending": 0,
+      "running": 0,
+      "completed": 3,
+      "failed": 0,
+      "cancelled": 0,
+      "total": 3,
+      "total_scraped": 24,
+      "total_ingested": 21,
+      "total_duped": 3,
+      "running_job": null,
+      "failed_jobs": [],
+      "jobs": [
+        { "id": "job-north-catalog", "status": "completed", "area": "North", "source": "catalog", "records_scraped": 14, "records_ingested": 12 },
+        { "id": "job-north-upload", "status": "completed", "area": "North", "source": "upload", "records_scraped": 5, "records_ingested": 4 },
+        { "id": "job-south-catalog", "status": "completed", "area": "South", "source": "catalog", "records_scraped": 5, "records_ingested": 5 }
+      ],
+      "by_area": {
+        "North": { "pending": 0, "running": 0, "completed": 2, "failed": 0 },
+        "South": { "pending": 0, "running": 0, "completed": 1, "failed": 0 }
+      }
+    },
+    "snapshots": {
+      "sample-2026-01": {
+        "batch": "sample-2026-01",
+        "scraped": 24,
+        "deduped": 21,
+        "enriched": 19,
+        "qualified": 12,
+        "promoted": 7,
+        "skipped": 2,
+        "by_area": {
+          "North": { "scraped": 14, "qualified": 7, "promoted": 4 },
+          "South": { "scraped": 10, "qualified": 5, "promoted": 3 }
+        },
+        "by_source": {
+          "catalog": { "scraped": 15, "qualified": 8, "promoted": 5 },
+          "upload": { "scraped": 9, "qualified": 4, "promoted": 2 }
+        },
+        "pipeline_stages": [
+          { "stage": "scrape", "state": "complete", "metrics": { "scraped": 24 } },
+          { "stage": "enrich", "state": "complete", "metrics": { "deduped": 21 } },
+          { "stage": "qualify", "state": "running", "metrics": { "qualified": 12 } },
+          { "stage": "promote", "state": "waiting", "metrics": {} }
+        ],
+        "pipeline_summary": { "state_machine_batch": "sample-2026-01", "current_stage": "qualify", "current_state": "running", "blocked": false },
+        "scraper_queue": {
+          "pending": 0,
+          "running": 0,
+          "completed": 3,
+          "failed": 0,
+          "cancelled": 0,
+          "total": 3,
+          "total_scraped": 24,
+          "total_ingested": 21,
+          "total_duped": 3,
+          "running_job": null,
+          "failed_jobs": [],
+          "jobs": [
+            { "id": "job-north-catalog", "status": "completed", "area": "North", "source": "catalog", "records_scraped": 14, "records_ingested": 12 },
+            { "id": "job-north-upload", "status": "completed", "area": "North", "source": "upload", "records_scraped": 5, "records_ingested": 4 },
+            { "id": "job-south-catalog", "status": "completed", "area": "South", "source": "catalog", "records_scraped": 5, "records_ingested": 5 }
+          ],
+          "by_area": {
+            "North": { "pending": 0, "running": 0, "completed": 2, "failed": 0 },
+            "South": { "pending": 0, "running": 0, "completed": 1, "failed": 0 }
+          }
+        }
+      },
+      "sample-2026-02": {
+        "batch": "sample-2026-02",
+        "scraped": 10,
+        "deduped": 9,
+        "enriched": 9,
+        "qualified": 5,
+        "promoted": 3,
+        "skipped": 0,
+        "by_area": {
+          "East": { "scraped": 10, "qualified": 5, "promoted": 3 }
+        },
+        "by_source": {
+          "catalog": { "scraped": 6, "qualified": 3, "promoted": 2 },
+          "upload": { "scraped": 4, "qualified": 2, "promoted": 1 }
+        },
+        "pipeline_stages": [
+          { "stage": "scrape", "state": "complete", "metrics": {} },
+          { "stage": "enrich", "state": "complete", "metrics": {} },
+          { "stage": "qualify", "state": "complete", "metrics": {} },
+          { "stage": "promote", "state": "complete", "metrics": {} }
+        ],
+        "pipeline_summary": { "state_machine_batch": "sample-2026-02", "current_stage": "promote", "current_state": "complete", "blocked": false },
+        "scraper_queue": { "pending": 0, "running": 0, "completed": 1, "failed": 0, "cancelled": 0, "total": 1, "total_scraped": 10, "total_ingested": 9, "total_duped": 1, "running_job": null, "failed_jobs": [], "jobs": [{ "id": "job-east-catalog", "status": "completed", "area": "East", "source": "catalog", "records_scraped": 10, "records_ingested": 9 }], "by_area": {} }
+      }
+    },
+    "default_batch": "sample-2026-01",
+    "all_batches": ["sample-2026-01", "sample-2026-02"],
+    "all_batches_meta": [
+      { "batch": "sample-2026-01", "source_type": "sample" },
+      { "batch": "sample-2026-02", "source_type": "sample" }
+    ]
+  }
+}

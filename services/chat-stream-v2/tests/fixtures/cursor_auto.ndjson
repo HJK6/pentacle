@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "session_id": "11111111-2222-4333-8444-555555555555", "cwd": "/work", "model": "Auto"}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Reply with the single word OK."}]}, "session_id": "11111111-2222-4333-8444-555555555555"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "OK"}]}, "timestamp_ms": 1793781893250, "session_id": "11111111-2222-4333-8444-555555555555"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "OK"}]}, "session_id": "11111111-2222-4333-8444-555555555555"}
+{"type": "result", "subtype": "success", "duration_ms": 1505, "is_error": false, "result": "OK", "usage": {"inputTokens": 11224, "outputTokens": 27, "cacheReadTokens": 3968, "cacheWriteTokens": 0}, "session_id": "11111111-2222-4333-8444-555555555555"}

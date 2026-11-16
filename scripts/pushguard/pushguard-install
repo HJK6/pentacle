@@ -1,0 +1,143 @@
+#!/bin/sh
+# pushguard-install - install / integrate / audit / roll back the host-wide pre-push guard. Config + files only.
+#   install [--hooks "N1 N2"] [--hint TEXT] [DIR]
+#                          copy pushguard-hook to DIR/<hook> (default: pre-push only) and set global core.hooksPath=DIR
+#                          (DIR is made absolute); extra stubs only for hooks some repo really uses; --hint = refusal text
+#   integrate REPO...      repos whose own core.hooksPath hides the global guard: point them at DIR and keep the old value in
+#                          pushguard.originalHooksPath (the guard chains to it). One literal path per argument.
+#   coverage ROOT...       list checkouts under ROOT (depth PUSHGUARD_DEPTH, default 6) whose effective hooksPath is not the
+#                          guard, original hooks that have no stub, and originals that cannot be chained; exit 1 if any, or
+#                          if no checkout was found (an empty scan is never "clean")
+#   uninstall              restore every recorded preimage (global + each integrated repo scope); on any failure keep the
+#                          log and the guard dir and exit non-zero
+# State lives in STATE (default ~/.pushguard): preimage log, guard dir path, stub list. Prints paths/ids only, no secrets.
+set -u
+SRC=$(cd "$(dirname "$0")" && pwd -P)
+STATE=${PUSHGUARD_STATE:-$HOME/.pushguard}
+LOG=$STATE/preimage.log
+TAB=$(printf '\t'); NL='
+'
+KNOWN="applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg commit-msg post-commit pre-rebase post-checkout post-merge pre-push pre-auto-gc post-rewrite post-index-change reference-transaction pre-receive update post-receive post-update fsmonitor-watchman sendemail-validate"
+# A stub for these would change Git's behaviour merely by existing (push-to-checkout disables receive.denyCurrentBranch=updateInstead),
+# so they are never stubbed; an original is reported as UNSUPPORTED instead.
+NOSTUB="push-to-checkout proc-receive"
+usage() { echo "usage: pushguard-install install [--hooks \"N…\"] [--hint TEXT] [DIR] | integrate REPO... | coverage ROOT... | uninstall" >&2; exit 64; }
+die() { echo "pushguard-install: $*" >&2; exit 1; }
+guard_dir() { [ -f "$STATE/dir" ] && cat "$STATE/dir"; }
+hooks_installed() { [ -f "$STATE/hooks" ] && cat "$STATE/hooks"; }
+# physical path of $2 as seen from directory $1 (Git for Windows rewrites /c/x to C:/x in config, so never compare strings)
+rp_in() { (cd "$1" 2>/dev/null && cd "$2" 2>/dev/null && pwd -P); }
+is_guard() { [ -n "$2" ] && [ "$(rp_in "$1" "$2")" = "$(rp_in . "$3")" ] && [ -n "$(rp_in "$1" "$2")" ]; }
+unset_ok() { "$@"; r=$?; [ "$r" -eq 0 ] || [ "$r" -eq 5 ]; }   # exit 5 = key already absent (a repeated uninstall is fine)
+plainpath() { case $1 in *"$TAB"*|*"$NL"*) return 1 ;; esac; return 0; }
+in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
+
+cmd_install() {
+  hooks=; hint=; dir=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --hooks) [ $# -ge 2 ] || usage; hooks=$2; shift 2 ;;
+      --hint)  [ $# -ge 2 ] || usage; hint=$2; shift 2 ;;
+      -*) usage ;;
+      *) [ -z "$dir" ] || usage; dir=$1; shift ;;
+    esac
+  done
+  hooks="pre-push $hooks"
+  dir=${dir:-$STATE/hooks.d}
+  mkdir -p "$STATE" "$dir" || die "cannot create $dir"
+  dir=$(cd "$dir" && pwd -P) || die "cannot resolve $dir"
+  plainpath "$dir" || die "guard dir path must not contain tab/newline"
+  cur=$(git config --global --get core.hooksPath 2>/dev/null) || cur=
+  sys=$(git config --system --get core.hooksPath 2>/dev/null) || sys=
+  [ -z "$sys" ] || die "system core.hooksPath already set ($sys); not touching it"
+  if [ -n "$cur" ] && ! is_guard . "$cur" "$dir"; then die "global core.hooksPath already set ($cur); resolve first"; fi
+  if [ -n "$cur" ] && ! grep -q "^global$TAB" "$LOG" 2>/dev/null; then die "the guard is already the global hooksPath but no preimage log exists; restore it by hand first"; fi
+  for h in $hooks; do
+    case $h in *[!a-z0-9-]*|"") die "bad hook name: $h" ;; esac
+    in_list "$h" "$NOSTUB" && die "refusing to stub $h (a stub changes Git behaviour for repos without an original)"
+  done
+  old=$(hooks_installed); for h in $old; do in_list "$h" "$hooks" || rm -f "$dir/$h"; done   # drop stubs no longer wanted
+  for h in $hooks; do cp "$SRC/pushguard-hook" "$dir/$h" && chmod +x "$dir/$h" || die "copy failed: $h"; done
+  cp "$SRC/pushguard-hook" "$dir/pushguard-hook" && chmod +x "$dir/pushguard-hook"
+  printf '%s\n' "$dir" > "$STATE/dir"; printf '%s\n' "$hooks" > "$STATE/hooks"
+  grep -q "^global$TAB" "$LOG" 2>/dev/null || printf 'global\t-\t%s\n' "${cur:-<unset>}" >> "$LOG"
+  git config --global core.hooksPath "$dir" || die "git config failed"
+  if [ -n "$hint" ]; then git config --global pushguard.hint "$hint" || die "git config failed (hint)"; fi
+  echo "installed: $dir (hooks: $hooks); global core.hooksPath set"
+}
+
+cmd_integrate() {
+  [ $# -gt 0 ] || usage
+  dir=$(guard_dir) || die "not installed"
+  rc=0
+  for repo in "$@"; do
+    abs=$(cd "$repo" 2>/dev/null && pwd -P) || { echo "FAILED (no such repo): $repo" >&2; rc=1; continue; }
+    plainpath "$abs" || { echo "FAILED (tab/newline in path): $abs" >&2; rc=1; continue; }
+    scope=$(git -C "$abs" config --show-scope --get core.hooksPath 2>/dev/null | awk '{print $1}')
+    old=$(git -C "$abs" config --get core.hooksPath 2>/dev/null) || old=
+    case $scope in local|worktree) ;; *) echo "skip (no local/worktree override): $abs"; continue ;; esac
+    is_guard "$abs" "$old" "$dir" && { echo "already: $abs"; continue; }
+    printf 'repo\t%s\t%s\t%s\n' "$abs" "$scope" "$old" >> "$LOG"
+    if git -C "$abs" config --"$scope" --replace-all pushguard.originalHooksPath "$old" && git -C "$abs" config --"$scope" --replace-all core.hooksPath "$dir"; then
+      echo "integrated ($scope): $abs (was $old)"
+    else echo "FAILED (git config): $abs" >&2; rc=1; fi
+  done
+  return $rc
+}
+
+cmd_coverage() {
+  [ $# -gt 0 ] || usage
+  dir=$(guard_dir) || die "not installed"
+  depth=${PUSHGUARD_DEPTH:-6}; stubs=$(hooks_installed)
+  for root in "$@"; do
+    find "$root" -maxdepth "$depth" \( -name node_modules -o -name .venv \) -prune -o -name .git -print 2>/dev/null
+  done | sort -u | while read -r g; do
+    d=$(dirname "$g")
+    eff=$(git -C "$d" config --get core.hooksPath 2>/dev/null) || eff=
+    if is_guard "$d" "$eff" "$dir"; then echo "covered $d"; else echo "UNCOVERED $d (hooksPath=${eff:-<none>})"; fi
+    od=$(git -C "$d" config --type=path --get pushguard.originalHooksPath 2>/dev/null) || od=
+    [ -n "$od" ] || od=$(git -C "$d" rev-parse --git-common-dir 2>/dev/null)/hooks
+    od=$(rp_in "$d" "$od") || od=
+    [ -n "$od" ] || continue
+    for f in "$od"/*; do
+      [ -f "$f" ] && [ -x "$f" ] || continue; n=${f##*/}
+      if in_list "$n" "$NOSTUB"; then echo "UNSUPPORTED $d ($n original cannot be chained; a guard stub would change Git behaviour)"; continue; fi
+      in_list "$n" "$stubs" && continue
+      in_list "$n" "$KNOWN" && echo "HOOK-GAP $d ($n has no stub; its original will not run)"
+    done
+  done > "$STATE/coverage.last"
+  cov=$(grep -c '^covered' "$STATE/coverage.last"); unc=$(grep -c '^UNCOVERED' "$STATE/coverage.last")
+  gap=$(grep -c '^HOOK-GAP' "$STATE/coverage.last"); uns=$(grep -c '^UNSUPPORTED' "$STATE/coverage.last")
+  echo "coverage (roots: $*; depth $depth): $cov covered, $unc uncovered, $gap hook gaps, $uns unsupported (details: $STATE/coverage.last)"
+  [ $((cov + unc)) -gt 0 ] || { echo "coverage: no checkout found under the given roots; not a clean result" >&2; return 1; }
+  [ "$unc" -eq 0 ] && [ "$gap" -eq 0 ] && [ "$uns" -eq 0 ]
+}
+
+cmd_uninstall() {
+  [ -f "$LOG" ] || die "no preimage log"
+  dir=$(guard_dir) || die "not installed"
+  hooks=$(hooks_installed); fails=0
+  while IFS="$TAB" read -r kind a b c; do
+    case $kind in
+      repo) if [ ! -d "$a" ]; then echo "gone (skipped): $a"
+            elif git -C "$a" config --"$b" --replace-all core.hooksPath "$c" && unset_ok git -C "$a" config --"$b" --unset-all pushguard.originalHooksPath; then :
+            else echo "FAILED restore: $a" >&2; fails=$((fails+1)); fi ;;
+      global) if [ "$b" = "<unset>" ]; then unset_ok git config --global --unset-all core.hooksPath; else git config --global --replace-all core.hooksPath "$b"; fi \
+                || { echo "FAILED restore: global" >&2; fails=$((fails+1)); } ;;
+    esac
+  done < "$LOG"
+  unset_ok git config --global --unset-all pushguard.hint || fails=$((fails+1))
+  if [ "$fails" -ne 0 ]; then echo "uninstall INCOMPLETE: $fails restore(s) failed; log and guard dir kept ($LOG)" >&2; return 1; fi
+  for h in $hooks pushguard-hook; do rm -f "$dir/$h"; done; rmdir "$dir" 2>/dev/null
+  mv "$LOG" "$LOG.restored.$(date -u +%Y%m%dT%H%M%SZ)"; rm -f "$STATE/dir" "$STATE/hooks"
+  echo "uninstalled; preimages restored"
+}
+
+c=${1:-}; [ $# -gt 0 ] && shift
+case $c in
+  install) cmd_install "$@" ;;
+  integrate) cmd_integrate "$@" ;;
+  coverage) cmd_coverage "$@" ;;
+  uninstall) cmd_uninstall ;;
+  *) usage ;;
+esac

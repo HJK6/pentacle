@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "tests/fixtures/th_h5/tag_checkout.txt",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "98cb42a35137eafc8943300c73c3373fe1fb1f627033986832c2dea37c1d1aba",
+      "purpose": "Authored synthetic ops evidence; checkout log is source-derived, not captured traffic"
+    },
+    {
+      "path": "tests/test_merge_gate_polling.py",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "055106998c5b17b5a3d45959fded379d8ab3f68c1b50510121045dfa95f2372c",
+      "purpose": "Retained shared-wrapper and historical fixture-integrity checks after promote retirement"
+    },
+    {
+      "path": "tests/test_deploy_fleet_verdict.py",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "6dba53e02b5b327c52bd25fc1c6cb34bdd33d2bce5f564aadb16b2c6f535a6e6",
+      "purpose": "Authored synthetic ops evidence; checkout log is source-derived, not captured traffic"
+    }
+  ],
+  "status": "historical"
+}

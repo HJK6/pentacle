@@ -1,0 +1,47 @@
+# Optional local microphone service
+
+Public source includes `mic_server.py`, the listener/meeting modules and configured local-action helpers. Source publication does not enable or restart a microphone service. The server starts in off mode when `MIC_SERVER_START_MODE` is unset. Explicit `off` also preloads the recognition model asynchronously; `on`, `clipboard` and `meeting` start their corresponding capture mode. Starting `on` requires `MIC_ALWAYS_ON_ENABLED=true`. Device/model provisioning and runtime activation are separate operator-controlled steps.
+
+The default bind is loopback `127.0.0.1:7780`. `MIC_BIND_HOST` is configurable, but the public local adapter contract uses loopback; sensitive routes reject non-loopback clients. This source does not provision authentication for exposing the service. Point the web host `micServerUrl` at the configured service and enable `features.mic` only when the intended service is ready. See [web configuration](../docs/desktop_config.md).
+
+`GET /status` reports mode, recognition and audio health. `POST /mode/on` and `/mode/off` change capture state; calibration and meeting operations use their existing handlers. Meeting mode writes transcripts under the local `transcripts/` directory. Calibration, recordings, vocabulary, transcripts and launcher receipts are local data and remain ignored. Rolling audio retention is disabled unless `MIC_AUDIO_BUFFER_DIR` is explicitly configured; its keep operation preserves selected audio and feedback locally.
+
+Uploaded audio on `POST /transcribe?prompt_profile=fleet` is decoded with
+`ffmpeg` before recognition. Digital silence (peak at or below -120 dBFS) returns
+empty text without invoking ASR. Other audio keeps only segments whose Whisper
+`no_speech_prob` is at most 0.6, even when decoder text confidence is high.
+Adapters without that metadata preserve their existing segment behavior. This
+addresses silent uploads producing confident phantom text without blacklisting
+words or imposing a minimum utterance duration. The daemon's existing empty-text
+handling prevents an outgoing message. Quiet speech uses the same acoustic
+probability rule as normal speech. Live microphone capture is unchanged.
+
+Focused regression coverage: `PYTHONPATH=mic-server python -m pytest
+mic-server/test/test_transcribe_route.py`. Fixtures exercise encoded silence,
+a very quiet signal, short utterances, the acoustic threshold and mixed segments.
+Actual model replay is also needed to establish recognition quality for a
+particular deployed model; portable fixtures do not establish that quality.
+
+Local host-directed actions require comma-separated single-word host labels in `MIC_LOCAL_ACTIONS_HOSTS`. `MIC_LOCAL_ACTIONS_DEFAULT_HOST`, when set, must belong to that list. Missing host configuration cannot silently select a machine. `MIC_LOCAL_ACTIONS` enables the optional router; `MIC_LOCAL_ACTIONS_WAKE=shared` shares Zephyr's wake, while `separate` uses the product wake “Hey Pentacle”. Zephyr remains the assistant identity.
+
+Legacy `local` and `ssh` speech modes require an absolute `MIC_VOICE_SPEAKER_SCRIPT`. `MIC_VOICE_SPEAKER_MODE=local` also requires an executable local file. SSH mode requires `MIC_VOICE_SPEAKER_SSH` and uses remote `python3`; the caller provisions the script/interpreter. Text travels as stdin JSON, with bounded deadlines and a matching completion receipt. No private script or interpreter fallback is shipped. The default resident mode uses the `MIC_KOKORO_*`, clip and output settings documented below.
+
+The standard listener needs caller-provisioned audio and ASR dependencies. MLX AppleASR imports lazily and is optional; portable tests fake hardware/model/process boundaries and do not download models. Platform launcher/recovery files are source tools requiring explicit template/output/plist inputs; publishing them is not installation or signing proof. The recovery helper's restart rules are in [`server/README.md`](../server/README.md) (`mic:start-server`).
+
+Always-on capture detects missing callbacks from its existing idle processing loop after three seconds. It attempts one input-stream reopen per callback stall and rearms when frames resume, including silence. A stopped or replaced capture cannot apply a queued reopen. If the reopen fails after an audio-device topology change, health remains explicitly unhealthy; an authorized off/on transition or service restart refreshes the backend. This does not globally reset audio while a concurrent meeting stream may be open.
+
+Resident speech, conversation capabilities, policy reload, captured clips and null-sink validation are documented in [local spoken conversations](../docs/voice_speaker.md). `MIC_VOICE_SPEAKER_MODE=resident` is the default for local-action speech; explicitly configured script/SSH consumers retain their existing contract.
+
+The answer window (Zephyr asks, then listens without a fresh wake word) and silent mode (`POST /mode/silent`, voice phrases, restart-persistent flag) are documented in [answer window and silent mode](../docs/voice_answer_window_and_silent_mode.md).
+
+## Assistant name
+
+The public wake name is **Zephyr**: say “Hey Zephyr” to start a request. Set
+`MIC_ASSISTANT_NAME` in the microphone service’s private launch environment to
+keep your own wake name before activating updated code. Whitespace-only or
+omitted values fall back to Zephyr; a nonempty value is trimmed. This one value
+drives wake recognition, ASR hints, local-reply wake rejection and the existing
+`/status` field `assistant_name`, which the web voice guidance also uses. Shared
+local actions use this wake; separate actions retain “Hey Pentacle”. The daemon’s
+private `PENTACLE_ASSISTANT_COMPOSITE_TITLE` controls the chat display name
+independently. No private configuration belongs in the public repository.

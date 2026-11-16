@@ -1,0 +1,474 @@
+# Pentacle web host
+
+Serves the Pentacle renderer to a browser or installed PWA. The Node host owns
+terminal attachments, shared request handlers and the chat-stream connection to
+the daemon. The browser calls it through `window.cc` over the `/cc` bridge. See
+[Pentacle architecture](../docs/ARCHITECTURE.md#web-host-and-browser-boundary).
+
+## Prerequisites
+
+Node.js 22.12+ and `npm ci` at the repo root. Beyond that: `tmux` on whichever
+host the terminals live on, Python 3 if you want to run the chat daemon locally,
+and Chrome or Chromium on `PATH` only if you intend to run the smoke.
+
+## Run it
+
+```bash
+npm ci
+npm run web                       # build the bundle, then serve
+node server --profile <name>      # serve an already-built bundle
+```
+
+The process prints the URL and stays in the foreground; it does **not** open a
+browser. Open the printed `http://127.0.0.1:7795` yourself. Without a daemon to
+talk to, the page loads and the terminals work, but the sidebar is empty — start
+one first if you want sessions:
+
+```bash
+SCRATCH=$(mktemp -d)
+python3 services/chat-stream-v2/main.py --host 127.0.0.1 --port 7796 \
+  --local-host local --db "$SCRATCH/sessions.db" \
+  --notifications-db "$SCRATCH/notifications.db" \
+  --assets-db "$SCRATCH/assets.db" --blob-root "$SCRATCH/blobs" \
+  --disable-hosts --disable-mirror --disable-nudges \
+  --disable-outbound-notices --disable-remote-presence
+```
+
+then export `PENTACLE_SMOKE_PORT=7796` and point the host at the matching
+`test/e2e/configs/web_mode_local_smoke.js` profile:
+`node server --profile test/e2e/configs/web_mode_local_smoke.js`. Stop the owned
+daemon and remove its scratch directory when finished.
+
+## Flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--profile <name>` | see below | `configs/<name>.local.js`, else `configs/<name>.js`; an argument containing a path separator or ending in `.js` is used verbatim |
+| `--port <n>` | `7795` | `0` picks a free port (the startup line prints the real one) |
+| `--bind <addr>` | `127.0.0.1` | the interface to listen on — read § Security below before changing it |
+| `--token-file <path>` | none | **web login** auth for *this* host; required for any non-loopback `--bind` (§ Security) |
+| `--token-path <path>` | none | the **chat-stream daemon** credential (§ Daemon credential) — distinct from `--token-file` |
+| `--auth <token\|tailscale>` | `token` | `tailscale` = Tailscale identity headers behind `tailscale serve` instead of a token (§ Security) |
+| `--allow-login <login>[,…]` | none | `--auth tailscale` only, repeatable: the exact `Tailscale-User-Login` values admitted |
+| `--origin <https origin>` | none | `--auth tailscale` only, required: the proxy's canonical origin, e.g. `https://host.tailnet.ts.net`; every `/cc` upgrade must carry exactly this `Origin` |
+
+With no `--profile`, the host does **not** look for `configs/<machine>.js`: it
+follows `config-loader`'s ordinary precedence — `PENTACLE_CONFIG` if it is set in
+the environment, then `pentacle.config.js`, then `pentacle.config.example.js`. A
+`--profile` that resolves to nothing is not fatal: the host logs
+`using fallback configuration` and starts with a minimal built-in config, which
+is why an empty sidebar can mean a mistyped profile rather than a dead daemon.
+
+The host loads its profile through `config-loader`. `get-config` and
+`/api/config` both answer with the same computed object, and both strip
+`chatStream.token` and `chatStream.tokenPath` — the daemon credential never
+reaches a browser.
+
+### Daemon credential
+
+A web host that talks to a **credentialed** chat-stream daemon must name the
+credential **explicitly**: the v2 operator auth refuses an implicit default path
+(it fails the connection with `operator_auth_v2_private_path_required`). Provide
+it as `--token-path <path>`, or set `chatStream.tokenPath` in the profile —
+either way it stays server-side (stripped from the browser config above). A
+loopback daemon with no credential registry needs neither. Example against a
+tailnet daemon:
+
+```bash
+# --token-path is the daemon credential; --token-file is the web login (the
+# routable --bind requires it). Both stay server-side.
+node server --profile workstation \
+  --token-path ~/.config/pentacle-stream/token \
+  --bind <tailnet-ip> --port 7796 \
+  --token-file ~/.config/pentacle-web/workstation.token
+```
+
+## HTTP
+
+| Route | Purpose |
+|---|---|
+| `/` | `renderer/dist/web/web.html` with the computed config injected as `window.__PENTACLE_CONFIG__` |
+| `/api/config` | the same computed config as JSON — byte-identical to what `window.cc.getConfig()` returns |
+| `/api/health` | `{ ok, connections }` |
+| `/login` | GET the token form, POST the token to mint the auth cookie — present only in token auth; `404` under `--auth tailscale` |
+| `/dashboards/private/<catalog_version>/<path>` | a private dashboard file listed in `<dashboards.catalogRoot>/<catalog_version>/catalog.json`, served after auth only if beneath that version directory and matching its sha256; otherwise `404` (`server/private_dashboards.js`, [Dashboards view](../docs/dashboards_view.md#runtime-catalog)) |
+| everything else | a file under `renderer/dist/web/`; paths cannot escape it |
+
+`GET /` answers `503` with a build hint when the bundle is missing. When auth is
+on, an unauthenticated GET navigation is `302`-redirected to `/login` and an
+unauthenticated `/api/*` call is `401`; `/login` is the only open surface. Under
+`--auth tailscale` there is no open surface: every unauthenticated request is
+`401` `{"error":"tailnet identity required"}`, navigations included.
+
+## Websocket protocol (`/cc`)
+
+JSON, one message per frame. One socket per browser tab.
+
+```jsonc
+// browser → host
+{ "id": 7, "method": "pty:create", "args": [0, "sess", "local", 80, 24] }
+// host → browser
+{ "id": 7, "ok": true,  "result": "%12" }
+{ "id": 7, "ok": false, "error": { "code": "handler_error", "message": "…" } }
+// host → browser, unsolicited
+{ "event": "pty:data", "args": [0, "…"] }
+```
+
+`method` is a channel name from the shared definitions in
+[`main/cc_handlers.js`](../main/cc_handlers.js), collected into a dispatch table.
+`renderer/web_cc.js` uses the corresponding call or fire-and-forget mode:
+
+- **invoke** channels answer exactly once, with `ok: true` and a `result` (a
+  handler returning nothing answers `null`), or `ok: false` and an `error`.
+- **send** channels (`pty:write`, `pty:resize`, `pty:scroll`, `pty:tmux-send`,
+  `pty:exit-copy-mode`, `perf-telemetry:record`, `context-menu`) are
+  fire-and-forget and are **never** answered — including when the handler
+  throws.
+
+Error codes: `bad_request` (unparseable frame or no `method`),
+`unknown_method`, `web_local`, `web_unsupported`, `handler_error`. A refusal
+obeys the same contract as a dispatch: a refused **send** channel is answered
+with silence, never an unsolicited error frame.
+
+### Push routing
+
+Each connection gets its own `event.sender` interface for handler routing. `main/terminal_adapter.js` keys its slots by
+`event.sender.id` and pushes `pty:data` / `pty:exit` through
+`event.sender.send`, which means one tab's terminals and output can never reach
+another's — no slot bookkeeping lives in the bridge. Closing a socket fires the
+adapter's `destroyed` hook, the same signal a closing window gives, so a reload
+cannot leak attachments; the tmux session itself is untouched. Daemon frames
+(`chat-stream:frame`) are broadcast to every connection.
+
+### Reconnect after a host restart
+
+A daemon frame is broadcast only to sockets that are connected *at that instant*,
+and a new socket gets **no snapshot on connect** — the browser pulls
+`chat-stream:get-state` once at startup instead. That is fine while the host
+process lives, but a host restart (`pentacle-web-start stop && pentacle-web-start`)
+drops every `/cc` socket and the page reconnects to a *fresh* process. That
+process may already have finished its daemon handshake before the page
+reconnects, so its `connected:true` frame reached nobody; and because
+`chat-stream` `state_version` is per-process, a fresh (lower) version would be
+gated as stale by the renderer's versioned-connection-state guard even if it did
+arrive. Without a reconnect signal the page would sit at `connected:false` and
+the chat input would stay frozen until a manual reload.
+
+So `renderer/web_cc.js` fires an `onReconnect` callback on every socket **re-open**
+(not the first connect), and `renderer/app.js` uses it to reset its
+connection-state version baseline and re-pull `chat-stream:get-state` — the same
+snapshot path startup uses — which re-enables the input and re-syncs the daemon
+inventory with no reload. Regression coverage:
+`test/e2e/lib/web_scenarios.js` (`host-restart-restores-input`, driven by
+`web_gate.js`'s host/daemon restart primitives) and the
+`test/chat_stream_connection_state.test.js` version-reset cases.
+
+#### Restoring the whole slot on a reconnect (not just the input)
+
+The same `/cc` re-open also drops WITHOUT restarting the host — a backgrounded
+tab's suspended socket resuming, or a transient loopback blip. The host stays up,
+so `connected` never flips and the sibling's `!wasConnected` recovery edge never
+fires — yet two things still break for the open slot until a manual close/reopen:
+
+- **Terminal.** Closing a socket destroys that connection's per-tab `event.sender`
+  (`ws_bridge.js removeSocket` → `sender.destroy`), which tears down its PTY
+  attachments in `terminal_adapter.js`. The reconnected socket is a fresh sender
+  with no attachments, so the xterm feed freezes and `pty:write` goes nowhere.
+- **Chat.** The `onReconnect` re-pull applies `get-state` as a `{type:'snapshot'}`.
+  Under `events_mode:'summary'` that snapshot carries no events, and the reducer's
+  empty-snapshot guard preserves events only for streams present in the snapshot's
+  `sessions`; a stream momentarily absent from the resync inventory (a filtered /
+  nested / remote session, or a post-daemon-reconnect inventory gap) has its
+  transcript **and its composer session detail** dropped — the blank "Loading
+  chat…" + disabled send, unrecoverable until close/reopen.
+
+So `renderer/app.js`'s `onReconnect` does two things via `renderer/slot_reconnect.js`:
+
+1. **Preserve open chat transcripts** — before pushing the re-pulled snapshot to
+   the store, `preserveOpenSlotSessionsInSnapshot` carries forward the session
+   summary (from the pre-reconnect store) for every open chat slot whose bound
+   stream the snapshot dropped. That keeps the stream a *surviving* stream, so the
+   reducer never evicts its transcript and the composer keeps its session detail.
+   Scoped to open slots, so a genuinely-closed session is never resurrected.
+2. **Re-attach terminals** — `reattachTerminalSlotsAfterReconnect` re-issues
+   `createPty` for every attached slot's terminal; the persistent `onPtyData`/
+   `onData` transport wiring means the pane just re-binds to the new socket (no
+   xterm rebuild, no view-mode change). It also clears the per-stream lazy-load
+   trackers and re-runs the chat backfill so any new events land.
+
+This is the recovery the operator otherwise got by closing/reopening the slot,
+done automatically.
+Regression coverage: `test/e2e/lib/web_scenarios.js` (`slot-survives-cc-reconnect`,
+covering the terminal re-attach AND the chat transcript through a summary snapshot
+that omits the open stream), `test/slot_reconnect.test.js`, and the
+clear-then-refetch case in `test/chat_events_lazy.test.js`.
+
+Each connection is capped at 8 concurrent ptys (the renderer uses four slots;
+the headroom covers reconnect churn), so one connection cannot exhaust a shared
+host by opening unbounded terminals. The (N+1)th `pty:create` on a connection is
+refused; re-creating an already-owned slot is a replacement, not a new one.
+
+Host resolution covers `local`, `remote` (`config.remote`), an explicit
+`config.hosts` map, **and `config.peers`** — each peer becomes an SSH target
+keyed by its id, so a `peers` profile (e.g. workstation) is attachable in the
+browser. Live attachment to a production peer session needs separate resource
+authority; the owned gate uses disposable fixtures.
+
+### What never reaches the host
+
+`main/cc_handlers.js` carries three lists, each with a per-channel reason:
+
+- **`WEB_LOCAL`** — the browser answers these itself: `clipboard:read-text`,
+  `clipboard:write-text`, `open-external`, `app:reload`. The clipboard is the
+  one that matters — routing it here would read the *host's* clipboard, not the
+  viewer's — so the host refuses them rather than serving them.
+- **`WEB_UNSUPPORTED`** — no *host-side* equivalent, so the host refuses them,
+  but the web layer answers each in the browser (§ Native-method browser
+  behaviours): `context-menu` → an HTML menu; both meeting methods show an
+  unavailable-feature notice when the mic feature is enabled.
+- **`UNIMPLEMENTED`** — retained channels without a host handler: two chat-popout
+  channels and six optional dashboard channels. The browser popout manager
+  handles chat popouts locally; its fallback transport channels remain
+  unimplemented. The listed dashboard RPCs have no public provider. The parity
+  tests keep these gaps explicit.
+
+### Native-method browser behaviours
+
+Browser-local controls are implemented by `renderer/web_cc.js`; they must act
+on the viewer's browser rather than on the host machine. The host still refuses
+`WEB_UNSUPPORTED` channels as a safety net:
+
+- **`context-menu`** → an HTML menu (Open in slot 1–4 / Rename / Delete) that
+  fires the same `assign-slot` / `action` events `app.js` already listens for.
+- **`meeting:open` / `meeting:close`** → a "not available in web mode" toast
+  when the mic feature is on; neither opens a native meeting window.
+- **`mic:start-server`** → explicit local-service recovery when the host profile
+  enables `features.mic` and configures `mic.startCommand: {file, args}`. The
+  executable must be absolute; arguments are fixed by the host, never the browser.
+  The command is omitted from public configuration and runs without a shell.
+  Only matching WebSocket Origin/Host requests may start it (behind a loopback
+  TLS proxy the scheme comes from `X-Forwarded-Proto`, § Behind `tailscale serve`);
+  existing web authentication still applies. `mic.useStreamHost` disables local recovery.
+  Concurrent starts share one execution with a 75-second timeout. The helper
+  must emit JSON `{"ok":true,"ready":true}` only after verifying service readiness;
+  exit success alone is insufficient. A service that answers `/status` must not be
+  restarted. The macOS helper (`mic-server/recover-local-service.py --plist <path>`)
+  bootstraps an unloaded job, and restarts a loaded job once (`launchctl kickstart -k`)
+  only when `/status` stays unanswered and its process is at least 30 seconds old;
+  it serializes runs with a lock file and finishes within 70 seconds. The button stays disabled while starting and shows a retryable error
+  on failure. No automatic start occurs on page load; `autoSpawn:false` is preserved.
+- **`pty:save-image`** → the pasted image is handed to the viewer as a browser
+  download rather than written into the *host's* tmpdir.
+- **`open-external`** → `window.open` (a `WEB_LOCAL` channel; unchanged).
+
+## Security — auth and `--bind`
+
+A **loopback** bind (`127.0.0.1`, `localhost`, `::1`) is single-user and needs
+no token: any client that can reach the port gets the operator's full
+`window.cc`. This is the default for a single-user machine you control.
+Unauthenticated HTTP and WebSocket requests must name a literal loopback or
+`localhost` Host at the actual listening port. A supplied Origin must exactly
+match that HTTP origin; foreign/null/duplicate origins and DNS-rebinding Hosts
+are rejected with 403. Browsers omit Origin on simple cross-site GETs, so a
+request whose `Sec-Fetch-Site` names another site is also refused, except a
+top-level navigation (the initiating page cannot read it). Local tools may omit
+Origin and fetch metadata. This is browser isolation, not authentication
+against other local processes; use token auth on shared hosts.
+
+A **routable** bind (anything else — `0.0.0.0`, a tailnet IP) **refuses to
+start** without `--token-file <path>`; there is no way to publish the surface
+unauthenticated. With a token:
+
+- the browser posts the token once at `/login`; the reply sets an `HttpOnly`,
+  `SameSite=Strict` cookie carrying `sha256(token)` (never the token itself);
+- every page, `/api/*` call and `/cc` websocket upgrade is gated on that cookie
+  with a constant-time compare; an upgrade's `Origin` must also be this host's own
+  (`http(s)://<Host>`), or absent from a loopback peer such as a CLI client;
+- repeated wrong tokens from one TCP peer (the socket's remote address) back off (three free failures, then 1 s doubling to 5 min, in memory); behind a loopback TLS-terminating proxy every client reaches the host from the proxy's loopback address and shares one backoff bucket, so four failures from one client can briefly return `429` to another — there is no trusted-proxy option. Use a generated token such as `openssl rand -hex 32`, not a chosen phrase;
+- passing `--token-file` on a loopback bind opts that instance into auth too.
+
+The cookie has **no `Secure` attribute**: the host speaks plain HTTP and relies
+on the tailnet (or an equivalent private transport) as the encryption boundary,
+or on a TLS-terminating proxy in front of a loopback bind (below). Auth gates *who* connects; it does not partition
+*what* a connected operator can do — every authenticated connection is equally
+the operator, and daemon `chat-stream:frame` traffic is broadcast to all of
+them by design. Terminal slots and their pty output are still isolated per
+connection (§ Push routing), so two connections never see each other's
+terminals.
+
+### Behind `tailscale serve`: identity auth (`--auth tailscale`)
+
+The recommended tailnet deployment is a loopback bind behind
+[`tailscale serve`](https://tailscale.com/kb/1312/serve), which terminates HTTPS
+with the tailnet certificate and gives every device one address:
+
+```bash
+tailscale serve --bg --https=443 http://127.0.0.1:7797
+node server --profile web --bind 127.0.0.1 --port 7797 \
+  --auth tailscale --allow-login you@example.com \
+  --origin https://<machine>.<tailnet>.ts.net
+```
+
+There is no token and no `/login`. The proxy connects over loopback and sets
+`Tailscale-User-Login`, `X-Forwarded-For`, `X-Forwarded-Proto` and
+`X-Forwarded-Host`, **replacing** any client-supplied values (verified with a
+header dump against Tailscale 1.102; it also preserves `Host`). A request is the
+operator iff **all** hold:
+
+- the socket peer is loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x`);
+- `Tailscale-User-Login` appears once and exactly equals an `--allow-login` value (case-sensitive);
+- `X-Forwarded-Proto` appears once and is `https`;
+- `X-Forwarded-For` appears once and is one Tailscale address (CGNAT `100.64/10` or `fd7a:115c:a1e0::/48`) — a list or a repeated header is refused.
+
+Anything else is `401`. A `/cc` upgrade must additionally carry exactly one
+`Origin` equal to `--origin`; a missing, `null` or different `Origin` is refused
+with `403 origin_refused` — there is no allowance for clients that omit it, so
+scripts send the canonical `Origin`. No cookie is ever set, and an old
+`pentacle_web` cookie is ignored. `--auth tailscale` refuses to start with a
+non-loopback `--bind`, with `--token-file`, or without `--origin` / `--allow-login`.
+
+Because the proxy reaches the host over plain HTTP, the same-origin gate on
+`mic:start-server` and `mic:request` takes the scheme from
+`X-Forwarded-Proto` when (and only when) the peer is loopback and the header is a
+single `http`/`https` value; `Host` is used as sent (serve preserves it). This
+applies in token mode too, so a token-mode host behind the same proxy also
+admits mic recovery.
+
+**Trust boundary.** Identity headers are trustworthy only because nothing but the
+proxy can reach the loopback port: any local process that can connect to it can
+send any headers it likes. A host running this mode must ensure that no other
+local principal (a CI account, a sandboxed job, another user) can connect to the
+port — or to the proxy's HTTPS name, which would stamp the *machine's* own
+tailnet identity — for example with a per-user packet-filter rule. Token mode
+does not have this requirement; keep it for hosts where that guarantee is absent.
+
+## Not implemented here
+
+Cross-user authorization (every authenticated connection is the operator),
+native HTTPS in the host (use a TLS-terminating proxy, above), and
+profile-switching UX.
+
+## Build
+
+`npm run build:web` → `renderer/dist/web/`. `scripts/build-web.js` derives
+`web.html` from `renderer/index.html` rather than maintaining a second source
+page. The UMD and classic scripts (`confirm_dialog.js`, the
+dashboard registry and boards, the prebuilt chat-core and cosmic bundles) stay
+`<script src>` tags — a CommonJS wrapper would redirect their `window` globals
+to `module.exports` — and `app.js` is bundled behind shims for `path` and
+`../config-loader`.
+
+## Composer drafts
+
+While a web page remains open, switching chats keeps each chat's unsent text and
+supported image attachments with that chat. A successful send clears the submitted
+draft; other chats' drafts remain. A pending upload cannot be submitted twice
+after navigating away and back. This cache is local to the page and is not
+synchronized to other tabs or devices. The existing active-pane text reload
+restore remains; switched-away drafts and attachments do not survive a reload.
+
+Pasting exposed PNG/JPEG clipboard images uses the same attachment flow as the
+picker and drop target, with the existing five-image and 25 MiB limits. Mixed
+plain text replaces the current selection; text-only paste keeps native behavior.
+Long message prose, links and inline code wrap within the chat width; fenced
+code scrolls horizontally inside its block.
+
+## Closed chat slots
+
+When a previously known managed chat disappears from a connected daemon inventory
+for 1.5 seconds, its slot returns to the empty state. Its local question portal,
+unsent draft and attachment previews are cleared, and its local terminal attachment
+is released. This does not send a remote close, interrupt or question response.
+Other open slots and their drafts remain intact.
+
+Reconnects and temporary inventory gaps cancel cleanup. Offline or hidden sessions
+that remain in inventory stay attached. Session and slot generations prevent an old
+timer from clearing a replacement chat; legacy rows without generation identity are
+retained conservatively.
+
+## Tests
+
+| File | Covers |
+|---|---|
+| `test/ws_bridge.test.js` | dispatch, error propagation, malformed frames, pty routing and ownership |
+| `test/ws_bridge_multiclient.test.js` | two sockets over the real handler table: slot isolation, broadcast, disconnect cleanup, per-connection cap |
+| `test/web_server.test.js` | the real host: HTTP surface, a refused native channel, a live local tmux attach, and two concurrent connections keeping their tmux sessions isolated |
+| `test/web_auth.test.js` | the bind guard (routable bind refuses without a token), loopback-needs-none, `/login`, cookie-gated `/api` + `/cc`, and the `--token-path` flag |
+| `test/web_auth_tailscale.test.js` | `--auth tailscale`: flags and startup refusals, the identity predicate (IPv4/IPv6 fixtures, one field varied per case, repeated headers, non-loopback peer), HTTP 401/404, `/cc` 401 vs `403 origin_refused`, and forwarded-proto same-origin admission for `mic:start-server` / `mic:request` through a stand-in handler table |
+| `test/terminal_peer_host.test.js` | terminal host resolution for a `peers[]` profile entry (SSH target), plus local/remote and the unknown-host refusal |
+| `test/web_cc.test.js` | the browser shim: the `buildCc` surface and its shared channel contract, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
+| `test/web_bundle.test.js` | no runtime Node requires survive; the page ships everything it references |
+| `test/closed_chat_slots.test.js` | retirement deadline, connection authority, generation replacement and slot isolation |
+| `test/renderer_clipboard_paste.test.js` | clipboard item precedence, files fallback, native text passthrough, selection replacement and single input update |
+| `test/e2e/web_wrap_paste_gate.test.js` | wide/phone wrapping in both themes, fenced-code scrolling, mixed paste/undo, decoding/limits, draft ownership, upload retry and ordinary/assistant sends |
+| `test/e2e/web_gate.js` | the deterministic web-mode E2E gate: seeds a loopback daemon and drives the served page in headless Chrome over CDP (`node test/e2e/web_gate.js`; `--profile <config.js>` runs against an external daemon by hand). Scenario functions live in `test/e2e/lib/web_scenarios.js`. Run by the `Public checks` workflow. |
+
+The hermetic web gate also creates two isolated durable questions, self-closes one
+seeded chat, and checks slot/portal retirement with survivor preservation. Fixture
+self-tokens stay in private scratch files and are removed with the isolated daemon.
+The destructive fixture scenario is skipped for external `--profile` runs.
+
+Run the clipboard/upload counterpart through the supported npm entry by selecting
+`test/e2e/web_wrap_paste_gate.test.js`; select
+`test/e2e/web_wrap_paste_served.test.js` for the served adapter's actual-source and
+freshness controls, and `test/e2e/lib/render_proofs.test.js` for source-cohort,
+shortened-response and reused-fixture refusals. See the [gate entry](../docs/E2E_HARNESS.md).
+The former `web_wrap_paste_gate.cjs` path is retired; no wrapper or CJS runner
+exception remains. The same assertions cover both themes, wide/phone geometry,
+fenced code, clipboard limits/undo, draft routing, upload retry and assistant sends.
+For a product baseline RED, the renamed script retains `PENTACLE_WRAP_PASTE_ROOT`
+and `--expect-red`; its measurements must execute before an observed RED is claimed.
+
+The ordinary `web-gate` also runs `web-wrap-paste` against a dedicated seeded
+stream. Its source-scoped oracle checks the exact URL, word, inline code, href and
+copy selection rather than counting unrelated fixture cards. The existing
+clipboard fixture and source oracle are shared with the served adapter.
+
+For an already-authorized real served proof, prepare a private JSON descriptor:
+
+```json
+{
+  "url": "https://web.example/",
+  "phase": "rehearsal",
+  "fixtureId": "fresh-rehearsal-id",
+  "streamId": "local:disposable-chat",
+  "expectedBuildId": "accepted-served-build-id",
+  "sourceSha": "accepted-40-hex-source-sha",
+  "evidenceDir": "/tmp/owned-served-proof"
+}
+```
+
+Invoke `node test/e2e/web_wrap_paste_gate.test.js --served DESCRIPTOR.json`.
+It uses `web_gate.run` against that exact URL, starts only its owned headless
+browser and never starts/stops the shared host or daemon. The release owner binds
+the descriptor to the accepted artifact, source, live PID and authorization in its
+existing release evidence. The helper checks the injected and served build IDs,
+positively empty history immediately before sending, actual provider source-event
+text against DOM/href/copy, image persistence after reload and the media viewer.
+A `live` descriptor must also name `rehearsalFixtureId` and `rehearsalStreamId`;
+both live identities must differ. Use fresh equivalent chats for each phase.
+No model echo promise substitutes for the actual structured source event. Dirty,
+missing or truncated fixture evidence fails; do not retry a mutated chat as fresh.
+Synthetic tests of this adapter do not establish real-provider or live adoption.
+
+Historical per-attempt deployed-proof/rehearsal variants are retained as evidence
+and retired from future supported use in favor of this adapter. Native Mac/Windows
+keyboard proof still requires its existing allocated clipboard window. Shared
+activation remains an owner-authorized transaction.
+
+### Web activation sequencing
+
+The product owner retains artifact/config/plist preimages, PID/listener/served-build
+checks and the exact rollback transaction. The old standalone activation helper
+is retired; activation needs an owner-reviewed plan for the current artifact.
+
+Daemon summary inventories contain active sessions and omit persistence lifecycle fields. The host's `ChatStreamClient.snapshot()` materializes `status: 'open'` only when the wire row has no status property; explicit values, including `null` or `closed`, remain intact. Strict consumers such as microphone wake delivery can use that known active membership without treating bootstrap `state` as lifecycle or changing the daemon wire contract.
+# Mockups gallery
+
+`/designs/` opens the shared Mockups gallery directly. Configure the private
+`dashboards.designLibraryRoot` profile setting or `PENTACLE_DESIGN_LIBRARY_ROOT`.
+The existing host authentication gates `/api/designs`, prepared-document JSON
+and allowlisted `/design-media/` routes. Media supports HEAD and byte ranges;
+original exports are not executable public files. See
+[design library](../docs/design-library.md) for the drop format, offline sandbox,
+agent edit/publish/rollback procedure, dependency pins and sync verification.

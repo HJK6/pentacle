@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+calibration.json
+transcripts/
+mic_server.log

@@ -1,0 +1,381 @@
+"""Work-lanes projection: frozen fixture parity, counts vs sessions, server read surface (V8, V10, V11)."""
+import asyncio
+import json
+import random
+from pathlib import Path
+
+import pytest
+
+from assistant_composite import AssistantComposite
+from server import Server
+from sessions import Sessions, VerbError
+from work_lanes_projection import WorkLanesInventory, build_frame, project_lanes
+
+from test_work_lanes import FD, Env, run
+from test_assistant_prose_mirror import ASSISTANT
+
+FIXTURE = Path(__file__).resolve().parents[3] / "pentacle-chat-core" / "tests" / "fixtures" / "work-lanes-inventory.json"
+
+
+def _stored_rows(fixture):
+    """Invert the fixture's wire lanes into stored rows + presence (the projection's inputs)."""
+    rows, presence = [], {}
+    for lane in fixture["list_reply"]["lanes"]:
+        # An unqualified active lane presents active/lead_lost; its stored reason is the activation's.
+        unreconciled = lane["state"] == "active" and lane["state_reason"] == "lead_lost"
+        lead = lane["lead"]
+        row = {
+            "lane_id": lane["lane_id"], "stream_id": ASSISTANT, "title": lane["title"], "summary": lane["summary"],
+            "work_state": "active" if unreconciled else lane["state"],
+            "work_state_reason": "fd" if unreconciled else lane["state_reason"],
+            "blocker": lane["blocker"], "owner_kind": lane["owner_kind"], "version": lane["version"],
+            "updated_at": lane["updated_at"], "first_admitted_at": lane["first_admitted_at"],
+            "done_at": lane["done_at"],
+            "bound_stream_id": lead["stream_id"] if lead else None,
+            "bound_generation": lead["generation"] if lead else None,
+            "visible_chat_stream_id": lane["visible_chat"]["stream_id"],
+            "visible_chat_generation": lane["visible_chat"]["generation"],
+            "_qualifies": bool(lead and lead["qualifies"]),
+            "_lead_row": ({"status": lead["status"], "visibility": lead["visibility"]} if lead else None),
+            "_chat_kind": lane["visible_chat"]["kind"], "_chat_available": lane["visible_chat"]["available"],
+            "_last_update": lane["last_update"],
+        }
+        rows.append(row)
+        if lead and lead["presence"]["online"]:
+            card = lead["status_card"]
+            presence[lead["stream_id"]] = {
+                **lead["presence"],
+                "status_card": {"goal": card["goal"], "update": card["update"], "eta_at": card["eta_at"],
+                                "eta_set_at": card["eta_set_at"], "updated_at": card["updated_at"],
+                                "plan": ([{"text": card["active_step"], "status": "in_progress"}]
+                                         if card["active_step"] else [])}}
+    return rows, presence
+
+
+def _offline_card(fixture):
+    """Offline leads read their status card from the stored session row."""
+    out = {}
+    for lane in fixture["list_reply"]["lanes"]:
+        lead = lane["lead"]
+        if lead and not lead["presence"]["online"]:
+            card = lead["status_card"]
+            out[lane["lane_id"]] = {"goal": card["goal"], "eta_at": card["eta_at"], "eta_set_at": card["eta_set_at"],
+                                    "updated_at": card["updated_at"], "update": card["update"], "plan": []}
+    return out
+
+
+def test_projection_matches_frozen_fixture_v10():
+    fixture = json.loads(FIXTURE.read_text())
+    rows, presence = _stored_rows(fixture)
+    for lane_id, card in _offline_card(fixture).items():
+        row = next(r for r in rows if r["lane_id"] == lane_id)
+        row["_lead_row"]["status_card"] = card
+    now = fixture["inventory_frame"]["generated_at"]
+    for seed in range(5):
+        shuffled = list(rows)
+        random.Random(seed).shuffle(shuffled)
+        frame = build_frame([r for r in shuffled if r["work_state"] != "done"], presence, now_iso=now)
+        # Additive facts must preserve every shipped v1 field and ordering.
+        legacy = {key: frame[key] for key in fixture["inventory_frame"]}
+        legacy["lanes"] = [{key: lane[key] for key in old}
+                           for lane, old in zip(frame["lanes"], fixture["inventory_frame"]["lanes"])]
+        assert legacy == fixture["inventory_frame"]
+        assert legacy == fixture["hello_field"]["work_lanes"]
+    assert [l["lane_id"] for l in fixture["inventory_frame"]["lanes"]] == fixture["expected"]["order"]
+    assert fixture["inventory_frame"]["counts"]["open"] == fixture["expected"]["header_count"]
+    listed = project_lanes(rows, presence, now)
+    assert [l["lane_id"] for l in listed] == [l["lane_id"] for l in fixture["list_reply"]["lanes"]]
+    for lane in fixture["inventory_frame"]["lanes"]:
+        assert lane["lead"]["eta_stale"] == fixture["expected"]["eta_stale"][lane["lane_id"]]
+        tap = fixture["expected"]["tap"][lane["lane_id"]]
+        available = lane["visible_chat"]["available"]
+        assert tap["action"] == {"open": "open_chat", "history": "history", "unavailable": "unavailable"}[available]
+
+
+def test_fixture_update_events_match_store_shape():
+    fixture = json.loads(FIXTURE.read_text())
+    kinds = {e["event"]["raw"]["lane_update"]["kind"] for e in fixture["lane_update_events"]}
+    assert kinds == set(fixture["enums"]["update_kind"])
+
+    async def body(env):
+        lid = (await env.adopt(key="stream:shape"))["lane"]["lane_id"]
+        out = await env.op("update", {"kind": "milestone", "source_id": "m", "summary": "S",
+                                      "grouped_source_ids": ["a"]}, lane=lid, version=1)
+        published = next(f["event"] for f in env.broadcasts if f.get("type") == "chat.event")
+        sample = fixture["lane_update_events"][-1]["event"]
+        assert set(published) - {"daemon_seq"} == set(sample) - {"daemon_seq"}
+        assert set(published["raw"]) == set(sample["raw"])
+        assert set(published["raw"]["lane_update"]) == set(sample["raw"]["lane_update"])
+        assert published["message_id"] == "publication:" + out["update"]["update_id"]
+    run(body)
+
+
+def test_lane_count_is_not_session_count_v11():
+    async def body(env):
+        lead = await env.seat("count-lead", role="lead", parent_stream_id=FD)
+        for i in range(3):
+            await env.seat(f"worker-{i}", parent_stream_id=lead[0], visibility="hidden")
+        await env.seat("unrelated-1")
+        await env.seat("unrelated-2")
+        await env.adopt(key="stream:count", lead=lead)
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
+        await sessions.refresh()
+        frames = []
+
+        async def broadcast(frame):
+            frames.append(frame)
+        inv = WorkLanesInventory(env.store, sessions, broadcast)
+        frame = await inv.current()
+        assert frame["counts"] == {"open": 1, "active": 1, "paused": 0, "blocked": 0}
+        assert len([s for s in sessions.list_open() if s["stream_id"].startswith("host-a:")]) == 6
+        assert await inv.emit_if_changed() is True
+        assert await inv.emit_if_changed() is False  # signature dedupe
+        assert frames[0]["type"] == "work_lanes.inventory"
+    run(body)
+
+
+def test_presented_paused_before_reconcile_and_server_reads_v4_v8():
+    async def body(env):
+        lead = await env.seat("hist-lead", role="lead", parent_stream_id=FD, pane_pid="5151")
+        lid = (await env.adopt(key="stream:hist", lead=lead,
+                               chat={"stream_id": lead[0], "generation": lead[1]}))["lane"]["lane_id"]
+        await env.store.append_session_events_lifecycle_cas([
+            {"stream_id": lead[0], "event": {"stream_id": lead[0], "provider": "claude", "kind": "ASSIST_TEXT",
+                                             "text": "history line", "raw": {}},
+             "identity": "h1",
+             "lifecycle": await env.store.fetch_open_session_lifecycle(lead[0], pane_pid="5151")}], limit=100)
+        await env.store.mark_closed("host-a", "hist-lead", closed_at="2026-10-07T20:00:00Z",
+                                    pane_status="pane_dead", close_kind="operator_close")
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
+        await sessions.refresh()
+        server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
+        server.assistant_composite = env.composite
+        server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast)
+        frame = await server.work_lanes.current()
+        lane = frame["lanes"][0]
+        assert (lane["state"], lane["state_reason"]) == ("active", "lead_lost")
+        assert lane["visible_chat"]["available"] == "history"
+        operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+        msg = {"stream_id": lead[0], "generation": lead[1], "_auth_context": operator}
+        assert sessions.get(lead[0]) is None, sessions.get(lead[0])
+        events = await server._on_request_stream_events(msg)
+        assert events is not None
+        # Scoped clients stay confined to their scope stream.
+        with pytest.raises(VerbError):
+            await server._on_request_stream_events({"stream_id": lead[0], "generation": lead[1],
+                                                    "_auth_context": {"scoped_principal": True,
+                                                                      "scope_stream": "host-a:other"}})
+        # The lane exception itself admits only the exact operator pointer.
+        assert await server._work_lane_history_readable(msg, lead[0], operator) is True
+        for auth, generation in (({"token_verified": True, "stream_id": FD}, lead[1]),
+                                 ({"operator_authenticated": True, "scoped_principal": True}, lead[1]),
+                                 (operator, "other-generation")):
+            probe = {"stream_id": lead[0], "generation": generation, "_auth_context": auth}
+            assert await server._work_lane_history_readable(probe, lead[0], auth) is False
+        listed = await server._on_work_lanes_list({"include_done": True, "_auth_context": operator})
+        assert [l["lane_id"] for l in listed["lanes"]] == [lid]
+        shown = await server._on_work_lanes_show({"lane_id": lid, "_auth_context": operator})
+        assert shown["projection"]["lane_id"] == lid and shown["events"]
+        with pytest.raises(VerbError):
+            await server._on_work_lanes_list({"_auth_context": {"scoped_principal": True}})
+        reply = await server._on_list_sessions({"capabilities": {"work_lanes_v1": True}, "_auth_context": operator})
+        assert reply["work_lanes"]["counts"]["open"] == 1
+        plain = await server._on_list_sessions({"_auth_context": operator})
+        assert "work_lanes" not in plain
+    run(body)
+
+
+def test_unavailable_when_tail_missing_or_generation_changed_v8():
+    async def body(env):
+        chat = await env.seat("empty-chat")
+        lid = (await env.adopt(key="stream:empty", state="paused", lead=False, owner="operator",
+                               chat={"stream_id": chat[0], "generation": chat[1]}))["lane"]["lane_id"]
+        await env.store.mark_closed("host-a", "empty-chat", closed_at="2026-10-07T20:00:00Z",
+                                    pane_status="pane_dead")
+        rows = await env.store.work_lane_rows()
+        assert rows[0]["_chat_available"] == "unavailable"
+        await env.store.open_session("host-a", "empty-chat", provider="claude")  # new generation
+        rows = await env.store.work_lane_rows()
+        assert rows[0]["lane_id"] == lid and rows[0]["_chat_available"] == "unavailable"
+    run(body)
+
+# Full-input presentation: the display slices are deliberately not the oracle.
+def _working_lane(count=1, owner="fd", state="paused", reason="fd"):
+    return {"lane_id": "wl-test", "work_state": state, "work_state_reason": reason,
+            "owner_kind": owner, "version": 1, "bound_stream_id": "host:old",
+            "bound_generation": "old", "_qualifies": False, "_lead_row": {"status": "closed"},
+            "_members": [{"spec_id": f"spec_demo__item{i}", "status": "in_progress"} for i in range(count)]}
+
+
+def _working_seat(spec="spec_demo__item0", **overrides):
+    return {"stream_id": "host:seat", "status": "open", "role": "lead", "visibility": "hidden",
+            "parent_stream_id": "host:parent", "assigned_spec_id": spec, "online": True, "working": True, **overrides}
+
+
+def _frame(lane, seats):
+    return build_frame([lane], {s["stream_id"]: s for s in seats}, now_iso="2026-11-02T00:00:00Z")
+
+
+def _assert_working(lane):
+    assert lane["lead"]["presence"]["working"] is True
+
+
+@pytest.mark.parametrize("role", ["lead", "nexus", "planner"])
+def test_members_working_red_hidden(role):
+    frame = _frame(_working_lane(), [_working_seat(role=role)])
+    _assert_working(frame["lanes"][0])
+    assert frame["counts"]["paused"] == 1
+
+
+def test_members_working_red_operator_parentless():
+    assert _frame(_working_lane(owner="operator"),
+                  [_working_seat(role="worker", visibility="default", parent_stream_id=None)])["lanes"][0]["state"] == "paused"
+
+
+@pytest.mark.parametrize("beyond", ["member", "seat"])
+def test_members_working_red_caps_and_surfaces(beyond):
+    async def body(env):
+        specs = [f"spec_demo__item{i}" for i in range(10 if beyond == "member" else 1)]
+        lead = await env.seat("old-lead", role="lead", parent_stream_id=FD)
+        lid = (await env.adopt(key="stream:caps", state="paused", lead=lead, members=specs))["lane"]["lane_id"]
+        await env.store.mark_closed("host-a", "old-lead", closed_at="2026-11-02T00:00:00Z", pane_status="pane_dead")
+        if beyond == "seat":
+            for i in range(8):
+                await env.seat(f"a{i}", role="lead", visibility="hidden", parent_stream_id=FD,
+                               provider="composite", assigned_spec_id=specs[0])
+        await env.seat("z-eligible", role="lead", visibility="hidden", parent_stream_id=FD,
+                       assigned_spec_id=specs[-1])
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
+        await sessions.refresh()
+        sessions.apply_live("host-a:z-eligible", online=True, working=True)
+        server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
+        server.assistant_composite = env.composite
+        server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast)
+        auth = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+        inventory = await server.work_lanes.current()
+        listed = await server._on_work_lanes_list({"_auth_context": auth})
+        shown = await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+        if beyond == "member":
+            assert len(inventory["lanes"][0]["members"]) == 8
+            assert specs[-1] not in [m["spec_id"] for m in inventory["lanes"][0]["members"]]
+        else:
+            member = inventory["lanes"][0]["members"][0]
+            assert member["seats_total"] == 9 and len(member["seats"]) == 8
+            assert all(s["stream_id"] != "host-a:z-eligible" for s in member["seats"])
+        for projection in (inventory["lanes"][0], listed["lanes"][0], shown["projection"]):
+            _assert_working(projection)
+    run(body)
+
+
+def test_members_working_red_last_seat_closes():
+    lane = _working_lane()
+    seat = _working_seat()
+    before = _frame(lane, [seat])
+    _assert_working(before["lanes"][0])
+    after = _frame(lane, [{**seat, "status": "closed"}])
+    assert after["lanes"][0]["state"] == "paused"
+
+
+def test_members_working_red_signature_flip():
+    from work_lanes_projection import frame_signature
+    lane, seat = _working_lane(), _working_seat()
+    before = _frame(lane, [seat])
+    _assert_working(before["lanes"][0])
+    after = _frame(lane, [{**seat, "status": "closed"}])
+    assert after["lanes"][0]["state"] == "paused"
+    assert frame_signature(before) != frame_signature(after)
+
+
+@pytest.mark.parametrize("seat", [
+    _working_seat(role="qa"), _working_seat(provider="composite"),
+    _working_seat(status="closed"), _working_seat(assigned_spec_id=""),
+    _working_seat(assigned_spec_id=None, spec_ids=["spec_demo__item0", "spec_demo__other"]),
+    _working_seat(role="worker", visibility="default"),
+])
+def test_members_working_control_ineligible(seat):
+    assert _frame(_working_lane(), [seat])["lanes"][0]["state"] == "paused"
+
+
+def test_members_working_control_hidden_operator_and_assignment():
+    from store_specs import effective_assignment
+    _assert_working(_frame(_working_lane(owner="operator"), [_working_seat()])["lanes"][0])
+    assert effective_assignment(_working_seat(assigned_spec_id=None, spec_ids=["spec_demo__item0"])) == "spec_demo__item0"
+
+
+def test_members_working_control_precedence_and_signature():
+    from work_lanes_projection import frame_signature
+    seat = _working_seat()
+    assert _frame(_working_lane(state="blocked"), [seat])["lanes"][0]["state"] == "blocked"
+    assert _frame(_working_lane(state="done"), [seat])["lanes"] == []
+    lost = _frame(_working_lane(reason="lead_lost"), [seat])["lanes"][0]
+    _assert_working(lost)
+    assert frame_signature(_frame(_working_lane(), [{**seat, "last_activity": "a"}])) == frame_signature(
+        _frame(_working_lane(), [{**seat, "last_activity": "b"}]))
+
+
+def test_members_working_red_single_tag_legacy():
+    _assert_working(_frame(_working_lane(), [_working_seat(
+        assigned_spec_id=None, spec_ids=["spec_demo__item0"])])["lanes"][0])
+
+
+def test_members_working_control_protected(monkeypatch):
+    monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "lead")
+    assert _frame(_working_lane(), [_working_seat()])["lanes"][0]["state"] == "paused"
+
+
+@pytest.mark.parametrize("stored", ["active", "paused"])
+@pytest.mark.parametrize("quality,status,working", [
+    ("fresh", "completed", False), ("fresh", "deprecated", False),
+    ("fresh", "in_progress", True), ("stale", "completed", True),
+    ("missing", "missing", True), ("ambiguous", "ambiguous", True),
+])
+def test_member_owner_precedes_history_but_fresh_terminal_does_not_activate(stored, quality, status, working):
+    lane = _working_lane(state=stored)
+    lane["_members"][0].update(status=status, observation={"quality": quality},
+                              source_changed_at="2026-10-01T00:00:00Z")
+    lane["_work_index_available"] = True
+    result = _frame(lane, [_working_seat(role="planner")])["lanes"][0]
+    _assert_working(result)  # residual terminal/unresolved activity remains observable
+    assert result["state"] == stored
+    assert result["stale"] is False
+
+
+def test_parked_lane_wire_keeps_paused_state_and_whole_reason():
+    from work_lanes_projection import project_lane
+    row = {"lane_id": "parked", "version": 1, "work_state": "paused", "parked_at": "2026-01-02T03:04:05.123Z",
+           "parked_reason": "🌱" * 160}
+    wire = project_lane(row, None, "2026-01-03T00:00:00Z")
+    assert wire["state"] == "paused"
+    assert wire["parked"] == {"at": "2026-01-02T03:04:05Z", "reason": "🌱" * 160}
+    assert "parked" not in project_lane({**row, "parked_at": None}, None, "2026-01-03T00:00:00Z")
+
+
+def test_parked_frame_list_and_show_share_projection():
+    from work_lanes_projection import project_lane
+    async def body(env):
+        lane = (await env.adopt(state="paused", owner="operator"))["lane"]
+        lid = lane["lane_id"]
+        before = (await env.store.get_work_lane(lid))["_projection_row"]["_state_at"]
+        await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later"}, lane=lid, version=1)
+        rows = await env.store.work_lane_rows()
+        shown = await env.store.get_work_lane(lid)
+        now = "2030-01-01T00:00:00Z"
+        frame = build_frame(rows, {}, now_iso=now)
+        listed = project_lanes(rows, {}, now)
+        detail = project_lane(shown["_projection_row"], None, now, all_members=True)
+        assert frame["counts"] == {"open": 1, "paused": 1, "active": 0, "blocked": 0}
+        assert frame["lanes"][0]["parked"] == listed[0]["parked"] == detail["parked"]
+        assert detail["state_at"] == before
+        assert detail["parked"]["at"] == shown["lane"]["parked_at"][:19] + "Z"
+    run(body)
+
+
+def test_parked_shared_fixture_and_order():
+    fixture = json.loads(FIXTURE.read_text())["parked_v1"]
+    parked = fixture["row"]
+    assert build_frame([parked], {}, now_iso=fixture["inventory_frame"]["generated_at"]) == fixture["inventory_frame"]
+    rows = [{**parked, "lane_id": state, "work_state": state, "_qualifies": True,
+             "updated_at": "2026-01-01T00:00:00Z", "parked_at": None} for state in ["paused", "active", "blocked"]]
+    rows.append({**parked, "updated_at": "2026-01-02T00:00:00Z"})
+    projected = project_lanes(rows, {}, "2026-01-03T00:00:00Z")
+    assert [row["lane_id"] for row in projected] == ["blocked", "active", parked["lane_id"], "paused"]

@@ -1,0 +1,976 @@
+"""Claude compaction threshold and durable crossing regression tests."""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+
+import pytest
+
+from context_adapters import ContextReading, context_fields
+from routing_integrity import RoutingIntegrity
+from test_context_nudges import _context_harness
+from test_nudges import HOST, _iso, _new_store
+
+pytestmark = pytest.mark.usefixtures("virtual_submission_clock")
+
+# --------------------------------------------------------------------------- #
+# Captured-layout fixtures for the Claude CLI self-update footer.
+#
+# Taken from a real idle assistant pane (2026-10-01):
+# the prompt sits ABOVE the footers, so the composer parser scans the divider,
+# the permission footer and — after an in-place CLI self-update — a persistent
+# banner line ("✔ Update installed · Restart to update", ✔=U+2714, ·=U+00B7).
+# Unlike the fake RecordingTmux.IDLE (prompt last, footers unscanned), these
+# exercise the footer region the deployed parser actually rejected.
+# --------------------------------------------------------------------------- #
+_DIV = "─" * 40
+_PERM_FOOTER = "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+_UPDATE_FOOTER = "                              ✔ Update installed · Restart to update"
+
+# Empty composer; the update banner renders below the permission footer.
+IDLE_WITH_UPDATE_FOOTER = "\n".join(
+    ["⏺ earlier assistant output", _DIV, "❯ ", _DIV, _PERM_FOOTER, _UPDATE_FOOTER, ""]
+)
+# Same captured layout WITHOUT the banner — the control that isolates it.
+IDLE_CAPTURED_LAYOUT = "\n".join(
+    ["⏺ earlier assistant output", _DIV, "❯ ", _DIV, _PERM_FOOTER, ""]
+)
+# Footer-like text ABOVE the permission footer must stay a draft (fail closed).
+UPDATE_BANNER_ABOVE_FOOTER = "\n".join(
+    [_DIV, "❯ ", "✔ Update installed · Restart to update", _DIV, _PERM_FOOTER, ""]
+)
+# A genuine draft that happens to be the banner text, typed on the prompt line.
+DRAFT_LOOKS_LIKE_FOOTER = "\n".join(
+    [_DIV, "❯ ✔ Update installed · Restart to update", _DIV, _PERM_FOOTER, ""]
+)
+# Unknown chrome after the banner still fails closed.
+UNKNOWN_CHROME_AFTER_FOOTER = IDLE_WITH_UPDATE_FOOTER + "spurious chrome line\n"
+# A plain in-progress draft under the banner (draft-protection with footer).
+DRAFT_UNDER_UPDATE_FOOTER = "\n".join(
+    ["⏺ earlier assistant output", _DIV, "❯ just compact now", _DIV,
+     _PERM_FOOTER, _UPDATE_FOOTER, ""]
+)
+
+
+def test_claude_compact_threshold_and_codex_backend_exemption(monkeypatch):
+    for suffix in ("ADVISORY_ABS", "ADVISORY_PCT", "COMPACT_ABS", "COMPACT_PCT"):
+        monkeypatch.delenv("PENTACLE_CONTEXT_" + suffix, raising=False)
+    reading = lambda tokens: ContextReading(tokens, model="claude-fable-5-1")
+    assert context_fields("claude", reading(399_999))[2] == "none"
+    assert context_fields("claude", reading(400_000))[2] == "advisory"
+    assert context_fields("claude", reading(500_000))[2] == "compact"
+    assert context_fields(
+        "codex", ContextReading(220_000, model_context_window=258_400),
+        assistant_backend=True,
+    ) == (220_000, 258_400, "none")
+
+
+def test_compact_episode_persists_across_advisory_dip_and_restart(tmp_path):
+    async def run():
+        store = _new_store(str(tmp_path / "compact-episodes.db"))
+        try:
+            h = await _context_harness(store)
+            now = time.time()
+
+            async def read(tokens, offset):
+                return await RoutingIntegrity(store, h.sessions).observe_context(
+                    HOST, "child", provider="claude",
+                    reading=ContextReading(tokens, model="claude-fable-5-1"),
+                    observed_at=_iso(now + offset),
+                )
+
+            await read(500_000, -30)
+            first = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert first["active"] is True
+            await read(450_000, -20)
+            await read(500_000, -10)
+            second = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert second["epoch"] == first["epoch"]
+            store.stop()
+            store.start()
+            await h.sessions.refresh()
+            third = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert third["epoch"] == first["epoch"]
+            await read(399_999, -5)
+            await read(500_000, -1)
+            reset = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert reset["epoch"] != first["epoch"]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_pending_input_fences_new_episode_until_saved_proof_reconciles():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            observer = RoutingIntegrity(store, h.sessions)
+            now = time.time()
+
+            async def read(tokens, offset):
+                await observer.observe_context(
+                    HOST, "child", provider="claude",
+                    reading=ContextReading(tokens, model="claude-fable-5-1"),
+                    observed_at=_iso(now + offset),
+                )
+
+            await read(450_000, -8)
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await read(500_000, -7)
+            await h.job.run_pass()
+            first = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert first["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+
+            await read(399_999, -6)
+            await read(500_000, -5)
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
+            second = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert second["epoch"] != first["epoch"]
+            assert second["pending_prior_attempt"]["id"] == first["attempt"]["id"]
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+
+            await store.append_session_event(
+                sid, {
+                    "stream_id": sid, "provider": "claude", "kind": "USER",
+                    "text": CONTEXT_COMPACT_COMMAND, "timestamp": _iso(time.time()),
+                }, identity="late-proof-of-first-compact", limit=500,
+            )
+            await h.job.run_pass()
+            resolved = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert resolved["pending_prior_attempt"]["outcome"] == "submitted"
+            assert resolved["pending_prior_attempt"]["proof_event_id"] > first["attempt"]["watermark"]
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            assert "attempt" not in json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+
+            # Proven carried input consumes this crossing; only a genuinely new
+            # below-advisory/compact crossing may submit another command.
+            await read(399_999, -4)
+            await read(500_000, -3)
+            await h.job.run_pass()  # advisory occupies the synthetic composer
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
+            third = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert third["epoch"] != second["epoch"]
+            assert third["attempt"]["id"] != first["attempt"]["id"]
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 2
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_assistant_front_desk_compacts_at_lower_thresholds(monkeypatch):
+    for suffix in ("ADVISORY_ABS", "ADVISORY_PCT", "COMPACT_ABS", "COMPACT_PCT",
+                   "ASSISTANT_ADVISORY_ABS", "ASSISTANT_COMPACT_ABS"):
+        monkeypatch.delenv("PENTACLE_CONTEXT_" + suffix, raising=False)
+    level = lambda tokens: context_fields(
+        "claude", ContextReading(tokens, model="claude-opus-5-5"), assistant_backend=True,
+    )[2]
+    assert level(149_999) == "none"
+    assert level(150_000) == "advisory"
+    assert level(200_000) == "compact"
+    assert context_fields("claude", ContextReading(200_000, model="claude-opus-5-5"))[2] == "none"
+    monkeypatch.setenv("PENTACLE_CONTEXT_ASSISTANT_COMPACT_ABS", "250000")
+    assert level(200_000) == "advisory"
+
+
+def test_unproven_input_retries_after_cooldown_while_still_compact():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            observer = RoutingIntegrity(store, h.sessions)
+            now = time.time()
+
+            async def read(tokens, offset):
+                await observer.observe_context(
+                    HOST, "child", provider="claude",
+                    reading=ContextReading(tokens, model="claude-fable-5-1"),
+                    observed_at=_iso(now + offset),
+                )
+
+            await read(450_000, -8)
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await read(500_000, -7)
+            await h.job.run_pass()
+            first = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert first["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+
+            # Inside the cooldown the unproven attempt still fences a repaste.
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+
+            # Past the cooldown and still compact-level: same episode retries.
+            h.job = NudgeJob(
+                h.sessions, h.comms, store,
+                NudgeConfig(compact_enabled=True, compact_cooldown_s=0.0),
+            )
+            await h.job.run_pass()
+            retried = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert retried["epoch"] == first["epoch"]
+            assert retried["attempt"]["id"] != first["attempt"]["id"]
+            assert retried["attempt"]["ordinal"] == 2
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 2
+
+            # A new crossing does not inherit a permanent fence either.
+            await read(399_999, -6)
+            await read(500_000, -5)
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()  # the new crossing's advisory occupies the composer
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
+            third = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert third["epoch"] != first["epoch"]
+            assert third["pending_prior_attempt"]["outcome"] == "unproven_expired"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 3
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_codex_parent_receives_no_claude_context_pressure():
+    from ledger import NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, config=NudgeConfig(compact_enabled=False),
+            )
+            await store.update_session(HOST, "parent", provider="codex")
+            await h.sessions.refresh()
+            await RoutingIntegrity(store, h.sessions).observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 5),
+            )
+            await h.job.run_pass()
+            assert [name for name, _ in h.tmux.pasted_by_name] == ["child"]
+            assert "context_advisory" in h.tmux.pasted[0]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_occupied_composer_defers_compaction_without_input():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            now = time.time()
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 5),
+            )
+            await h.job.run_pass()
+            draft = (
+                "⏵⏵ bypass permissions on (bypass)\n"
+                "❯ user draft in progress\n"
+                "────────────────────────\n"
+                "⏵⏵ bypass permissions on (bypass)\n"
+            )
+            h.tmux.set_capture("child", draft)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 4),
+            )
+            await h.job.run_pass()
+            assert await h.tmux.capture("child") == draft
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+            basis = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert "attempt" not in basis
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_pane_mode_defers_compaction_without_input():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 6),
+            )
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            h.tmux.input_mode_clear = lambda name: asyncio.sleep(0, result=False)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 5),
+            )
+            await h.job.run_pass()
+            basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert "attempt" not in basis
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_disable_switch_preserves_episode_until_reenabled():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
+
+    async def run():
+        store = _new_store()
+        try:
+            disabled = NudgeConfig.from_env({"PENTACLE_CONTEXT_COMPACT_ENABLED": "0"})
+            enabled = NudgeConfig.from_env({"PENTACLE_CONTEXT_COMPACT_ENABLED": "1"})
+            assert disabled.compact_enabled is False
+            assert enabled.compact_enabled is True
+            h = await _context_harness(store, parent=False, config=disabled)
+            sid = f"{HOST}:child"
+            await RoutingIntegrity(store, h.sessions).observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 5),
+            )
+            await h.job.run_pass()
+            before = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert "attempt" not in before
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            h.job = NudgeJob(h.sessions, h.comms, store, enabled)
+            await h.job.run_pass()
+            after = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert after["epoch"] == before["epoch"]
+            assert after["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            h.job = NudgeJob(h.sessions, h.comms, store, disabled)
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_pre_input_failure_retries_only_after_compact_cooldown(monkeypatch):
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+    from sessions import VerbError
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False,
+                config=NudgeConfig(compact_enabled=True, compact_cooldown_s=600),
+            )
+            sid = f"{HOST}:child"
+            now = time.time()
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 5),
+            )
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 4),
+            )
+            original_paste = h.tmux.paste
+
+            async def fail_before_input(name, text):
+                if text == CONTEXT_COMPACT_COMMAND:
+                    raise VerbError("paste_failed", "injected load-buffer refusal", phase="not_started")
+                await original_paste(name, text)
+
+            h.tmux.paste = fail_before_input
+            await h.job.run_pass()
+            first = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert first["attempt"]["outcome"] == "no_input"
+            assert first["attempt"]["ordinal"] == 1
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+            await h.job.run_pass()
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+            h.tmux.paste = original_paste
+            monkeypatch.setattr("ledger.time.time", lambda: now + 601)
+            await h.job.run_pass()
+            second = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert second["attempt"]["ordinal"] == 2
+            assert second["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_turn_becoming_busy_while_pane_lock_waits_queues_initial_input():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            now = time.time()
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 5),
+            )
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 4),
+            )
+            lock = h.comms._pane_input_lock(sid)
+            await lock.acquire()
+            task = asyncio.create_task(h.job.run_pass())
+            await asyncio.sleep(.01)
+            h.sessions.apply_live(sid, working=True)
+            lock.release()
+            await task
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert basis["attempt"]["outcome"] == "pending_input"
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_exact_command_left_in_draft_gets_one_enter_only_recovery():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            now = time.time()
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 5),
+            )
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 4),
+            )
+            original_paste = h.tmux.paste
+            enters = []
+
+            async def paste(name, text):
+                await original_paste(name, text)
+                if text == CONTEXT_COMPACT_COMMAND:
+                    h.tmux.set_capture(
+                        name, f"⏵⏵ bypass permissions on (bypass)\n❯ {text}\n",
+                    )
+
+            async def send_enter(name):
+                enters.append(name)
+                await store.append_session_event(
+                    sid, {
+                        "stream_id": sid, "provider": "claude", "kind": "USER",
+                        "text": CONTEXT_COMPACT_COMMAND,
+                        "timestamp": _iso(time.time()),
+                    }, identity="enter-only-command", limit=500,
+                )
+
+            h.tmux.paste = paste
+            h.tmux.send_enter = send_enter
+            await h.job.run_pass()
+            basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert basis["attempt"]["outcome"] == "submitted"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            assert enters == ["child"]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_collapsed_or_mixed_draft_never_gets_enter_recovery():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run(draft):
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 6),
+            )
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 5),
+            )
+            original_paste = h.tmux.paste
+            enters = []
+
+            async def paste(name, text):
+                await original_paste(name, text)
+                if text == CONTEXT_COMPACT_COMMAND:
+                    h.tmux.set_capture(name, draft)
+
+            h.tmux.paste = paste
+            h.tmux.send_enter = lambda name: enters.append(name)
+            await h.job.run_pass()
+            basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert basis["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            assert enters == []
+        finally:
+            store.stop()
+
+    asyncio.run(run("⏵⏵ bypass permissions on (bypass)\n❯ [Pasted text #1]\n"))
+    asyncio.run(run(f"⏵⏵ bypass permissions on (bypass)\n❯ {CONTEXT_COMPACT_COMMAND} extra\n"))
+
+
+def test_mode_entered_after_paste_blocks_enter_recovery():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 6),
+            )
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(time.time() - 5),
+            )
+            original_paste = h.tmux.paste
+            mode_active = False
+            enters = []
+
+            async def paste(name, text):
+                nonlocal mode_active
+                await original_paste(name, text)
+                if text == CONTEXT_COMPACT_COMMAND:
+                    h.tmux.set_capture(name, f"⏵⏵ bypass permissions on (bypass)\n❯ {text}\n")
+                    mode_active = True
+
+            h.tmux.paste = paste
+            h.tmux.input_mode_clear = lambda name: asyncio.sleep(0, result=not mode_active)
+            h.tmux.send_enter = lambda name: enters.append(name)
+            await h.job.run_pass()
+            basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert basis["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            assert enters == []
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("working", [False, True])
+@pytest.mark.parametrize("roster", [False, True])
+def test_compaction_has_durable_user_proof_and_no_duplicate(tmp_path, working, roster):
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
+
+    async def run():
+        store = _new_store(str(tmp_path / "confirmed.db"))
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            original_paste = h.tmux.paste
+            pane = MAIN_ROSTER if roster else IDLE_CAPTURED_LAYOUT
+            if working:
+                pane = "✻ Thinking… (5s · esc to interrupt)\n" + pane
+                from mirror import _extract_live_state
+                assert _extract_live_state(pane, "claude")["working"] is True
+
+            async def paste(name, text):
+                if text == CONTEXT_COMPACT_COMMAND:
+                    assert await h.tmux.capture(name) == pane
+                await original_paste(name, text)
+                h.tmux.set_capture(
+                    name, h.tmux._panes[name] + "⏵⏵ bypass permissions on (bypass)\n",
+                )
+                if text == CONTEXT_COMPACT_COMMAND:
+                    await store.append_session_event(
+                        sid, {
+                            "stream_id": sid, "provider": "claude", "kind": "USER",
+                            "text": text, "timestamp": _iso(time.time()),
+                        }, identity="compact-command-1", limit=500,
+                    )
+
+            h.tmux.paste = paste
+            now = time.time()
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 6),
+            )
+            await h.job.run_pass()
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 5),
+            )
+            h.sessions.apply_live(sid, working=working)
+            h.tmux.set_capture("child", pane)
+            await h.job.run_pass()
+            basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert basis["attempt"]["outcome"] == "submitted"
+            assert basis["attempt"]["proof_event_id"] > basis["attempt"]["watermark"]
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            h.job = NudgeJob(h.sessions, h.comms, store)
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            await RoutingIntegrity(store, h.sessions).observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 4),
+            )
+            await RoutingIntegrity(store, h.sessions).observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 3),
+            )
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_uncertain_input_stays_fenced_until_user_event_reconciliation(tmp_path):
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
+
+    async def run():
+        store = _new_store(str(tmp_path / "pending.db"))
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            original_paste = h.tmux.paste
+
+            async def paste(name, text):
+                await original_paste(name, text)
+                h.tmux.set_capture(
+                    name, h.tmux._panes[name] + "⏵⏵ bypass permissions on (bypass)\n",
+                )
+                if text == CONTEXT_COMPACT_COMMAND:
+                    raise RuntimeError("injected failure after body input")
+
+            h.tmux.paste = paste
+            now = time.time()
+            await RoutingIntegrity(store, h.sessions).observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(500_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 5),
+            )
+            await h.job.run_pass()
+            first = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert first["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            store.stop()
+            store.start()
+            await h.sessions.refresh()
+            h.job = NudgeJob(h.sessions, h.comms, store, NudgeConfig(compact_enabled=True))
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            await store.append_session_event(
+                sid, {
+                    "stream_id": sid, "provider": "claude", "kind": "USER",
+                    "text": CONTEXT_COMPACT_COMMAND, "timestamp": _iso(time.time()),
+                }, identity="reconciled-command", limit=500,
+            )
+            await h.job.run_pass()
+            last = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert last["attempt"]["outcome"] == "submitted"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_update_footer_structural_recognition():
+    """Parser: the self-update banner is empty-composer chrome only in its
+    structural footer position; drafts, footer-like composer text and unknown
+    chrome still fail closed."""
+    from boot_ready import claude_composer_empty, claude_prompt_ready
+
+    assert claude_prompt_ready(IDLE_WITH_UPDATE_FOOTER) is True
+    # RED before the fix / GREEN after: an empty composer under the banner.
+    assert claude_composer_empty(IDLE_WITH_UPDATE_FOOTER) is True
+    # Control: identical layout without the banner was always empty.
+    assert claude_composer_empty(IDLE_CAPTURED_LAYOUT) is True
+    # Structural: banner-like text ABOVE the permission footer is not chrome.
+    assert claude_composer_empty(UPDATE_BANNER_ABOVE_FOOTER) is False
+    # A genuine draft (even the banner text) on the prompt line stays a draft.
+    assert claude_composer_empty(DRAFT_LOOKS_LIKE_FOOTER) is False
+    # Unknown chrome after the banner still fails closed.
+    assert claude_composer_empty(UNKNOWN_CHROME_AFTER_FOOTER) is False
+    # Managed manual mode renders a different permission footer; the banner
+    # below it is chrome there too, and a banner above it stays a draft.
+    manual = "  ⏸ manual mode on · ? for shortcuts"
+    assert claude_composer_empty("\n".join([_DIV, "❯ ", _DIV, manual, _UPDATE_FOOTER, ""])) is True
+    assert claude_composer_empty("\n".join([_DIV, "❯ ", _UPDATE_FOOTER, _DIV, manual, ""])) is False
+
+
+def _arm_then_capture_and_cross(h, observer, capture):
+    now = time.time()
+
+    async def read(tokens, offset):
+        await observer.observe_context(
+            HOST, "child", provider="claude",
+            reading=ContextReading(tokens, model="claude-fable-5-1"),
+            observed_at=_iso(now + offset),
+        )
+
+    async def go():
+        await read(450_000, -8)
+        await h.job.run_pass()
+        h.tmux.set_capture("child", capture)
+        await read(500_000, -7)
+        await h.job.run_pass()
+
+    return go
+
+
+def test_update_footer_pane_compacts_once():
+    """Real compaction path: an empty composer carrying the CLI update footer
+    receives exactly one /compact (RED pre-fix: the footer deferred it)."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, IDLE_WITH_UPDATE_FOOTER)()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            basis = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert basis["attempt"]["outcome"] in {"submitted", "pending_input"}
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_captured_layout_without_footer_compacts():
+    """Isolation control: the same captured layout without the banner also
+    compacts, proving the banner line is the only differentiator."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, IDLE_CAPTURED_LAYOUT)()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_draft_under_update_footer_defers_and_preserves_draft():
+    """A genuine draft beneath the update footer still blocks compaction and
+    the draft is never overwritten — footer tolerance must not leak a draft."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, DRAFT_UNDER_UPDATE_FOOTER)()
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+            assert await h.tmux.capture("child") == DRAFT_UNDER_UPDATE_FOOTER
+            basis = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert "attempt" not in basis
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_compact_defer_reason_logged_once_bounded(caplog):
+    """A persistent blocker logs one bounded INFO reason, not one per sweep,
+    and never the composer text."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, DRAFT_UNDER_UPDATE_FOOTER)()
+            # A second sweep with the same blocker must not re-log.
+            await h.job.run_pass()
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+        finally:
+            store.stop()
+
+    with caplog.at_level(logging.INFO, logger="chat_streamd_v2.ledger"):
+        asyncio.run(run())
+    deferred = [
+        r for r in caplog.records
+        if "deferred" in r.getMessage() and "context_compact" in r.getMessage()
+    ]
+    assert len(deferred) == 1, [r.getMessage() for r in deferred]
+    message = deferred[0].getMessage()
+    assert "reason=composer_not_proven_empty" in message
+    assert "just compact now" not in message  # never log composer text
+
+@pytest.mark.parametrize("late_proof", [False, True])
+def test_expired_unproven_attempt_preserves_draft_or_accepts_late_proof(late_proof):
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(store, parent=False, config=NudgeConfig(compact_enabled=True))
+            observer = RoutingIntegrity(store, h.sessions)
+            sid = f"{HOST}:child"
+            now = time.time()
+            for tokens, offset in [(450_000, -8), (500_000, -7)]:
+                await observer.observe_context(HOST, "child", provider="claude",
+                    reading=ContextReading(tokens, model="claude-fable-5-1"), observed_at=_iso(now+offset))
+                h.tmux.set_capture("child", h.tmux.IDLE)
+                await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            h.job = NudgeJob(h.sessions, h.comms, store,
+                NudgeConfig(compact_enabled=True, compact_cooldown_s=0.0))
+            draft = "❯ actual user draft\n────────────────────────\n⏵⏵ bypass permissions on (bypass)\n"
+            h.tmux.set_capture("child", h.tmux.IDLE if late_proof else draft)
+            if late_proof:
+                await store.append_session_event(sid, {"stream_id":sid, "provider":"claude", "kind":"USER",
+                    "text":CONTEXT_COMPACT_COMMAND, "timestamp":_iso(time.time())}, identity="expired-late-proof", limit=500)
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            if late_proof:
+                basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+                assert basis["attempt"]["outcome"] == "submitted"
+                await h.job.run_pass()
+                assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            else:
+                assert await h.tmux.capture("child") == draft
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+# Synthetic provider chrome: no production agent descriptions or pane text.
+MAIN_ROSTER = IDLE_CAPTURED_LAYOUT + "⏺ main\n◯ researcher Synthetic task (12m 3s)\n"
+
+
+@pytest.mark.parametrize("pane", [
+    IDLE_WITH_UPDATE_FOOTER.replace("Restart to update", "Restart to apply"),
+    IDLE_WITH_UPDATE_FOOTER.replace("Restart to update", "/restart to apply"),
+    MAIN_ROSTER + _UPDATE_FOOTER.replace("Restart to update", "/restart to apply"),
+    MAIN_ROSTER,
+    MAIN_ROSTER + "◯ tester Another synthetic task (2s)\n" + _UPDATE_FOOTER,
+    MAIN_ROSTER.replace(_PERM_FOOTER, _PERM_FOOTER + " · ✔ Update installed · Restart to apply"),
+])
+def test_main_roster_and_apply_banner_are_empty_chrome(pane):
+    from boot_ready import claude_composer_empty
+    assert claude_composer_empty(pane)
+
+
+@pytest.mark.parametrize("pane", [
+    MAIN_ROSTER.replace("⏺ main", "⏺ researcher"),
+    MAIN_ROSTER.replace("⏺ main\n", ""),
+    IDLE_CAPTURED_LAYOUT + "⏺ main\n",
+    IDLE_CAPTURED_LAYOUT + "⏺ main\n◯ \n",
+    MAIN_ROSTER + "unknown trailing content\n",
+    MAIN_ROSTER.replace("⏺ main", "● main"),
+    MAIN_ROSTER.replace("◯ researcher", "○ researcher"),
+    MAIN_ROSTER.replace("❯ ", "❯ ✔ Update installed · /restart to apply"),
+    MAIN_ROSTER.replace("❯ ", "❯ ⏺ main"),
+    MAIN_ROSTER.replace("❯ ", "❯ Press up to edit queued messages"),
+    "❯\n" + _PERM_FOOTER + "\n⏺ main\n◯ worker synthetic\n",
+    "❯\n⏺ main\n◯ worker synthetic\n" + _DIV + "\n" + _PERM_FOOTER,
+    "❯\nactual multiline draft\n" + _DIV + "\n" + _PERM_FOOTER + "\n⏺ main\n◯ worker synthetic",
+])
+def test_roster_recognition_preserves_drafts_and_unknown_chrome(pane):
+    from boot_ready import claude_composer_empty
+    assert not claude_composer_empty(pane)

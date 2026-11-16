@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import socket
+from typing import Any
+
+
+DEFAULT_WS_URL = "ws://127.0.0.1:7791"
+
+
+def is_loopback_endpoint(url: str) -> bool:
+    from urllib.parse import urlparse
+    import ipaddress
+    hostname = urlparse(url).hostname or ""
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def local_admin_token(config: Config) -> str:
+    """Read daemon-user proof only for a literal loopback endpoint."""
+    import stat
+    if not is_loopback_endpoint(config.ws_url):
+        raise ValueError("local admin commands require a loopback endpoint")
+    path = Path.home() / ".config/pentacle-stream/local-admin.token"
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+            raise ValueError("unsafe local admin token file")
+        token = source.read(256).strip()
+    if len(token) != 64:
+        raise ValueError("invalid local admin token file")
+    return token
+
+
+@dataclass(frozen=True)
+class OperatorTokenSource:
+    env_name: str
+    env_present: bool
+    path: Path
+
+
+@dataclass(frozen=True)
+class Config:
+    ws_url: str
+    token: str
+    host_id: str
+    runtime_dir: Path
+    memory_repo_path: Path | None = None
+    operator_token_source: OperatorTokenSource | None = None
+
+
+def _agent_config_path() -> Path:
+    return Path("~/.agent-orch/config.json").expanduser()
+
+
+def _read_json_config() -> dict[str, Any]:
+    path = _agent_config_path()
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _config_chat_stream_url(config: dict[str, Any]) -> str | None:
+    chat_stream = config.get("chat_stream")
+    if not isinstance(chat_stream, dict):
+        return None
+    value = chat_stream.get("url")
+    return value if isinstance(value, str) and value else None
+
+
+def _sanitize_hostname(short_hostname: str) -> str:
+    """Lowercase and reduce a hostname to alphanumeric + dashes for use as a host id."""
+    lowered = short_hostname.lower()
+    cleaned = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in lowered)
+    cleaned = cleaned.strip("-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned
+
+
+def _hostname_host_id() -> str:
+    hostname = socket.gethostname()
+    short_hostname = hostname.split(".", 1)[0]
+    sanitized = _sanitize_hostname(short_hostname)
+    if sanitized:
+        return sanitized
+    raise RuntimeError(f"unknown_local_host: {hostname}")
+
+
+def local_host_id(config: dict[str, Any] | None = None) -> str:
+    """This machine's fleet host id: AGENT_ORCH_HOST_ID, then config.json local_host_id, then the hostname."""
+    host_id = os.environ.get("AGENT_ORCH_HOST_ID")
+    if host_id:
+        return host_id
+    config = _read_json_config() if config is None else config
+    configured_host_id = config.get("local_host_id")
+    if isinstance(configured_host_id, str) and configured_host_id:
+        return configured_host_id
+    return _hostname_host_id()
+
+
+def load_config() -> Config:
+    config = _read_json_config()
+
+    ws_url = (
+        os.environ.get("AGENT_ORCH_WS_URL")
+        or _config_chat_stream_url(config)
+        or DEFAULT_WS_URL
+    )
+
+    operator_source = OperatorTokenSource(
+        env_name="AGENT_ORCH_TOKEN",
+        env_present="AGENT_ORCH_TOKEN" in os.environ,
+        path=Path("~/.config/pentacle-stream/token").expanduser(),
+    )
+
+    host_id = local_host_id(config)
+
+    runtime_dir = Path(
+        os.environ.get("AGENT_ORCH_RUNTIME_DIR") or "~/.agent-orch/"
+    ).expanduser()
+
+    memory_repo_path = None
+    configured_memory_repo_path = os.environ.get("AGENT_ORCH_MEMORY_REPO", config.get("memory_repo_path"))
+    if isinstance(configured_memory_repo_path, str) and configured_memory_repo_path:
+        memory_repo_path = Path(configured_memory_repo_path).expanduser()
+
+    return Config(
+        ws_url=ws_url,
+        token="",
+        host_id=host_id,
+        runtime_dir=runtime_dir,
+        memory_repo_path=memory_repo_path,
+        operator_token_source=operator_source,
+    )

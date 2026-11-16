@@ -1,0 +1,206 @@
+"""Small stdlib-only machine sampler shared by the daemon and satellites."""
+
+from __future__ import annotations
+
+import math
+import logging
+import os
+import platform
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+
+log = logging.getLogger("chat_streamd_v2.machine_stats")
+
+
+STATS_INTERVAL_S = 30.0
+WIRE_VERSION = 1
+STATS_FIELDS = (
+    "cpu_load_1m",
+    "memory_used_bytes",
+    "memory_total_bytes",
+    "disk_used_bytes",
+    "disk_total_bytes",
+    "uptime_seconds",
+)
+
+CPU_USAGE_FIELD = "cpu_usage_pct"
+
+
+def _sysctl_int(name: str) -> int:
+    try:
+        return int(subprocess.check_output(["sysctl", "-n", name], text=True, stderr=subprocess.PIPE, timeout=2).strip())
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        log.warning("machine sampler command failed: %s", exc)
+        return 0
+
+
+def _darwin_available_bytes() -> int:
+    page_size = _sysctl_int("hw.pagesize") or 4096
+    try:
+        output = subprocess.check_output(["vm_stat"], text=True, stderr=subprocess.PIPE, timeout=2)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("machine sampler command failed: %s", exc)
+        return 0
+    available_pages = 0
+    for line in output.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() not in {"Pages free", "Pages inactive", "Pages speculative", "Pages purgeable", "File-backed pages"}:
+            continue
+        try:
+            available_pages += int(value.strip().rstrip("."))
+        except ValueError:
+            continue
+    return available_pages * page_size
+
+
+def _memory_bytes() -> tuple[int, int]:
+    if Path("/proc/meminfo").is_file():
+        values = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, value = line.partition(":")
+            if key in {"MemTotal", "MemAvailable"}:
+                values[key] = int(value.split()[0]) * 1024
+        total = values.get("MemTotal", 0)
+        available = values.get("MemAvailable", 0)
+        if total:
+            return max(0, total - available), total
+    total = _sysctl_int("hw.memsize") or 0
+    if not total:
+        try:
+            total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        except (AttributeError, OSError, ValueError):
+            total = 0
+    available = _darwin_available_bytes() if platform.system() == "Darwin" else 0
+    return max(0, total - available), total
+
+
+def _uptime_seconds() -> int:
+    try:
+        return max(0, int(float(Path("/proc/uptime").read_text().split()[0])))
+    except (FileNotFoundError, IndexError, ValueError, OSError):
+        pass
+    if platform.system() == "Darwin":
+        try:
+            raw = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True, stderr=subprocess.PIPE, timeout=2)
+            boot = int(raw.split("sec =", 1)[1].split(",", 1)[0].strip())
+            return max(0, int(time.time()) - boot)
+        except (IndexError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            log.warning("machine sampler command failed: %s", exc)
+    clock = getattr(time, "CLOCK_BOOTTIME", getattr(time, "CLOCK_MONOTONIC", None))
+    return max(0, int(time.clock_gettime(clock))) if clock is not None else 0
+
+
+def _linux_cpu_ticks() -> tuple[int, int] | None:
+    """Read system-wide total and idle ticks, excluding duplicated guest fields."""
+    try:
+        first = Path("/proc/stat").read_text().splitlines()[0].split()
+        if first[0] != "cpu" or len(first) < 5:
+            return None
+        ticks = [int(value) for value in first[1:9]]
+        return sum(ticks), ticks[3] + (ticks[4] if len(ticks) > 4 else 0)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _darwin_cpu_usage_pct() -> float | None:
+    # The second top sample measures an interval; its first line may reflect
+    # counters since boot and is not the current utilization.
+    try:
+        output = subprocess.check_output(
+            ["top", "-l", "2", "-n", "0", "-s", "1"],
+            text=True, stderr=subprocess.PIPE,
+            timeout=5,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("machine sampler command failed: %s", exc)
+        return None
+    lines = [line for line in output.splitlines() if "CPU usage:" in line]
+    if len(lines) < 2:
+        return None
+    idle = re.search(r"(\d+(?:\.\d+)?)%\s+idle\b", lines[-1])
+    if idle is None:
+        return None
+    percent = 100.0 - float(idle.group(1))
+    return percent if math.isfinite(percent) and 0 <= percent <= 100 else None
+
+
+def _cpu_usage_pct() -> float | None:
+    system = platform.system()
+    if system == "Darwin":
+        return _darwin_cpu_usage_pct()
+    if system != "Linux":
+        return None
+    before = _linux_cpu_ticks()
+    if before is None:
+        return None
+    time.sleep(0.1)
+    after = _linux_cpu_ticks()
+    if after is None:
+        return None
+    total = after[0] - before[0]
+    idle = after[1] - before[1]
+    if total <= 0 or idle < 0 or idle > total:
+        return None
+    return 100.0 * (total - idle) / total
+
+
+def sample_machine_stats(host: str) -> dict[str, int | float | str | None]:
+    """Return host stats with an optional measured CPU utilization percent."""
+    try:
+        load = float(os.getloadavg()[0])
+    except (AttributeError, OSError):
+        load = 0.0
+    memory_used, memory_total = _memory_bytes()
+    disk = shutil.disk_usage(Path.home())
+    return {
+        "host": str(host),
+        "cpu_load_1m": load if math.isfinite(load) and load >= 0 else 0.0,
+        CPU_USAGE_FIELD: _cpu_usage_pct(),
+        "memory_used_bytes": memory_used,
+        "memory_total_bytes": memory_total,
+        "disk_used_bytes": disk.used,
+        "disk_total_bytes": disk.total,
+        "uptime_seconds": _uptime_seconds(),
+    }
+
+
+def validate_machine_stats(stats: object, host: str) -> dict[str, int | float | str | None] | None:
+    if (
+        not isinstance(host, str)
+        or not host
+        or not isinstance(stats, dict)
+        or not isinstance(stats.get("host"), str)
+        or not stats["host"]
+        or stats["host"] != host
+    ):
+        return None
+    result: dict[str, int | float | str | None] = {"host": host}
+    for field in STATS_FIELDS:
+        value = stats.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(float(value)) or value < 0:
+            return None
+        result[field] = value
+    if result["memory_total_bytes"] <= 0 or result["disk_total_bytes"] <= 0:
+        return None
+    if result["memory_used_bytes"] > result["memory_total_bytes"]:
+        return None
+    if result["disk_used_bytes"] > result["disk_total_bytes"]:
+        return None
+    if CPU_USAGE_FIELD in stats:
+        cpu = stats[CPU_USAGE_FIELD]
+        if cpu is None:
+            result[CPU_USAGE_FIELD] = None
+        elif isinstance(cpu, bool) or not isinstance(cpu, (int, float)):
+            result[CPU_USAGE_FIELD] = None
+        elif not 0 <= cpu <= 100 or not math.isfinite(float(cpu)):
+            result[CPU_USAGE_FIELD] = None
+        else:
+            result[CPU_USAGE_FIELD] = float(cpu)
+    return result

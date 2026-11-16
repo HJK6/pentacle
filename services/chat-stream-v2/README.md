@@ -1,0 +1,695 @@
+# Chat stream daemon
+
+The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated web/mobile transport.
+
+Covered assistant commissions run non-mutating admission preflight before
+creating a ruling, enqueueing its notice or launching/reserving a provider.
+`spawn_preflight_failed` carries at most eight redacted `{code, field,
+correction}` entries in `errors`; account authorization remains fail-fast.
+The existing spec resolver, work binding and model tuple predicates are reused;
+no routing policy or advisor authority changes. Missing operator origin remains
+honest substantive input; Tracking text is interpreted by content. New decision packets retain the exact resolved
+`spec_content_sha256` and display-only `excerpt_rule`, with complete immutable
+intent in the existing ruling row. Existing pending requests retain their
+original evidence, and release still rechecks authority and safety.
+See [CLI admission and exact close retries](../agent-orch/README.md#supporting-spawn-admission).
+
+## Accepted report evidence
+
+`work.report.get` reads an immutable ingested report by `report_id`. Existing
+authenticated metadata callers receive `report_id`, `status`, `from_stream_id`,
+`provenance_qualified_spec_ids` and `created_at`. Missing reports remain
+`not_found`; unavailable storage remains `unavailable`.
+
+Only the existing `work-report-reader` service identity additionally receives
+well-formed typed evidence for a finished QA report: `qa_verdict`, `target_sha`,
+the report's `session_generation`, and `qa_review` containing only
+`reviewed_scope`, `candidate_identity`, `gate_evidence_digest` and
+`commission_msg_id`. Candidate identity must equal the full target SHA; scope
+and generation must be nonempty, the evidence digest must be SHA256, and a
+commission ID must be a nonnegative integer matching an existing independent
+commission for that reviewer generation and provenance-qualified spec; a
+spec-phase review does not authorize final release. Missing or malformed
+evidence leaves the original metadata response intact. No opaque extras,
+report body, request hash or credentials are exposed. The service's existing
+authentication and single-verb restriction are unchanged.
+
+A consumer admitting a protected release must require ACCEPT and bind the
+reviewer's immutable evidence to its exact candidate bytes, affected paths and
+base revisions, while retaining spec provenance, reviewer independence and
+commission checks. A completed report or free-form scope alone is insufficient.
+
+[Named provider accounts](../../docs/provider_accounts.md) are optional and
+default OFF. Their launch, transcript, usage and recovery consumers must be
+compatible before enabling the host's named-account controls.
+
+
+Turn-budget observation, recovery and settings are retired. Existing history is
+retained; pending legacy turn notices become terminal without delivery. Spec and
+lane tracking remain available, but spawning does not require lane membership
+and completion does not parse spec Markdown or fence source-file fingerprints.
+See [retained WIP and lifecycle controls](../../docs/completion-admission-guards.md).
+
+Close/reap process identity uses numeric kernel session IDs. On hosts whose
+`ps` lacks `sid` (macOS), a bounded Python probe combines supported `ps` fields
+with `os.getsid`; peer reaping requires `python3` on the peer's command path.
+An unavailable probe leaves cleanup unverified. Birth, boot, user, process group,
+session and tmux ownership checks still apply before survivor signals.
+Forced local close first brackets capture with the same live, single-pane tmux
+binding across the whole session. The pane root must be a direct child of the
+responding server. Both snapshots require server version `3.4` or `3.7c`,
+`pane_dead=0`, `pane_pipe=0`, and exactly empty `pane_dead_status` and
+`pane_dead_signal`; even exit status `0` refuses authority. Other server versions
+defer until their format/reap/respawn contract is independently qualified.
+Capture retains a fixed process cohort and a kernel witness per process before
+the second binding check and graceful teardown. Fresh process records and boot
+identity fence each target; Linux sends through the retained pidfd. Darwin uses
+NOTE_EXIT and a synchronous final event check immediately before kill. Darwin's
+check and kill are not atomic: exit plus PID reuse in that final interval, and
+initial ambiguity in one-second printed birth values, remain platform limits.
+Unproved initial binding returns `logical_ownership_unproven` for forced close;
+later instance drift returns `instance_authority_unproven`. An unanchored attempt
+creates no ownership proofs and retains unknown cleanup even if its guessed PIDs
+disappear. Existing authorized graceful tmux teardown remains available without
+an initial anchor; its success is separate from that unresolved cleanup.
+An instance refusal may follow delivery to other proved members of the cohort;
+the session stays open with its cleanup obligation.
+After a valid initial binding, a changed or unavailable second binding defers
+the entire attempt without graceful teardown, so it cannot retarget a replacement.
+Late descendants are reported but never signalled by this escalation. A tmux
+server that wedges after a successful anchor still permits witnessed escalation;
+a server already wedged before anchoring does not.
+Legacy cancelled-spawn rows without a nonce also require a nonempty matching
+birth value; otherwise their retained cleanup remains deferred.
+
+`close` requests carrying `progeny_stream_id` are refused before teardown with
+`close_progeny_unsupported`; use `spawn --handoff` for succession.
+
+Cancelled remote spawns retain exact cleanup ownership until creation commands
+are terminal and the pane is absent. See [remote creation cleanup](docs/remote-creation-cleanup.md)
+for status, persistent uncertainty and rollback requirements.
+
+Use the complete [local startup recipe](../../README.md#quick-start) first. It aligns the web host and daemon host identity (`local`), native transcript directory, loopback endpoint and web host credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
+
+## Work index polling
+
+Work observations sweep every 60 seconds by default (`WORK_INDEX_SWEEP_S` overrides
+the interval). Unchanged folders reuse fresh candidates keyed by the identity,
+size, mtime and ctime of `spec.md` and `summary.md`; conflict markers are checked
+each scan, and removed folders leave the cache. Missing/ambiguous observations
+retain the existing 300-second settle default (`WORK_INDEX_SETTLE_S`). Sweep
+duration is logged as `work index phase=worktree_sweep duration_s=...`.
+
+## Private configuration
+
+`PENTACLE_MACHINES_FILE` selects a private machine JSON file; `PENTACLE_MACHINES_JSON` supplies the same shape inline. [machines.example.json](machines.example.json) demonstrates a single local machine. Set executable locations and working directories for your machine. `projects_root` must point to the actual Claude `.claude/projects` directory. A daemon's `--local-host` must match its machine name and the host used by clients.
+
+Without peer configuration, the daemon runs locally. To keep specs and QA records outside the checkout, configure the documented memory root for the orchestration CLI and daemon. Do not put transcripts, credentials, runtime databases or real work receipts in the public source tree.
+
+`python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The web gate explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
+
+## Waiting for notification answers
+
+`notification.await` holds the host-transfer lock only while projecting committed
+transfers, registering its waiter and inspecting the durable notification. It
+releases the lock before waiting, so `prompt.answer`, `notification.resolve` and
+host transfer can proceed while a request is parked. Registration precedes the
+database read to avoid losing an answer during that read. Each request removes
+its own waiter on success, timeout, error or cancellation; other waiters survive.
+Already saved answers return immediately. A terminal notification without an
+answer retains the ordinary timeout behavior.
+
+## Connecting during startup
+
+The listener binds before startup adoption finishes. A connecting client waits
+for persisted sessions to be adopted and the runtime SHA to be resolved before
+receiving its first welcome or any broadcast. Its first hello snapshot therefore
+includes the adopted inventory. Authentication challenges are created after this
+wait; disconnecting during startup releases the pending handler.
+
+SHA resolution keeps its existing checkout, deploy-stamp and VERSION fallbacks.
+If none provides an identity, the daemon logs that limitation. The web host's
+five-second welcome timeout can still require a reconnect during an unusually
+slow startup; the existing git lookup timeout is ten seconds.
+
+## Interrupted input and spawn recovery
+
+Accepted direct-assistant input retains its original binding identity. When fresh
+local pane and process checks prove the holder died unintentionally, the daemon
+keeps input queued before dispatch. It releases that input only to a recorded
+restore, generation handoff, or committed host-transfer successor. An unrelated
+rebind does not inherit the old input; new input uses the current binding.
+
+An interrupted spawn with a saved pre-paste watermark and a live owned pane stays
+`indeterminate` with `spawn_delivery_unknown` until positive delivery evidence
+arrives. Status, await and same-key retry retain the original handle and report
+prompt submission as unknown. They never repaste. Inspect or await that seat; an
+authorized close does not undo provider work. A NULL intent with no pane reports
+`spawn_interrupted`, rather than an objective validation error.
+
+Before downgrading to an older daemon, retain or explicitly disposition queued
+recovery inputs and unresolved spawn handles without replay: older binaries do
+not enforce the new route-origin fence.
+
+## Web and mobile credentials
+
+Unauthenticated local bootstrap is only for actual loopback peers whose
+WebSocket handshake omits `Origin` (native CLI tools and the Node web bridge).
+Any supplied `Origin`, including a local, empty or `null` value, requires the
+same authentication as a remote peer for reads, snapshots and broadcasts.
+Authenticated browser/mobile clients continue to use their existing credentials.
+This isolates websites; it is not authentication against other local processes.
+
+`tools/operator_auth_cli.py issue --client-kind pentacle` issues a web host credential; `--client-kind pentacle-mobile` issues a separate mobile credential. The JSON output's `code` field is secret. Store web host credentials in a mode-0600 file under a mode-0700 directory and point `chatStream.tokenPath` at its canonical path. Do not place a v2 credential inline in the web host config. The CLI's `list`, `revoke` and `rotate` commands manage credentials in the daemon's registry.
+
+For the mobile app, create a **single-use enrollment link** on the daemon host,
+as the same OS user running the daemon. This is separate from the raw credential
+envelope returned by `operator_auth_cli.py issue`; that envelope cannot be used
+as an eight-character enrollment code.
+
+```sh
+python services/chat-stream-v2/tools/mobile_enrollment_cli.py \
+  --ws-url ws://127.0.0.1:7791 --label simulator
+```
+
+The JSON contains a secret `url` that expires after ten minutes and can be used
+once. Open it in the installed mobile app. The app exchanges the code with this
+daemon and stores the resulting credential in SecureStore. Create the link only
+after the app is built and the daemon is reachable. The issuer writes the
+existing private `~/.config/pentacle-mobile/enrollment-codes.json` registry with
+owner-only permissions; no daemon restart is needed. `--ttl-seconds` accepts
+1–3600 seconds. Do not commit or publish the link.
+
+For a physical phone, replace loopback with the daemon host's reachable LAN/VPN
+endpoint and bind the listener to the appropriate interface. Keep access on a
+private network or authenticated tunnel; use WSS if traffic crosses an untrusted
+network. See [network access](../../docs/REMOTE_AUTH.md) and the complete
+[mobile setup guide](https://github.com/HJK6/pentacle-mobile/blob/main/docs/FRIEND_SETUP.md).
+An SSH tunnel can retain a loopback daemon listener; forwarded connections
+inherit the tunnel endpoint's trust boundary. Restrict tunnel access to the
+operator.
+
+## Desk credential labels
+
+`PENTACLE_DESK_STAMP_CONFIG` names a private (mode 600, daemon-user) JSON file
+mapping operator-registry credential ids to desk labels, for example
+`{"<credential uuid>": "sms-desk"}`. Labels are lowercase words ending in `-desk`;
+the file holds at most eight entries and an invalid file or entry stamps nothing.
+A `send` authenticated with a mapped credential has its `text` (and `message`)
+prefixed `[from <label>]` on its own line after sanitising, before any target
+handling. The prefix is deliberately not an anchored tell, so the row stays an
+ordinary user row and its receipt reaches `landed`. The file is re-read on each
+send: deleting it or an entry stops the label at once. This is attribution and
+per-credential revocation, not a reduction in privilege; a desk credential can
+still do whatever an operator credential can, and only `send` text is labelled.
+
+## Remote session interrupt
+
+`send.interrupt` targets a session by `host` and `session_name`. For a configured
+remote host, updated web clients also send the selected open row's
+`expected_session_generation`. They capture that value before handing the
+request to an asynchronous bridge and retain it for a retry. A remote request
+without the selected generation returns `generation_required`; the daemon does
+not substitute the current row's generation. The existing local request may
+omit it.
+
+For a remote request, the daemon requires an open durable row of the expected
+generation and an SSH tmux pane whose session name and PID match that row. It
+rechecks the row and exact pane identity before sending one Escape to the
+checked pane ID. Unknown hosts, unreachable peers, changed rows or panes, and
+missing identity return typed errors without sending a key. A missing pane
+returns `pane_unavailable`. A live pane returns `interrupt_unconfirmed` after
+the key because a successful tmux send does not prove that the provider stopped
+its turn. Installed mobile clients that lack selected-generation propagation
+receive `generation_required` for remote targets until their separate client
+release; this daemon release does not claim mobile remote interrupt support.
+
+## Approved close deferral
+
+An approved lane close that returns `close.deferred` stays actionable in the
+existing durable ruling loop. Each retry uses the ordinary close path and its
+generation, requester and liveness checks. Once capture proves idle,
+the original request closes exactly once, including after a daemon restart.
+Definitive refusals remain terminal. The existing 600-second unruled deadline
+policy is unchanged.
+
+## Codex terminal provider errors
+
+When a Codex rollout records `event_msg/task_complete` with a nonempty `error`,
+the shared normalizer emits an `ERROR` event. Local ingestion and satellite
+ingestion retain it in the ordinary event tail, so chat and inspection show why
+a turn stopped even when Codex emitted no final assistant message.
+
+Capacity failures use fixed text identifying `server_overloaded`; other errors
+use a fixed generic message. Arbitrary provider messages and details are not
+copied. The event includes the turn ID and an allowlisted error code. Turn IDs
+provide replay identity, so re-reading a completion does not duplicate it.
+Successful completions and token bookkeeping remain excluded. This visibility
+does not resume a task, switch models, or produce a completion report.
+
+## Pending lane digests
+
+`agent-orch work owed --json` clears assignment debt on the normal accepted
+observation scan when source is fresh, has a revision, and is `completed`,
+`deprecated`, `backlog`, `ready_for_dev`, `blocked` or `needs_qa`, including
+work already settled before assignment. `analysis` and `in_progress` remain
+active. Unusable source cannot clear debt from cached status; a later healthy
+scan can repair it. Lead, nexus and planner close checks also retain unresolved
+assignment history; see [Lead disposition and close](docs/lead-dispositions.md).
+
+`agent-orch work unattended --json` lists fresh `in_progress` work without a
+qualifying live lead or Nexus. Missing records do not degrade this list when
+their last-good state was absent or inactive and no current owner, open lane,
+assignment episode or debt references them. The observation rows remain for
+diagnostics. Missing former active work and stale, ambiguous, referenced or
+unavailable observations remain omissions. CLI and lane digest share these
+projections; scan and delivery cadence are unchanged.
+
+An old `lane_digest` with committed-pending submission proof is reconciled by
+the existing notice retry loop after both its retry and proof-age bounds.
+Positive proof completes the original delivery. Otherwise, a complete ordered
+read from its reachable, positive watermark through the current generation's
+event tip (including archived events) may record `delivery_absent_after_bound`.
+That terminal negative retains the original tell without acknowledging or
+resubmitting it; current owed facts can use the next ordinary digest deadline.
+Incomplete, unavailable or changed evidence stays pending with a typed
+`absence_readback_unknown:<reason>` in the existing error/action fields.
+Tell ledger audit records expose `sender_verified`, `sender_kind` (`peer`,
+`operator`, `service`, `unknown`) and nullable `sender_generation`. These fields
+capture server-authenticated context at delivery; they are not reconstructed from
+current sessions. `from_stream_id` remains a display claim unless verification
+is true. Legacy rows default to false/unknown/null. Composite queued peers retain
+only their verified stream and generation in additive nullable queue columns;
+legacy queue rows receive no inferred identity or backfill.
+
+`agent-orch ledger get <tell_id>` remains read-only. Do not resend or manually
+terminalize a pending notice to obtain fresh debt delivery.
+
+## Front desk close authority
+
+The verified current direct-primary front desk is the lifecycle principal:
+`agent-orch close <stream> --expected-generation <generation> --reason "Operator <directive-id>: close absorbed kickoff; custody with FD"`
+closes any ownership shape (non-child, another parent's hidden child, a
+top-level handoff successor) after the FD inspects the target and confirms the
+cited instruction covers it. Authority follows the binding; rebind, handoff,
+restore and host transfer need no designation. The reason and request identity
+are required and audited. Protected assistants and leads or visible chats of
+open operator-owned lanes are refused, including with force or confirmation
+flags. Idle, child/spawn, external close-ruling and process-death checks still
+apply; a missing terminal report uses the audited exact-generation waiver, and
+an ordinary accountable-owner close requires a fresh disposition or live
+same-spec successor. Explicit `--force` recovery of the FD's own proven busy
+child retains owed debt with FD custody; a reason and request id are required. Binding,
+generation and lane ownership are rechecked under the close fence before
+termination. Audit rows are `manager_close*` with `actor_kind=front_desk`. See
+[Fleet lifecycle authority](../../docs/assistant.md#fleet-lifecycle-authority).
+
+## Tests and supported integrations
+
+```sh
+python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
+python -m pytest services/chat-stream-v2/tests
+python -m pytest services/agent-orch/tests
+python services/chat-stream-v2/tools/run_gate.py merge
+```
+
+Run tests in a harness-owned tmux session on an explicit `tmux -L <test-socket>` namespace, with `env -u TMUX` before Python. The gate runner and preflight refuse an inherited `TMUX`; daemon fixtures clear it and use their own explicit socket. Never run bare `tmux kill-server` against ambient operator state.
+
+Codex guardian review rollouts are internal bookkeeping. Local and satellite
+ingest exclude them by their `session_meta` provenance before selecting a seat's
+conversation transcript; genuine messages and operator approval prompts remain
+unchanged. Previously stored events are retained without rewriting history.
+
+Satellite primary discovery also excludes native worker rollouts whose session
+header has a `source.subagent.thread_spawn` object. Those files can share the
+primary process's descriptors; they must not make its conversation ambiguous.
+The filter does not change worker-message normalization. Account and process
+checks still apply, and multiple remaining candidates fail closed.
+The retained source checkpoint resumes missing primary messages without clearing
+history. Restart recovery can drain that checkpoint independently of discovery;
+verify that the source returns to live capture after recovery completes.
+
+Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the web gate. Fixtures must use invented content and valid public wire identifiers.
+
+Public CI sets the existing unit-only budget `V2_UNIT_TIMEOUT_S=1200`; smoke and
+soak limits keep their defaults. Pytest scratch is separate from
+`V2_GATE_EVIDENCE_DIR`. On failure CI retains the gate logs/JUnit/receipt and the
+synthetic stall helper's complete output, result and fixed sidecar allowlist for
+seven days. Runtime databases, arbitrary scratch and linked files are excluded.
+Helper failures and timeouts remain failures; use the retained first cause rather
+than rerunning the whole gate. Hard job cancellation can prevent artifact upload.
+
+Broadcast queues replace pending `session.inventory` and `hosts.stats` snapshots,
+and `working.state` snapshots for the same stream, at every enqueue. The newest
+state stays at its arrival position after intervening events; an in-flight send
+is never replaced. Other existing state families retain warning/overflow
+compaction. Chat events and all non-coalescible frames (including
+`work_lanes.inventory`) preserve their exact bytes and order. An incompressible
+full queue still disconnects with 1011/`slow_consumer`, signaling the client to
+reconnect and refetch.
+
+### Recurring schedules
+
+`v2_recurring_schedules` holds durable recurring rules (additive `CREATE TABLE IF NOT EXISTS`; a rollback to older code leaves it inert). `recurrence.py` is the pure next-occurrence math (`daily`, `weekdays`, `weekly`, an IANA zone, DST per the agent-orch README). `WindowSchedule` serves `schedule.recurring.create|list|get|update|pause|resume|run|delete`; admission mirrors `schedule.insert` and runs at create/update only. The `materialise_due_recurring()` pass runs inside `run_forever` before the one-shot due scan, and `recover()` applies the same evaluation to every due active rule. Missed (`late`, grace `RECURRING_LATE_FIRE_GRACE_S = 900`), overlap and unbound-parent policies are described under "Recurring" in the agent-orch README.
+
+The authenticated current primary front desk may also list, get, pause and delete
+rules whose creators are proved by the daemon's primary FD binding history,
+including open predecessors and earlier seat generations. This is a retirement
+exception: update, resume, run and one-shot access retain their existing scope.
+Creator identity, template and already-materialised occurrences remain unchanged.
+Parent mode alone never makes a rule eligible. Other named assistants are excluded.
+The exception requires the exact open, unretired bound generation and an enabled
+lifecycle policy; missing binding/history proof denies it without affecting normal
+creator or existing operator/service/nexus access. Reads use a durable snapshot;
+pause/delete recheck authority in their mutation transaction under the FD fence,
+so a superseded FD cannot mutate after a rebind. Repeated pause stays paused;
+delete after a lost successful response returns the usual `not_found`. Retirement
+prevents future materialisation across recovery; it does not cancel an occurrence
+that was already materialised.
+
+Frames reach authenticated operator clients only, like every `schedule.*` frame:
+
+- The hello snapshot carries `recurring: [rule, ...]` beside `schedules`.
+- `{"type": "schedule.lifecycle", "event": <event>, "recurring": <rule>}` with `event` one of `recurring_created`, `recurring_updated`, `recurring_paused`, `recurring_resumed`, `recurring_run_requested`, `recurring_materialised`, `recurring_missed`, `recurring_deleted`. A materialised occurrence also pushes the ordinary one-shot `created` lifecycle frame.
+- A projected rule carries `recurrence` (`every`, `at_time`, `days`, `tz`), `recurrence_text`, `state` (`active`|`paused`), `next_fire_at_utc`, `next_fire_local`, `last_result` (`fired`|`missed`), `last_result_reason`, `missed_count`, `last_schedule_state` and `last_child_stream_id`; never the prompt body (`get` returns `initial_prompt_b64`).
+
+### Scheduled spawn fleet smoke
+
+Synthetic warning and failure cards are published only in a harness-owned
+temporary loopback daemon with a unique `smoke-*:assistant` composite, then
+removed with its state. The harness refuses the configured operator composite
+as a target. Fleet RPCs never submit these cards through `notification.create`;
+failures and disposable-publication receipts remain in the runner's JSON/log
+output. PASS, FAIL and UNTESTED exit behavior is preserved.
+
+`tools/spawn_fleet_smoke.py --dry-run` resolves the full matrix without opening a WebSocket or spawning a session. The no-argument full run requires `PENTACLE_MACHINES_FILE` to point to the same file configured for the daemon. It rejects a missing file or `PENTACLE_MACHINES_JSON`, reads host names from that file, and includes every configured host by default. Set `PENTACLE_SMOKE_EXCLUDED_HOSTS` to a comma-separated list of unique configured host IDs only when a deployment explicitly excludes them; unknown names and an empty final matrix are refused. An optional `PENTACLE_SMOKE_HOSTS` subset must contain only remaining configured hosts. The dry-run output names the source, selected hosts, explicit excluded names and their configuration source, and every host/provider/prompt cell. A machine entry may set `"smoke_optional": true` for an intermittently available host. Only its proven `host_unavailable` cells become `SKIPPED_OFFLINE`; quota, missing evidence and failed cells retain their existing verdicts. Both the scheduled runner and deploy verdict retain skipped evidence and allow PASS when the required hosts pass. The flag defaults to false and must be a JSON boolean.
+
+The launchd template under `deploy/` runs every 12 hours and sets the machine-file path. The deploy helper also passes the installed daemon’s machine-file setting explicitly to its immediate full smoke, clearing inherited JSON configuration and host-subset overrides. A missing or invalid setting remains a post-activation smoke failure (exit 6); the activated SHA/PID stamp and do-not-retry instruction are preserved. A full run closes each spawned session, including after cell failure; a failed teardown is reported as a failure even if the provider is over quota. The explicit `<url> <host>` post-deploy canary remains a single Codex promptless cell. A failed cell (class `failure`, including a connection or handshake failure) also raises one live `agent-orch notify` at severity `critical`, with the dedup key = host, provider, prompt mode and failure stage plus the UTC date; the error registry routes it to the front desk as a BLOCKER. Quota and untested cells stay in the disposable composite only. Tests point `PENTACLE_SMOKE_AGENT_ORCH` at a missing path so they never reach the live CLI.
+
+### Transcript ingest fairness
+
+Cold ingest replays open streams from the beginning. Each pass retains the shared
+500-new-event cap and starts after the last visited stream, using stream identity
+and inventory order. If that stream disappears, its first surviving successor
+from the previous inventory goes first. Backoff skips, zero inserts and handled
+failures advance the scheduling frontier; a backoff skip does not attempt ingest.
+Each snapshot row is visited at most once per pass. Per-stream offsets, durable
+dedupe, lifecycle fences and byte limits remain intact, so finite old transcripts
+continue replaying without skipping history while fresh streams receive service.
+
+For a fixed finite inventory of N continuously eligible streams, each receives
+an ingest attempt within N completed passes while the actor runs. Churn, actor
+restart and whole-pass backoff do not inherit this bound. Wall time is conditional
+on bounded pass duration; a prompt buried within its own stream's history may
+still need more service before its durable USER proof appears. This scheduling
+bound alone does not guarantee readiness within the prompt-proof deadline.
+
+### Idle transcript proofs
+
+After initial replay completes, intake can skip an entire seat visit when its
+latest identity proof succeeded, its proof inputs are unchanged, no refusal,
+grace period or identity incident is pending, and the bound open transcript is
+still at its consumed offset. Path stat and descriptor stat must both match the
+recorded device, inode and link count, with both sizes equal to that offset.
+A skipped visit advances scheduling but performs no transcript reads, native
+header checks, binding, checkpoint or append work and changes no per-seat state.
+
+`PENTACLE_INGEST_IDLE_PROOF_S` is read once when intake is constructed. It defaults
+to 30 seconds; zero disables skipping. Invalid, negative or non-finite values
+log one warning and use 30. Age starts before the successful proof's probes and
+is never extended by a skip. At the first visit at or beyond the interval, or
+when any condition fails, the whole normal path runs with fresh identity probes.
+Bytes arriving after a skipped visit's stat wait for the next visit. An idle
+transcript header rewritten in place at the same size is checked at its next
+unskipped visit; pass scheduling and backoff mean this is not a wall-clock
+detection deadline. Active seats retain every proof guarding reads and appends.
+
+At the end of the first completed pass after each 60-second window, the INFO
+`ingest_pass_summary` JSON line reports `passes`, `pass_ms_median`, `pass_ms_max`,
+`seats_median` (rows visited, including backoff and idle skips), `backoff_skips`,
+`idle_skips`, `proof_calls` and `window_s`. Pass durations exclude the pump sleep;
+the summary also runs during replay. Proof calls count all identity-proof
+invocations, including refusals before a subprocess can launch.
+
+### Busy-seat send probe
+
+`tools/busy_seat_send_probe.py --provider claude|codex [--host H --ssh USER@HOST]` reproduces a send to a working seat without a UI: it spawns one low-cost hidden seat, holds it in a ~75 s foreground command, sends once through `send`, and compares `send.result` with the pane's native-queue chrome. Verdicts: `queued_reported` (0), `queued_unreported` (1), `not_queued` (2), `harness_error` (3, including a failed cleanup close). The seat is always closed unless `--keep`. Codex 0.159 needs a working sandbox on the seat host (`bwrap` on Linux).
+
+### Router replay harness
+
+`tools/router_replay.py` measures the same `_router_input` builder and SSH
+`AssistantRouterAdapter` used by the daemon. It selects a deterministic,
+redacted set of Claude transcript sessions, interleaves real turns with the
+short-reply and burst cases, and freezes each case's canonical router-input
+JSON bytes plus `router_input_sha256`. A run writes only a manifest, report and
+run-scoped `misses.jsonl`; it never edits the fixture automatically.
+
+Configure `PENTACLE_ASSISTANT_ROUTER_ENDPOINT` and
+`PENTACLE_ASSISTANT_ROUTER_ACTION_PATH`, then run from an isolated harness
+session:
+
+```sh
+python3 services/chat-stream-v2/tools/router_replay.py \
+  --manifest /tmp/router-replay/transcript-manifest.json \
+  --seed 20260921 --threads 3 \
+  --report /tmp/router-replay/report.json \
+  --misses /tmp/router-replay/misses.jsonl
+```
+
+Candidate runs must reuse the same manifest and harness configuration and may
+add `--baseline-report /tmp/router-replay/baseline.json`; a changed
+`harness_config_sha256` or per-case router-input digest is a `HARNESS_ERROR`.
+Compare the report before an explicit, reviewed merge:
+
+```sh
+python3 services/chat-stream-v2/tools/router_replay.py \
+  --misses /tmp/router-replay/candidate-misses.jsonl \
+  --merge-misses --fixture services/chat-stream-v2/tests/fixtures/assistant_router_v1_cases.json
+```
+
+The router input carries bounded `last_outbound_excerpt` and
+`last_outbound_truncated` values for each open lane. They come only from the
+newest durable `ASSIST_TEXT` publication associated with its persisted route;
+absent output is `null`/`false`. Transcript, manifest, report, fixture and
+diagnostic sinks are redacted fail-closed. Keep raw run artifacts outside the
+repository and do not put credentials or unredacted transcripts in fixtures.
+
+Lane publication excerpts never replace the current operator input's
+`body_excerpt`, `body_truncated` or `original_length`. On a nonzero router
+process exit, the durable `router_failure` retains `returncode`, `stdout` and
+`stderr` alongside the exception and elapsed time. Each stream captures only
+its first 2048 bytes, decoding UTF-8 with invalid/incomplete sequences dropped.
+Exit 2 with a bounded stderr JSON object whose `error` is
+`assistant_router_failed` records `assistant_router_script_failed`: the remote
+script reported an exception, including inference failures. Other exits record
+`assistant_router_transport_failed`, an unclassified process/SSH failure rather
+than proof of a network outage. Fallback resolution preserves this evidence.
+
+Committed history batches yield between broadcasts so existing socket writers can drain. Each client still has one writer and a 256-frame queue; a blocked writer remains subject to `1011 slow_consumer` isolation. Smoke failure records retain the full exception chain, including the original cell failure when teardown also fails. Preserve the smoke command's complete output when investigating a failed deployment; the deployment stamp contains only a shortened command detail.
+
+## Context crossing and compaction
+
+`agent-orch compact` submits the authenticated calling seat's compact command
+immediately through ordinary `Comms.send`, even during a turn or below a context
+threshold. The provider CLI handles its native queue. This self-only request has
+no force or turn-end wait, and cannot follow handoff routing to another seat.
+The daemon generates a bare `/compact` for Codex or the existing preservation
+command for Claude. Existing atomic send receipts deduplicate retries by request
+ID; no new daemon queue or cooldown is involved. The [CLI contract](../agent-orch/README.md#request-context-compaction)
+distinguishes input acceptance from transcript-confirmed completion.
+
+`NudgeJob` sends a `context_advisory` notice to an open, reachable Claude
+seat and its current live non-Codex parent, including hidden and working seats.
+Parentless seats also get a daemon-owned operator notification through `Notify`.
+Codex seats, including the configured assistant backend and Codex parents of
+Claude children, receive no context-pressure notices. Title/card reminders
+keep their existing visible, idle, operator-engaged filter. Context notices
+do not refuse spawns or implement a `handoff_planned` exemption.
+
+Claude defaults are advisory at `min(400000, 70% of model window)` and compact
+at `min(500000, 85%)`. `PENTACLE_CONTEXT_ADVISORY_ABS`,
+`PENTACLE_CONTEXT_COMPACT_ABS` and their `_PCT` overrides are supported.
+The Claude seat bound as the assistant front desk uses 150000/200000
+(`PENTACLE_CONTEXT_ASSISTANT_ADVISORY_ABS`, `PENTACLE_CONTEXT_ASSISTANT_COMPACT_ABS`).
+Codex still reports tokens and model window but always has level `none`.
+Routine context-threshold handoff is retired; deliberate, scheduled and
+recovery handoff remain independent of the level.
+
+Telemetry ingestion atomically stores the reading and crossing episodes in
+`v2_nudge_state.basis`. The compact episode persists through compact →
+advisory → compact and rearms only after a reading below advisory or a new
+source generation. Restart preserves the episode and its input outcome; close
+prunes its state. Advisory keeps its one-delivery-per-recipient episode.
+
+With `PENTACLE_CONTEXT_COMPACT_ENABLED=1` (the default), a fresh compact
+reading can submit one daemon-owned `/compact` command with a proven empty
+Claude composer, including while working: Claude queues the initial command.
+The source lifecycle lock and Comms pane input lock serialize this with
+observations and cooperating daemon input. They do not exclude independent
+terminal typing. A durable attempt ID and USER-event watermark are recorded
+before possible pane input. Only a matching current-generation USER event
+proves submission; native queue visibility alone is not a receipt.
+
+Ambiguous input stays `pending_input` for at least
+`PENTACLE_CONTEXT_COMPACT_COOLDOWN_S=600`. After that, a seat still at compact
+level can retry only while idle with an empty composer; busy or unknown turn
+state retains the possible-input fence, including across restart and crossing
+changes. A proven pre-input failure can retry after the same cooldown while
+working only when no earlier command remains uncertain. A confirmed submission
+consumes the episode, so continued high context does not repeat the command. Disabling the action leaves advisory and
+pending-input state intact and suppresses compaction defer alerts.
+
+The empty-composer predicate recognizes the provider's exact update banner
+variants and main-selected agent roster below the composer rule and permission
+footer. Drafts, unknown chrome and the ambiguous queued-message placeholder
+remain refusals. A persistent pre-input hold after the compact cooldown from
+crossing observation raises one content-free notification per episode; it never
+forces input through a draft. Ordinary messages and slash commands have no
+promised cross-type FIFO order.
+
+Only valid readings no older than 1800 seconds and no earlier than session
+creation qualify. Future/malformed readings, offline/dead sources and routing
+mismatches are suppressed. An unavailable parent is deferred; it is not treated
+as a parentless seat. The retired park API is not restored.
+
+Each recipient uses a stable tell ID and frozen body. A delivered receipt prevents
+resending; a committed but unconfirmed paste stays pending and is reconciled
+read-only. A crash after a persisted attempt without a receipt is indeterminate:
+the owner must investigate it, and the job does not blindly paste again. Proven
+pre-input route refusals retry the same ID after the existing cooldown. Operator
+cards use the same stable ID as their notification dedup key.
+
+Context delivery attempts share the existing cadence, per-pass cap, cooldown,
+and whole-pass error backoff with title/card work. Context gets the available
+slots first. `--disable-nudges` disables the combined job. Tagged logs use
+`subsystem=context_nudge bug_ref=context_notifications_handoff_proof` and retain
+source, kind, epoch, target, outcome and tell ID.
+
+### QA dispatch containment
+
+The optional [QA dispatch reject counter](../../docs/qa-dispatch-counter.md) adds
+`spec-issue adjudicate/diagnose/show` and explicit QA surface/cycle fields for
+immediate and scheduled reviews. Enforcement defaults off; the coordinated
+release owner activates it after upgrading callers.
+
+## Attachment send correlation
+
+A send claims its logical message before materializing attachments. Retries match
+the target, actor, optimistic ID, display text and canonical attachment metadata
+within the existing recency window; replaying a request ID remains request-scoped.
+Materialized file paths belong only to provider wire correlation. Before any paste,
+the daemon appends the final wire correlation to the same receipt history so an
+early provider USER event already carries the caption, attachments and optimistic
+ID. The newest receipt outcome remains authoritative, including a materialized
+`not_landed` result that permits retry. No prior receipt row is rewritten.
+
+When receipt projection replaces provider text, ingress stores a
+`provider_text_digest` on that same event before persistence. It hashes the
+original normalized provider text and contains no staged path. Both durable USER
+proof and the Comms event-proof reader use this shared digest; a caption match
+alone cannot confirm an image prompt. Ingress discards producer-supplied digests,
+and malformed proof metadata cannot fall back to caption equality. Existing
+stream, generation, event-kind and post-watermark proof fences still apply.
+
+### Observer start presentation and rollout recovery
+
+The public `prockill.canonical_start` helper collapses only whitespace in printed
+`ps lstart` strings. Missing, non-string and empty values are invalid; dates,
+locale/timezone tokens and case are not transformed. Printed starts are not
+portable process-birth tokens and a mismatch alone does not establish clock
+movement or PID reuse.
+
+Local ingestion keeps its strict generation, observer/live pane PID, UID,
+provider executable and nonempty canonical-start check at entry, discovery and
+pre-append. After root failure, an anchored rollout may recover either a changed
+pane PID or a same-PID changed start. Recovery requires one distinct current
+writable transcript in the legitimate provider tree, matching the prior
+anchor's device/inode and native provider session ID parsed from an opened,
+fstat-checked descriptor. A pane/process re-read fences that proof before the
+exact expected-binding Store CAS; only observer PID/start can change. Ingestion
+then reruns the strict check and keeps the ordinary lifecycle/native-ID checks
+and durable event dedup. A recorded path or first bind cannot seed recovery.
+An unchanged strict identity still tolerates an ordinary writer gap/restart.
+
+Claude seats carry a launch-recorded `jsonl_path` and need not keep their
+transcript open, so they have no writer to census. A healthy strict pass anchors
+such a row once, best effort: only for the recorded path, through a descriptor
+whose fstat identity is still that path's file, carrying the recorded
+`claude_session_id`; a refused anchor leaves the legacy path unchanged. An
+anchored Claude row recovers only a same-PID changed start: the anchor's path
+and session ID must equal the row's launch record, and the path's device/inode
+and native session ID must equal the anchor. A changed Claude pane PID stays
+refused. Bindings refused before this anchor existed are not repaired.
+
+Refused identities produce [historical integrity incidents](../../docs/contracts/error-alerts-v1.md#historical-ingest-identity-incidents),
+not idle-timeout claims. This detector belongs to local `Ingest`; satellite
+`event.push` ownership must be inspected separately when investigating a remote
+session.
+
+The [process ownership contract and consumer dispositions](../../docs/PROCESS_OWNERSHIP.md)
+cover restore/replay, capture, reap, ingest, occupancy and input/capacity probes,
+including each retained availability refusal and the alternate-rendering clock
+fences. Persisted producer renderings and exact binding CAS snapshots remain
+unchanged.
+
+### Native Codex cwd trust and late delivery
+
+After account launch admission, the target host seeds the realpath cwd in the
+selected binding's `home/config.toml`. Unbound legacy launches use
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). A file lock protects
+idempotent writes; unrelated configuration bytes are preserved. The existing
+command-line trust override remains. Invalid or unsupported project-table
+syntax fails launch with `codex_trust_failed` rather than rewriting the config.
+
+During native initial-prompt proof, the daemon recognizes current and legacy
+folder-trust dialogs and sends at most one Enter, logs a warning, and continues
+waiting for the initial USER event. It never pastes into that dialog. Reset
+interstitials remain operator-only; pane capture cannot extend the proof wait.
+
+Failed native proof logs its key and pane classification and persists a parent
+notice that bypasses the front-desk digest. Classification is `trust_dialog`,
+`reset_interstitial`, or `silent`. The notice survives requester disconnect and
+is fenced to the parent generation. Late proof retains `failure_code` and
+`delivery_failed_at`, adds `delivered_late_at`, and records
+`late_first_user_event`; `adopted_after_restart` requires evidence of a different
+daemon instance. Reuse the existing spawn handle for recovery.
+
+
+### Interrupted spawn adoption
+
+A restart reconciles each saved request against its pane nonce and session
+generation. An owned pane created before admission can be registered normally
+when no conflicting row exists. If a retained closed row has another generation
+and no intentional close marker, recovery preserves that row and cleans up only
+the interrupted request's nonce-bound pane. Confirmed cleanup produces a failed
+spawn outcome; uncertain cleanup keeps an indeterminate outcome and its durable
+reservation. Foreign panes, open successor generations and intentional closes
+retain their existing refusal behavior.
+
+For promptless provider spawns still starting, adoption runs the existing
+bounded readiness observer. A ready pane advances bootstrap to ready; an
+unproven live pane keeps the original handle and reports starting. Initial
+prompt delivery remains `not_requested`, and recovery sends no synthetic input.
+
+## Screen leases
+
+Desktop automation cooperatively acquires the whole screen for a registered
+host. The daemon serves `screen.lease.acquire`, `screen.lease.renew`,
+`screen.lease.release` and the public read `screen.lease.status`, exposed by
+`agent-orch screen acquire|renew|release|status`. Host names are trimmed and
+lowercased; unknown hosts are refused. A lease defaults to 900 seconds and
+accepts an integer TTL from 1 through 3600 seconds.
+
+Acquire on a free host creates a lease; re-acquiring by its holder refreshes the
+same lease. Another seat receives `screen_held`, and the current front desk gets
+one durable `screen_lease_contended` notice per lease and requester. The front
+desk prioritises in chat. Renew and release require the holder; the verified
+front desk alone may force release, which sends `screen_lease_revoked` to the
+former holder. A second release returns `screen_lease_not_found`.
+
+Status reports every registered host, or the selected host, as `free` or `held`.
+Expired leases appear free immediately and are finalized by a mutation. Active
+leases survive daemon restarts in the session database and release atomically
+when their holder closes, including presumed-dead closes. There is no input
+locking or presence detection. Consumers must acquire before visible actions
+and release their acquired lease IDs in a `finally` block.

@@ -1,0 +1,10 @@
+● Bash(python3 tools/run_gate.py merge)
+  ⎿  Running…
+
+· Ruminating… (1m 38s · ↓ 5.9k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · 2 shells · esc to interrupt · ← 1 agent · ↓ to manage

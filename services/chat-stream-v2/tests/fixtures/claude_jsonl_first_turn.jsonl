@@ -1,0 +1,5 @@
+{"type":"user","sessionId":"sample-session","uuid":"sample-user-0","timestamp":"2030-01-01T00:00:00.000Z","message":{"role":"user","content":"<system-reminder>\nsynthetic setup note\n</system-reminder>"}}
+{"type":"user","sessionId":"sample-session","uuid":"sample-user-1","timestamp":"2030-01-01T00:00:01.000Z","message":{"role":"user","content":"Summarize the sample note."}}
+{"type":"assistant","sessionId":"sample-session","uuid":"sample-assistant-0","timestamp":"2030-01-01T00:00:02.000Z","message":{"role":"assistant","id":"sample-message-0","content":[{"type":"text","text":"The sample note is ready for review."}]}}
+{"type":"user","sessionId":"sample-session","uuid":"sample-user-2","timestamp":"2030-01-01T00:00:03.000Z","message":{"role":"user","content":"Now check the second sample too."}}
+{"type":"user","sessionId":"sample-session","uuid":"sample-user-3","timestamp":"2030-01-01T00:00:04.000Z","message":{"role":"user","content":"[from hosta:v2-peer] [tell:sample-1]\nA synthetic coordination note."}}

@@ -1,0 +1,587 @@
+"""Durable daemon-originated outbound notices.
+
+The v2 daemon has one outbound-notice substrate for messages it creates on its
+own behalf. Producers persist a notice before attempting delivery; this module
+owns the claim/lease, retry, terminal-state, and recipient-pane recovery loop.
+Interactive ``tell`` calls still use :class:`comms.Comms` directly, but daemon
+notices enter here so a restart cannot lose a report or reconciler tell.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import logging
+import os
+import time
+from typing import Any, Awaitable, Callable, Iterable
+import uuid
+
+from submission_events import COMMITTED_PENDING_PROOF_STATUSES, PROOF_TERMINAL_BOUND_S
+from message_envelopes import build_message_envelope, build_notice_body
+from v2_runtime import env_number
+
+log = logging.getLogger("chat_streamd_v2.outbound_notices")
+
+NOTICE_KIND_FD_TURN_BUDGET = "fd_turn_budget"
+NOTICE_KIND_REPORT = "report"
+NOTICE_KIND_RECONCILER = "reconciler"
+NOTICE_KIND_SPAWN_FAILURE = "spawn_failure"
+NOTICE_KIND_NOTIFICATION_ANSWER = "notification_answer"
+NOTICE_KIND_STATUS_CARD = "status_card"
+NOTICE_KIND_STATUS_CARD_COMBINED = "status_card_combined"
+NOTICE_KIND_TREE_IDLE = "tree_idle"
+NOTICE_KIND_LANE_DIGEST = "lane_digest"
+# A reminder that the front desk owes an external-work check; see external_work.py.
+NOTICE_KIND_EXTERNAL_WORK_DUE = "external_work_due"
+# A primary composite terminal or decision gate is still delivered through this
+# established durable outbox.  It is a narrow authority wake, not a second
+# inbox or routing queue.
+NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY = "assistant_composite_authority"
+NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST = "assistant_composite_authority_request"
+NOTICE_KIND_ASSISTANT_LANE_RULING = "assistant_lane_ruling_request"
+NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT = "assistant_lane_ruling_result"
+# Object identity cannot be supplied by a JSON wire caller.
+ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
+
+_NON_URGENT_KINDS = frozenset({
+    NOTICE_KIND_FD_TURN_BUDGET,
+    "error_alert",
+    "codex_capacity_exhausted",
+    NOTICE_KIND_REPORT,
+    NOTICE_KIND_RECONCILER,
+    NOTICE_KIND_SPAWN_FAILURE,
+    "watch", "wake", "wake_missed",
+    NOTICE_KIND_TREE_IDLE,
+    NOTICE_KIND_LANE_DIGEST,
+    NOTICE_KIND_EXTERNAL_WORK_DUE,
+    NOTICE_KIND_NOTIFICATION_ANSWER,
+    NOTICE_KIND_STATUS_CARD,
+    NOTICE_KIND_STATUS_CARD_COMBINED,
+    NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY,
+    NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST,
+    NOTICE_KIND_ASSISTANT_LANE_RULING,
+    NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT,
+})
+
+_TERMINAL_CODES = frozenset({
+    "pool_at_cap", "pool_blocked", "pool_usage_unknown",
+    "pool_notice_stale",
+    "bad_request",
+    "from_stream_id_forbidden",
+    "tell_id_conflict",
+    "unsupported_host",
+    "unknown_session",
+})
+
+# Delivery policy is deliberately fixed in the module. Only the lease and
+# retry budget are fleet-level controls: those values depend on recipient
+# latency and the acceptable terminal-failure boundary, respectively.
+NOTICE_INTERVAL_S = 5.0
+NOTICE_MAX_PER_PASS = 32
+NOTICE_LEASE_S = 30.0
+NOTICE_BACKOFF_BASE_S = 2.0
+NOTICE_BACKOFF_MAX_S = 60.0
+NOTICE_MAX_ATTEMPTS = 10
+NOTICE_FIRST_DELAY_S = 0.0
+
+
+def _iso_from_epoch(value: float) -> str:
+    return datetime.fromtimestamp(float(value), timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _epoch_from_iso(value: object) -> float | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def notice_needle(tell_id: str) -> str:
+    """Return the stable pane marker used to prove a prior paste landed."""
+    return build_message_envelope("notice_marker", notice_id=tell_id)
+
+
+def ensure_notice_marker(tell_id: str, body: str) -> str:
+    """Make the tell id observable in the recipient capture exactly once."""
+    return build_notice_body(tell_id, body)
+
+
+@dataclass(frozen=True)
+class OutboundNoticeConfig:
+    lease_s: float = NOTICE_LEASE_S
+    max_attempts: int = NOTICE_MAX_ATTEMPTS
+
+    @classmethod
+    def from_env(cls) -> "OutboundNoticeConfig":
+        return cls(
+            lease_s=max(
+                0.1,
+                env_number(os.environ, "PENTACLE_OUTBOUND_NOTICE_LEASE_S", cls.lease_s, float),
+            ),
+            max_attempts=max(
+                1,
+                env_number(
+                    os.environ, "PENTACLE_OUTBOUND_NOTICE_MAX_ATTEMPTS", cls.max_attempts, int,
+                ),
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class NoticeDecision:
+    """A producer-specific pre-delivery decision."""
+
+    action: str = "deliver"
+    reason: str = ""
+    next_action: str = ""
+
+    @classmethod
+    def retry(cls, reason: str, next_action: str = "") -> "NoticeDecision":
+        return cls("retry", reason, next_action)
+
+    @classmethod
+    def defer(cls, reason: str, next_action: str = "") -> "NoticeDecision":
+        """Not attempted yet: retry on a later pass without spending a transport attempt."""
+        return cls("defer", reason, next_action)
+
+    @classmethod
+    def terminal(cls, reason: str, next_action: str = "") -> "NoticeDecision":
+        return cls("terminal", reason, next_action)
+
+
+class OutboundNoticeConflict(ValueError):
+    """A dedupe key was reused for a different recipient or payload."""
+
+
+Guard = Callable[[dict[str, Any]], Awaitable[NoticeDecision | None]]
+TerminalCallback = Callable[[dict[str, Any], str, str], Awaitable[None]]
+LockFactory = Callable[[dict[str, Any]], Any]
+
+
+class OutboundNoticeQueue:
+    """Single durable producer/consumer queue for daemon-originated tells."""
+
+    def __init__(
+        self,
+        store: Any,
+        comms: Any = None,
+        *,
+        config: OutboundNoticeConfig | None = None,
+        owner: str | None = None,
+    ) -> None:
+        self.store = store
+        self.comms = comms
+        self.config = config or OutboundNoticeConfig.from_env()
+        self.owner = owner or f"outbound:{os.getpid()}:{uuid.uuid4().hex}"
+        self.front_desk_digest = None
+        self.external_work = None
+        self.error_alerts = None
+        self._guards: dict[str, Guard] = {}
+        self._terminal_callbacks: dict[str, TerminalCallback] = {}
+        self._delivered_callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {}
+        self._lock_factories: dict[str, LockFactory] = {}
+        self.register_kind(NOTICE_KIND_FD_TURN_BUDGET, guard=self._fd_turn_budget_guard)
+
+    async def _fd_turn_budget_guard(self, row: dict[str, Any]) -> NoticeDecision | None:
+        # Tombstone for persisted notices from the retired observer.
+        return NoticeDecision.terminal("fd_turn_budget_stale_or_disabled", "observation retained; observer retired")
+
+    def register_kind(
+        self,
+        kind: str,
+        *,
+        guard: Guard | None = None,
+        on_terminal: TerminalCallback | None = None,
+        lock_factory: LockFactory | None = None,
+        on_delivered: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> None:
+        if guard is not None:
+            self._guards[kind] = guard
+        if on_terminal is not None:
+            self._terminal_callbacks[kind] = on_terminal
+        if lock_factory is not None:
+            self._lock_factories[kind] = lock_factory
+        if on_delivered is not None:
+            self._delivered_callbacks[kind] = on_delivered
+
+    async def enqueue(
+        self,
+        *,
+        kind: str,
+        dedupe_key: str,
+        recipient_stream_id: str,
+        body: str,
+        tell_id: str,
+        source_stream_id: str | None = None,
+        episode_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        watch_fact: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist a notice before any delivery attempt is scheduled."""
+        marked_body = ensure_notice_marker(tell_id, body)
+        try:
+            return await self.store.enqueue_outbound_notice(
+                notice_id=tell_id,
+                kind=kind,
+                dedupe_key=dedupe_key,
+                recipient_stream_id=recipient_stream_id,
+                tell_id=tell_id,
+                body=marked_body,
+                source_stream_id=source_stream_id,
+                episode_id=episode_id,
+                metadata=metadata,
+                created_at=created_at,
+                watch_fact=watch_fact,
+            )
+        except ValueError as exc:
+            if "outbound_notice_conflict" in str(exc):
+                raise OutboundNoticeConflict(str(exc)) from exc
+            raise
+
+    async def deliver_now(self, notice_id: str, *, lock_held: bool = False) -> bool:
+        """Claim and attempt one notice immediately, ignoring its backoff timer."""
+        row = await self.store.claim_outbound_notice(
+            notice_id,
+            owner=self.owner,
+            lease_s=self.config.lease_s,
+            force=True,
+        )
+        if row is None:
+            return False
+        return (await self._deliver_claimed(row, lock_held=lock_held)) == "delivered"
+
+    async def confirm_late_answer(self, row: dict[str, Any]) -> bool:
+        """The queue owns late completion as well as first-attempt completion."""
+        if not await self.store.complete_answer_notice_from_proof(str(row["notice_id"])):
+            return False
+        callback = self._delivered_callbacks.get(NOTICE_KIND_NOTIFICATION_ANSWER)
+        if callback is not None:
+            await callback(row)
+        return True
+
+    async def drain_once(
+        self,
+        *,
+        limit: int | None = None,
+        kinds: Iterable[str] | None = None,
+        force: bool = False,
+    ) -> int:
+        """Claim due notices atomically and process one bounded batch."""
+        if self.error_alerts is not None:
+            try:
+                await self.error_alerts.reconcile()
+            except Exception:
+                log.warning("subsystem=error_alerts bug_ref=error_alerts_v1 action=reconcile_failed")
+        if self.front_desk_digest is not None:
+            await self.front_desk_digest.tick()
+        if self.external_work is not None:
+            try:
+                await self.external_work.tick()
+            except Exception:  # noqa: BLE001 - a failed check must not skip other notices
+                log.exception("subsystem=external_work action=tick_failed")
+        cap = max(1, int(limit or NOTICE_MAX_PER_PASS))
+        kind_set = set(kinds) if kinds is not None else None
+        notice_ids = await self.store.list_outbound_notice_ids(
+            limit=cap,
+            now=time.time(),
+            kinds=kind_set,
+            force=force,
+        )
+        completed = 0
+        for notice_id in notice_ids:
+            row = await self.store.claim_outbound_notice(
+                notice_id,
+                owner=self.owner,
+                lease_s=self.config.lease_s,
+                force=force,
+            )
+            if row is None:
+                continue
+            if (await self._deliver_claimed(row)) == "delivered":
+                completed += 1
+        return completed
+
+    async def _deliver_claimed(self, row: dict[str, Any], *, lock_held: bool = False) -> str:
+        kind = str(row.get("kind") or "")
+        if not lock_held:
+            lock_factory = self._lock_factories.get(kind)
+            if lock_factory is not None:
+                async with lock_factory(row):
+                    return await self._deliver_claimed(row, lock_held=True)
+        guard = self._guards.get(kind)
+        if guard is not None:
+            try:
+                decision = await guard(row)
+            except Exception as exc:  # noqa: BLE001 - guard failure is retryable
+                return await self._retry(
+                    row,
+                    'absence_readback_unknown:notice_guard_failed' if self._pending_digest(row)
+                    else f"notice guard failed: {exc}",
+                    "retry the guarded notice",
+                    proof_pending=self._pending_digest(row), digest_readback=False,
+                )
+            if decision is not None and decision.action != "deliver":
+                if decision.action == "terminal":
+                    await self._terminal(row, decision.reason, decision.next_action)
+                    return "terminal"
+                if decision.action == "defer":
+                    # Nothing was sent, so the next pass must still be a first
+                    # attempt: a counted retry would be an evidence-only readback.
+                    await self.store.fail_outbound_notice(
+                        str(row["notice_id"]), owner=self.owner, error=decision.reason,
+                        next_attempt_at=time.time() + NOTICE_INTERVAL_S,
+                        next_action=decision.next_action, count_attempt=False,
+                    )
+                    return "retry"
+                return await self._retry(row, decision.reason, decision.next_action)
+
+        try:
+            if self.comms is None:
+                raise RuntimeError("outbound transport unavailable")
+            message = {
+                "_outbound_notice_kind": kind,
+                "tell_id": str(row["tell_id"]),
+                "stream_id": str(row["recipient_stream_id"]),
+                "to_stream_id": str(row["recipient_stream_id"]),
+                "message": str(row["body"]),
+                # Report and reconciler notices are informational queue
+                # deliveries; only an explicitly urgent notice may interrupt
+                # an in-flight provider turn.
+                "urgent": kind not in _NON_URGENT_KINDS,
+            }
+            import json
+            metadata = row.get('metadata') or '{}'
+            metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+            if kind in {"account_cap_reminder","account_cap_blocker"}:
+                from account_pool_control import NOTICE_TOKEN
+                message.update(_pool_notice_token=NOTICE_TOKEN,_pool_notice_metadata=metadata,_pool_notice_kind=kind)
+                if kind=="account_cap_blocker":
+                    from front_desk_digest import WAKE_TOKEN
+                    message['_front_desk_wake_token']=WAKE_TOKEN
+            if kind == NOTICE_KIND_LANE_DIGEST or metadata.get('front_desk_digest'):
+                from front_desk_digest import DIGEST_TOKEN
+                message['_front_desk_digest_token'] = DIGEST_TOKEN
+            if kind == "dispatch_no_reply":
+                from front_desk_digest import WAKE_TOKEN
+                message["_front_desk_wake_token"] = WAKE_TOKEN
+            if kind == "spawn_delivery_failed" and metadata.get("parent_generation"):
+                message["_notification_answer_generation"] = metadata["parent_generation"]
+            if kind == "error_alert":
+                # Reuse the existing generation-fenced, pre-input proof path.
+                message["_notification_answer_generation"] = metadata["root_generation"]
+                # The only immediate work-lane alert is a lost lead; it wakes the
+                # front desk instead of joining its routine hold.
+                if metadata.get("family") == "work_lane.v1" and metadata.get("policy_mode") == "immediate":
+                    from front_desk_digest import WAKE_TOKEN
+                    message["_front_desk_wake_token"] = WAKE_TOKEN
+            if kind == NOTICE_KIND_NOTIFICATION_ANSWER:
+                import json
+                metadata = row.get("metadata") or "{}"
+                metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                message["_notification_answer_generation"] = metadata["producer_session_generation"]
+            if kind in {NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST, NOTICE_KIND_ASSISTANT_LANE_RULING,
+                        NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT}:
+                import json
+                metadata = row.get("metadata") or "{}"
+                metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                message["_assistant_authority_request_token"] = ASSISTANT_AUTHORITY_REQUEST_TOKEN
+                message["_assistant_authority_request_generation"] = metadata["authority_generation"]
+                # A lane-ruling request/result wakes its own bound target (the
+                # configured lane authority, or the requesting lead for a result),
+                # which is NOT pinned to the composite's astra backend seat. The
+                # marker lets the ingress policy deliver it to that target instead
+                # of rejecting every non-astra authority as a misconfiguration.
+                if kind in {NOTICE_KIND_ASSISTANT_LANE_RULING, NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT}:
+                    message["_assistant_lane_ruling"] = True
+                if kind == NOTICE_KIND_ASSISTANT_LANE_RULING:
+                    message["_assistant_lane_ruling_request_id"] = metadata["ruling_request_id"]
+            deliver_notice = getattr(self.comms, "deliver_outbound_notice", None)
+            if callable(deliver_notice):
+                reply = await deliver_notice(
+                    message,
+                    check_existing=int(row.get("attempts") or 0) > 1,
+                )
+            else:
+                # Small in-process test transports and older adapters expose
+                # only the established tell seam. Production Comms always has
+                # deliver_outbound_notice, which is where marker scans live.
+                reply = await self.comms.tell(message)
+        except Exception as exc:  # noqa: BLE001 - durable failure state below
+            code = str(getattr(exc, "code", "") or "")
+            reason = str(exc)[:400]
+            if code=="pool_notice_deferred":
+                await self.store.fail_outbound_notice(str(row['notice_id']),owner=self.owner,error=code,
+                    next_attempt_at=time.time()+NOTICE_INTERVAL_S,next_action='wait for fresh autonomous evidence',count_attempt=False)
+                return "retry"
+            if code in _TERMINAL_CODES:
+                await self._terminal(row, reason, "inspect the terminal notice reason and recipient lifecycle")
+                return "terminal"
+            return await self._retry(row, reason, "retry after the recorded backoff",
+                                     proof_pending=self._pending_digest(row))
+
+        if isinstance(reply, dict) and reply.get("assistant_backend_ingress") == "persisted_suppressed":
+            await self._terminal(row, "persisted_suppressed", "routine ingress persisted without provider delivery")
+            return "terminal"
+        from account_pool_control import POOL_ERRORS
+        if isinstance(reply,dict) and reply.get("error_code") in POOL_ERRORS:
+            await self._terminal(row,reply["error_code"],"pool refusal is terminal; inspect current account status")
+            return "terminal"
+        if not (isinstance(reply, dict) and reply.get("delivery_status") == "delivered"):
+            proof_pending = (
+                isinstance(reply, dict)
+                and reply.get("delivery_status") in COMMITTED_PENDING_PROOF_STATUSES
+            )
+            if (
+                proof_pending
+                and reply.get("proof_state") == "row_missing"
+                and self._past_proof_floor(row)
+                and not self._pending_digest(row)
+            ):
+                await self._terminal(
+                    row,
+                    "tell_row_missing: no delivery proof row (never persisted or pruned)",
+                    "inspect the recipient transcript for the notice marker; resend deliberately only if absent",
+                )
+                return "terminal"
+            authoritative_negative = proof_pending and reply.get("proof_state") == "pending"
+            return await self._retry(
+                row,
+                "submission_proof_pending" if proof_pending else "submission_unconfirmed",
+                "retry evidence-only recipient readback",
+                proof_pending=proof_pending,
+                authoritative_negative=authoritative_negative,
+            )
+
+        if kind in {NOTICE_KIND_STATUS_CARD, NOTICE_KIND_STATUS_CARD_COMBINED}:
+            completed = await self.store.complete_trusted_status_notice(
+                str(row["notice_id"]),
+                owner=self.owner,
+                proof=reply,
+            )
+            if completed is None:
+                return await self._retry(
+                    row,
+                    "status_notice_proof_binding_failed",
+                    "retry evidence-only proof binding for the existing tell id",
+                )
+            row = completed
+        else:
+            await self.store.complete_outbound_notice(str(row["notice_id"]), owner=self.owner)
+        callback = self._delivered_callbacks.get(kind)
+        if callback is not None:
+            await callback(row)
+        return "delivered"
+
+    async def _retry(
+        self, row: dict[str, Any], error: str, next_action: str, *, proof_pending: bool = False,
+        authoritative_negative: bool = False, digest_readback: bool = True,
+    ) -> str:
+        attempts = max(1, int(row.get("attempts") or 1))
+        if attempts >= self.config.max_attempts:
+            if (digest_readback and row.get('kind') == NOTICE_KIND_LANE_DIGEST and proof_pending
+                    and self._past_proof_floor(row)):
+                from digest_delivery_proof import reconcile
+                outcome = await reconcile(self.store, str(row['notice_id']), self.owner,
+                                          max_attempts=self.config.max_attempts)
+                if outcome['state'] == 'terminal':
+                    return 'terminal'
+                if outcome['state'] == 'proven':
+                    promoted = await self.store.promote_tell_delivery(
+                        outcome['tell_id'], outcome['digest'], proof=outcome['proof'])
+                    if promoted is not None:
+                        completed = await self.store.complete_outbound_notice(
+                            str(row['notice_id']), owner=self.owner)
+                        if completed:
+                            callback = self._delivered_callbacks.get(str(row['kind']))
+                            if callback is not None:
+                                await callback(row)
+                            return 'delivered'
+                    outcome = {'state': 'unknown', 'reason': 'positive_proof_fence_changed'}
+                error = 'absence_readback_unknown:' + outcome['reason']
+                next_action = 'retry complete original-generation digest readback; never resend'
+            if str(row.get("kind")) == NOTICE_KIND_NOTIFICATION_ANSWER:
+                await self._terminal(row, "unconfirmed_after_bound",
+                                     "inspect the original producer transcript; reconcile this intent, do not resend")
+                return "terminal"
+            if proof_pending and not (
+                authoritative_negative and await self._terminal_proof_negative(row)
+            ):
+                attempts = self.config.max_attempts - 1
+            else:
+                await self._terminal(
+                    row,
+                    "retry_budget_exhausted: " + error,
+                    "inspect transport and replay deliberately",
+                )
+                return "terminal"
+        delay = min(
+            NOTICE_BACKOFF_MAX_S,
+            NOTICE_BACKOFF_BASE_S * (2 ** max(0, attempts - 1)),
+        )
+        await self.store.fail_outbound_notice(
+            str(row["notice_id"]),
+            owner=self.owner,
+            error=error,
+            next_attempt_at=time.time() + delay,
+            next_action=next_action,
+        )
+        return "retry"
+
+    @staticmethod
+    def _pending_digest(row: dict[str, Any]) -> bool:
+        return (row.get('kind') == NOTICE_KIND_LANE_DIGEST and str(row.get('last_error') or '').startswith(
+            ('submission_proof_pending', 'absence_readback_unknown:')))
+
+    @staticmethod
+    def _past_proof_floor(row: dict[str, Any]) -> bool:
+        created = _epoch_from_iso(row.get("created_at"))
+        return created is not None and time.time() - created >= PROOF_TERMINAL_BOUND_S
+
+    async def _terminal_proof_negative(self, row: dict[str, Any]) -> bool:
+        """A missing event is terminal only after time and lifecycle evidence."""
+        if not self._past_proof_floor(row):
+            return False
+        stream_id = str(row.get("recipient_stream_id") or "")
+        host, sep, name = stream_id.partition(":")
+        if not sep or not host or not name:
+            return False
+        recipient = await self.store.fetch_session(host, name)
+        return isinstance(recipient, dict) and str(recipient.get("status") or "") == "closed"
+
+    async def _terminal(self, row: dict[str, Any], reason: str, next_action: str) -> None:
+        await self.store.terminal_outbound_notice(
+            str(row["notice_id"]),
+            owner=self.owner,
+            reason=reason or "terminal outbound notice failure",
+            next_action=next_action or "inspect the outbound notice row",
+        )
+        callback = self._terminal_callbacks.get(str(row.get("kind") or ""))
+        if callback is not None:
+            try:
+                await callback(row, reason, next_action)
+            except Exception:  # noqa: BLE001 - terminal state is already durable
+                log.exception("outbound notice terminal callback failed notice=%s", row.get("notice_id"))
+
+    async def run_forever(self) -> None:
+        """Restart sweep plus bounded periodic retry loop."""
+        failures = 0
+        delay = NOTICE_FIRST_DELAY_S
+        while True:
+            try:
+                if delay:
+                    await asyncio.sleep(delay)
+                await self.drain_once()
+                failures = 0
+                delay = NOTICE_INTERVAL_S
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one bad pass must not kill retries
+                failures += 1
+                delay = min(
+                    NOTICE_BACKOFF_MAX_S,
+                    NOTICE_BACKOFF_BASE_S * (2 ** max(0, failures - 1)),
+                )
+                log.exception("outbound notice sweep failed; retrying in %.1fs", delay)

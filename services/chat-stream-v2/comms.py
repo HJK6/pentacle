@@ -1,0 +1,2565 @@
+"""comms.py - send/tell, questions (prompt), notifications/updates.
+
+Contract (v2_design.md module table):
+  owns: send/tell, questions (`prompt`), notifications/updates.
+
+Binding requirements:
+  - **Handoff-aware tell routing (operator-named must-keep).** A tell/send
+    addressed to a dead or handed-off stream follows the handoff lineage
+    (`resolve_route_target`-style, bounded depth) to the live successor.
+    Carries a pinned regression.
+  - `child_report_ready` is a top-level WS push type AND a lineage-routed pane
+    tell - see `_artifacts/phase_c_entry_gates.md`. Both paths are required;
+    keeping `chat.event` does not cover it.
+  - B11: notifications carry TTLs; exactly one gated push emitter (the
+    phone-spam SEV class); questions are single durable rows.
+  - Retry simplifies to receipt-or-explicit-failure. v1's reply-type
+    vocabulary is preserved for the verbs v2 keeps (`send.result`, ...) -
+    mobile enumerates them by name. Two v1 uncertainty replies are gone by
+    ruling: `close.degraded` (recovered to `close.ok` or an honest
+    `close.failed`) and `send.indeterminate` (v2 never emits it).
+  - No standing nexus awareness-delivery loop (design L10; the Phase C entry
+    gate found zero programmatic consumers). `nexus.context` stays as a pull.
+
+Notification-expiry loop rules: cadence configurable; per-pass cap on rows
+expired; backoff on failure; kill switch `--disable-notification-expiry`.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+
+import qa_dispatch
+
+import asyncio
+from contextlib import nullcontext
+import hashlib
+import json
+import logging
+import os
+import re
+import time
+import unicodedata
+import uuid
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Any
+
+from claude_jsonl_norm import strip_peer_delivery_envelope
+from send_metadata import normalize_send_meta, voice_context_dispatch_block
+from boot_ready import (
+    CODEX_RESET_BLOCKED,
+    DRAFT_PREDICATES,
+    SUBMIT_PREDICATES,
+    _last_claude_input_start,
+    claude_command_exactly_in_active_draft,
+    claude_composer_empty,
+    claude_prompt_ready,
+    claude_prompt_in_active_draft,
+    codex_prompt_in_active_draft,
+    codex_reset_interstitial_visible,
+    codex_tui_session_visible,
+    prompt_in_native_queue,
+    submission_proven_after,
+)
+from mirror import _extract_live_state
+from outbound_notices import ensure_notice_marker, notice_needle
+from sessions import VerbError
+from tmux_transport import RECEIPT_TIMEOUT_S, assert_injectable, receipt_needle, sanitize_injectable
+from submission_events import (
+    COMMITTED_PENDING_PROOF,
+    DurableUserEventProof,
+    EventProof,
+    EventWatermark,
+    PROOF_FAST_WAIT_S,
+    submission_text_matches,
+    system_submission_matches,
+)
+from v2_runtime import iso_now
+
+log = logging.getLogger("chat_streamd_v2.comms")
+
+ROUTE_MAX_DEPTH = 8
+
+from chat_attachment_types import ATTACHMENT_MAX_BYTES
+ATTACHMENT_ROOT = Path.home() / ".local/share/pentacle-stream/attachments"
+SUPPORTED_ATTACHMENT_MIME = {"image/jpeg": "jpg", "image/png": "png"}
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_NOTICE_TOKEN_RE = re.compile(r"\[pentacle-notice:[^\]\s]+\]")
+
+
+def is_codex_usage_command(value: object) -> bool:
+    """Recognize the quota-reset slash command without retaining its body."""
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    first_line = stripped.splitlines()[0].strip() if stripped else ""
+    return bool(first_line) and first_line.split(maxsplit=1)[0].casefold() == "/usage"
+
+
+CODEX_INITIAL_PROMPT_PENDING = "initial_prompt_pending"
+_POOL_INPUT_MESSAGE = ContextVar("pool_input_message",default=None)
+
+
+def _verified_operator_provenance(msg: dict[str, Any]) -> bool:
+    """Use only the server-bound operator bit for provider reset actions.
+
+    A wire ``operator``/``trusted`` claim is intentionally ignored.  The v2
+    server attaches ``_auth_context`` after filtering wire fields; if a caller
+    cannot present that distinguishable connection-bound provenance, the
+    action fails closed as agent-originated.
+    """
+    auth = msg.get("_auth_context")
+    return isinstance(auth, dict) and auth.get("operator_authenticated") is True
+
+
+#: How long the post-paste submission probe watches the pane for evidence that
+#: the message left the draft.
+SUBMISSION_EVIDENCE_TIMEOUT_S = 4.0
+SUBMISSION_EVIDENCE_POLL_S = 0.25
+#: Recency horizon for collapsing a logical send's retries into one delivery.
+#: Sized to the desktop client's own optimistic-reconcile horizon
+#: (OPTIMISTIC_RECONCILE_WINDOW_MS = 60_000 in the packaged renderer): the span
+#: within which the client treats an optimistic send as the same in-flight
+#: delivery to reconcile against one server echo. Rotated-request_id retries and
+#: prompt reconnect replays of ONE logical send fall inside it; beyond it the
+#: client has settled the send, so a later identical-text message — including one
+#: after a client restart that reset its optimistic counter to _1 — is a NEW
+#: logical send and is delivered. The old client sends no client-generation token
+#: on the wire (only stream/text/request_id/optimistic_id; actor is the stable
+#: operator principal), so this recency bound is the only available discriminator
+#: between a retry and a post-restart identical send.
+SEND_DEDUPE_WINDOW_S = 60.0
+
+
+def watermark_fields(watermark: EventWatermark) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "proof_watermark": watermark.daemon_seq,
+        "proof_watermark_state": watermark.state,
+    }
+    if watermark.reason:
+        fields["proof_watermark_reason"] = watermark.reason
+    return fields
+
+
+def payload_digest(target: str, body: str) -> str:
+    """What a `tell_id` is allowed to stand for: one body, delivered to one
+    stream. The target is the RESOLVED final stream, not the address the caller
+    typed, so a lineage change makes the digest differ (QA #13)."""
+    return hashlib.sha256(f"{target}\x00{body}".encode()).hexdigest()
+
+
+def _normalize_pane(text: str) -> str:
+    cleaned = _ANSI_RE.sub("", text or "").replace("\r", "").replace("\u00a0", " ")
+    return "\n".join(line.rstrip() for line in cleaned.split("\n")).strip()
+
+
+def _same_submission_prompt(sent_text: str, echo_text: str) -> bool:
+    """The pinned semantic matcher used only for immediate pane evidence."""
+    sent_value = _normalize_pane(sent_text.replace("\r", "\n")).strip()
+    echo_value = _normalize_pane(echo_text.replace("\r", "\n")).strip()
+    if not sent_value or not echo_value:
+        return False
+    if sent_value == echo_value:
+        return True
+    return re.sub(r"\s+", " ", sent_value).strip() == re.sub(r"\s+", " ", echo_value).strip()
+
+
+# Stamping this envelope is the only signal that makes both provider normalizers
+# classify a peer delivery as kind:TELL (claude_jsonl_norm._PEER_TELL_RE, imported
+# by the Codex normalizer), so the transcript renders it as a peer/agent row. The
+# matching strip helper (strip_peer_delivery_envelope) lives with the normalizer.
+def _peer_delivery_envelope(from_stream_id: str, anchor: str, anchor_id: str, payload: str) -> str:
+    from message_envelopes import build_message_envelope
+    return build_message_envelope("peer_delivery", from_stream_id=from_stream_id, anchor=anchor,
+                                  anchor_id=anchor_id, payload=payload)
+
+
+class AttachmentValidationError(ValueError):
+    pass
+
+
+class AttachmentFetchError(RuntimeError):
+    pass
+
+
+class AttachmentStageError(RuntimeError):
+    pass
+
+
+def _attachment_ext(mime: object) -> str:
+    try:
+        return SUPPORTED_ATTACHMENT_MIME[str(mime)]
+    except KeyError:
+        raise AttachmentValidationError(f"unsupported mime: {mime!r}") from None
+
+
+def _attachment_sha(value: object) -> bool:
+    return isinstance(value, str) and bool(_SHA256_RE.fullmatch(value.lower()))
+
+
+def _optional_attachment_int(item: dict, field: str, index: int, *, max_value: int | None = None) -> int | None:
+    raw = item.get(field)
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise AttachmentValidationError(f"attachments[{index}] {field} must be an integer")
+    if raw < 0:
+        raise AttachmentValidationError(f"attachments[{index}] {field} must be non-negative")
+    if max_value is not None and raw > max_value:
+        raise AttachmentValidationError(f"attachments[{index}] {field} exceeds max {max_value}")
+    return raw
+
+
+def validate_send_attachments(value: object, *, max_bytes: int = ATTACHMENT_MAX_BYTES) -> list[dict]:
+    if not isinstance(value, list) or not value:
+        raise AttachmentValidationError("attachments must be a non-empty list")
+    if len(value) > 5:
+        raise AttachmentValidationError("at most 5 attachments per send")
+    normalized: list[dict] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise AttachmentValidationError(f"attachments[{index}] must be an object")
+        key = item.get("key")
+        if not _attachment_sha(key):
+            raise AttachmentValidationError(f"attachments[{index}] key must be a 64-hex sha256 blob ref")
+        key = str(key).lower()
+        mime = item.get("mime")
+        _attachment_ext(mime)
+        supplied_sha = item.get("sha256")
+        if supplied_sha is not None:
+            if not _attachment_sha(supplied_sha) or str(supplied_sha).lower() != key:
+                raise AttachmentValidationError(f"attachments[{index}] sha256 must match key")
+        entry: dict[str, Any] = {"key": key, "mime": mime}
+        for field in ("width", "height"):
+            number = _optional_attachment_int(item, field, index)
+            if number is not None:
+                entry[field] = number
+        declared = _optional_attachment_int(item, "bytes", index, max_value=max_bytes)
+        if declared is not None:
+            entry["bytes"] = declared
+        if supplied_sha is not None:
+            entry["sha256"] = key
+        normalized.append(entry)
+    return normalized
+
+
+def build_attachment_inject_text(paths: list[str], caption: str) -> str:
+    if not paths:
+        raise AttachmentValidationError("at least one attachment path is required")
+    # Native echoes can compose Unicode; keep their receipt wire identical.
+    # The original operator caption remains in SendPlan.display_text.
+    caption = unicodedata.normalize("NFC", (caption or "").strip())
+    noun = "file" if len(paths) == 1 else "files"
+    joined = ", ".join(paths)
+    if caption:
+        return f"Look at the image {noun} at {joined}, then respond to the user's message: {caption}"
+    return f"Look at the image {noun} at {joined}, then respond to the user's message."
+
+
+class _AttachmentMaterializer:
+    def __init__(self, root: str | os.PathLike[str] | None = None) -> None:
+        self.root = Path(root or ATTACHMENT_ROOT).expanduser()
+        self.max_bytes = ATTACHMENT_MAX_BYTES
+
+    @staticmethod
+    def _write_local(root: Path, sha: str, ext: str, data: bytes) -> Path:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = root / f"{sha}.{ext}"
+        if target.exists():
+            try:
+                if target.stat().st_size == len(data) and hashlib.sha256(target.read_bytes()).hexdigest() == sha:
+                    os.chmod(target, 0o600)
+                    return target
+            except OSError:
+                pass
+        temporary = root / f".{sha}.{uuid.uuid4().hex}.partial"
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            os.chmod(target, 0o600)
+        except OSError:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
+        return target
+
+    async def _remote_path(self, hosts: Any, host: str, sha: str, ext: str) -> str:
+        runner = getattr(hosts, "run_command", None)
+        if not callable(runner):
+            raise AttachmentStageError("remote attachment transport is unavailable")
+        script = (
+            "from pathlib import Path; "
+            "p=Path.home()/'.cache/pentacle-stream/attachments'; "
+            "p.mkdir(mode=0o700, parents=True, exist_ok=True); print(p)"
+        )
+        rc, output = await runner(host, "python3", "-c", script)
+        if rc != 0:
+            raise AttachmentStageError(output.strip() or "remote attachment directory creation failed")
+        remote_dir = str(output or "").strip().splitlines()[-1] if str(output or "").strip() else ""
+        if not remote_dir.startswith("/"):
+            raise AttachmentStageError("remote attachment directory is not absolute")
+        return f"{remote_dir}/{sha}.{ext}"
+
+    async def materialize(
+        self, attachments: list[dict], blob_store: Any, *, host: str, tmux: Any, hosts: Any,
+    ) -> list[str]:
+        paths: list[str] = []
+        for attachment in attachments:
+            sha = str(attachment["key"]).lower()
+            ext = _attachment_ext(attachment["mime"])
+            try:
+                if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
+                    raise ValueError("blob reader is unavailable")
+                data = await blob_store.read_verified(sha, max_bytes=self.max_bytes)
+                if len(data) > self.max_bytes:
+                    raise ValueError("attachment exceeds byte limit")
+            except Exception as exc:  # noqa: BLE001 - one typed send failure
+                raise AttachmentFetchError(f"failed to materialize attachment {sha}") from exc
+            if hosts is None or hosts.is_local(host):
+                try:
+                    local = await asyncio.to_thread(self._write_local, self.root, sha, ext, data)
+                except Exception as exc:  # noqa: BLE001 - typed send failure
+                    raise AttachmentFetchError(f"failed to write attachment {sha}") from exc
+                paths.append(str(local))
+                continue
+            try:
+                remote = await self._remote_path(hosts, host, sha, ext)
+                await tmux.stage_text(remote, data)
+            except Exception as exc:  # noqa: BLE001 - typed send failure
+                if isinstance(exc, AttachmentStageError):
+                    raise
+                raise AttachmentStageError(f"failed to stage attachment {sha}: {exc}") from exc
+            paths.append(remote)
+        return paths
+
+
+@dataclass
+class SendPlan:
+    message: dict[str, Any]
+    route: dict[str, Any]
+    body: str
+    display_text: str
+    attachments: list[dict]
+    wire_text: str
+    optimistic_id: str | None
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+class Comms:
+    """tell/send delivery through one per-resolved-pane input lock.
+
+    Injection is spawnctl's atomic paste.  Codex tells may issue one bounded
+    Enter-only recovery when the exact body is still structurally editable;
+    submission proof is the delivered/Sent boundary for that provider.  The
+    lock is deliberately owned here and shared by direct tells, durable
+    outbound notices, and send.  Spawn delivery is pre-registration and stays
+    outside this addressable-pane path.
+    """
+
+    def __init__(
+        self, store: Any, sessions: Any, spawnctl: Any, hosts: Any = None,
+        *, blob_store: Any = None, attachment_root: str | os.PathLike[str] | None = None,
+        submission_proof: Any = None,
+    ) -> None:
+        self.store = store
+        self.sessions = sessions
+        self.spawnctl = spawnctl
+        #: The probe pool + transport seam. When present, a tell whose resolved
+        #: target is a peer is fenced behind `ensure_reachable` and injected over
+        #: that peer's `tmux_for`. None keeps tell localhost-only (unit suite).
+        self.hosts = hosts
+        self.submission_proof = submission_proof or DurableUserEventProof(
+            store, local_host=str(getattr(sessions, "local_host", "")),
+        )
+        self.blob_store = blob_store
+        self.attachment_materializer = _AttachmentMaterializer(attachment_root)
+        #: tell_ids whose delivery is IN FLIGHT, each paired with the digest of
+        #: what it is delivering. The durable table remembers completed
+        #: deliveries; this covers the retry that matters most — the one fired
+        #: while the first attempt is still waiting for its receipt.
+        self._inflight: dict[str, tuple[str, asyncio.Future]] = {}
+        #: Exactly one input lock per resolved pane.  Route resolution happens
+        #: before this map is touched; all baseline capture, paste, Enter-only
+        #: recovery, and final evidence for a pane occur under this lock.
+        self._pane_input_locks: dict[str, asyncio.Lock] = {}
+        # Bound by main only when a composite is configured. The callback is a
+        # narrow target filter; ordinary Comms users remain unchanged.
+        self.assistant_ingress_policy: Any = None
+        self.front_desk_digest: Any = None
+        self.guidelines: Any = None
+        self.capacity_retry: Any = None
+        # The observer seam is attached after bind-first construction. A single
+        # queue/drain serializes buffered replays with live arrivals even while
+        # an observer awaits broadcasts, so receipt order cannot invert.
+
+    def _pane_input_lock(self, target: str) -> asyncio.Lock:
+        """Return the Comms-owned lock for one resolved ``host:session``."""
+        return self._pane_input_locks.setdefault(target, asyncio.Lock())
+
+    async def submit_context_compact(
+        self, stream_id: str, command: str, *, expected_generation: str,
+        before_input: Any, allow_busy: bool = False,
+    ) -> dict[str, Any]:
+        """Submit one daemon-owned Claude slash command under the shared pane lock.
+
+        The caller owns the source lifecycle lock. This method rechecks the
+        live row and composer after acquiring the pane lock, then persists a
+        possible-input fence through `before_input` before touching the pane.
+        Only a current-generation USER event confirms submission.
+        """
+        host, name = self.sessions.split(stream_id)
+        async with self._pane_input_lock(stream_id):
+            durable = await self.store.fetch_session(host, name) or {}
+            live = self.sessions.get(stream_id) or {}
+            session_generation = str(live.get("session_generation") or "")
+            local_mirror = (
+                (live.get("local_mirror") is True or live.get("mirror_local") is True)
+                and str(live.get("mirror_generation") or live.get("local_mirror_generation") or "")
+                == session_generation
+            )
+            fresh_capture = (
+                live.get("capture_generation") == session_generation
+                and live.get("capture_liveness") == "idle"
+            )
+            if (
+                durable.get("status") != "open"
+                or durable.get("created_at") != expected_generation
+                or durable.get("provider") != "claude"
+                or durable.get("context_level") != "compact"
+                or live.get("created_at") != expected_generation
+                or not session_generation
+                or not (live.get("working") is False
+                        or (allow_busy and live.get("working") is True))
+                or not (local_mirror or fresh_capture)
+                or live.get("capture_liveness") not in {None, "idle"}
+                or live.get("pane_status") != "pane_alive"
+                or live.get("routing_integrity") == "mismatch"
+                or live.get("host_status") == "offline"
+                or live.get("limit_stalled") is True
+                or live.get("parked") is True
+            ):
+                return {"outcome": "deferred", "reason": "seat_not_idle_or_current"}
+            if self.hosts is not None and not self.hosts.is_local(host):
+                await self.hosts.ensure_reachable(host, "context_compact")
+            tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+            if not await tmux.input_mode_clear(name):
+                return {"outcome": "deferred", "reason": "pane_mode_active_or_unknown"}
+            pane = await tmux.capture(name)
+            if (
+                not claude_prompt_ready(pane)
+                or not claude_composer_empty(pane)
+                or (not allow_busy and _extract_live_state(pane, "claude")["working"] is True)
+            ):
+                return {"outcome": "deferred", "reason": "composer_not_proven_empty"}
+            watermark = await self._watermark_before_action(stream_id)
+            if watermark.state != "reachable":
+                return {"outcome": "deferred", "reason": "watermark_unavailable"}
+            await before_input(watermark)
+
+            async def confirm_or_recover() -> dict[str, Any]:
+                # A pane echo alone is never a submission receipt. An exact
+                # active draft permits one Enter-only recovery under this lock.
+                try:
+                    proof = await self._durable_submission_evidence(
+                        stream_id, command, watermark=watermark,
+                    )
+                    if proof.proven:
+                        return {"outcome": "submitted", **proof.audit_fields()}
+                    current_pane = await tmux.capture(name)
+                    if (claude_command_exactly_in_active_draft(current_pane, command)
+                            and await tmux.input_mode_clear(name)):
+                        async with self._account_input_guard(stream_id,phase="enter_failed"):
+                            await tmux.send_enter_compact(name)
+                        proof = await self._durable_submission_evidence(
+                            stream_id, command, watermark=watermark,
+                        )
+                        if proof.proven:
+                            return {"outcome": "submitted", **proof.audit_fields()}
+                    return {"outcome": "pending_input", **proof.audit_fields()}
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    return {"outcome": "pending_input", "reason": type(exc).__name__}
+
+            try:
+                async with self._account_input_guard(stream_id):
+                    await tmux.paste_compact(name, command)
+            except VerbError as exc:
+                phase = str(exc.extra.get("phase") or "body_maybe_pasted")
+                if phase == "not_started":
+                    return {"outcome": "no_input", "reason": exc.code}
+                return await confirm_or_recover()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pane input may already have happened
+                return await confirm_or_recover()
+            return await confirm_or_recover()
+
+    async def _watermark_before_action(
+        self, stream_id: str,
+    ) -> EventWatermark:
+        """Take a bounded pre-action watermark when the proof supports it.
+
+        Test and rollout doubles from before the retry API expose only
+        ``watermark()``. Keep that fallback one-shot while production proof
+        uses its bounded retry window.
+        """
+        waiter = getattr(self.submission_proof, "wait_for_watermark", None)
+        if callable(waiter):
+            return await waiter(stream_id, timeout_s=PROOF_FAST_WAIT_S)
+        return await self.submission_proof.watermark(stream_id)
+
+    async def resolve_route_target(self, stream_id: str, *, max_depth: int = ROUTE_MAX_DEPTH) -> dict[str, Any]:
+        """A tell addressed to a handed-off stream follows the lineage to the
+        live successor, bounded in depth and loop-guarded.
+
+        Lineage comes from the successor row's `handoff_from_stream_id` — the
+        only forward link the contracted `sessions` table carries. v1 also kept
+        a `stream_progeny` table for non-handoff progeny; that path is not
+        implemented here (see `spec.md` Phase C bootstrap state)."""
+        hops = [stream_id]
+        seen = {stream_id}
+        current = stream_id
+        for _ in range(max_depth):
+            host, name = self.sessions.split(current)
+            row = self.sessions.get(current) or await self.store.fetch_session(host, name)
+            if row is not None and str(row.get("status") or "open") != "closed":
+                break
+            successor = await self.store.find_successor(current)
+            if successor is None:
+                break
+            if successor in seen:
+                hops.append(successor)
+                return {"ok": False, "reason": "route_loop", "original_target": stream_id,
+                        "final_target": current, "hops": hops, "forwarded": current != stream_id}
+            hops.append(successor)
+            seen.add(successor)
+            current = successor
+        else:
+            return {"ok": False, "reason": "route_depth_exceeded", "original_target": stream_id,
+                    "final_target": current, "hops": hops, "forwarded": current != stream_id}
+        return {"ok": True, "reason": None, "original_target": stream_id,
+                "final_target": current, "hops": hops, "forwarded": current != stream_id}
+
+    # -- tell --------------------------------------------------------------
+
+    async def tell(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """`tell_id` is the CALLER's idempotency key (the CLI documents it as
+        one): a retry must never inject the message a second time.
+
+        The key is bound to what was actually DELIVERED — the digest of the
+        resolved target plus the body (QA #13). A reuse carrying the same
+        payload replays the stored `tell.ok` (v1's duplicate vocabulary,
+        unchanged). A reuse carrying a DIFFERENT body, or the same body now
+        routing to a different stream, is `tell_id_conflict`: the daemon will
+        not answer `.ok` for a message it never delivered.
+
+        Routing and the host guard run BEFORE the dedupe lookup, so a replayed
+        id can never be a way around `assert_local` or handoff lineage, and the
+        digest is always compared against TODAY's routing, never the target the
+        first attempt happened to land on.
+
+        A transport failure is deliberately not remembered, so a retry after a
+        real failure is still free to attempt delivery once. A Codex
+        submission-unconfirmed result is different: its one paste is durable as
+        ``pasted_unsubmitted`` and a same-ID replay performs no input.
+        """
+        tell_id = str(msg.get("tell_id") or "").strip() or uuid.uuid4().hex[:12]
+        try:
+            route, body = await self._route(msg)
+        except VerbError as exc:
+            if exc.code in {CODEX_RESET_BLOCKED, CODEX_INITIAL_PROMPT_PENDING}:
+                await self._record_blocked_input(
+                    msg, tell_id, exc, verb="tell", receipt=False,
+                )
+            raise
+        await self._validate_assistant_request_target(msg, route)
+        # The idempotency digest hashes the ORIGINAL (unstamped) payload so a
+        # tell_id retried across a daemon upgrade — where a prior row hashed the
+        # bare body and this build would otherwise hash header+body — is still
+        # recognized as the same payload instead of a spurious tell_id_conflict.
+        # Only the injected wire text carries the peer-provenance envelope.
+        logical = msg.get("_logical_front_desk")
+        logical = logical if isinstance(logical, dict) else None
+        digest = self._logical_digest(msg, logical, body) if logical else payload_digest(str(route["final_target"]), body)
+        wire = self._peer_delivery_wire(msg, "tell", tell_id, body)
+
+        prior = await self.store.get_tell_delivery(tell_id)
+        if prior is not None:
+            # A logical FD retry after a rebind returns the original committed
+            # outcome; an attempt is reconciled at the seat it was made on.
+            matched = self._same_logical_payload(tell_id, digest, prior, logical, body) if logical else digest
+            if not logical:
+                self._assert_same_payload(tell_id, digest, prior)
+            attempted = str((prior.get("delivery") or {}).get("to_stream_id") or "") if logical else ""
+            async with self._pane_input_lock(attempted or str(route["final_target"])):
+                prior = await self.store.get_tell_delivery(tell_id)
+                self._assert_same_payload(tell_id, matched, prior)
+                prior = (await self.store.promote_tell_delivery(
+                    tell_id, matched, reconcile=True)) or prior
+            return {**prior["reply"], "duplicate": True}
+        pending = self._inflight.get(tell_id)
+        if pending is not None:
+            prior_digest, fut_pending = pending
+            if prior_digest != digest:
+                raise self._conflict(tell_id)
+            kind, value = await fut_pending
+            if kind == "error":
+                raise value
+            return {**value, "duplicate": True}
+
+        # Registered with no await since the lookup above, so a concurrent same-key
+        # tell waits on (or conflicts with) this one even while the ingress policy
+        # below is still awaiting its durable hold.
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._inflight[tell_id] = (digest, fut)
+        outcome: tuple[str, Any] = ("error", VerbError("delivery_failed", "tell did not complete"))
+        try:
+            await self._pool_ingress(str(route["final_target"]),msg)
+            policy = self.assistant_ingress_policy
+            if callable(policy):
+                # The policy sees the caller's tell_id only when one was supplied;
+                # a keyless tell keeps its request_id/body-hash policy identity.
+                suppressed = await policy(
+                    target_stream_id=str(route["final_target"]), body=body,
+                    msg={**msg, "tell_id": tell_id} if str(msg.get("tell_id") or "").strip() else msg,
+                    verb="tell",
+                )
+                if isinstance(suppressed, dict):
+                    reply = {**suppressed, "tell_id": tell_id}
+                    ledger_row_id = await self.store.put_tell_delivery(tell_id, {
+                        "payload_digest": digest,
+                        "reply": reply,
+                        "delivery": {
+                            "tell_id": tell_id,
+                            "from_stream_id": str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            **self._tell_sender_provenance(msg),
+                            "to_stream_id": str(route["final_target"]),
+                            "original_to_stream_id": str(route["original_target"]),
+                            "route_hops": list(route.get("hops") or []),
+                            **self._logical_receipt(logical),
+                            "text": wire,
+                            "delivery_status": suppressed["delivery_status"],
+                            "assistant_backend_ingress": suppressed.get("assistant_backend_ingress"),
+                            "front_desk_hold_id": suppressed.get("front_desk_hold_id"),
+                            "submission_confirmed": False,
+                            "delivered_at": None,
+                        },
+                    })
+                    reply["ledger_row_id"] = ledger_row_id
+                    await self._stamp_milestone_status(msg, body)
+                    outcome = ("ok", reply)
+                    return reply
+            msg={**msg,"tell_id":tell_id}
+            async with self._pane_input_lock(str(route["final_target"])):
+                await self._validate_assistant_request_target(msg, route)
+                # The pane lock keeps the advisor's baseline immediately before
+                # its request, even when several peers send concurrently.
+                advisor_input = (msg.get('_outbound_notice_kind') == 'assistant_lane_ruling_request'
+                                 or bool((msg.get('_auth_context') or {}).get('token_verified')))
+                if advisor_input and self.guidelines is not None:
+                    supplied = await self.guidelines.advisor_for_target(str(route['final_target']))
+                    if supplied is not None:
+                        generation, identity, baseline = supplied
+                        baseline_id = 'guidelines:' + uuid.uuid4().hex
+                        from assistant_guidelines import DELIVERY_TOKEN
+                        baseline_msg = {'to_stream_id': str(route['final_target']), 'from_stream_id': 'daemon:guidelines',
+                                        'tell_id': baseline_id, 'sanitize': True, '_guidelines_token': DELIVERY_TOKEN,
+                                        '_guidelines_role': 'advisor', '_guidelines_generation': generation}
+                        baseline = sanitize_injectable(baseline)
+                        baseline_reply = await self._deliver_tell(baseline_msg, baseline_id, route, baseline,
+                            payload_digest(str(route['final_target']), baseline))
+                        status = baseline_reply.get('delivery_status')
+                        if status in {'delivered', 'committed_pending_proof', 'pasted_unsubmitted', 'proof_unavailable'}:
+                            await self.guidelines.advisor_record(str(route['final_target']), generation, identity,
+                                                                 baseline_id, status)
+                        if status not in {'delivered', 'committed_pending_proof'}:
+                            raise VerbError('guidelines_delivery_unconfirmed', 'advisor guidelines delivery is unconfirmed')
+                reply = await self._deliver_tell(msg, tell_id, route, wire, digest)
+            if reply.get("delivery_status") == "delivered":
+                await self._stamp_milestone_status(msg, body)
+            outcome = ("ok", reply)
+            return reply
+        except Exception as exc:
+            from account_pool_control import POOL_ERRORS
+            if isinstance(exc,VerbError) and exc.code in POOL_ERRORS:
+                reply=await self._pool_tell_refusal(msg,tell_id,route,digest,exc)
+                outcome=("ok",reply)
+                return reply
+            if isinstance(exc, VerbError) and exc.code == CODEX_RESET_BLOCKED:
+                await self._record_blocked_input(
+                    msg, tell_id, exc, verb="tell", receipt=False,
+                )
+            outcome = ("error", exc)
+            raise
+        finally:
+            self._inflight.pop(tell_id, None)
+            if not fut.done():
+                fut.set_result(outcome)
+
+    async def _stamp_milestone_status(self, msg: dict[str, Any], body: str) -> None:
+        """Best-effort card update after a new tell is delivered or persisted."""
+        try:
+            text = strip_peer_delivery_envelope(body)
+            text = re.sub(r"^\[from [^\]\r\n]+\]\s*", "", text, count=1)
+            if not re.match(r"^(START|GATE|BLOCKER|END)\b", text):
+                return
+            sender = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "")
+            if not sender:
+                return
+            host, name = self.sessions.split(sender)
+            row = await self.store.fetch_session(host, name)
+            if row is None or row.get("status") != "open" or row.get("role") not in {"lead", "nexus"}:
+                return
+            await self.sessions.set_status_card(host, name, {"update": text[:300]})
+        except Exception:
+            log.exception("subsystem=comms bug_ref=milestone_tells status card stamp failed")
+
+    async def deliver_capacity_continue(self, target, state, attempt_id):
+        """One plain continuation; caller owns the original lifecycle lock.
+
+        The trusted token is an in-process object, never a wire capability.
+        A prior receipt is reconciled before entering the ordinary tell path.
+        """
+        if self.capacity_retry is None:
+            raise VerbError("capacity_retry_deferred", "capacity policy unavailable", phase="not_started")
+        prior = await self.reconcile_notification_answer(attempt_id, target, state["generation"])
+        if prior is not None:
+            return prior["reply"]
+        return await self.tell({
+            "stream_id": target, "message": "continue", "tell_id": attempt_id,
+            "urgent": False, "_durable_notice_proof": True,
+            "_notification_answer_generation": state["generation"],
+            "_capacity_retry_token": self.capacity_retry.token, "_capacity_attempt": state,
+        })
+
+    async def deliver_outbound_notice(
+        self, msg: dict[str, Any], *, check_existing: bool = False
+    ) -> dict[str, Any]:
+        """Deliver one queued daemon notice with crash-after-paste recovery.
+
+        A queue claim is durable before this method runs.  A retry performs an
+        evidence-only lookup from the watermark stored with the first paste.
+        It never consults pane chrome and never sends a second paste.
+        """
+        tell_id = str(msg.get("tell_id") or "").strip()
+        generation = msg.get("_notification_answer_generation")
+        if generation:
+            # Only the owned answer queue requests this boundary. A durable
+            # pre-input row means input MAY have happened, never that it did.
+            target = str(msg.get("stream_id") or "")
+            prior = await self.reconcile_notification_answer(tell_id, target, str(generation))
+            if prior is not None:
+                marked = ensure_notice_marker(tell_id, str(msg.get("message") or ""))
+                self._assert_same_payload(tell_id, payload_digest(target, marked), prior)
+                return {**prior["reply"], "duplicate": True}
+            host, name = self.sessions.split(target)
+            current = await self.store.fetch_session(host, name)
+            if (current is None or current.get("status") != "open"
+                    or current.get("session_generation") != generation):
+                raise VerbError("unknown_session", "asking generation is gone")
+            # No intent row proves this code has not reached its paste boundary.
+            # A queue claim alone is not permission to call it an ambiguous send.
+            check_existing = False
+        route, body = await self._route(msg)
+        target = str(route["final_target"])
+        await self._validate_assistant_request_target(msg, route)
+        policy = self.assistant_ingress_policy
+        if callable(policy):
+            suppressed = await policy(
+                target_stream_id=target, body=body, msg={**msg, "tell_id": tell_id}, verb="notice",
+            )
+            if isinstance(suppressed, dict):
+                return {**suppressed, "tell_id": tell_id}
+        host, name = self.sessions.split(target)
+        tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+        marked_body = ensure_notice_marker(tell_id, body)
+        if check_existing:
+            async with self._pane_input_lock(target):
+                prior = await self.store.get_tell_delivery(tell_id)
+                digest = payload_digest(target, marked_body)
+                if prior is not None:
+                    self._assert_same_payload(tell_id, digest, prior)
+                    delivery = prior.get("delivery") if isinstance(prior, dict) else None
+                    if isinstance(delivery, dict) and delivery.get("proof_watermark") is not None:
+                        watermark = EventWatermark(
+                            target,
+                            int(delivery.get("proof_watermark") or 0),
+                            str(delivery.get("proof_watermark_state") or "reachable"),
+                            str(delivery.get("proof_watermark_reason") or ""),
+                        )
+                        observed = await self.submission_proof.lookup(
+                            target, expected_text=marked_body, watermark=watermark,
+                        )
+                    else:
+                        observed = EventProof(
+                            "unreachable", target, 0, reason="proof_watermark_missing",
+                        )
+                else:
+                    observed = EventProof("unreachable", target, 0, reason="tell_row_missing")
+                if observed.proven:
+                    promoted = await self.store.promote_tell_delivery(
+                        tell_id, digest, proof=observed.audit_fields(),
+                    )
+                    if promoted is not None:
+                        reply = dict(promoted["reply"])
+                        reply["duplicate"] = True
+                        reply["already_present"] = True
+                        return reply
+                if prior is not None:
+                    return {
+                        **prior["reply"],
+                        **observed.audit_fields(),
+                        "duplicate": True,
+                    }
+                provider = await self._provider_for_route(route)
+                if provider not in SUBMIT_PREDICATES:
+                    pane = await tmux.capture(name)
+                    if notice_needle(tell_id) in pane:
+                        acknowledged_at = iso_now()
+                        reply = self._tell_reply(
+                            tell_id, route, submission_confirmed=True,
+                            delivery_status="delivered", submission_attempts=1,
+                            delivery_ack_at=acknowledged_at,
+                        )
+                        reply["already_present"] = True
+                        delivery = {
+                            "tell_id": tell_id,
+                            "to_stream_id": target,
+                            "text": marked_body,
+                            "delivery_status": "delivered",
+                            "delivery_attempts": 1,
+                            "submission_attempts": 1,
+                            "submission_confirmed": True,
+                            "enqueued_at": acknowledged_at,
+                            "delivered_at": acknowledged_at,
+                            "delivery_ack_at": acknowledged_at,
+                            "request_payload_hash": digest,
+                        }
+                        reply["ledger_row_id"] = await self.store.put_tell_delivery(
+                            tell_id,
+                            {"payload_digest": digest, "reply": reply, "delivery": delivery},
+                        )
+                        return reply
+                # The durable outbound row is expected to have a tell row after
+                # the initial attempt.  If a crash fell into that pre-persist
+                # window, keep this recovery pass evidence-only; the queue
+                # settles it from the explicit row_missing state.
+                reply = self._tell_reply(
+                    tell_id, route, submission_confirmed=False,
+                    delivery_status="proof_unavailable", submission_attempts=0,
+                    reason="tell_row_missing",
+                )
+                reply["proof_state"] = "row_missing"
+                return reply
+        return await self.tell({
+            **msg,
+            "message": marked_body,
+            "stream_id": target,
+            "_durable_notice_proof": True,
+        })
+
+    async def reconcile_notification_answer(
+        self, tell_id: str, target: str, generation: str,
+    ) -> dict[str, Any] | None:
+        """Read original-generation USER evidence; caller holds lifecycle lock.
+
+        Queue dispatch and Notify's late recovery both keep that ownership
+        through lookup and promotion. This method cannot input.
+        """
+        prior = await self.store.get_tell_delivery(tell_id)
+        if prior is None:
+            return None
+        delivery = prior.get("delivery") or {}
+        if (delivery.get("notification_answer_generation") != generation
+                or delivery.get("to_stream_id") != target):
+            raise self._conflict(tell_id)
+        if prior.get("reply", {}).get("delivery_status") == "delivered":
+            return prior
+        host, name = self.sessions.split(target)
+        current = await self.store.fetch_session(host, name)
+        if current is None or current.get("session_generation") != generation:
+            return prior
+        watermark = EventWatermark(target, int(delivery.get("proof_watermark") or 0),
+            str(delivery.get("proof_watermark_state") or "unreachable"),
+            str(delivery.get("proof_watermark_reason") or ""))
+        proof = await self.submission_proof.lookup(
+            target, expected_text=str(delivery.get("text") or ""), watermark=watermark)
+        if proof.proven:
+            return await self.store.promote_tell_delivery(
+                tell_id, str(prior["payload_digest"]), proof=proof.audit_fields()) or prior
+        return prior
+
+    async def _deliver_tell(
+        self, msg: dict[str, Any], tell_id: str, route: dict[str, Any], body: str, digest: str,
+    ) -> dict[str, Any]:
+        """Inject once, then durably record the provider's truth boundary."""
+        binding = await self.store.exchange_binding(str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""), str(route["final_target"]))
+        original = await self.store.fetch_session(*self.sessions.split(str(route["final_target"]))) or {}
+        prepared = False
+        async def before_paste(watermark):
+            nonlocal prepared
+            await self._prepare_tell_input(msg, tell_id, route, body, digest, original, watermark)
+            prepared = True
+        confirmed, attempts, provider, active_draft, proof, watermark = await self._attempt_delivery(
+            msg, route, body, before_paste=before_paste,
+        )
+        if msg.get("_notification_answer_generation"):
+            prior = await self.reconcile_notification_answer(
+                tell_id, str(route["final_target"]), str(msg["_notification_answer_generation"]))
+            if prior is not None:
+                return prior["reply"]
+        durable_notice = msg.get("_durable_notice_proof") is True
+        delivery_status = "delivered"
+        reason = None
+        if durable_notice and provider in SUBMIT_PREDICATES and not confirmed:
+            # Durable notice paste committed; async proof is late. Non-fatal,
+            # promotable via promote_tell_delivery when the event lands.
+            delivery_status = COMMITTED_PENDING_PROOF
+            reason = proof.reason or "submission_proof_pending"
+        elif provider == "codex" and not confirmed:
+            if active_draft:
+                delivery_status = "pasted_unsubmitted"
+                reason = "active_draft_present"
+            else:
+                # Paste left the composer (no active draft) but the post-
+                # watermark USER event has not yet been ingested. Committed, not
+                # failed: report the non-fatal, do_not_resubmit status.
+                delivery_status = COMMITTED_PENDING_PROOF
+                reason = "submission_proof_pending"
+        ack_at = iso_now() if confirmed else None
+        reply = self._tell_reply(
+            tell_id,
+            route,
+            submission_confirmed=confirmed,
+            delivery_status=delivery_status,
+            submission_attempts=attempts,
+            delivery_ack_at=ack_at,
+            reason=reason,
+            action_committed=not confirmed,
+            confirmation_pending=not confirmed,
+        )
+        if durable_notice:
+            reply.update(watermark_fields(watermark))
+            reply.update(proof.audit_fields())
+        enqueued_at = iso_now()
+        delivery = {
+            "tell_id": tell_id,
+            "cap_input_reason":msg.get('_pool_input_reason'),
+            "from_stream_id": str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            **self._tell_sender_provenance(msg),
+            "to_stream_id": str(route["final_target"]),
+            "original_to_stream_id": str(route["original_target"]),
+            "route_hops": list(route.get("hops") or []),
+            **self._logical_receipt(msg.get("_logical_front_desk")),
+            "text": body,
+            "delivery_status": delivery_status,
+            "delivery_attempts": attempts,
+            "submission_attempts": attempts,
+            "submission_confirmed": confirmed,
+            "enqueued_at": enqueued_at,
+            "delivered_at": enqueued_at if delivery_status == "delivered" else None,
+            "delivery_ack_at": ack_at,
+            "request_payload_hash": digest,
+            **watermark_fields(watermark),
+            **proof.audit_fields(),
+            "proof_generation": original.get("session_generation"),
+            "proof_session_created_at": original.get("created_at"),
+            **(
+                {
+                    key: reply[key]
+                    for key in (
+                        "action_status", "confirmation_status", "action_committed",
+                        "confirmation_pending", "do_not_resubmit", "reconcile",
+                    )
+                    if key in reply
+                }
+                if not confirmed else {}
+            ),
+        }
+        from store_exchange import source
+        delivery["exchange"] = source(binding, "tell", tell_id, strip_peer_delivery_envelope(body), enqueued_at)
+        envelope = {"payload_digest": digest, "reply": reply, "delivery": delivery}
+        if prepared:
+            finalized = await self.store.promote_tell_delivery(tell_id, digest, prepared_result=envelope)
+            if finalized is None:
+                # A stale/corrupt completion cannot overwrite original custody.
+                finalized = await self.store.get_tell_delivery(tell_id)
+                self._assert_same_payload(tell_id, digest, finalized)
+            # Ingest may have recorded proof while this was still a preparation
+            # row. Finalize its route/exchange metadata before reconciling it.
+            if finalized["reply"].get("delivery_status") == COMMITTED_PENDING_PROOF:
+                finalized = (await self.store.promote_tell_delivery(tell_id, digest, reconcile=True)) or finalized
+            return finalized["reply"]
+        reply["ledger_row_id"] = await self.store.put_tell_delivery(tell_id, envelope)
+        return reply
+
+    async def _prepare_tell_input(self, msg, tell_id, route, body, digest, original, watermark):
+        """Existing tell receipt custody, before input, never a claim of delivery."""
+        reply = self._tell_reply(tell_id, route, submission_confirmed=False,
+            delivery_status="proof_unavailable", submission_attempts=0, reason="input_outcome_unknown")
+        reply.update(action_status="indeterminate", action_committed=False,
+                     confirmation_pending=True, confirmation_status="pending", do_not_resubmit=True,
+                     reconcile="tell_id_evidence_only", **watermark_fields(watermark))
+        delivery = {"tell_id":tell_id, "to_stream_id":str(route["final_target"]), "text":body,
+            **self._logical_receipt(msg.get("_logical_front_desk")),
+            "from_stream_id":str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            **self._tell_sender_provenance(msg),
+            "delivery_status":"proof_unavailable", "submission_confirmed":False, "submission_attempts":0,
+            "delivered_at":None, "request_payload_hash":digest,
+            "proof_generation":original.get("session_generation"),
+            "proof_session_created_at":original.get("created_at"), **watermark_fields(watermark)}
+        await self.store.put_tell_delivery(tell_id,
+            {"payload_digest":digest, "reply":reply, "delivery":delivery})
+
+    def _tell_reply(
+        self,
+        tell_id: str,
+        route: dict[str, Any],
+        *,
+        submission_confirmed: bool,
+        delivery_status: str = "delivered",
+        submission_attempts: int = 1,
+        delivery_ack_at: str | None = None,
+        reason: str | None = None,
+        action_committed: bool = False,
+        confirmation_pending: bool = False,
+    ) -> dict[str, Any]:
+        """The compatibility ``tell.ok`` envelope and its evidence fields."""
+        reply = {
+            "type": "tell.ok", "tell_id": tell_id,
+            "delivery_status": delivery_status, "to_stream_id": str(route["final_target"]),
+            "original_target": route["original_target"], "forwarded": route["forwarded"],
+            "hops": route["hops"], "submission_confirmed": submission_confirmed,
+            "submission_attempts": int(submission_attempts),
+            "delivery_ack_at": delivery_ack_at,
+        }
+        if reason:
+            reply["reason"] = reason
+        if action_committed:
+            reply.update({
+                "action_status": "committed",
+                "confirmation_status": "pending" if confirmation_pending else "confirmed",
+                "action_committed": True,
+                "confirmation_pending": confirmation_pending,
+            })
+            if confirmation_pending:
+                reply.update({
+                    "do_not_resubmit": True,
+                    "reconcile": "tell_id_evidence_only",
+                    "reconcile_command": f"agent-orch ledger get {tell_id}",
+                    "retry_guidance": (
+                        "Action is committed; confirmation is pending. "
+                        "DO NOT RESUBMIT; reconcile with the existing tell_id."
+                    ),
+                })
+        return reply
+
+    @staticmethod
+    def _conflict(tell_id: str) -> VerbError:
+        return VerbError(
+            "tell_id_conflict",
+            f"tell_id {tell_id} was already used for a different message or a different "
+            "target stream; reusing an idempotency key requires an identical payload",
+        )
+
+    @staticmethod
+    def _logical_digest(msg: dict[str, Any], logical: dict[str, Any], body: str) -> str:
+        """FD tell identity: authenticated sender, logical destination and body."""
+        sender = str(logical.get("sender") or msg.get("from_stream_id") or "")
+        return payload_digest(f"front-desk:{logical['name']}\x00{sender}", body)
+
+    def _same_logical_payload(self, tell_id, digest, prior, logical, body) -> str:
+        """The stored digest a logical FD retry matches, or tell_id_conflict.
+
+        A row written before logical FD identity hashed its physical seat; it
+        matches only when that seat is a proved primary binding, its retained
+        sender is this sender and the body is the same. Ambiguous evidence
+        fails closed.
+        """
+        if not isinstance(prior, dict):
+            raise self._conflict(tell_id)
+        if prior.get("payload_digest") == digest:
+            return digest
+        delivery = prior.get("delivery") or {}
+        attempted = str(delivery.get("to_stream_id") or "")
+        sender = str(logical.get("sender") or "")
+        if (attempted and attempted in logical.get("aliases", ())
+                and sender and str(delivery.get("from_stream_id") or "") == sender
+                and delivery.get("logical_front_desk") is None
+                and prior.get("payload_digest") == payload_digest(attempted, body)):
+            return str(prior["payload_digest"])
+        raise self._conflict(tell_id)
+
+    @staticmethod
+    def _logical_receipt(logical: Any) -> dict[str, Any]:
+        if not isinstance(logical, dict):
+            return {}
+        return {"logical_front_desk": logical["name"], "requested_to_stream_id": logical.get("requested"),
+                "binding_revision": logical.get("binding_revision")}
+
+    def _assert_same_payload(self, tell_id: str, digest: str, prior: dict[str, Any]) -> None:
+        """A stored record that predates the envelope has no digest to compare,
+        so it cannot be proved to be the same message: fail closed rather than
+        replay a `tell.ok` that may name a stream this call never reached."""
+        if not isinstance(prior, dict) or prior.get("payload_digest") != digest:
+            raise self._conflict(tell_id)
+
+    async def _resolve_route(self, msg: dict[str, Any], *, verb: str) -> dict[str, Any]:
+        """Resolve lineage, routing integrity, host fencing, and open-session state."""
+        host, name = await self.sessions.resolve(msg)
+        route = await self.resolve_route_target(f"{host}:{name}")
+        if not route["ok"]:
+            raise VerbError(route["reason"] or "route_failed", f"cannot route to {host}:{name}")
+        target = str(route["final_target"])
+        # Self-requested compaction must not follow a caller that retired after
+        # authentication into another seat's handoff successor.
+        if msg.get("_self_compact_stream_id") not in {None, target}:
+            raise VerbError("compact_self_only", "compact cannot follow a different seat")
+        host, name = self.sessions.split(target)
+        # Read the authoritative row before any peer reachability/RPC probe.
+        # A rejected Codex reset or unresolved initial prompt must not even
+        # open the remote transport that would precede pane input.
+        row = await self.store.fetch_session(host, name)
+        if row is None:
+            row = self.sessions.get(target)
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is not None and row is not None:
+            from provider_accounts import AccountError
+            try:await runtime.maintenance_input(row)
+            except AccountError as exc:
+                raise VerbError(str(exc),str(exc),**exc.context) from None
+        if row is not None and str(row.get("status") or "") == "open":
+            raw_body = msg.get("message") if "message" in msg else msg.get("text")
+            await self._assert_codex_input_allowed(
+                route,
+                "" if raw_body is None else str(raw_body),
+                msg,
+            )
+
+        # Injection pastes into `=<name>:` on the target's OWN host, so the host
+        # must be resolved before delivery: a bare local paste would hit an
+        # unrelated local pane that happens to share the name. A configured peer
+        # is fenced behind a bounded reachability probe (offline -> fast
+        # `host_offline`); without a `hosts` pool, the unit path stays local-only.
+        if self.hosts is not None and not self.hosts.is_local(host):
+            await self.hosts.ensure_reachable(host, verb)
+        else:
+            self.sessions.assert_local(host, verb)
+
+        if row is None or str(row.get("status") or "") != "open":
+            raise VerbError("unknown_session", f"{target} is not an open session")
+
+        return route
+
+    async def _route(self, msg: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """The tell route retains its pinned text-only validation contract."""
+        route = await self._resolve_route(msg, verb="tell")
+        body = str(msg.get("message") or msg.get("text") or "")
+        if not body.strip():
+            raise VerbError("bad_request", "message is required")
+        # Opt-in only (QA #17): a tell explicitly relaying captured terminal
+        # output (ANSI colour, a `capture-pane` excerpt — routine agent traffic)
+        # sets `sanitize` to STRIP the control sequences instead of being
+        # rejected. Absent the flag the behaviour is exactly as before —
+        # `assert_injectable` rejects a raw ESC, so no caller ever silently gets
+        # a mangled injection, and briefs/spawns (a different path) are untouched.
+        if msg.get("sanitize"):
+            body = sanitize_injectable(body)
+            if not body.strip():
+                raise VerbError("bad_request", "message is empty after sanitize")
+        await self._assert_codex_input_allowed(route, body, msg)
+        # Rejected before the urgent Escape, so a hostile tell leaves the target
+        # pane completely untouched. After a sanitize this always passes; it
+        # stays the single guarantee that nothing unsafe reaches the pane.
+        assert_injectable(body)
+        return route, body
+
+    # -- the one injection path (submission-confirmed, busy-aware) ----------
+
+    async def _provider_for_route(self, route: dict[str, Any]) -> str:
+        target = str(route["final_target"])
+        host, name = self.sessions.split(target)
+        row = self.sessions.get(target) or await self.store.fetch_session(host, name)
+        return str((row or {}).get("provider") or "")
+
+    @staticmethod
+    def _send_provenance(msg: dict[str, Any]) -> tuple[str | None, str | None, bool]:
+        """Return bounded actor/from metadata without copying message content."""
+        auth = msg.get("_auth_context")
+        auth = auth if isinstance(auth, dict) else {}
+        from_stream_id = str(
+            msg.get("from_stream_id") or msg.get("actor_stream_id") or ""
+        ).strip() or None
+        actor_stream_id = str(
+            auth.get("stream_id")
+            or auth.get("service_actor")
+            or auth.get("operator_principal")
+            or from_stream_id
+            or ""
+        ).strip() or None
+        actor_trusted = bool(
+            auth.get("token_verified")
+            or auth.get("service_authenticated")
+            or auth.get("operator_authenticated")
+        )
+        return from_stream_id, actor_stream_id, actor_trusted
+
+    @staticmethod
+    def _tell_sender_provenance(msg: dict[str, Any]) -> dict[str, Any]:
+        """Capture server-authenticated origin once; claims stay display-only."""
+        auth = msg.get("_auth_context")
+        auth = auth if isinstance(auth, dict) else {}
+        sender = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "")
+        peer = auth.get("token_verified") is True and bool(sender) and sender == auth.get("stream_id")
+        kind = ("peer" if peer else "operator" if auth.get("operator_authenticated") is True
+                else "service" if auth.get("service_authenticated") is True else "unknown")
+        return {"sender_verified": kind != "unknown", "sender_kind": kind,
+                "sender_generation": str(auth.get("session_generation") or "") or None if peer else None}
+
+    @staticmethod
+    def _peer_delivery_wire(msg: dict[str, Any], anchor: str, anchor_id: str, payload: str) -> str:
+        """Wrap ``payload`` in a `[from …]` envelope for a genuine bound peer, else
+        return it unchanged.
+
+        The gate is a token-verified seat whose verified identity equals the
+        claimed sender (`token_verified and stream_id == from_stream_id`). The
+        server only sets `token_verified` after checking a seat-owned stream token
+        against the store, and rejects a mismatched claim as WRONG_SEAT — so this
+        binds the stamp to a proven peer. An OPERATOR (operator_authenticated but no
+        seat token → token_verified False, empty stream_id) and a system producer
+        (whose service_actor is an unverified claim) are deliberately excluded, so
+        neither can spoof a peer attribution. Daemon housekeeping
+        (`_durable_notice_proof`) is left bare. Submitted envelope-like text
+        remains literal inside the actual sender stamp.
+        """
+        from_stream_id, _actor, _actor_trusted = Comms._send_provenance(msg)
+        auth = msg.get("_auth_context")
+        auth = auth if isinstance(auth, dict) else {}
+        verified_peer = bool(
+            auth.get("token_verified")
+            and from_stream_id
+            and str(auth.get("stream_id") or "") == from_stream_id
+        )
+        anchor_id = str(anchor_id or "").strip()
+        if (
+            verified_peer
+            and anchor_id
+            and not msg.get("_durable_notice_proof")
+        ):
+            return _peer_delivery_envelope(from_stream_id, anchor, anchor_id, payload)
+        return payload
+
+    async def _reconcile_codex_reset_state(
+        self, target: str, host: str, name: str, row: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Clear a stale reset block after observing a normal Codex session."""
+        tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+        try:
+            pane = await tmux.capture(name)
+        except Exception:  # noqa: BLE001 - capture ambiguity preserves the block
+            return row
+        if not codex_tui_session_visible(pane):
+            return row
+
+        if str(row.get("bootstrap_state") or "") != CODEX_RESET_BLOCKED:
+            return row
+
+        updated = await self.store.update_session(
+            host,
+            name,
+            expected_generation=str(row.get("created_at") or ""),
+            bootstrap_state="started",
+        )
+        if updated is None:
+            return await self.store.fetch_session(host, name) or row
+        self.sessions.apply_durable(target, bootstrap_state="started")
+        return updated
+
+    async def _assert_codex_pane_input_safe(self, target: str, pane: str) -> None:
+        """Persist and reject the actual ``/usage`` selection surface."""
+        if not codex_reset_interstitial_visible(pane):
+            return
+        host, name = self.sessions.split(target)
+        row = await self.store.fetch_session(host, name)
+        if row is not None:
+            updated = await self.store.update_session(
+                host,
+                name,
+                expected_generation=str(row.get("created_at") or ""),
+                bootstrap_state=CODEX_RESET_BLOCKED,
+            )
+            if updated is not None:
+                self.sessions.apply_durable(target, bootstrap_state=CODEX_RESET_BLOCKED)
+        raise VerbError(
+            CODEX_RESET_BLOCKED,
+            "Codex /usage reset selection is visible; automated input is blocked",
+            phase="not_started",
+            readiness_reason=CODEX_RESET_BLOCKED,
+            reset_blocked=True,
+            retryable=False,
+            nonretryable=True,
+            action_committed=False,
+            confirmation_pending=False,
+            pane_preserved=True,
+            startup_input_blocked=True,
+            do_not_retry=True,
+            target_stream_id=target,
+        )
+
+    async def _assert_codex_input_allowed(
+        self, route: dict[str, Any], body: str, msg: dict[str, Any],
+    ) -> None:
+        """Fail closed before any tmux/RPC input can reach a Codex pane."""
+        target = str(route["final_target"])
+        host, name = self.sessions.split(target)
+        row = await self.store.fetch_session(host, name)
+        if row is None:
+            row = self.sessions.get(target)
+        if str((row or {}).get("provider") or "") != "codex":
+            return
+        operator = _verified_operator_provenance(msg)
+        reset_state = str((row or {}).get("bootstrap_state") or "") == CODEX_RESET_BLOCKED
+        usage_command = is_codex_usage_command(body)
+
+        # A verified operator may still deliberately use the existing /usage
+        # action. No wire-controlled operator claim reaches this branch because
+        # `_verified_operator_provenance` reads only server auth.
+        if operator and usage_command:
+            return
+        if reset_state and not usage_command:
+            row = await self._reconcile_codex_reset_state(target, host, name, row or {})
+            reset_state = str(row.get("bootstrap_state") or "") == CODEX_RESET_BLOCKED
+        initial_pending = str((row or {}).get("bootstrap_state") or "") == "unproven"
+
+        if reset_state or usage_command:
+            code = CODEX_RESET_BLOCKED
+            message = (
+                "agent-originated /usage is disabled for Codex; a usage-limit reset "
+                "requires a verified operator action"
+                if usage_command else
+                "Codex pane is reset-blocked; no automated input is permitted until "
+                "a verified operator resolves the interstitial"
+            )
+        elif initial_pending:
+            code = CODEX_INITIAL_PROMPT_PENDING
+            message = (
+                "Codex initial prompt submission is unproven; follow-up input is "
+                "blocked until exact USER proof settles bootstrap"
+            )
+        else:
+            return
+
+        from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(msg)
+        reset = code == CODEX_RESET_BLOCKED
+        raise VerbError(
+            code,
+            message,
+            readiness_reason=CODEX_RESET_BLOCKED if reset else CODEX_INITIAL_PROMPT_PENDING,
+            reset_blocked=reset,
+            pending=not reset,
+            retryable=False,
+            nonretryable=True,
+            action_committed=False,
+            confirmation_pending=False,
+            pane_preserved=True,
+            startup_input_blocked=True,
+            do_not_retry=True,
+            target_stream_id=target,
+            from_stream_id=from_stream_id,
+            actor_stream_id=actor_stream_id,
+            actor_trusted=actor_trusted,
+        )
+
+    async def _record_blocked_input(
+        self,
+        msg: dict[str, Any],
+        request_id: str,
+        exc: VerbError,
+        *,
+        verb: str = "send",
+        receipt: bool = True,
+    ) -> None:
+        """Record blocked input without storing its body."""
+        target = str(exc.extra.get("target_stream_id") or "").strip()
+        if not target or ":" not in target:
+            return
+        from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(msg)
+        code = str(exc.code or CODEX_RESET_BLOCKED)
+        if receipt:
+            receipt_id = f"receipt-{uuid.uuid4()}"
+            try:
+                await self.store.append_send_receipt(
+                    to_stream_id=target,
+                    request_id=request_id,
+                    receipt_id=receipt_id,
+                    state="not_landed",
+                    wire_text="",
+                    display_text="",
+                    attachments=[],
+                    delivery="not_landed",
+                    submission_confirmed=False,
+                    reason=code,
+                    attempts=0,
+                    from_stream_id=from_stream_id,
+                    actor_stream_id=actor_stream_id,
+                    actor_trusted=actor_trusted,
+                )
+            except Exception:  # noqa: BLE001 - preserve the typed rejection
+                log.exception("could not append blocked send receipt target=%s", target)
+    async def _validate_assistant_request_target(self, msg, route):
+        from assistant_guidelines import DELIVERY_TOKEN
+        if msg.get('_guidelines_token') is DELIVERY_TOKEN:
+            target = str(route['final_target'])
+            host, name = self.sessions.split(target)
+            current = await self.store.fetch_session(host, name)
+            generation = msg.get('_guidelines_generation')
+            role = msg.get('_guidelines_role')
+            if (role not in {'front_desk', 'advisor'} or not generation or current is None
+                    or current.get('status') != 'open' or current.get('session_generation') != generation
+                    or self.guidelines is None or not await self.guidelines.is_current(role, target, generation)):
+                raise VerbError('guidelines_binding_changed', 'guidelines target binding changed')
+        from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
+        if msg.get("_assistant_authority_request_token") is not ASSISTANT_AUTHORITY_REQUEST_TOKEN:
+            return
+        target = str(route["final_target"])
+        host, name = self.sessions.split(target)
+        current = await self.store.fetch_session(host, name)
+        if (target != str(msg.get("stream_id") or "") or current is None
+                or current.get("status") != "open"
+                or not msg.get("_assistant_authority_request_generation")
+                or current.get("session_generation") != msg["_assistant_authority_request_generation"]):
+            raise VerbError("unknown_session", "bound assistant authority generation is gone")
+        ruling_id = str(msg.get("_assistant_lane_ruling_request_id") or "")
+        if ruling_id:
+            def effective_pending(conn):
+                from store_host_transfer import effective_ruling
+                row = effective_ruling(conn, conn.execute(
+                    "SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?",
+                    (ruling_id,),
+                ).fetchone())
+                return bool(row and row['state']=='pending'
+                    and (row['authority_stream_id'],row['authority_generation'])
+                        == (target,current['session_generation']))
+            valid = await self.store.submit(effective_pending)
+            if not valid:
+                raise VerbError("unknown_session", "ruling request no longer pending")
+
+    async def _attempt_delivery(
+        self, msg: dict[str, Any], route: dict[str, Any], body: str,
+        *, before_paste=None,
+    ) -> tuple[bool, int, str, bool, EventProof, EventWatermark]:
+        """Deliver ``body`` and return proof, attempts, provider, and active-draft evidence."""
+        target = str(route["final_target"])
+        if self.capacity_retry is not None and msg.get("_capacity_retry_token") is not self.capacity_retry.token:
+            await self.capacity_retry.cancel_input(target)
+        host, name = self.sessions.split(target)
+        row = self.sessions.get(target) or await self.store.fetch_session(host, name)
+        provider = str((row or {}).get("provider") or "")
+        if msg.get("_notification_answer_generation") and provider not in SUBMIT_PREDICATES:
+            raise VerbError("bad_request", "answer delivery requires a supported USER-proof provider")
+        tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+        async def prepare(watermark):
+            if msg.get("_notification_answer_generation"):
+                await self._prepare_answer_input(msg, route, body, watermark)
+            else:
+                if msg.get("_assistant_authority_request_generation") or msg.get("_guidelines_token"):
+                    await self._validate_assistant_request_target(msg, route)
+                if before_paste is not None:
+                    await before_paste(watermark)
+        token=_POOL_INPUT_MESSAGE.set(msg)
+        try:
+            confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
+                tmux, name, body, provider, bool(msg.get("urgent")), target,
+                durable_proof=msg.get("_durable_notice_proof") is True,
+                before_paste=prepare,
+            )
+        finally: _POOL_INPUT_MESSAGE.reset(token)
+        return confirmed, attempts, provider, active_draft, proof, watermark
+
+    async def _prepare_answer_input(
+        self, msg: dict, route: dict, body: str, watermark: EventWatermark,
+    ) -> None:
+        """Persist possible-input ownership before the single paste, never a sent claim."""
+        if watermark.state != "reachable":
+            raise VerbError("answer_proof_unavailable", "cannot establish a pre-input USER watermark")
+        tell_id = str(msg["tell_id"])
+        target = str(route["final_target"])
+        if self.capacity_retry is not None and msg.get("_capacity_retry_token") is self.capacity_retry.token:
+            await self.capacity_retry.before_input(msg, route, watermark)
+        if target != str(route["original_target"]):
+            raise VerbError("unknown_session", "answer cannot follow a replacement producer")
+        reply = self._tell_reply(tell_id, route, submission_confirmed=False,
+            delivery_status="proof_unavailable", submission_attempts=0,
+            reason="input_outcome_unknown", confirmation_pending=True)
+        reply.update({"action_status": "indeterminate", "action_committed": False,
+                      "confirmation_pending": True, "do_not_resubmit": True,
+                      "reconcile": "tell_id_evidence_only", **watermark_fields(watermark)})
+        delivery = {"tell_id": tell_id, "to_stream_id": target, "text": body,
+                    "notification_answer_generation": msg["_notification_answer_generation"],
+                    "delivery_status": "proof_unavailable", "submission_confirmed": False,
+                    "submission_attempts": 0, "delivered_at": None,
+                    "request_payload_hash": payload_digest(target, body),
+                    **watermark_fields(watermark)}
+        await self.store.put_tell_delivery(tell_id,
+            {"payload_digest": payload_digest(target, body), "reply": reply, "delivery": delivery})
+
+    async def _inject_body(
+        self, tmux: Any, name: str, body: str, provider: str, urgent: bool, stream_id: str,
+        *, durable_proof: bool = False, before_paste: Any = None,
+    ) -> tuple[bool, int, bool, EventProof, EventWatermark]:
+        """Paste once, then perform only the bounded provider recovery."""
+        # B6: `urgent` is SENDER-chosen — one Escape, then the message. The
+        # caller holds the resolved-pane input lock while this entire sequence
+        # runs. The baseline is captured after that optional Escape and before
+        # the paste, so all proof is anchored to this input region.
+        before: str | None = None
+        if provider == "codex":
+            before = await tmux.capture(name)
+            await self._assert_codex_pane_input_safe(stream_id, before)
+        if urgent:
+            async with self._account_input_guard(stream_id):
+                await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+            before = None
+            if provider == "codex":
+                before = await tmux.capture(name)
+                await self._assert_codex_pane_input_safe(stream_id, before)
+        if provider not in SUBMIT_PREDICATES:
+            before = before if before is not None else await tmux.capture(name)
+            async with self._account_input_guard(stream_id,claim=True):
+                await tmux.paste(name, body)
+            confirmed = await self.spawnctl._await_marker(
+                name, receipt_needle(body), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
+            )
+            watermark = EventWatermark(stream_id, 0, "not_required")
+            proof = EventProof("proven" if confirmed else "pending", stream_id, 0)
+            return confirmed, 1, False, proof, watermark
+        before = before if before is not None else await tmux.capture(name)
+        watermark = await self._watermark_before_action(stream_id)
+        async with self._account_input_guard(stream_id,claim=True):
+            if before_paste is not None:
+                await before_paste(watermark)
+            await tmux.paste(name, body)
+        if durable_proof:
+            proof = await self._durable_submission_evidence(
+                stream_id, body, watermark=watermark,
+            )
+            confirmed = proof.proven
+        else:
+            confirmed = await self._submission_evidence(
+                tmux, name, body, provider, baseline=before, stream_id=stream_id,
+                watermark=watermark.daemon_seq,
+            )
+            proof = EventProof("proven" if confirmed else "pending", stream_id, watermark.daemon_seq)
+        if confirmed or (not durable_proof and provider != "codex"):
+            return confirmed, 1, False, proof, watermark
+        if durable_proof:
+            # Pane chrome is advisory for durable notices. The baseline wait
+            # ends in a keyed proof_pending row and never authorizes input.
+            return False, 1, False, proof, watermark
+
+        # Tmux.paste already issued the first Enter.  A second Enter is legal
+        # only when this exact body (or its exact collapsed placeholder) is
+        # still in the editable Codex composer.  It is never a re-paste.
+        pane = await tmux.capture(name)
+        in_draft = (
+            codex_prompt_in_active_draft(pane, body, exact=True)
+            if provider == "codex" else DRAFT_PREDICATES[provider](pane, body)
+        )
+        if not in_draft:
+            return False, 1, False, proof, watermark
+        try:
+            async with self._account_input_guard(stream_id,phase="enter_failed"):
+                await self._send_enter(tmux, name)
+        except VerbError as exc:
+            if exc.code!="provider_cli_input_maintenance":raise
+            # The first paste is durable input custody. Record its pending
+            # truth so a same-ID retry can never paste the body a second time.
+            return False,1,True,EventProof("pending",stream_id,watermark.daemon_seq,
+                reason="provider_cli_input_maintenance"),watermark
+        if durable_proof:
+            proof = await self._durable_submission_evidence(
+                stream_id, body, watermark=watermark,
+            )
+            confirmed = proof.proven
+        else:
+            confirmed = await self._submission_evidence(
+                tmux, name, body, provider, baseline=before, stream_id=stream_id,
+                watermark=watermark.daemon_seq,
+            )
+            proof = EventProof("proven" if confirmed else "pending", stream_id, watermark.daemon_seq)
+        if confirmed:
+            return True, 2, False, proof, watermark
+        pane = await tmux.capture(name)
+        in_draft = (
+            codex_prompt_in_active_draft(pane, body, exact=True)
+            if provider == "codex" else DRAFT_PREDICATES[provider](pane, body)
+        )
+        return False, 2, in_draft, proof, watermark
+
+    async def _submission_evidence(
+        self,
+        tmux: Any,
+        name: str,
+        body: str,
+        provider: str,
+        *,
+        baseline: str | None = None,
+        stream_id: str = "",
+        watermark: int = 0,
+    ) -> bool:
+        """Existing general send/tell pane receipt seam (not item4 authority)."""
+        submitted = SUBMIT_PREDICATES[provider]
+        deadline = time.monotonic() + SUBMISSION_EVIDENCE_TIMEOUT_S
+        while True:
+            pane = await tmux.capture(name)
+            if (
+                submission_proven_after(pane, baseline, body, provider)
+                if baseline is not None
+                else submitted(pane, body)
+            ):
+                return True
+            # Positive durable-event proof of native-queue/submission acceptance.
+            # For claude this matches the native queued-command USER event
+            # (claude_jsonl_norm subtype queued-command), the direct analogue of
+            # codex's native-queue proof — a genuinely-queued message becomes a
+            # confirmed landing rather than an inferred committed_pending_proof.
+            if provider in ("codex", "claude") and await self._submission_event_proven(
+                stream_id, body, watermark,
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(SUBMISSION_EVIDENCE_POLL_S)
+
+    async def _durable_submission_evidence(
+        self, stream_id: str, body: str, *, watermark: EventWatermark,
+    ) -> EventProof:
+        """Item4 authority: one exact post-watermark durable USER event."""
+        return await self.submission_proof.wait(
+            stream_id,
+            expected_text=body,
+            watermark=watermark,
+            timeout_s=PROOF_FAST_WAIT_S,
+        )
+
+    async def _submission_watermark(self, stream_id: str) -> int:
+        """Snapshot the highest durable event sequence visible before one paste."""
+        return await self.store.fetch_session_event_watermark(stream_id)
+
+    @staticmethod
+    def _claude_commit_mode(pane: str, mode: str | None) -> str | None:
+        """Positive-evidence gate for treating a claude send that has left the
+        editable composer as committed to the native queue. A live claude composer
+        (a ``❯`` input caret) must be present; a stale/dead or non-provider pane has
+        no caret, so the paste was NOT committed and must classify not_landed
+        (reason ``no_claude_composer``) instead of a silent committed_pending_proof.
+        Origin: spec_pentacle__mobile_send_status_reconcile_2026_09 QA — absence of
+        an active draft alone is not proof of commit."""
+        if _last_claude_input_start(pane.splitlines()) is not None:
+            return mode
+        return mode or "no_claude_composer"
+
+    @staticmethod
+    def _daemon_seq(event: dict[str, Any]) -> int:
+        try:
+            return max(0, int(event.get("daemon_seq") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _tail_event_matches_submission(event: dict[str, Any], stream_id: str, body: str) -> bool:
+        if str(event.get("stream_id") or "") != stream_id:
+            return False
+        if event.get("kind") == "SYSTEM":
+            return system_submission_matches(event, body)
+        if str(event.get("kind") or "") not in {"USER", "TELL"}:
+            return False
+        if "provider_text_digest" in event:
+            return submission_text_matches(event, strip_peer_delivery_envelope(body))
+        text = event.get("text")
+        if not isinstance(text, str):
+            return False
+        # The normalizer stores only the header-stripped payload, so compare the
+        # stripped body (a bare body is returned unchanged) to keep proof matching.
+        if not _same_submission_prompt(strip_peer_delivery_envelope(body), text):
+            return False
+        return all(token in text for token in _NOTICE_TOKEN_RE.findall(body))
+
+    async def _submission_event_proven(self, stream_id: str, body: str, watermark: int) -> bool:
+        """Preserved non-item4 general send/tell event receipt seam."""
+        if not stream_id:
+            return False
+        tail = await self.store.fetch_session_event_tail(
+            stream_id, limit=500, after_daemon_seq=watermark,
+        )
+        matches = [event for event in tail
+            if self._daemon_seq(event) > watermark
+            and self._tail_event_matches_submission(event, stream_id, body)]
+        system_matches = [event for event in matches if event.get("kind") == "SYSTEM"]
+        if system_matches:
+            return len(system_matches) == 1
+        return bool(matches)
+
+
+    # -- send --------------------------------------------------------------
+
+    async def _assert_claude_send_ready(self, route: dict[str, Any]) -> None:
+        """Early V2 admission does not authorize input before bootstrap readiness."""
+        target = str(route["final_target"])
+        host, name = self.sessions.split(target)
+        row = await self.store.fetch_session(host, name)
+        if row is None:
+            row = self.sessions.get(target)
+        if (row or {}).get("provider") == "claude" and (row or {}).get("bootstrap_state") in {
+            "queued", "starting", "failed",
+        }:
+            raise VerbError(
+                "bootstrap_not_ready", "Claude session is not ready for input",
+                phase="not_started", action_committed=False, confirmation_pending=False,
+                target_stream_id=target,
+            )
+
+    async def _prepare_send_plan(self, msg: dict[str, Any]) -> SendPlan:
+        """Prepare the canonical text-or-attachments plan without pane I/O."""
+        from provider_accounts import AccountError, reject_overrides
+        try:
+            reject_overrides(msg)
+        except AccountError as exc:
+            raise VerbError(str(exc), str(exc), **exc.context) from None
+        route = await self._resolve_route(msg, verb="send")
+        await self._assert_claude_send_ready(route)
+        raw_body = msg.get("message") if "message" in msg else msg.get("text")
+        body = "" if raw_body is None else str(raw_body)
+        if msg.get("sanitize"):
+            body = sanitize_injectable(body)
+
+        # This check is deliberately before attachment validation/materialization
+        # and before the first receipt acceptance: a reset command must not turn
+        # into any transport or pane action while an agent-originated reset is
+        # being rejected.
+        await self._assert_codex_input_allowed(route, body, msg)
+
+        raw_attachments = msg.get("attachments")
+        if raw_attachments is None or raw_attachments == []:
+            attachments: list[dict] = []
+        else:
+            try:
+                attachments = validate_send_attachments(raw_attachments)
+            except AttachmentValidationError as exc:
+                raise VerbError("attachment_invalid", str(exc)) from exc
+
+        if msg.get("sanitize") and not body.strip() and not attachments:
+            raise VerbError("bad_request", "message is empty after sanitize")
+        if not body.strip() and not attachments:
+            raise VerbError("bad_request", "message is required")
+        if body:
+            assert_injectable(body)
+        display_text = body.strip() if attachments else body
+        # Stamp wire_text only; display_text stays the operator-visible payload.
+        # Attachments re-derive wire_text in _materialize_send_plan (re-stamped there).
+        send_anchor = str(msg.get("request_id") or msg.get("msg_id") or "send")
+        meta = normalize_send_meta(msg.get("meta"))
+        context = meta.get("voice", {}).get("context_v1")
+        if context is not None:
+            log.info("subsystem=voice bug_ref=voice_everywhere_context stage=send_prepared visits=%d truncated=%s",
+                     len(context["visits"]), context.get("truncated", False))
+        wire_body = body + voice_context_dispatch_block(context)
+        assert_injectable(wire_body)
+        return SendPlan(
+            message=msg,
+            route=route,
+            body=body,
+            display_text=display_text,
+            attachments=attachments,
+            wire_text=self._peer_delivery_wire(msg, "send", send_anchor, wire_body),
+            optimistic_id=str(msg.get("optimistic_id") or "") or None,
+            meta=meta,
+        )
+
+    async def _materialize_send_plan(self, plan: SendPlan) -> SendPlan:
+        """Materialize and stage every attachment before the first paste."""
+        if not plan.attachments:
+            return plan
+        target = str(plan.route["final_target"])
+        host, name = self.sessions.split(target)
+        tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+        try:
+            paths = await self.attachment_materializer.materialize(
+                plan.attachments,
+                self.blob_store,
+                host=host,
+                tmux=tmux,
+                hosts=self.hosts,
+            )
+        except AttachmentStageError as exc:
+            raise VerbError("attachment_stage_failed", str(exc)) from exc
+        except AttachmentFetchError as exc:
+            raise VerbError("attachment_fetch_failed", str(exc)) from exc
+        wire_text = build_attachment_inject_text(paths, plan.display_text)
+        wire_text += voice_context_dispatch_block(plan.meta.get("voice", {}).get("context_v1"))
+        send_anchor = str(plan.message.get("request_id") or plan.message.get("msg_id") or "send")
+        wire_text = self._peer_delivery_wire(plan.message, "send", send_anchor, wire_text)
+        assert_injectable(wire_text)
+        return SendPlan(
+            message=plan.message,
+            route=plan.route,
+            body=plan.body,
+            display_text=plan.display_text,
+            attachments=plan.attachments,
+            wire_text=wire_text,
+            optimistic_id=plan.optimistic_id,
+            meta=plan.meta,
+        )
+
+    async def _send_enter(self, tmux: Any, name: str) -> str | None:
+        """Issue the one allowed Enter-only retry, never a second paste."""
+        try:
+            sender = getattr(tmux, "send_enter", None)
+            if callable(sender):
+                return await sender(name)
+            rc, output = await tmux.run("send-keys", "-t", f"={name}:", "Enter")
+            if rc != 0:
+                raise VerbError("paste_failed", output.strip() or "send-keys Enter failed")
+            return None
+        except VerbError as exc:
+            exc.extra.setdefault("phase", "enter_failed")
+            raise
+        except Exception as exc:  # noqa: BLE001 - public send error is stable
+            raise VerbError("paste_failed", str(exc), phase="enter_failed") from exc
+
+    async def _pool_ingress(self,target,message):
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is None: return
+        from provider_accounts import AccountError
+        try:
+            reason=await runtime.cap_input(await self.store.fetch_session(*self.sessions.split(target)) or {},message)
+            if reason=="direct_operator_order": message["_pool_input_reason"]=reason
+            return reason
+        except AccountError as exc:
+            raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
+
+    async def _pool_tell_refusal(self,msg,tell_id,route,digest,exc):
+        reply={"type":"tell.error","error_code":exc.code,"error":exc.code,"tell_id":tell_id,
+               "to_stream_id":route["final_target"],"delivery_status":"not_landed",**exc.extra}
+        await self.store.put_tell_delivery(tell_id,{"payload_digest":digest,"reply":reply,
+            "delivery":{"tell_id":tell_id,"to_stream_id":route["final_target"],"text":"",
+                        "delivery_status":"not_landed","submission_confirmed":False,"reason":exc.code}})
+        return reply
+
+    @asynccontextmanager
+    async def _account_input_guard(self,target,*,phase="not_started",claim=False,execution=False):
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is None and not execution:
+            yield
+            return
+        from provider_accounts import AccountError
+        host,name=self.sessions.split(target)
+        try:
+            account_guard = (runtime.input_guard(await self.store.fetch_session(host,name) or {},
+                message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim) if runtime is not None else nullcontext())
+            # Provider preparation precedes this fence. Hold the graph only for
+            # one physical action, never submission evidence or an Enter wait.
+            async with account_guard, (self.sessions._graph_lock if execution else nullcontext()):
+                yield
+        except AccountError as exc:
+            if str(exc)=="provider_cli_input_maintenance" and phase!="not_started":
+                exc.context.update(delivery="pasted_unsubmitted",attempts=1,action_committed=True,
+                                   confirmation_pending=True,do_not_resubmit=True)
+            raise VerbError(str(exc),str(exc),phase=phase,**exc.context) from None
+
+    async def _attempt_send_delivery(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:
+        token=_POOL_INPUT_MESSAGE.set(plan.message)
+        try: return await self._attempt_send_delivery_bound(plan)
+        finally: _POOL_INPUT_MESSAGE.reset(token)
+
+    async def _attempt_send_delivery_bound(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:
+        """Submit one prepared plan: one paste, then at most one Enter retry."""
+        target = str(plan.route["final_target"])
+        host, name = self.sessions.split(target)
+        row = self.sessions.get(target) or await self.store.fetch_session(host, name)
+        provider = str((row or {}).get("provider") or "")
+        tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+        before: str | None = None
+        if provider == "codex":
+            before = await tmux.capture(name)
+            await self._assert_codex_pane_input_safe(target, before)
+        if plan.message.get("urgent"):
+            async with self._account_input_guard(target,execution=True):
+                await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+            before = None
+            if provider == "codex":
+                before = await tmux.capture(name)
+                await self._assert_codex_pane_input_safe(target, before)
+
+        if provider not in SUBMIT_PREDICATES:
+            before = before if before is not None else await tmux.capture(name)
+            async with self._account_input_guard(target,claim=True,execution=True):
+                pane_mode_reason = await tmux.paste(name, plan.wire_text)
+            confirmed = await self.spawnctl._await_marker(
+                name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
+            )
+            if confirmed:
+                return True, 1, False, provider, None
+            async with self._account_input_guard(target,phase="enter_failed",execution=True):
+                enter_mode_reason = await self._send_enter(tmux, name)
+            confirmed = await self.spawnctl._await_marker(
+                name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
+            )
+            return confirmed, 2, False, provider, pane_mode_reason or enter_mode_reason
+
+        before = before if before is not None else await tmux.capture(name)
+        watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
+        async with self._account_input_guard(target,claim=True,execution=True):
+            pane_mode_reason = await tmux.paste(name, plan.wire_text)
+        confirmed = await self._submission_evidence(
+            tmux, name, plan.wire_text, provider, baseline=before,
+            stream_id=target, watermark=watermark,
+        )
+        if confirmed:
+            return True, 1, False, provider, None
+        if provider == "claude":
+            pane = await tmux.capture(name)
+            if not claude_prompt_in_active_draft(pane, plan.wire_text):
+                return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
+            async with self._account_input_guard(target,phase="enter_failed",execution=True):
+                enter_mode_reason = await self._send_enter(tmux, name)
+            confirmed = await self._submission_evidence(
+                tmux, name, plan.wire_text, provider, baseline=before,
+                stream_id=target, watermark=watermark,
+            )
+            if confirmed:
+                return True, 2, False, provider, None
+            pane = await tmux.capture(name)
+            in_draft = claude_prompt_in_active_draft(pane, plan.wire_text)
+            mode = pane_mode_reason or enter_mode_reason
+            if not in_draft:
+                mode = self._claude_commit_mode(pane, mode)
+            return False, 2, in_draft, provider, mode
+        if provider != "codex":
+            async with self._account_input_guard(target,phase="enter_failed",execution=True):
+                enter_mode_reason = await self._send_enter(tmux, name)
+            confirmed = await self._submission_evidence(
+                tmux, name, plan.wire_text, provider, baseline=before,
+            )
+            if confirmed:
+                return True, 2, False, provider, None
+            pane = await tmux.capture(name)
+            return False, 2, (
+                claude_prompt_in_active_draft(pane, plan.wire_text) if provider == "claude" else False
+            ), provider, pane_mode_reason or enter_mode_reason
+        pane = await tmux.capture(name)
+        if not codex_prompt_in_active_draft(pane, plan.wire_text, exact=True):
+            return False, 1, False, provider, pane_mode_reason
+        async with self._account_input_guard(target,phase="enter_failed",execution=True):
+            enter_mode_reason = await self._send_enter(tmux, name)
+        confirmed = await self._submission_evidence(
+            tmux, name, plan.wire_text, provider, baseline=before,
+            stream_id=target, watermark=watermark,
+        )
+        if confirmed:
+            return True, 2, False, provider, None
+        pane = await tmux.capture(name)
+        return False, 2, codex_prompt_in_active_draft(pane, plan.wire_text, exact=True), provider, (
+            pane_mode_reason or enter_mode_reason
+        )
+
+    async def _append_send_receipt(
+        self,
+        plan: SendPlan,
+        *,
+        request_id: str,
+        receipt_id: str,
+        state: str,
+        delivery: str,
+        submission_confirmed: bool,
+        reason: str | None = None,
+        attempts: int | None = None,
+    ) -> dict[str, Any]:
+        """Append the receipt record; nothing in this lane updates a prior row."""
+        from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(plan.message)
+        from account_pool_control import operator
+        if operator(plan.message.get("_auth_context") or {}):
+            plan.meta["pool_input"]={"reason":"direct_operator_order","wire_text":plan.wire_text}
+        return await self.store.append_send_receipt(
+            to_stream_id=str(plan.route["final_target"]),
+            request_id=request_id,
+            receipt_id=receipt_id,
+            state=state,
+            wire_text=plan.wire_text,
+            display_text=plan.display_text,
+            attachments=plan.attachments,
+            delivery=delivery,
+            submission_confirmed=submission_confirmed,
+            optimistic_id=plan.optimistic_id,
+            reason=reason,
+            attempts=attempts,
+            from_stream_id=from_stream_id,
+            actor_stream_id=actor_stream_id,
+            actor_trusted=actor_trusted,
+            meta_json=json.dumps(plan.meta, separators=(",", ":"), sort_keys=True),
+        )
+
+    async def _send_result(
+        self,
+        plan: SendPlan,
+        *,
+        request_id: str,
+        receipt_id: str,
+        state: str,
+        delivery: str,
+        submission_confirmed: bool,
+        reason: str | None = None,
+        attempts: int | None = None,
+        action_committed: bool = False,
+        confirmation_pending: bool = False,
+        provider_queued: bool = False,
+    ) -> dict[str, Any]:
+        projection = await self._append_send_receipt(
+            plan,
+            request_id=request_id,
+            receipt_id=receipt_id,
+            state=state,
+            delivery=delivery,
+            submission_confirmed=submission_confirmed,
+            reason=reason,
+            attempts=attempts,
+        )
+        target = str(plan.route["final_target"])
+        host, name = self.sessions.split(target)
+        result: dict[str, Any] = {
+            "type": "send.result", "host": host, "session_name": name,
+            "msg_id": plan.message.get("msg_id"), "to_stream_id": target,
+            "original_target": plan.route["original_target"],
+            "forwarded": plan.route["forwarded"], "hops": plan.route["hops"],
+            "receipt_id": receipt_id, "delivery": delivery,
+            "submission_confirmed": submission_confirmed,
+        }
+        if delivery == COMMITTED_PENDING_PROOF:
+            # Installed clients recognize accepted state while retaining the
+            # canonical delivery's pending-proof and do-not-resubmit semantics.
+            result["state"] = state
+        if submission_confirmed and attempts is not None:
+            result["attempt"] = attempts
+        elif attempts is not None:
+            result["attempts"] = attempts
+        if reason:
+            result["reason"] = reason
+        from account_pool_control import POOL_ERRORS
+        if reason in POOL_ERRORS:
+            result.update(plan.meta.get("pool_refusal",{}))
+            result.update(error_code=reason,retryable=False,nonretryable=True,do_not_retry=True,
+                          queued_for_redelivery=False,phase="not_started")
+        if provider_queued:
+            result["provider_queued"] = True
+        if action_committed:
+            result.update({
+                "action_status": "committed",
+                "confirmation_status": "pending" if confirmation_pending else "confirmed",
+                "action_committed": True,
+                "confirmation_pending": confirmation_pending,
+            })
+            if confirmation_pending:
+                result.update({
+                    "do_not_resubmit": True,
+                    "reconcile": "send_receipt",
+                    "reconcile_command": (
+                        f"agent-orch send-receipt {target} {request_id}"
+                    ),
+                    "retry_guidance": (
+                        "Action is committed; confirmation is pending. "
+                        "DO NOT RESUBMIT; reconcile with the existing request_id."
+                    ),
+                })
+        return result
+
+    async def _submit_send_plan(
+        self, plan: SendPlan, *, request_id: str, receipt_id: str,
+        qa_generation: str | None = None,
+        assistant_generation: str | None = None,
+        voice_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Inject one accepted plan and append its known durable outcome."""
+        target = str(plan.route["final_target"])
+        try:
+            host, name = self.sessions.split(target)
+            row = await self.store.fetch_session(host, name)
+            queued_operation = plan.message.get("_queued_send_now_operation")
+            queued_binding = (getattr(self, "queued_send_now", None) is not None
+                and (plan.message.get("_auth_context") or {}).get("operator_authenticated"))
+            lifecycle = (
+                self.sessions._lifecycle_lock(host, name)
+                if qa_generation is not None or assistant_generation is not None or voice_generation is not None
+                or queued_operation is not None or queued_binding
+                or (row or {}).get("provider") == "claude" else nullcontext()
+            )
+            # An alias send holds the FD gate through physical input, so a
+            # rebind commits either before its binding check or after the
+            # paste. Gate before lifecycle, as for binding writers.
+            binding_gate = (self.store.front_desk_fence()
+                            if isinstance(plan.message.get("_assistant_alias_binding"), dict) else nullcontext())
+            # Match bootstrap publishers: lifecycle before pane input, never the reverse.
+            async with binding_gate, lifecycle, self._pane_input_lock(target):
+                if queued_operation is not None:
+                    policy = getattr(self, "queued_send_now", None)
+                    current = await self.store.fetch_session(host, name) or {}
+                    if (policy is None or not await policy.validate_continue_locked(
+                            queued_operation, target, current.get("session_generation"), request_id)):
+                        raise VerbError("queued_continue_cancelled", "Queued continuation was cancelled", phase="not_started")
+                if voice_generation is not None:
+                    current = await self.store.fetch_session(host, name) or {}
+                    if current.get("status") != "open" or current.get("session_generation") != voice_generation:
+                        raise VerbError(
+                            "voice_origin_generation_conflict",
+                            "Voice origin generation changed before delivery",
+                            phase="not_started",
+                        )
+                if qa_generation is not None:
+                    current = await self.store.fetch_session(host, name) or {}
+                    if current.get("status") != "open" or current.get("session_generation") != qa_generation:
+                        raise VerbError(
+                            "qa_reviewer_generation_conflict",
+                            "QA reviewer lifecycle changed after admission",
+                            phase="not_started",
+                        )
+                if assistant_generation is not None:
+                    current = await self.store.fetch_session(host, name) or {}
+                    if current.get("status") != "open" or current.get("session_generation") != assistant_generation:
+                        raise VerbError(
+                            "assistant_direct_generation_conflict",
+                            "Direct assistant target generation changed before delivery",
+                            phase="not_started",
+                        )
+                fence = plan.message.get("_assistant_alias_binding")
+                if isinstance(fence, dict):
+                    # `send assistant` sampled the binding once; a rebind before
+                    # input refuses rather than silently redirecting the send.
+                    current = await self.store.get_assistant_binding(
+                        env_binding=fence["env_binding"], name=fence["name"])
+                    if any(current.get(k) != fence[k] for k in ("stream_id", "generation", "revision")):
+                        raise VerbError("assistant_binding_stale",
+                                        "assistant binding changed before input; nothing was sent; retry",
+                                        phase="not_started", retryable=True)
+                await self._assert_claude_send_ready(plan.route)
+                account_runtime = getattr(self, "account_runtime", None)
+                if account_runtime is not None:
+                    from provider_accounts import AccountError
+                    try: await account_runtime.before_input(await self.store.fetch_session(host,name) or {})
+                    except AccountError as exc:
+                        raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
+                if self.capacity_retry is not None:
+                    await self.capacity_retry.cancel_input(target)
+                # Persist the actual winning attempt's final-wire anchors before
+                # native input. Public/client metadata never supplies this key.
+                current = await self.store.fetch_session(host, name) or {}
+                watermark = await self.submission_proof.watermark(target)
+                plan.meta["_input_proof"] = {
+                    **self._tell_sender_provenance(plan.message),
+                    "from_stream_id": str(plan.message.get("from_stream_id") or ""),
+                    "to_stream_id": target, "proof_generation": current.get("session_generation"),
+                    "proof_session_created_at": current.get("created_at"),
+                    **watermark_fields(watermark),
+                    "wire_sha256": hashlib.sha256(plan.wire_text.encode("utf-8")).hexdigest(),
+                    "wire_length": len(plan.wire_text), "wire_text": plan.wire_text,
+                }
+                await self._append_send_receipt(plan, request_id=request_id, receipt_id=receipt_id,
+                    state="accepted", delivery="accepted", submission_confirmed=False, attempts=0)
+                confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
+                provider_queued = (
+                    not active_draft and pane_mode_reason is None
+                    and await self._prompt_in_native_queue(target, provider, plan.wire_text)
+                )
+                queued_policy = getattr(self, "queued_send_now", None)
+                if (provider_queued and queued_policy is not None
+                        and (plan.message.get("_auth_context") or {}).get("operator_authenticated")):
+                    current = await self.store.fetch_session(host, name) or {}
+                    await queued_policy.bind_receipt_locked(target, current.get("session_generation"), request_id, receipt_id)
+        except VerbError as exc:
+            phase = str(exc.extra.get("phase") or "body_maybe_pasted")
+            if phase == "not_started":
+                plan.meta['pool_input_not_started']=True
+                from account_pool_control import POOL_ERRORS
+                if exc.code in POOL_ERRORS: plan.meta["pool_refusal"]=exc.extra
+                return await self._send_result(
+                    plan, request_id=request_id, receipt_id=receipt_id,
+                    state="not_landed", delivery="not_landed", submission_confirmed=False,
+                    reason=str(exc.code),
+                )
+            return await self._send_result(
+                plan, request_id=request_id, receipt_id=receipt_id,
+                state="accepted", delivery=COMMITTED_PENDING_PROOF, submission_confirmed=False,
+                reason=phase,
+                action_committed=True, confirmation_pending=True,
+            )
+        except Exception:  # noqa: BLE001 - body may have reached the pane
+            return await self._send_result(
+                plan, request_id=request_id, receipt_id=receipt_id,
+                state="accepted", delivery=COMMITTED_PENDING_PROOF, submission_confirmed=False,
+                reason="body_maybe_pasted",
+                action_committed=True, confirmation_pending=True,
+            )
+
+        reason = pane_mode_reason or ("active_draft" if active_draft else "submit_unconfirmed")
+        if confirmed:
+            # A prompt held in the provider's native queue is delivered (the TUI
+            # owns it and will submit it when the running turn ends) but is not a
+            # turn yet. ``delivery`` stays ``landed`` for every existing consumer;
+            # the additive ``provider_queued`` flag (receipt reason) lets chat
+            # clients show Queued until the transcript echo arrives.
+            return await self._send_result(
+                plan, request_id=request_id, receipt_id=receipt_id,
+                state="landed", delivery="landed", submission_confirmed=True,
+                attempts=attempts,
+                reason="provider_queued" if provider_queued else None,
+                provider_queued=provider_queued,
+            )
+        # A native-queue TUI (claude, codex — the SUBMIT_PREDICATES providers) queues
+        # mid-turn input natively: once the brief has left the active draft, it is
+        # committed to the target (submitted or queued), even if submission proof has
+        # not surfaced within the evidence window. It is a true not_landed only when
+        # the brief is still sitting in the active draft, the pane could not accept the
+        # input at all (pane_mode_reason set, e.g. an unclearable copy-mode), or the
+        # provider has no native-queue evidence. Classifying a genuinely-queued claude
+        # send as not_landed was the false "send failed" in
+        # spec_pentacle__mobile_send_status_reconcile_2026_09. (Codex reaches this point
+        # with pane_mode_reason unset — an unsafe pane raises earlier — so its
+        # classification is unchanged.)
+        if active_draft or pane_mode_reason is not None or provider not in SUBMIT_PREDICATES:
+            return await self._send_result(
+                plan, request_id=request_id, receipt_id=receipt_id,
+                state="not_landed", delivery="not_landed", submission_confirmed=False,
+                reason=reason, attempts=attempts,
+                action_committed=True, confirmation_pending=True,
+            )
+        return await self._send_result(
+            plan, request_id=request_id, receipt_id=receipt_id,
+            state="accepted", delivery=COMMITTED_PENDING_PROOF, submission_confirmed=False,
+            reason=reason, attempts=attempts,
+            action_committed=True, confirmation_pending=True,
+            provider_queued=provider_queued,
+        )
+
+    async def _prompt_in_native_queue(self, target: str, provider: str, wire_text: str, *, strict=False) -> bool:
+        """One post-delivery capture: is the prompt held in the native queue?
+
+        Purely informational; any capture failure answers False so the send's
+        delivery classification is never affected.
+        """
+        if provider not in ("claude", "codex"):
+            return False
+        try:
+            host, name = self.sessions.split(target)
+            tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+            pane = await tmux.capture(name)
+        except Exception:  # noqa: BLE001 - informational probe only
+            if strict: raise
+            return False
+        return isinstance(pane, str) and prompt_in_native_queue(pane, wire_text, provider)
+
+    @staticmethod
+    def _send_dedupe_window_floor() -> str:
+        """The lower ISO-UTC bound (inclusive) of the send-idempotency recency
+        window: receipts older than this no longer collapse a same-identity send,
+        so a post-restart identical message is delivered."""
+        floor = time.time() - SEND_DEDUPE_WINDOW_S
+        return datetime.fromtimestamp(floor, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def _coalesced_send_result(
+        self, plan: SendPlan, *, request_id: str, receipt_id: str, winner: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve a retry that coalesced onto an already-claimed logical send.
+
+        Appends THIS request_id's own correlated receipt mirroring the winner's
+        delivery (so a client polling this request_id reconciles from
+        retry-eligible to the winner's state) with a ``coalesced_replay:<winner>``
+        reason pointing at the replayed delivery, and returns a do-not-resubmit
+        result. No pane paste is issued — the physical delivery already happened
+        (or is in flight) under the winner's request_id.
+        """
+        winner_state = str(winner.get("state") or "accepted")
+        winner_delivery = str(winner.get("delivery") or winner_state)
+        winner_confirmed = bool(winner.get("submission_confirmed"))
+        winner_request_id = str(winner.get("request_id") or request_id)
+        # Replaying this physical request retains its original validated meta.
+        # A rotated request owns its own meta, even when its delivery coalesces.
+        own_receipt = await self.store.get_send_receipt(
+            str(plan.route["final_target"]), request_id,
+        )
+        if own_receipt is not None:
+            plan = replace(plan, meta=normalize_send_meta(own_receipt.get("meta")))
+        winner_attempts = winner.get("attempts")
+        winner_attempts = winner_attempts if isinstance(winner_attempts, int) else None
+        # A replay of a send the provider holds in its native queue stays queued.
+        # The winner may itself be a replay ("coalesced_replay:<id>;provider_queued").
+        winner_reason = str(winner.get("reason") or "")
+        from account_pool_control import POOL_ERRORS
+        if winner_reason in POOL_ERRORS:
+            plan.meta['pool_refusal']=(winner.get('meta') or {}).get('pool_refusal') or {'reason':winner_reason}
+            return await self._send_result(plan,request_id=request_id,receipt_id=receipt_id,
+                state='not_landed',delivery='not_landed',submission_confirmed=False,reason=winner_reason,attempts=0)
+        winner_queued = winner_reason == "provider_queued" or winner_reason.endswith(";provider_queued")
+        await self._append_send_receipt(
+            plan, request_id=request_id, receipt_id=receipt_id,
+            state=winner_state, delivery=winner_delivery,
+            submission_confirmed=winner_confirmed,
+            reason=f"coalesced_replay:{winner_request_id}" + (";provider_queued" if winner_queued else ""),
+            attempts=winner_attempts,
+        )
+        target = str(plan.route["final_target"])
+        host, name = self.sessions.split(target)
+        result: dict[str, Any] = {
+            "type": "send.result", "host": host, "session_name": name,
+            "msg_id": plan.message.get("msg_id"), "to_stream_id": target,
+            "original_target": plan.route["original_target"],
+            "forwarded": plan.route["forwarded"], "hops": plan.route["hops"],
+            "receipt_id": str(winner.get("receipt_id") or receipt_id),
+            "delivery": winner_delivery,
+            "submission_confirmed": winner_confirmed,
+            "coalesced": True,
+            "do_not_resubmit": True,
+            "reconcile": "send_receipt",
+            "reconcile_command": f"agent-orch send-receipt {target} {winner_request_id}",
+            "retry_guidance": (
+                "Duplicate of an in-flight or landed send (same logical message); "
+                "reconcile with the existing request_id. DO NOT RESUBMIT."
+            ),
+        }
+        if winner_delivery == COMMITTED_PENDING_PROOF:
+            result["state"] = winner_state
+        if winner_confirmed and winner_attempts is not None:
+            result["attempt"] = winner_attempts
+        if winner_queued:
+            result["provider_queued"] = True
+        return result
+
+    async def send(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Append acceptance before materialization, then append the known result."""
+        # Wire clients mint this ID. The fallback preserves direct in-process
+        # callers during the mobile rollout; it deliberately adds no dedupe.
+        request_id = str(msg.get("request_id") or f"send-{uuid.uuid4()}")
+        # Bind the peer-delivery envelope anchor to the receipt identity: the
+        # normalized event carries request_id as raw.tell_id, and the receipt
+        # projection correlates on it. Without this, a fallback anchor (msg_id)
+        # could diverge from the receipt request_id and defeat correlation.
+        if msg.get("request_id") != request_id:
+            msg = {**msg, "request_id": request_id}
+        try:
+            plan = await self._prepare_send_plan(msg)
+        except VerbError as exc:
+            if exc.code in {CODEX_RESET_BLOCKED, CODEX_INITIAL_PROMPT_PENDING, "bootstrap_not_ready"}:
+                await self._record_blocked_input(msg, request_id, exc)
+            raise
+        target = str(plan.route["final_target"])
+        target_host, target_name = self.sessions.split(target)
+        target_row = await self.store.fetch_session(target_host, target_name) or {}
+        # A composite backend turn already has immutable route, dispatch and
+        # generation receipts.  It is never ordinary user QA/progress work.
+        # The private marker is introduced only by send_assistant_backend;
+        # Server strips it from all ordinary wire sends.
+        commission = None
+        if not bool(msg.get("_assistant_composite_backend_dispatch")):
+            commission = await qa_dispatch.admit(
+                self.store, msg, row=target_row, reviewer=target,
+                generation=target_row.get("session_generation", ""),
+                msg_id=msg.get("msg_id", 0), existing_reviewer=True,
+            )
+        receipt_id = f"receipt-{uuid.uuid4()}"
+        # Atomic idempotency claim: collapse retries of ONE logical send (the
+        # client keeps optimistic_id stable and rotates only request_id) into a
+        # single physical delivery. The check + 'accepted' claim run in one
+        # serialized store op so two concurrent retries cannot both win. A
+        # coalesced retry appends its OWN correlated receipt (so its request_id
+        # still resolves) pointing at the winner's delivery, and never pastes.
+        from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(plan.message)
+        claim = await self.store.claim_or_coalesce_send(
+            to_stream_id=target,
+            request_id=request_id,
+            receipt_id=receipt_id,
+            wire_text=plan.wire_text,
+            display_text=plan.display_text,
+            attachments=plan.attachments,
+            optimistic_id=plan.optimistic_id,
+            window_floor=self._send_dedupe_window_floor(),
+            from_stream_id=from_stream_id,
+            actor_stream_id=actor_stream_id,
+            actor_trusted=actor_trusted,
+            meta_json=json.dumps(plan.meta, separators=(",", ":"), sort_keys=True),
+        )
+        if claim.get("coalesced"):
+            return await self._coalesced_send_result(
+                plan, request_id=request_id, receipt_id=receipt_id, winner=claim["winner"],
+            )
+        if self.capacity_retry is not None:
+            async with self._pane_input_lock(target):
+                await self.capacity_retry.cancel_input(target)
+        try: await self._pool_ingress(target,msg)
+        except VerbError as exc:
+            from account_pool_control import POOL_ERRORS
+            if exc.code not in POOL_ERRORS: raise
+            plan.meta["pool_refusal"]=exc.extra
+            return await self._send_result(plan,request_id=request_id,receipt_id=receipt_id,
+                state="not_landed",delivery="not_landed",submission_confirmed=False,reason=exc.code,attempts=0)
+        if self.front_desk_digest is not None:
+            held = await self.front_desk_digest.ingress(
+                target_stream_id=target, body=plan.body, msg=msg, verb="send",
+            )
+            if held is not None:
+                return await self._send_result(
+                    plan, request_id=request_id, receipt_id=receipt_id,
+                    state="accepted", delivery="persisted", submission_confirmed=False,
+                    reason="front_desk_held", action_committed=True,
+                )
+        try:
+            materialized = await self._materialize_send_plan(plan)
+        except asyncio.CancelledError:
+            # Materialization stages files only; no provider input has begun.
+            try:
+                await self._send_result(
+                    plan, request_id=request_id, receipt_id=receipt_id,
+                    state="not_landed", delivery="not_landed", submission_confirmed=False,
+                    reason="cancelled_before_submission",
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve the original cancellation
+                log.warning(
+                    "subsystem=send bug_ref=restart_materialization_cancel "
+                    "request_id=%s error_type=%s",
+                    request_id, type(exc).__name__,
+                )
+            raise
+        except VerbError as exc:
+            return await self._send_result(
+                plan, request_id=request_id, receipt_id=receipt_id,
+                state="not_landed", delivery="not_landed", submission_confirmed=False,
+                reason=str(exc.code),
+            )
+        if materialized.wire_text != plan.wire_text:
+            # Provider ingestion can precede submission proof. Publish the final
+            # wire correlation before any paste so that first USER already has
+            # its caption, attachments and optimistic identity. Keep the original
+            # atomic claim and all outcomes as append-only receipt history.
+            await self._append_send_receipt(
+                materialized, request_id=request_id, receipt_id=receipt_id,
+                state="accepted", delivery="accepted", submission_confirmed=False,
+            )
+        return await self._submit_send_plan(
+            materialized, request_id=request_id, receipt_id=receipt_id,
+            qa_generation=commission["generation"] if commission is not None else None,
+            assistant_generation=(str(msg.get("_assistant_expected_generation") or "") or None)
+            if msg.get("_assistant_composite_backend_dispatch") is True else None,
+            # ErrorAlerts introduces this only after authenticated operation
+            # ownership checks; Server strips all private wire fields.
+            voice_generation=msg.get("_voice_operation_generation"),
+        )
+
+    async def send_assistant_backend(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Reuse existing transport for daemon-owned composite backend work."""
+        return await self.send({**msg, "_assistant_composite_backend_dispatch": True})
+
+    async def post_self_image(
+        self,
+        *,
+        stream_id: str,
+        raw_attachments: Any,
+        caption: str,
+        request_id: str,
+        broadcast: Any,
+        recent_limit: int,
+    ) -> dict[str, Any]:
+        """Attach an already-uploaded image blob to the caller's OWN conversation
+        as an agent-authored (ASSIST) transcript event.
+
+        Reuses ``validate_send_attachments`` + the existing ``ChatAttachment``
+        shape + the blob store (``read_verified``, the same read the operator flow
+        and ``fetch_blob`` use) to prove each blob is really present and within
+        the byte limit. Emits exactly one ``chat.event`` on an assistant-authored
+        event with NO pane injection and NO cross-host materialization, so the
+        operator sees the real image as the agent's own message. Idempotent by
+        ``(stream_id, request_id)``: a retry collides on the durable identity
+        unique index and re-appends nothing, so history/reconnect shows exactly
+        one row. The durable transcript row is the receipt, exposed through
+        ``event_id``/``duplicate``; no separate receipt row is written. Validation and
+        blob failures raise :class:`VerbError` (surfaced as ``send_image.error``).
+
+        The caller (server handler) resolves ``stream_id`` from the verified seat
+        token, so a seat can only ever attach to its own conversation.
+        """
+        try:
+            attachments = validate_send_attachments(raw_attachments)
+        except AttachmentValidationError as exc:
+            raise VerbError("attachment_invalid", str(exc)) from exc
+
+        # Prove every referenced blob is actually present and within the limit;
+        # a path or a dangling ref is never treated as a delivered image.
+        blob_store = self.blob_store
+        if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
+            raise VerbError("attachment_fetch_failed", "blob store unavailable")
+        for attachment in attachments:
+            sha = str(attachment["key"])
+            try:
+                await blob_store.read_verified(sha, max_bytes=ATTACHMENT_MAX_BYTES)
+            except KeyError as exc:
+                raise VerbError("attachment_missing", f"blob {sha} was not uploaded") from exc
+            except ValueError as exc:
+                raise VerbError("attachment_invalid", str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001 - stable public error surface
+                raise VerbError("attachment_fetch_failed", str(exc)) from exc
+
+        host, name = self.sessions.split(stream_id)
+        row = self.sessions.get(stream_id) or await self.store.fetch_session(host, name) or {}
+        caption = (caption or "").strip()
+        content_kind = "image_and_text" if caption else "attachment_only"
+        event = {
+            "stream_id": stream_id,
+            "host": host,
+            "session_name": name,
+            "session_id": str(row.get("session_id") or row.get("created_at") or ""),
+            "provider": str(row.get("provider") or ""),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kind": "ASSIST",
+            "text": caption,
+            "attachments": attachments,
+            "attachment_count": len(attachments),
+            "content_kind": content_kind,
+            "raw": {"source": "agent_image", "request_id": request_id},
+        }
+        identity = f"send_image:{stream_id}:{request_id}"
+        seq = await self.store.append_session_event(
+            stream_id, event, identity=identity, limit=recent_limit,
+        )
+        blob_shas = [str(item["key"]) for item in attachments]
+        if seq is None:
+            # A durable replay of the same (stream, request_id): the one row
+            # already exists and was already broadcast on its first insert.
+            return {
+                "type": "send_image.ok", "ok": True, "stream_id": stream_id,
+                "event_id": None, "blob_shas": blob_shas,
+                "content_kind": content_kind, "attachment_count": len(attachments),
+                "duplicate": True,
+            }
+        # The durable transcript row (persisted by append_session_event above,
+        # served back by request_stream_events / fetch_session_event_tail and
+        # surviving reconnect) IS the receipt: `event_id` is a retrievable,
+        # single-write record of delivery. We deliberately do NOT write a second
+        # v2_send_receipts row — that would be a separate transaction that could
+        # fail after the row is committed, forcing either a false success (ok with
+        # no retrievable receipt) or a broadcast without a receipt. Binding the
+        # success contract to the one durable event keeps it atomic and honest.
+        projected = await self.store.project_session_events([
+            {**event, "daemon_seq": seq},
+        ])
+        await broadcast({"type": "chat.event", "event": projected[0]})
+        return {
+            "type": "send_image.ok", "ok": True, "stream_id": stream_id,
+            "event_id": seq, "blob_shas": blob_shas,
+            "content_kind": content_kind, "attachment_count": len(attachments),
+            "duplicate": False,
+        }

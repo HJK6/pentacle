@@ -1,0 +1,655 @@
+'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { closedChatSlot } = require('./closed_chat_scenario');
+const { questionFreeText } = require('./question_free_text_scenario');
+const { questionPartialSend, questionSkip } = require('./question_partial_skip_scenario');
+const { webVoiceAnswers } = require('./voice_answers_scenario');
+const { runGridSplit } = require('./grid_split_scenario');
+const { publicChatRendererContracts } = require('./public_chat_renderer_contracts');
+const { micPanelAnswerWindow } = require('./mic_panel_scenario');
+const { webVoice } = require('./web_voice_scenario');
+const { webVoiceReloadAfterCommit } = require('./web_voice_reload_scenario');
+const { micSourceSelector } = require('./mic_source_scenario');
+const { chatFileDelivery } = require('./chat_file_delivery_scenario');
+const { webDashboardsRevamp, reloadDashboardPage } = require('./dashboard_scenario');
+const { dashboardCatalog } = require('./dashboard_catalog_scenario');
+const { webWorkLanes } = require('./work_lanes_scenario');
+const { crossOriginBoundary } = require('./cross_origin_scenario');
+const { defaultPaneAssistant, paneCountSelector, chatFirstStyle } = require('./workspace_scenario');
+const { branding } = require('./branding_scenario');
+const { agentChatSendDefaultQueueState } = require('./send_default_queue_state_scenario');
+const { optimisticReload } = require('./optimistic_reload_scenario');
+const { composerDraftPerChat } = require('./composer_draft_per_chat_scenario');
+const { composerDraftRetire, composerDraftPendingSend } = require('./composer_draft_lifecycle_scenario');
+const { scheduledSection } = require('./scheduled_section_scenario');
+const { providerVisibility } = require('./provider_visibility_scenario');
+const { summaryFallbackFormatting } = require('./summary_fallback_scenario');
+const { installedClientSeam } = require('./installed_client_seam_scenario');
+const { wrapPasteProof } = require('./wrap_paste_scenario');
+const { sidebarPreviewPlainText } = require('./sidebar_preview_scenario');
+
+// Named web-mode E2E scenario functions, driven over CDP against the served
+// page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
+// runs them against a hermetic, SEEDED loopback daemon so every assertion is
+// deterministic; the same functions can run against any daemon for a by-hand
+// check (pass `fixture: null` to fall back to observational, non-fatal checks).
+//
+// Each scenario is `async (ctx) => {}` and throws on failure (ctx.report.ok
+// throws). ctx carries: { session, report, cdp, url, timeoutMs, tmux, fixture,
+// runtime }. `fixture` (when set) = { streamId, host, sessionName, transcript:
+// [{kind,text}] } — the rows web_gate seeded into the daemon before boot.
+
+// ── shared CDP polling helpers ──────────────────────────────────────────────
+// cdp.js's waitFor only distinguishes truthy/falsy; these poll the evaluated
+// value against a predicate (a non-empty list, a string containing a token).
+async function waitForValue(session, cdp, expression, predicate,
+  { timeoutMs = 30000, intervalMs = 300, label = expression } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  for (;;) {
+    try { last = await session.eval(`(async () => (${expression}))()`); } catch { last = undefined; }
+    if (predicate(last)) return last;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${label} (last: ${JSON.stringify(last)?.slice(0, 300)})`);
+    }
+    await cdp.sleep(intervalMs);
+  }
+}
+
+async function pollUntil(read, predicate, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  for (;;) {
+    last = read();
+    if (predicate(last)) return last;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label} (last: ${JSON.stringify(last)})`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+// ── the scenarios ───────────────────────────────────────────────────────────
+
+// The page installs the bridge and the host-injected config matches HTTP.
+async function transportAndConfig(ctx) {
+  const { session, report, cdp, url, timeoutMs } = ctx;
+  await waitForValue(session, cdp, '!!(window.cc && window.HOST)', (v) => v === true,
+    { timeoutMs, label: 'window.cc installed' });
+  report.ok('window.cc and window.HOST install before the renderer runs', true);
+
+  const injected = await session.eval('({ hostname: window.HOST.hostname, platform: window.HOST.platform, hasConfig: !!window.__PENTACLE_CONFIG__ })');
+  report.ok('the host injected the computed config', injected.hasConfig && !!injected.hostname, injected);
+
+  const viaCc = await session.eval('window.cc.getConfig().then(c => ({ appName: c.appName, hostIds: c.hostIds, localHostId: c.localHostId }))', { awaitPromise: true });
+  const viaHttp = await fetch(`${url}api/config`).then((r) => r.json());
+  report.ok('getConfig() over the websocket matches GET /api/config',
+    viaCc.appName === viaHttp.appName && JSON.stringify(viaCc.hostIds) === JSON.stringify(viaHttp.hostIds),
+    { viaCc, viaHttp });
+}
+
+// The sidebar renders from the daemon inventory. With a fixture the seeded
+// session MUST appear (deterministic); without one, it is observational.
+async function sidebarFromInventory(ctx) {
+  const { session, report, cdp, timeoutMs, fixture } = ctx;
+  await waitForValue(session, cdp, '!!document.getElementById("session-list")', (v) => v === true,
+    { timeoutMs, label: 'sidebar mounted' });
+  const streamState = await waitForValue(session, cdp,
+    'window.cc.getChatStreamState()', (s) => s && s.connected === true,
+    { timeoutMs, label: 'daemon connection over the websocket' });
+  report.ok('the daemon connection is established over the websocket', streamState.connected === true,
+    { sessions: (streamState.sessions || []).length });
+
+  if (!fixture) {
+    report.note('no fixture: skipping the deterministic sidebar-row assertion (observational run)');
+    return;
+  }
+
+  // The hello snapshot can arrive marked connected before the daemon's inventory
+  // refresh has run, so poll for the seeded session rather than asserting on the
+  // first connected state (a CI-scheduling race).
+  const inState = await waitForValue(session, cdp,
+    `window.cc.getChatStreamState().then(s => (s.sessions||[]).some(x => x.stream_id === ${JSON.stringify(fixture.streamId)}))`,
+    (v) => v === true,
+    { timeoutMs, label: 'seeded session appears in the daemon inventory' });
+  report.ok('the seeded session is present in the daemon inventory', inState === true,
+    { want: fixture.streamId });
+
+  const row = await waitForValue(session, cdp,
+    `(() => { const el = document.querySelector('#session-list .session-item[data-stream-id="${fixture.streamId}"]'); return el ? { name: el.dataset.name, host: el.dataset.host, streamId: el.dataset.streamId } : null; })()`,
+    (r) => r && r.streamId === fixture.streamId,
+    { timeoutMs, label: 'seeded sidebar row rendered' });
+  report.ok('the sidebar renders the seeded session row from the live daemon',
+    row && row.streamId === fixture.streamId, { row });
+}
+
+// A local tmux slot: attach, type (round trip), resize, kill — session survives.
+async function slotAttachTypeResizeKill(ctx) {
+  const { session, report, cdp, timeoutMs, tmux, runtime } = ctx;
+  const sessionName = `ptest-web-${process.pid}-${Date.now().toString(36)}`;
+  runtime.tmuxSession = sessionName;
+  tmux(['new-session', '-d', '-s', sessionName, 'sh', '-c', 'stty raw -echo; exec cat']);
+  report.ok('local ptest tmux session created', tmux(['has-session', '-t', `=${sessionName}`]) === '');
+
+  const known = await session.eval(`window.cc.checkSession(${JSON.stringify(sessionName)}, 'local')`, { awaitPromise: true });
+  report.ok('checkSession sees the local session over the websocket', known === true, { known });
+
+  await session.eval(`(() => {
+    window.__gate = { data: '', exits: [] };
+    window.cc.onPtyData((slot, data) => { if (slot === 0) window.__gate.data += data; });
+    window.cc.onPtyExit((slot, code) => window.__gate.exits.push([slot, code]));
+    return true;
+  })()`);
+  const paneId = await session.eval(`window.cc.createPty(0, ${JSON.stringify(sessionName)}, 'local', 80, 24)`, { awaitPromise: true });
+  report.ok('createPty attaches the slot and returns a pane id', /^%\d+$/.test(String(paneId)), { paneId });
+
+  await session.eval("window.cc.writePty(0, 'echo WEBOK\\r'), true");
+  const buffer = await waitForValue(session, cdp, 'window.__gate.data', (d) => String(d).includes('WEBOK'),
+    { timeoutMs, label: 'WEBOK echoed back to the browser' });
+  report.ok('typing round-trips browser -> host -> tmux -> browser', String(buffer).includes('WEBOK'));
+
+  const widthBefore = Number(tmux(['display', '-p', '-t', String(paneId), '#{pane_width}']));
+  await session.eval('window.cc.resizePty(0, 120, 40), true');
+  const widthAfter = await pollUntil(
+    () => Number(tmux(['display', '-p', '-t', String(paneId), '#{pane_width}'])),
+    (w) => w === 120, timeoutMs, 'tmux pane resized');
+  report.ok('resizePty resizes the real tmux pane', widthAfter === 120 && widthBefore !== widthAfter, { widthBefore, widthAfter });
+
+  const clientsBefore = tmux(['list-clients', '-t', `=${sessionName}`, '-F', 'x']).split('\n').filter(Boolean).length;
+  await session.eval('window.cc.killPty(0)', { awaitPromise: true });
+  const clientsAfter = await pollUntil(
+    () => tmux(['list-clients', '-t', `=${sessionName}`, '-F', 'x']).split('\n').filter(Boolean).length,
+    (n) => n === 0, timeoutMs, 'the tmux client to detach');
+  const sessionAlive = (() => { try { tmux(['has-session', '-t', `=${sessionName}`]); return true; } catch { return false; } })();
+  report.ok('killPty releases the attach without killing the tmux session',
+    clientsBefore > 0 && clientsAfter === 0 && sessionAlive, { clientsBefore, clientsAfter, sessionAlive });
+}
+
+// The chat transcript loads and paints for the seeded session.
+async function chatTranscriptPaint(ctx) {
+  const { session, report, cdp, timeoutMs, fixture } = ctx;
+  if (!fixture) { report.note('no fixture: skipping the transcript assertion (observational run)'); return; }
+
+  const receipt = await session.eval(
+    `window.cc.requestStreamEvents({ streamId: ${JSON.stringify(fixture.streamId)}, limit: 20 })`,
+    { awaitPromise: true });
+  report.ok('the seeded transcript events load over the websocket', receipt && receipt.ok && Number(receipt.count) > 0,
+    { streamId: fixture.streamId, count: receipt && receipt.count });
+
+  const wantText = (fixture.transcript && fixture.transcript[0] && fixture.transcript[0].text) || '';
+  const painted = await waitForValue(session, cdp, `(() => {
+    try {
+      const container = document.getElementById('web-gate-transcript') || (() => {
+        const el = document.createElement('div'); el.id = 'web-gate-transcript'; document.body.appendChild(el); return el;
+      })();
+      const detail = window.PentacleChatView.renderStreamTranscript(${JSON.stringify(fixture.streamId)}, container);
+      return { items: (detail && detail.transcriptItems || []).length, text: (container.innerText || '').trim() };
+    } catch (e) { return { error: String(e && e.message || e) }; }
+  })()`, (v) => v && v.items > 0 && v.text.length > 0,
+    { timeoutMs, label: 'chat transcript painted' });
+  const textOk = !wantText || painted.text.includes(wantText);
+  report.ok('the chat transcript paints the seeded events for the session',
+    painted.items > 0 && painted.text.length > 0 && textOk,
+    { items: painted.items, chars: painted.text.length, containsSeededText: textOk });
+}
+
+// Producer-generated multiline answer must survive ingest, transport and the
+// shipped transcript renderer. Only the hermetic seeder supplies this event.
+async function multilineNotificationAnswer(ctx) {
+  const { session, report, fixture } = ctx;
+  if (!fixture) return;
+  await session.eval(`window.cc.requestStreamEvents({ streamId: ${JSON.stringify(fixture.streamId)}, limit: 30 })`);
+  const painted = await session.eval(`(() => {
+    const container = document.createElement('div');
+    container.className = 'cosmic';
+    document.body.appendChild(container);
+    const detail = window.PentacleChatView.renderStreamTranscript(${JSON.stringify(fixture.streamId)}, container);
+    const item = detail.transcriptItems.find(item => item.notificationId === 'notification-multiline-web-fixture');
+    const row = container.querySelector('.slot-chat-v3-answers');
+    if (row) row.open = true;
+    const answer = row?.querySelector('.slot-chat-v3-answer-text');
+    const node = answer?.firstChild;
+    const lineTop = (start, end) => {
+      if (!node) return null;
+      const range = document.createRange();
+      range.setStart(node, start); range.setEnd(node, end);
+      return range.getBoundingClientRect().top;
+    };
+    const result = { text: item?.text, eventCase: item?.eventCase,
+      answerText: answer?.textContent, whiteSpace: answer && getComputedStyle(answer).whiteSpace,
+      firstLineTop: lineTop(0, 8), secondLineTop: lineTop(9, 17),
+      rowText: row?.innerText, rawVisible: container.innerText.includes('[notification.answer]') };
+    container.remove();
+    return result;
+  })()`);
+  report.ok('multiline notification answer keeps original LF in a compact history row',
+    painted.text === 'Operator answered: line one\nline two' &&
+    painted.eventCase === 'agent-question-answer' &&
+    painted.answerText === 'line one\nline two' && painted.whiteSpace === 'pre-wrap' &&
+    painted.secondLineTop > painted.firstLineTop && !painted.rawVisible,
+    painted);
+}
+
+// A web host restart mid-session must restore full interaction WITHOUT a manual
+// reload: the frozen (degraded) chat input re-enables and the reconnected socket
+// serves the live daemon inventory. Regression guard for
+// spec_pentacle__web_reconnect_input_frozen_2026_09.
+//
+// The failing journey (operator report 2026-09-12): a chat-stream drop latches
+// the live app into connected:false (degraded / input frozen); the operator
+// restarts the web host; the page's /cc websocket reconnects to a FRESH host
+// process, but that host already completed its daemon handshake before the
+// browser reconnected — so its connected:true frame was broadcast to nobody, and
+// no snapshot is pushed on connect. Without a reconnect re-sync the browser
+// never learns it is connected again: state.chatStream.connected stays false,
+// chatControlTargetForSlot returns {error:'Chat stream offline.'}, and the input
+// stays frozen until a manual reload (which re-pulls getChatStreamState).
+//
+// Distinct from reconnect_survival, which cycles the host↔daemon link via
+// forceReconnect while the browser↔host websocket stays up (the host itself
+// pushes connected:false→true). Here the browser↔host websocket is what drops,
+// exactly as `pentacle-web-start stop && pentacle-web-start` does.
+async function hostRestartRestoresInput(ctx) {
+  const { session, report, cdp, timeoutMs, fixture, stopHost, startHostSamePort, killDaemon, startDaemonSamePort } = ctx;
+  if (!fixture) { report.note('no fixture: skipping host-restart scenario (observational run)'); return; }
+  if (![stopHost, startHostSamePort, killDaemon, startDaemonSamePort].every((f) => typeof f === 'function')) {
+    report.note('host/daemon lifecycle primitives unavailable: skipping host-restart scenario'); return;
+  }
+  const degraded = 'document.body.classList.contains("chat-stream-degraded")';
+
+  await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s) => s.connected === true)', (v) => v === true,
+    { timeoutMs, label: 'connected before the drop' });
+  await waitForValue(session, cdp, degraded, (v) => v === false, { timeoutMs, label: 'not degraded before the drop' });
+
+  // A chat-stream drop latches the live app into connected:false — the frozen
+  // input the operator reported.
+  await killDaemon();
+  await waitForValue(session, cdp, degraded, (v) => v === true, { timeoutMs, label: 'input frozen (degraded) after the chat-stream drop' });
+  report.ok('the live app freezes (degraded) when the chat-stream connection drops', true);
+
+  // Restart the web host PROCESS with the daemon brought up FIRST, so the fresh
+  // host completes its daemon handshake and broadcasts connected:true BEFORE the
+  // browser's websocket reconnects — i.e. the recovery frame reaches nobody. The
+  // page stays loaded throughout; only its /cc websocket drops and reconnects.
+  //
+  // This makes the walk RED without the fix on the overwhelming majority of runs:
+  // the daemon is already up, so host2's handshake broadcast fires within ms of
+  // it listening, while the browser sits in a backoff grown near its 5s cap. A
+  // narrow residual window remains (host2 accepts sockets between server.listen()
+  // and the async handshake resolving), so a browser reconnect landing inside it
+  // could catch the live broadcast and recover without the fix — a rare potential
+  // false GREEN, never a false RED. The DETERMINISTIC guard for the underlying
+  // logic is test/chat_stream_connection_state.test.js (version-reset RED/GREEN);
+  // this e2e is the integration belt on top of it.
+  await stopHost();
+  await cdp.sleep(8000); // let the browser's reconnect backoff grow toward its 5s cap
+  await startDaemonSamePort();
+  const newHostPort = await startHostSamePort();
+  report.note(`daemon-then-host back up on 127.0.0.1:${newHostPort}; browser has not reconnected yet`);
+
+  // THE FIX: on websocket reconnect the browser re-pulls the chat-stream snapshot
+  // (resetting its connection-state version baseline first, since the fresh
+  // host's state_version namespace restarts), so it learns it is connected again
+  // and degraded mode clears — WITHOUT a reload. Before the fix the input stays
+  // frozen until a manual reload.
+  const recovered = await waitForValue(session, cdp, degraded, (v) => v === false,
+    { timeoutMs, label: 'input restored (not degraded) after host restart, NO reload' });
+  report.ok('a host restart restores interaction without a manual reload', recovered === false);
+
+  // And the reconnected socket serves the live daemon inventory again (re-sync).
+  // Assert connected + a non-empty inventory rather than a specific stream_id:
+  // earlier scenarios (e.g. closed-chat-slot) may retire the seeded fixture, so
+  // the seeded session is not guaranteed to survive to this last walk — but the
+  // daemon always has at least one session and the reconnected socket must serve
+  // it.
+  const invOk = await waitForValue(session, cdp,
+    'window.cc.getChatStreamState().then((s) => s.connected === true && Array.isArray(s.sessions) && s.sessions.length >= 1)',
+    (v) => v === true, { timeoutMs, label: 'daemon inventory re-synced over the reconnected socket' });
+  report.ok('the reconnected socket re-syncs the daemon inventory', invOk === true);
+}
+
+// A browser<->host /cc websocket reconnect (the HOST stays up) must restore the
+// WHOLE slot without a close/reopen: the terminal PTY attachment re-binds and an
+// open chat transcript reloads. Regression guard for
+// spec_pentacle__web_chat_view_stale_freeze_2026_09.
+//
+// The failing journey (operator report 2026-09-12): a chat/terminal slot left
+// open freezes — terminal output stops and input dies (and a chat transcript
+// blanks) — while the host stays up (NOT the degraded/host-restart path). The
+// browser's /cc socket had dropped (a backgrounded tab's suspended socket) and
+// reconnected; on reconnect the host had already torn down this connection's
+// PTY attachments (ws_bridge removeSocket -> sender.destroy) and the renderer
+// never re-attached, and the resync snapshot can wipe an open transcript. Only
+// close/reopen recovered it. The fix re-attaches terminals and re-backfills chat
+// on the web onReconnect. Distinct from host-restart-restores-input, where the
+// host process itself restarts; here the host and daemon stay up and only the
+// browser socket cycles.
+async function slotSurvivesCcReconnect(ctx) {
+  const { session, report, cdp, timeoutMs, tmux, runtime, fixture } = ctx;
+  if (!fixture) { report.note('no fixture: skipping slot-survives-cc-reconnect (observational run)'); return; }
+  const sid = fixture.streamId;               // local:web-gate-1
+  const sessionName = fixture.sessionName || 'web-gate-1';
+  const marker = (tag) => path.join(os.tmpdir(), `pentacle-gate-${process.pid}-${tag}-${Date.now().toString(36)}`);
+  const preFile = marker('pre');
+  const postFile = marker('post');
+  let slot = -1;
+
+  try {
+    // Capture the /cc WebSocket so the test can drop it while the host stays up,
+    // then reload so the hook is active for the real socket.
+    await session.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      (() => { const N = window.WebSocket;
+        window.WebSocket = function(u, p){ const w = p===undefined ? new N(u) : new N(u, p);
+          try { if (String(u).endsWith('/cc')) window.__ccSocket = w; } catch(e){} return w; };
+        window.WebSocket.prototype = N.prototype;
+        window.WebSocket.CONNECTING=N.CONNECTING; window.WebSocket.OPEN=N.OPEN; window.WebSocket.CLOSING=N.CLOSING; window.WebSocket.CLOSED=N.CLOSED;
+      })();` });
+    await reloadDashboardPage(ctx);
+    await waitForValue(session, cdp, 'typeof window.focusStreamId === "function" && !!document.getElementById("session-list")',
+      (v) => v === true, { timeoutMs, label: 'app ready after reload' });
+    await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s)=>s.connected===true)', (v) => v === true,
+      { timeoutMs, label: 'connected after reload' });
+    await waitForValue(session, cdp, `window.cc.getChatStreamState().then(s => (s.sessions||[]).some(x => x.stream_id === ${JSON.stringify(sid)}))`,
+      (v) => v === true, { timeoutMs, label: 'fixture in inventory' });
+    await waitForValue(session, cdp, '!!window.__ccSocket', Boolean, { timeoutMs, label: '/cc socket captured' });
+
+    // A real tmux session the fixture's terminal can attach to (createPty maps the
+    // chat-stream session_name -> the local tmux session of the same name). A plain
+    // shell runs a typed command.
+    runtime.freezeTmux = sessionName;
+    try { tmux(['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' }); } catch {}
+    tmux(['new-session', '-d', '-s', sessionName, 'sh']);
+
+    const clients = () => tmux(['list-clients', '-t', `=${sessionName}`, '-F', 'x']).split('\n').filter(Boolean).length;
+    // Deterministic input-liveness probe independent of pane rendering: type a
+    // command that touches a unique host file, then check the file exists. If the
+    // slot's PTY attachment is live the shell runs it; if the host has no
+    // attachment for this (reconnected) socket the write is dropped and no file
+    // appears.
+    const typeTouch = (s, file) => session.eval(`window.cc.writePty(${s}, ${JSON.stringify('touch ' + file + '\r')}), true`);
+    const fileAppears = (file) => pollUntil(() => fs.existsSync(file), Boolean, timeoutMs, `host file ${path.basename(file)} created via typed input`).catch(() => false);
+
+    // Attach the fixture to a slot through the app (defaults to the terminal view).
+    await session.eval(`window.focusStreamId(${JSON.stringify(sid)})`);
+    slot = await waitForValue(session, cdp,
+      `(() => { for (let i=0;i<4;i++){ const c=document.getElementById('cell-'+i); if (c && c.querySelector('.xterm')) return i; } return -1; })()`,
+      (v) => typeof v === 'number' && v >= 0, { timeoutMs, label: 'terminal attached to a slot' });
+    const attachedClients = await pollUntil(clients, (n) => n >= 1, timeoutMs, 'host attached a tmux client');
+    report.ok('a slot terminal attaches through the app', attachedClients >= 1, { slot, clients: attachedClients });
+
+    // Baseline: typed input reaches the shell before the drop.
+    await typeTouch(slot, preFile);
+    report.ok('the slot terminal accepts input before the drop', (await fileAppears(preFile)) === true, { preFile });
+
+    // Switch the SAME slot to its chat view and backfill the transcript, so the one
+    // reconnect exercises both halves of the slot (a real slot has both a terminal
+    // and a chat).
+    await waitForValue(session, cdp, `!!document.querySelector('#header-${slot} [data-mode="chat"]')`, Boolean, { timeoutMs, label: 'chat toggle present' });
+    await session.eval(`document.querySelector('#header-${slot} [data-mode="chat"]').click()`);
+    await session.eval(`window.cc.requestStreamEvents({ streamId: ${JSON.stringify(sid)}, limit: 20 })`, { awaitPromise: true });
+    const chatText = () => session.eval(`(document.querySelector('#cell-${slot} .slot-chat-list')?.innerText||'')`);
+    // The v3 Send button is deliberately disabled on an empty draft. Insert a
+    // harmless unsent draft to distinguish that idle state from a disconnected
+    // or missing control target, then retain it across the reconnect check.
+    const sendEnabled = () => session.eval(`(() => {
+      const input = document.querySelector('#cell-${slot} .slot-chat-compose-input');
+      const button = document.querySelector('#cell-${slot} .slot-chat-compose-send');
+      if (!input || !button) return false;
+      input.value = 'unsent reconnect probe';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return button.disabled === false;
+    })()`);
+    await waitForValue(session, cdp, `(document.querySelector('#cell-${slot} .slot-chat-list')?.innerText||'').includes('fixture assistant reply')`,
+      Boolean, { timeoutMs, label: 'chat transcript painted before the drop' });
+    const sendBefore = await sendEnabled();
+    report.ok('the slot chat transcript paints and the composer is usable before the drop', sendBefore === true, { sendBefore });
+
+    // Model the primary assistant's PRODUCTION summary daemon on the reconnect re-pull: the hello
+    // snapshot carries no events (events_mode:'summary') AND the open stream is
+    // momentarily ABSENT from the resync session inventory (a filtered/nested/remote
+    // session, or a post-daemon-reconnect inventory gap). That is the exact shape
+    // that evicts the open transcript. The gate's local daemon otherwise keeps its
+    // ring + inventory populated, so shim just the get-state re-pull. Save the
+    // original on a holder so cleanup can restore it deterministically.
+    await session.eval(`(() => {
+      window.__origGetChatStreamState = window.cc.getChatStreamState.bind(window.cc);
+      window.cc.getChatStreamState = () => window.__origGetChatStreamState().then(s => ({
+        ...s, events: [], sessions: (s.sessions||[]).filter(x => x.stream_id !== ${JSON.stringify(sid)}),
+      }));
+      return true;
+    })()`);
+
+    // Drop ONLY the browser<->host socket. The host and daemon stay up; the
+    // transport reconnects and fires onReconnect.
+    await session.eval('(() => { try { window.__ccSocket && window.__ccSocket.close(); } catch(e){} return true; })()');
+    await waitForValue(session, cdp, '(() => { const s = window.__ccSocket; return !!s && s.readyState === 1; })()',
+      (v) => v === true, { timeoutMs, label: '/cc socket reconnected' });
+
+    // CHAT half — THE FIX: onReconnect carries the open slot's session forward into
+    // the resync snapshot, so the reducer never evicts the transcript OR the
+    // composer's session detail. Before the fix the summary snapshot drops the
+    // stream and the transcript blanks to "Loading chat…" with a disabled send
+    // (RED). Assert the transcript is still shown AND the composer stays usable
+    // WITHOUT a close/reopen.
+    await cdp.sleep(2500);
+    const afterText = await chatText();
+    report.ok('a /cc reconnect keeps the open chat transcript (no blank / close-reopen)',
+      String(afterText).includes('fixture assistant reply') && !String(afterText).includes('Loading chat'),
+      { sample: String(afterText).replace(/\s+/g, ' ').trim().slice(0, 90) });
+    const sendAfter = await sendEnabled();
+    report.ok('a /cc reconnect keeps the chat composer usable (session detail preserved)', sendAfter === true, { sendAfter });
+
+    // TERMINAL half — THE FIX: onReconnect re-attaches the slot terminal. Before the
+    // fix the host never re-attaches (client count stays 0) — the frozen terminal
+    // the operator reported; after the fix the tmux client re-appears.
+    const reattachedClients = await pollUntil(clients, (n) => n >= 1, timeoutMs, 'terminal re-attached after /cc reconnect');
+    report.ok('a /cc reconnect re-attaches the slot terminal without close/reopen', reattachedClients >= 1, { clients: reattachedClients });
+
+    // And typed input flows again over the reattached PTY (dead before the fix).
+    await typeTouch(slot, postFile);
+    report.ok('the reattached terminal accepts input after a /cc reconnect', (await fileAppears(postFile)) === true, { postFile });
+  } finally {
+    // Always run cleanup, even if an assertion above threw: restore the shimmed
+    // get-state, detach the slot's client, remove the tmux session + marker files,
+    // then reload so later scenarios start from a clean slot. A failed cleanup
+    // reload is terminal (it can contaminate later scenarios), not a soft note.
+    try { await session.eval('(() => { if (window.__origGetChatStreamState) { window.cc.getChatStreamState = window.__origGetChatStreamState; delete window.__origGetChatStreamState; } return true; })()'); } catch {}
+    if (slot >= 0) { try { await session.eval(`window.cc.killPty(${slot})`, { awaitPromise: true }); } catch {} }
+    try { tmux(['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' }); } catch {}
+    try { fs.rmSync(preFile, { force: true }); fs.rmSync(postFile, { force: true }); } catch {}
+    runtime.freezeTmux = null;
+    let cleanupOk = true;
+    try {
+      await reloadDashboardPage(ctx);
+      await waitForValue(session, cdp, '!!(window.cc && window.HOST)', (v) => v === true, { timeoutMs, label: 'app ready after cleanup reload' });
+      await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s)=>s.connected===true)', (v) => v === true, { timeoutMs, label: 'reconnected after cleanup reload' });
+    } catch (e) { cleanupOk = false; report.note('cleanup reload failed: ' + (e && e.message)); }
+    report.ok('slot-survives-cc-reconnect cleanup restored a clean page for later scenarios', cleanupOk === true);
+  }
+}
+
+// The ordered gate: names map to functions; web_gate runs them in this order.
+// These four are fully deterministic against the seeded loopback daemon.
+//
+// A chat "send-turn round trip" scenario is intentionally NOT in this gate: a
+// real chat send needs a live provider SPAWN, and the sanitized public repo
+// omits the spawn/ingest fixture `tests/smoke/stub_cli.py` (with the available
+// ingest_provider_stub the send reaches the provider and it writes the reply,
+// but ingest does not associate that transcript back to the spawned stream, so
+// the reply is not deterministically observable over the websocket). Per the
+// Nexus (2026-09-12): the browser send path is covered by the web_cc/ws_bridge
+// unit tests and the daemon send/ingest by the service's own python tests; see
+// spec_pentacle__web_mode_e2e_gate_2026_09 § Findings.
+async function colouredHostGlyphs({ session, report }) {
+  const { hostGlyphContrast, hostSurfaceContrast } = require('./host_glyph_contrast');
+  const cells = await hostGlyphContrast(session);
+  report.ok('host glyphs retain colour, labels and graphic contrast across themes/states',
+    cells.length === 48 && cells.every(cell => cell.pass),
+    { subsystem: 'host-presentation', bug_ref: 'web_mic_endpoint_coloured_glyphs_2026_09', cells });
+  const surfaces = await hostSurfaceContrast(session);
+  report.ok('host labels, stats glyphs and header controls remain readable and consistent',
+    surfaces.filter(cell => cell.type !== 'stats').length === 45 && surfaces.every(cell => cell.pass),
+    { subsystem: 'host-presentation', bug_ref: 'web_visual_consistency_2026_09', surfaces });
+  const { machineStatsLayout } = require('./machine_stats_layout');
+  const layout = await machineStatsLayout(session);
+  report.ok('machine stats use compact rows and wrap without clipping at narrow width',
+    layout.length === 2 && layout.every(cell => cell.pass),
+    { subsystem: 'machine-stats', bug_ref: 'web_machine_stats_cpu_compaction_2026_09', layout });
+}
+
+// Issue #13: the Settings footer shows the running build SHA and the connected
+// daemon's runtime SHA. In the hermetic gate the web host and the seeded daemon
+// both run from this checkout, so each SHA resolves to the checkout HEAD and the
+// line renders two real 7-hex prefixes. Driven over CDP: open Settings, assert
+// the footer text and the full-SHA hover title, then close the modal.
+async function settingsVersionLine(ctx) {
+  const { session, report, cdp, timeoutMs } = ctx;
+  // The daemon SHA only populates once the chat-stream handshake completes.
+  await waitForValue(session, cdp,
+    'window.cc.getChatStreamState().then((s) => s.connected === true)', (v) => v === true,
+    { timeoutMs, label: 'chat-stream connected (for the daemon runtime SHA)' });
+
+  const data = await session.eval(`(async () => {
+    const snap = await window.cc.getChatStreamState();
+    document.getElementById('settings-btn').click();
+    return { buildSha: snap.build_sha, runtimeSha: snap.runtime_sha };
+  })()`);
+  const build = String(data.buildSha || '');
+  const runtime = String(data.runtimeSha || '');
+
+  // The footer repaints asynchronously (refreshVersionLine pulls a fresh
+  // snapshot); poll the DOM text until it reflects both short SHAs.
+  const text = await waitForValue(session, cdp,
+    `(document.getElementById('settings-version-line') || {}).textContent || ''`,
+    (v) => typeof v === 'string' && /^Desktop [0-9a-f]{7} · Daemon [0-9a-f]{7}$/.test(v),
+    { timeoutMs, label: 'settings version line shows both short SHAs' });
+
+  report.ok('the web host exposes its build SHA via the snapshot', /^[0-9a-f]{40}$/.test(build), { build });
+  report.ok('the daemon runtime SHA arrives on the welcome frame', /^[0-9a-f]{40}$/.test(runtime), { runtime });
+  report.ok('the footer shows the build short SHA under "Desktop"', text.includes(`Desktop ${build.slice(0, 7)}`), { text, build });
+  report.ok('the footer shows the daemon short SHA under "Daemon"', text.includes(`Daemon ${runtime.slice(0, 7)}`), { text, runtime });
+
+  const title = await session.eval(`(document.getElementById('settings-version-line') || {}).title || ''`);
+  report.ok('the full SHAs are available on hover', title.includes(build) && title.includes(runtime), { title });
+
+  // The provider re-login controls were removed; Settings must not render them.
+  const relogin = await session.eval(`({
+    section: document.querySelector('.provider-relogin') !== null,
+    buttons: document.querySelectorAll('#settings-overlay [data-provider]').length,
+  })`);
+  report.ok('Settings renders no provider re-login control', relogin.section === false && relogin.buttons === 0, relogin);
+
+  // Leave the modal closed so later scenarios see a clean page.
+  await session.eval(`document.getElementById('settings-close').click()`);
+}
+
+// Match the saved session name, not its UI host alias: a composite stream's
+// prefix can differ from the daemon host and focusStreamId can use a local alias.
+function advisorProbeSlot(bindings, sessionName) {
+  const slots = (bindings || []).map((binding, index) => binding && binding.name === sessionName ? index : -1).filter(index => index >= 0);
+  if (slots.length > 1) throw new Error('ambiguous probe session in workspace');
+  return slots.length ? slots[0] : -1;
+}
+
+// External-daemon proof: the probe body must include its exact question ID.
+async function advisorQuestionRendered({ session, report, fixture, timeoutMs, cdp }) {
+  if (fixture) { report.note('live advisor question probe excluded from fixture run'); return; }
+  const questionId = process.env.PENTACLE_CARD_PROBE_ID;
+  const screenshot = process.env.PENTACLE_CARD_PROBE_SCREENSHOT;
+  const stream = process.env.PENTACLE_CARD_PROBE_STREAM;
+  const host = process.env.PENTACLE_CARD_PROBE_HOST;
+  if (!questionId || !screenshot || !stream || !host) throw new Error('PENTACLE_CARD_PROBE_ID, PENTACLE_CARD_PROBE_SCREENSHOT, PENTACLE_CARD_PROBE_STREAM and PENTACLE_CARD_PROBE_HOST are required');
+  await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'", { timeoutMs });
+  await session.waitFor(`window.focusStreamId(${JSON.stringify(stream)}) === true`, { timeoutMs });
+  const slot = await waitForValue(session, cdp,
+    `window.cc.getChatStreamState().then(s => { const target=(s.sessions || []).find(item => item.stream_id === ${JSON.stringify(stream)}); const saved=JSON.parse(localStorage.getItem('pentacle.workspace.v1') || '{}'); return target ? (${advisorProbeSlot.toString()})(saved.bindings, target.session_name || target.name) : -1; })`, (value) => Number.isInteger(value) && value >= 0,
+    { timeoutMs, label: 'assistant stream bound to a slot' });
+  await session.click(`#header-${slot} [data-mode="chat"]`);
+  await session.waitFor(`!!document.querySelector('#cell-${slot} .slot-chat-question-open')`, { timeoutMs });
+  await session.click(`#cell-${slot} .slot-chat-question-open`);
+  const portal = `#desktop-question-portal-${stream.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  await session.waitFor(`!!document.querySelector(${JSON.stringify(portal + ' [data-notification-id]')})`, { timeoutMs });
+  const expression = `Array.from(document.querySelectorAll(${JSON.stringify(portal + ' [data-notification-id]')})).some(el => el.getClientRects().length && el.innerText.includes(${JSON.stringify(questionId)}))`;
+  const count = await session.eval(`document.querySelectorAll(${JSON.stringify(portal + ' .desktop-question-dot')}).length`);
+  let found = await session.eval(expression);
+  for (let index = 0; !found && index < count; index++) {
+    await session.click(`${portal} .desktop-question-dot:nth-child(${index + 1})`);
+    found = await session.eval(expression);
+  }
+  report.ok('probe question ID rendered in assistant card', found, { questionId });
+  await session.screenshot(screenshot);
+}
+
+const SCENARIOS = [
+  // Must run first: it needs the gate's fresh browser profile (no saved
+  // workspace) and leaves a saved classic four-pane choice for the rest.
+  ['default-pane-assistant', defaultPaneAssistant],
+  ['transport-and-config', transportAndConfig],
+  ['branding', branding],
+  ['provider-visibility', providerVisibility],
+  // Opens and closes its own foreign-origin targets; the served page is untouched.
+  ['cross-origin-boundary', crossOriginBoundary],
+  ['settings-version-line', settingsVersionLine],
+  ['sidebar-from-inventory', sidebarFromInventory],
+  ['coloured-host-glyphs', colouredHostGlyphs],
+  ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
+  ['chat-transcript-paint', chatTranscriptPaint],
+  ['multiline-notification-answer', multilineNotificationAnswer],
+  ['sidebar-preview-plain-text', sidebarPreviewPlainText],
+  ['summary-fallback-formatting', summaryFallbackFormatting],
+  ['installed-client-seam', installedClientSeam],
+  ['chat-file-delivery', chatFileDelivery],
+  ['web-wrap-paste', wrapPasteProof],
+  ['web-chat-voice', webVoice],
+  ['web-voice-reload-after-commit', webVoiceReloadAfterCommit],
+  ['public-chat-renderer-contracts', publicChatRendererContracts],
+  // Self-contained: appends and removes its own probe node; renders the shipped
+  // mic-state view model against status fixtures (answer window + silent toggle).
+  ['mic-panel-answer-window', micPanelAnswerWindow],
+  // Runs under its own service-less mic profile (features.mic on, unused mic
+  // URL) and restores the default profile; cancels the question it seeds.
+  ['mic-source-selector', micSourceSelector],
+  // Runs before closed-chat-slot (which retires the seeded fixture) and reloads
+  // the page at both ends, so it neither depends on nor disturbs its neighbours.
+  ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
+  ['slot-column-split', runGridSplit],
+  ['advisor-question-rendered', advisorQuestionRendered],
+  ['question-free-text', questionFreeText],
+  ['question-partial-send', questionPartialSend],
+  ['question-skip', questionSkip],
+  ['web-voice-answers', webVoiceAnswers],
+  ['web-dashboards-revamp', webDashboardsRevamp],
+  ['dashboard_catalog', dashboardCatalog],
+  ['design-gallery', require('./design_gallery_scenario.cjs').designGallery],
+  // Reloads the page at both ends and injects only the frozen lane wire fixture; runs before closed-chat-slot.
+  ['web-work-lanes', webWorkLanes],
+  // Drives the sidebar Scheduled section against the seeded rule and one-shot; leaves them as found except the edited time.
+  ['scheduled-section', scheduledSection],
+  ['pane-count-selector', paneCountSelector],
+  ['chat-first-style', chatFirstStyle],
+  ['agent-chat-send-default-queue-state', agentChatSendDefaultQueueState],
+  ['optimistic-reload', optimisticReload],
+  ['composer-draft-per-chat', composerDraftPerChat],
+  ['composer-draft-pending-send', composerDraftPendingSend],
+  ['composer-draft-retire', composerDraftRetire],
+  ['closed-chat-slot', closedChatSlot],
+  // Host-restart walk runs LAST: it tears the host process (and briefly the
+  // daemon) down, so it must not disturb the deterministic scenarios above.
+  ['reliability-viewport-fixture', require('./reliability_fixtures').viewportReliability],
+  ['reliability-capture-fixture', require('./reliability_fixtures').captureReliability],
+  ['host-restart-restores-input', hostRestartRestoresInput],
+];
+
+module.exports = {
+  waitForValue,
+  advisorProbeSlot,
+  pollUntil,
+  transportAndConfig,
+  settingsVersionLine,
+  sidebarFromInventory,
+  slotAttachTypeResizeKill,
+  chatTranscriptPaint,
+  slotSurvivesCcReconnect,
+  hostRestartRestoresInput,
+  SCENARIOS,
+};

@@ -1,0 +1,14 @@
+{
+  "answer": "line one\nline two",
+  "wire_text": "[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=notification-fixture\ncustom_text_json=\"line one\\nline two\"\nby=operator",
+  "wire_sha256": "11d96fbe82700309c18bd2587987be0ceca6fc2034c92dcff5eb6aa4bb08ed19",
+  "message_envelope": {
+    "kind": "notification_answer",
+    "id": "notification-answer-fixture",
+    "notification_id": "notification-fixture",
+    "custom_text": "line one\nline two",
+    "by": "operator",
+    "schema_version": 1
+  },
+  "expected_display": "Operator answered: line one\nline two"
+}

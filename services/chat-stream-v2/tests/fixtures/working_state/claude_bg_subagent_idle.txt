@@ -1,0 +1,9 @@
+● Agent(Footer probe subagent 2)
+  ⎿  Backgrounded agent
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 1 agent · ↓ to manage
+  ● main
+  ◯ general-purpose  Footer probe subagent 2                                  49s · ↓ 39.8k tokens

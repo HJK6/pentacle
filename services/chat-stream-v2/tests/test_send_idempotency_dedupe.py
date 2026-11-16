@@ -1,0 +1,378 @@
+"""Idempotent-replay coverage for daemon-v2 send (desktop fourfold-send incident).
+
+Regression for spec_pentacle__desktop_duplicate_send_2026_09: one operator
+desktop message produced four provider USER records because the client's retry
+path keeps the optimistic_id STABLE and rotates only the request_id, while the
+daemon send lane keyed idempotency on request_id alone and "deliberately adds no
+dedupe". A retry (rotated request_id) therefore landed a fresh delivery each time.
+
+The fix collapses sends that share the client's logical-message identity
+(to_stream_id + actor + optimistic_id + display_text + canonical attachments) within a short recency
+window, and coalesces any re-submission of the same physical request_id at any
+age. Intentional identical messages get a fresh optimistic_id (the client counter
+increments) and remain deliverable; a post-restart identical send (counter reset
+to _1) outside the window is a NEW logical message and is delivered.
+
+These are in-process component tests with real Comms/Store/Sessions/SpawnCtl
+and fake transport, hosts and blobs. See docs/TEST_COVERAGE.md for the separate
+receipt reconciliation, disconnect and client boundaries.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from test_send_semantics import FakeTmux, FakeBlobStore, VALID, _new_comms, _open, HOST, NAME, _run  # noqa: F401
+from store import Store, iso_now
+
+
+STREAM = f"{HOST}:{NAME}"
+AUTH = {"operator_principal": "operator:op-1", "operator_authenticated": True}
+BODY = "teh bottom space on teh frevenue graph looks off"
+
+
+async def _open_claude(sessions) -> None:
+    await sessions.open(HOST, NAME, provider="claude")
+
+
+# Retry identity and admission: sequential replay, then held-flight overlap.
+def test_rotated_request_id_retry_collapses_to_one_delivery(tmp_path: Path) -> None:
+    """The exact incident: four retry-<ms> request_ids sharing one optimistic_id
+    and body must produce ONE physical paste, and every request_id still gets its
+    own correlated receipt resolving to the single landed delivery."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            base = {"stream_id": STREAM, "text": BODY,
+                    "optimistic_id": "optimistic_assistant_v2-d33b331d_1", "_auth_context": AUTH}
+            rids = ["retry-1789356725441-i1zgeh", "retry-1789356725967-sh2xt0",
+                    "retry-1789356726159-p9dsil", "retry-1789356726334-1r8b8s"]
+            results = [await comms.send({**base, "request_id": rid}) for rid in rids]
+            assert len(tmux.pastes) == 1, f"expected ONE delivery, got {len(tmux.pastes)}"
+            assert results[0]["submission_confirmed"] is True
+            for result in results[1:]:
+                assert result["coalesced"] is True
+                assert result["do_not_resubmit"] is True
+            # Each request owns its correlation and mirrors the landed outcome.
+            # A replay can point at another replay, rather than the first ID.
+            for rid in rids:
+                rec = await store.get_send_receipt(STREAM, rid)
+                assert rec is not None, f"missing correlated receipt for {rid}"
+                assert rec["request_id"] == rid
+                assert rec["to_stream_id"] == STREAM
+                assert rec["optimistic_id"] == base["optimistic_id"]
+                assert rec["state"] == "landed", (rid, rec)
+                assert rec["delivery"] == "landed", (rid, rec)
+                assert rec["submission_confirmed"] is True, (rid, rec)
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_concurrent_overlapping_retries_coalesce(tmp_path: Path) -> None:
+    """Retry while the winning paste is held: coalesce without awaiting delivery.
+
+    The replay mirrors the latest accepted pre-paste receipt. Finishing the
+    winner does not itself reconcile that replay receipt to landed.
+    """
+    async def go() -> None:
+        class HeldPasteTmux(FakeTmux):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def paste(self, name: str, text: str) -> None:
+                self.entered.set()
+                await asyncio.wait_for(self.release.wait(), timeout=5)
+                await super().paste(name, text)
+
+        tmux = HeldPasteTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        tasks = []
+        try:
+            await _open_claude(sessions)
+            base = {"stream_id": STREAM, "text": BODY,
+                    "optimistic_id": "optimistic_concurrent_1", "_auth_context": AUTH}
+            winner = asyncio.create_task(comms.send({**base, "request_id": "retry-a"}))
+            tasks.append(winner)
+            await asyncio.wait_for(tmux.entered.wait(), timeout=2)
+            retry = asyncio.create_task(comms.send({**base, "request_id": "retry-b"}))
+            tasks.append(retry)
+            result = await asyncio.wait_for(asyncio.shield(retry), timeout=2)
+            assert not winner.done(), "retry must finish while the winning paste is held"
+            assert tmux.pastes == []
+            assert result["coalesced"] is True
+            assert result["do_not_resubmit"] is True
+            assert result["delivery"] == "accepted"
+            assert result["submission_confirmed"] is False
+            tmux.release.set()
+            landed = await asyncio.wait_for(asyncio.shield(winner), timeout=2)
+            assert landed["submission_confirmed"] is True
+            assert len(tmux.pastes) == 1, f"expected ONE delivery, got {len(tmux.pastes)}"
+            for rid in ("retry-a", "retry-b"):
+                rec = await store.get_send_receipt(STREAM, rid)
+                assert rec is not None, f"missing correlated receipt for {rid}"
+                assert rec["request_id"] == rid
+                assert rec["to_stream_id"] == STREAM
+                assert rec["optimistic_id"] == base["optimistic_id"]
+        finally:
+            tmux.release.set()
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2)
+            finally:
+                store.stop()
+
+    _run(go())
+
+
+async def _preinsert_receipt(store, *, optimistic_id, request_id, state, delivery,
+                             created_at, confirmed, actor="operator:op-1", body=BODY):
+    await store.append_send_receipt(
+        to_stream_id=STREAM, request_id=request_id, receipt_id=f"receipt-{request_id}",
+        state=state, wire_text=body, display_text=body, attachments=[],
+        delivery=delivery, submission_confirmed=confirmed, optimistic_id=optimistic_id,
+        created_at=created_at, actor_stream_id=actor, actor_trusted=True,
+    )
+
+
+# Intentional sends and failed attempts remain eligible for physical delivery.
+def test_new_optimistic_id_same_text_is_delivered(tmp_path: Path) -> None:
+    """Intentional identical messages carry a fresh optimistic_id (the client
+    counter increments): both must be delivered, no text dedupe."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await comms.send({"stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                              "optimistic_id": "optimistic_x_1", "request_id": "send-1"})
+            await comms.send({"stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                              "optimistic_id": "optimistic_x_2", "request_id": "send-2"})
+            assert len(tmux.pastes) == 2, f"both intentional sends must deliver, got {len(tmux.pastes)}"
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_post_restart_same_text_after_window_is_delivered(tmp_path: Path) -> None:
+    """A client restart resets the optimistic counter to _1; an identical-text
+    message OUTSIDE the recency window is a NEW logical send and is delivered."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            # A landed receipt from the pre-restart session, long outside the window.
+            await _preinsert_receipt(
+                store, optimistic_id="optimistic_assistant_v2-d33b331d_1",
+                request_id="retry-old", state="landed", delivery="landed",
+                created_at="2000-01-01T00:00:00Z", confirmed=True)
+            result = await comms.send({
+                "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                "optimistic_id": "optimistic_assistant_v2-d33b331d_1", "request_id": "send-new"})
+            assert len(tmux.pastes) == 1, "post-restart identical send must be delivered"
+            assert not result.get("coalesced")
+            assert result["submission_confirmed"] is True
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_prior_not_landed_does_not_block_retry(tmp_path: Path) -> None:
+    """A genuinely failed (not_landed) prior attempt must NOT suppress a retry."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await _preinsert_receipt(
+                store, optimistic_id="optimistic_y_1", request_id="retry-failed",
+                state="not_landed", delivery="not_landed",
+                created_at=iso_now(), confirmed=False)
+            result = await comms.send({
+                "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                "optimistic_id": "optimistic_y_1", "request_id": "retry-after-fail"})
+            assert len(tmux.pastes) == 1, "retry after a failed attempt must be delivered"
+            assert not result.get("coalesced")
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_committed_pending_proof_prior_replays_not_resubmit(tmp_path: Path) -> None:
+    """A prior committed_pending_proof (submission proof not yet surfaced) is a
+    real in-flight delivery: a rotated-request_id retry replays it, no re-paste."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await _preinsert_receipt(
+                store, optimistic_id="optimistic_z_1", request_id="retry-pending",
+                state="accepted", delivery="committed_pending_proof",
+                created_at=iso_now(), confirmed=False)
+            result = await comms.send({
+                "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                "optimistic_id": "optimistic_z_1", "request_id": "retry-after-pending"})
+            assert len(tmux.pastes) == 0, "must not re-paste an in-flight committed send"
+            assert result.get("coalesced") is True
+            assert result.get("do_not_resubmit") is True
+            # The retry's own request_id still resolves, pointing at the replay.
+            rec = await store.get_send_receipt(STREAM, "retry-after-pending")
+            assert rec is not None and rec["reason"].startswith("coalesced_replay:")
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_failed_preclaim_superseded_by_not_landed_allows_retry(tmp_path: Path) -> None:
+    """Store-level regression (QA cycle-1 finding): the claim appends an 'accepted'
+    row BEFORE materialization; when the send then fails and records a not_landed
+    receipt, a rotated retry of the same logical identity must NOT coalesce onto the
+    stale accepted preclaim — the latest outcome (not_landed) is authoritative."""
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            kw = dict(to_stream_id=STREAM, wire_text=BODY, display_text=BODY,
+                      attachments=[], optimistic_id="optimistic_fail_1",
+                      actor_stream_id="operator:op-1", actor_trusted=True,
+                      window_floor="2000-01-01T00:00:00Z")
+            c1 = await store.claim_or_coalesce_send(request_id="retry-1", receipt_id="rc1", **kw)
+            assert c1["coalesced"] is False, "first send must win the claim"
+            # Simulate materialize/submit failure: send() appends a not_landed row.
+            await store.append_send_receipt(
+                to_stream_id=STREAM, request_id="retry-1", receipt_id="rc1",
+                state="not_landed", wire_text=BODY, display_text=BODY, attachments=[],
+                delivery="not_landed", submission_confirmed=False,
+                optimistic_id="optimistic_fail_1", actor_stream_id="operator:op-1",
+                actor_trusted=True)
+            c2 = await store.claim_or_coalesce_send(request_id="retry-2", receipt_id="rc2", **kw)
+            assert c2["coalesced"] is False, "retry after a genuinely failed send must re-deliver"
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_attachment_failure_then_recovery_retry_delivers(tmp_path: Path) -> None:
+    """End-to-end regression: an attachment send whose blob fetch fails records a
+    not_landed receipt (no paste); after the blob recovers, a rotated-request_id
+    retry of the same logical send must produce a fresh delivery, not coalesce."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        blobs = FakeBlobStore(error=ValueError("missing blob"))
+        comms, store, sessions = _new_comms(tmux, tmp_path, blob_store=blobs)
+        try:
+            await _open(comms, sessions)  # claude provider
+            base = {"stream_id": STREAM, "message": "caption", "attachments": [VALID],
+                    "optimistic_id": "optimistic_att_1", "_auth_context": AUTH}
+            r1 = await comms.send({**base, "request_id": "retry-att-1"})
+            assert r1["delivery"] == "not_landed"
+            assert tmux.pastes == [], "failed fetch must not paste"
+            # Blob becomes available; operator retries the same logical message.
+            blobs.error = None
+            r2 = await comms.send({**base, "request_id": "retry-att-2"})
+            assert not r2.get("coalesced"), "retry after failure must not coalesce"
+            assert r2["delivery"] == "landed"
+            assert len(tmux.pastes) == 1, "recovered retry must deliver exactly once"
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_mobile_launch_id_scheme_unaffected(tmp_path: Path) -> None:
+    """Mobile/launch sends use send-<..> request_ids with distinct
+    optimistic_<stream>_launch-<..>_N ids per logical message: each delivers."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await comms.send({"stream_id": STREAM, "text": "launch one", "_auth_context": AUTH,
+                              "optimistic_id": "optimistic_assistant_launch-abc_1", "request_id": "send-l1"})
+            await comms.send({"stream_id": STREAM, "text": "launch two", "_auth_context": AUTH,
+                              "optimistic_id": "optimistic_assistant_launch-abc_2", "request_id": "send-l2"})
+            assert len(tmux.pastes) == 2, f"distinct launch sends must each deliver, got {len(tmux.pastes)}"
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+# Provider-native queue state survives first and chained replay independently.
+def test_coalesced_replay_of_provider_queued_send_keeps_queued(tmp_path: Path) -> None:
+    """A rotated retry (e.g. a reconnect replay) of a send the provider still
+    holds in its native queue must keep reporting provider_queued, or the client
+    would caption Sent while the message has not become a turn.
+    spec_pentacle__chat_queued_message_state_2026_10 (final QA finding 2)."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await store.append_send_receipt(
+                to_stream_id=STREAM, request_id="queued-first", receipt_id="receipt-queued-first",
+                state="landed", wire_text=BODY, display_text=BODY, attachments=[],
+                delivery="landed", submission_confirmed=True, optimistic_id="optimistic_q_1",
+                reason="provider_queued", created_at=iso_now(),
+                actor_stream_id="operator:op-1", actor_trusted=True,
+            )
+            result = await comms.send({
+                "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                "optimistic_id": "optimistic_q_1", "request_id": "queued-replay"})
+            assert len(tmux.pastes) == 0
+            assert result.get("coalesced") is True
+            assert result.get("delivery") == "landed"
+            assert result.get("provider_queued") is True
+            rec = await store.get_send_receipt(STREAM, "queued-replay")
+            assert rec is not None
+            assert rec["reason"] == "coalesced_replay:queued-first;provider_queued"
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_chained_coalesced_replays_of_provider_queued_send_stay_queued(tmp_path: Path) -> None:
+    """Two successive rotated retries: the second coalesces onto the first
+    replay's receipt (newest by rowid), whose reason carries the queued marker
+    as a suffix. Both replays must keep provider_queued, with no re-paste.
+    spec_pentacle__chat_queued_message_state_2026_10 (final QA re-read finding)."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await store.append_send_receipt(
+                to_stream_id=STREAM, request_id="queued-first", receipt_id="receipt-queued-first",
+                state="landed", wire_text=BODY, display_text=BODY, attachments=[],
+                delivery="landed", submission_confirmed=True, optimistic_id="optimistic_q_2",
+                reason="provider_queued", created_at=iso_now(),
+                actor_stream_id="operator:op-1", actor_trusted=True,
+            )
+            for request_id in ("queued-replay-1", "queued-replay-2"):
+                result = await comms.send({
+                    "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                    "optimistic_id": "optimistic_q_2", "request_id": request_id})
+                assert result.get("coalesced") is True, request_id
+                assert result.get("provider_queued") is True, request_id
+                rec = await store.get_send_receipt(STREAM, request_id)
+                assert rec is not None and rec["reason"].endswith(";provider_queued"), (request_id, rec)
+            assert len(tmux.pastes) == 0
+        finally:
+            store.stop()
+
+    _run(go())

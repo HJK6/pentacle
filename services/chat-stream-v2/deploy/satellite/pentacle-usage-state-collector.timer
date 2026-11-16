@@ -1,0 +1,13 @@
+# Cadence for pentacle-usage-state-collector.service (600 s between runs).
+[Unit]
+Description=Run the Pentacle usage-state collector every 600 s
+
+[Timer]
+OnActiveSec=30
+OnBootSec=120
+OnUnitActiveSec=600
+AccuracySec=10
+Unit=pentacle-usage-state-collector.service
+
+[Install]
+WantedBy=timers.target

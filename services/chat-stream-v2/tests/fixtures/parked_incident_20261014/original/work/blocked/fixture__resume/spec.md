@@ -1,0 +1,58 @@
+---
+id: spec_fixture__resume
+owner: fixture-owner
+---
+## Tracking
+- deferred_from: spec_fixture__member_01 — Criterion 02: program paused
+- deferred_from: spec_fixture__member_01 — Criterion 03: program paused
+- deferred_from: spec_fixture__member_01 — Criterion 04: program paused
+- deferred_from: spec_fixture__member_01 — Criterion 05: program paused
+- deferred_from: spec_fixture__member_01 — Criterion 06: program paused
+- deferred_from: spec_fixture__member_01 — Criterion 07: program paused
+- deferred_from: spec_fixture__member_01 — Criterion 08: program paused
+- deferred_from: spec_fixture__member_01 — Criterion 09: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 01: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 02: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 03: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 04: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 05: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 06: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 07: program paused
+- deferred_from: spec_fixture__member_02 — Criterion 08: program paused
+- deferred_from: spec_fixture__member_03 — Criterion 01: program paused
+- deferred_from: spec_fixture__member_03 — Criterion 02: program paused
+- deferred_from: spec_fixture__member_03 — Criterion 03: program paused
+- deferred_from: spec_fixture__member_03 — Criterion 04: program paused
+- deferred_from: spec_fixture__member_03 — Criterion 05: program paused
+- deferred_from: spec_fixture__member_03 — Criterion 06: program paused
+- deferred_from: spec_fixture__member_03 — Criterion 07: program paused
+- deferred_from: spec_fixture__member_04 — Criterion 01: program paused
+- deferred_from: spec_fixture__member_04 — Criterion 02: program paused
+- deferred_from: spec_fixture__member_04 — Criterion 03: program paused
+- deferred_from: spec_fixture__member_04 — Criterion 04: program paused
+- deferred_from: spec_fixture__member_04 — Criterion 05: program paused
+- deferred_from: spec_fixture__member_04 — Criterion 06: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 01: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 02: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 03: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 04: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 05: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 06: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 07: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 08: program paused
+- deferred_from: spec_fixture__member_05 — Criterion 09: program paused
+- deferred_from: spec_fixture__member_06 — Criterion 04: program paused
+- deferred_from: spec_fixture__member_07 — Criterion 05: program paused
+- deferred_from: spec_fixture__member_07 — Criterion 06: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 02: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 04: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 05: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 06: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 07: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 08: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 09: program paused
+- deferred_from: spec_fixture__member_08 — Criterion 10: program paused
+- deferred_from: spec_fixture__member_09 — Criterion 01: program paused
+- deferred_from: spec_fixture__member_09 — Criterion 02: program paused
+- deferred_from: spec_fixture__member_09 — Criterion 03: program paused
+- deferred_from: spec_fixture__member_10 — Criterion 01: program paused

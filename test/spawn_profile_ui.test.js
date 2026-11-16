@@ -1,0 +1,763 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { JSDOM } = require('jsdom');
+
+const app = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
+
+test('manual spawn UI uses catalog-backed Codex Sol high factory defaults and versioned preferences', () => {
+  assert.match(app, /SPAWN_PREFERENCES_KEY = 'pentacle\.spawnPreferences\.v1'/);
+  assert.match(app, /defaultProvider: 'codex'/);
+  assert.match(app, /catalog\.profiles\?\.desktop_manual/);
+  assert.match(app, /chatSpawnCatalog/);
+});
+
+function extractFunction(name) {
+  const src = app.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`));
+  assert.ok(src, `${name} function found in renderer/app.js`);
+  return src[0];
+}
+
+function loadModelLabel() {
+  return new Function(`${extractFunction('modelLabel')}; return modelLabel;`)();
+}
+
+test('modelLabel formats catalog ids and keeps the raw fallback', () => {
+  const src = app.match(/function modelLabel\(model\) \{[\s\S]*?\n\}/);
+  assert.ok(src, 'modelLabel function found in renderer/app.js');
+  const modelLabel = loadModelLabel();
+  assert.equal(modelLabel('claude-opus-4-8'), 'Opus 4.8');
+  assert.equal(modelLabel('claude-opus-5'), 'Opus 5');
+  assert.equal(modelLabel('claude-opus-5-5'), 'Opus 5.5');
+  assert.equal(modelLabel('claude-sonnet-5-5'), 'Sonnet 5.5');
+  assert.equal(modelLabel('claude-sonnet-5'), 'Sonnet 5');
+  assert.equal(modelLabel('claude-fable-5'), 'Fable 5');
+  assert.equal(modelLabel('claude-fable-5-1'), 'Fable 5.1');
+  assert.equal(modelLabel('claude-fable-5-2'), 'Fable 5.2');
+  assert.equal(modelLabel('gpt-5.6-sol'), '5.6 Sol');
+  assert.equal(modelLabel('gpt-5.6-terra'), '5.6 Terra');
+  assert.equal(modelLabel('gpt-6-astra'), '6 Astra');
+  assert.equal(modelLabel('gpt-6-sol'), '6 Sol');
+  assert.equal(modelLabel('gpt-6.1-sol'), '6.1 Sol');
+  assert.equal(modelLabel('gpt-6.1-terra'), '6.1 Terra');
+  assert.equal(modelLabel('gpt-6-luna'), '6 Luna');
+  assert.equal(modelLabel('gpt-5.6-luna'), '5.6 Luna');
+  assert.equal(modelLabel('claude-opus-6'), 'Opus 6');
+  assert.equal(modelLabel('claude-haiku-5-5'), 'Haiku 5.5');
+  assert.equal(modelLabel('gemini-2-pro'), 'Gemini 2 Pro');
+  assert.equal(modelLabel('gemini-3.1-pro-preview'), 'Gemini 3.1 Pro Preview');
+  assert.equal(modelLabel('gemini-3.5-flash-lite'), 'Gemini 3.5 Flash Lite');
+  assert.equal(modelLabel('claude-opus'), 'claude-opus');
+  assert.equal(modelLabel('gpt-'), 'gpt-');
+  assert.equal(modelLabel(''), '');
+});
+
+function renderProfileForTest(selection, models, emissions, catalogOverride = null, providerSelections = [], submissions = [], accountLabels = {}) {
+  const dom = new JSDOM('<main><h1 id="new-session-title"></h1><p id="new-session-subtitle"></p><div id="profile"></div></main>');
+  const catalog = catalogOverride || {
+    profiles: { desktop_manual: { [selection.provider]: [selection.model, selection.effort] } },
+    models: { [selection.provider]: models },
+  };
+  const controller = new Function(
+    'document', 'esc', 'modelLabel', 'updateNewSessionStatus',
+    'catalogTuple', 'catalogProviders', 'providerLabelForHero', 'saveSpawnPreference',
+    'selectionForProvider', 'renderNewSessionModal',
+    'newSessionSelection', 'newSessionCatalog', 'newSessionError', 'newSessionLocation',
+    'submissions', 'accountLabels',
+    `const CONFIG = { chatStream: { accountLabels } };
+     let newSessionSubmitting = false; let newSessionSubmitToken = 0;
+     const state = { slots: [null] };
+     const window = { cc: { chatSpawnV2: async request => { submissions.push(request); return { ok: true }; } } };
+     const waitForNewSessionSpawn = promise => promise; const NEW_SESSION_LONG_WAIT_MS = 100;
+     const hideNewSessionModal = () => {};
+     ${extractFunction('spawnAccountControl')}; ${extractFunction('renderSpawnProfileOptions')};
+     ${extractFunction('newSession')};
+     return { render: renderSpawnProfileOptions, selection: () => newSessionSelection, submit: () => newSession() };`,
+  )(
+    dom.window.document,
+    String,
+    loadModelLabel(),
+    () => {},
+    (provider, candidate) => {
+      emissions.push({ provider, model: candidate.model });
+      return { provider, model: candidate.model, effort: candidate.effort };
+    },
+    (value) => Object.keys(value.profiles?.desktop_manual || {}).filter((provider) => {
+      const tuple = value.profiles.desktop_manual[provider];
+      return value.models?.[provider]?.[tuple?.[0]]?.efforts?.includes(tuple?.[1]);
+    }),
+    (provider) => (provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider),
+    () => {},
+    (provider) => {
+      providerSelections.push(provider);
+      const tuple = catalog.profiles.desktop_manual[provider];
+      return { provider, model: tuple[0], effort: tuple[1] };
+    },
+    () => {},
+    selection,
+    catalog,
+    '',
+    'fixture-host',
+    submissions,
+    accountLabels,
+  );
+  const container = dom.window.document.getElementById('profile');
+  controller.render(container);
+  return { dom, container, selection: controller.selection, submit: controller.submit };
+}
+
+function lateCatalogPicker(previousAccount) {
+  const dom = new JSDOM('<h1 id="new-session-title"></h1><p id="new-session-subtitle"></p><div id="profile"></div>');
+  const models = Object.fromEntries(['gpt-6.1-sol', 'gpt-6.1-terra'].map(model => [model, { efforts: ['low', 'medium', 'high'] }]));
+  const catalog = { profiles: { desktop_manual: { codex: ['gpt-6.1-sol', 'medium'] } },
+    models: { codex: models }, account_status: { accounts: ['primary', 'spare'].map(alias =>
+      ({ host: 'fixture-host', provider: 'codex', alias, active: true, enabled: true, health: 'healthy' })) } };
+  let resolveCatalog;
+  const arrival = new Promise(resolve => { resolveCatalog = resolve; });
+  const submissions = [];
+  const controller = new Function('document', 'catalog', 'arrival', 'submissions', 'previousAccount', `
+    const CONFIG = {};
+    let newSessionCatalog = catalog;
+    let newSessionSelection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium',
+      ...(previousAccount !== undefined ? { account: previousAccount } : {}) };
+    let newSessionError = '', newSessionSubmitting = false, newSessionSubmitToken = 0;
+    const newSessionLocation = 'fixture-host', NEW_SESSION_LONG_WAIT_MS = 100;
+    const state = { slots: [null] }, esc = String;
+    let prefs = { defaultProvider: 'codex', byProvider: {} };
+    const spawnPreferences = () => prefs;
+    const saveSpawnPreference = (provider, tuple) => {
+      prefs = { defaultProvider: provider, byProvider: { [provider]: { model: tuple.model, effort: tuple.effort } } };
+    };
+    const spawnCatalogLoader = { peek: () => catalog, load: () => arrival };
+    const window = { cc: { chatSpawnV2: async request => { submissions.push(request); return { ok: true }; } } };
+    const updateNewSessionStatus = () => {}, hideNewSessionModal = () => {};
+    const providerLabelForHero = value => value, waitForNewSessionSpawn = promise => promise;
+    const renderNewSessionModal = () => renderSpawnProfileOptions(document.getElementById('profile'));
+    ${['catalogForNewSession', 'catalogTuple', 'catalogProviders', 'selectionForProvider', 'modelLabel',
+      'spawnAccountControl', 'renderSpawnProfileOptions', 'loadSpawnCatalog', 'warmSpawnCatalog', 'newSession']
+      .map(extractFunction).join('\n')}
+    renderNewSessionModal();
+    return { loadSpawnCatalog, warmSpawnCatalog, selection: () => newSessionSelection, submit: () => newSession() };
+  `)(dom.window.document, catalog, arrival, submissions, previousAccount);
+  return { ...controller, submissions, dom,
+    arrive: async () => { resolveCatalog({ ok: true, catalog }); await arrival; await Promise.resolve(); },
+    edit: (control, value) => {
+      const select = dom.window.document.querySelector('#spawn-' + control);
+      select.value = value; select.dispatchEvent(new dom.window.Event('change'));
+    },
+  };
+}
+
+for (const method of ['loadSpawnCatalog', 'warmSpawnCatalog']) {
+  for (const previousAccount of [undefined, 'primary']) {
+    test(`${method} late arrival retains the edited account through effort and submit (${previousAccount || 'default'})`, async () => {
+      const ui = lateCatalogPicker(previousAccount);
+      ui[method]();
+      ui.edit('account', 'spare');
+      ui.edit('model', 'gpt-6.1-terra');
+      ui.edit('model', 'gpt-6.1-sol');
+      ui.edit('effort', 'low');
+      await ui.arrive();
+      ui.edit('effort', 'medium');
+      assert.equal(ui.dom.window.document.querySelector('#spawn-account').value, 'spare');
+      assert.equal(ui.selection().account, 'spare');
+      assert.equal(ui.submissions.length, 0, 'pre-submit edits never launch');
+      await ui.submit();
+      assert.equal(ui.submissions.length, 1);
+      assert.equal(ui.submissions[0].account, 'spare');
+      assert.equal(ui.submissions[0].model, 'gpt-6.1-sol');
+      assert.equal(ui.submissions[0].effort, 'medium');
+    });
+  }
+}
+
+
+function labelledAccountCatalog(defaultAlias = 'primary', provider = 'codex') {
+  const model = provider === 'codex' ? 'gpt-6.1-sol' : 'claude-fable-5';
+  const cell = (alias, extras = {}) => ({ host: 'fixture-host', provider, alias,
+    active: true, enabled: true, health: 'healthy', ...extras });
+  return { profiles: { desktop_manual: { [provider]: [model, 'high'] } },
+    models: { [provider]: { [model]: { efforts: ['high', 'medium'] } } },
+    account_status: { defaults: [{ host: 'fixture-host', provider, alias: defaultAlias }],
+      accounts: [cell('primary'), cell('spare'), cell('old', { health: 'auth_unhealthy' }),
+        cell('disabled', { enabled: false }), cell('retired', { active: false }),
+        cell('foreign', { host: 'other-host' }), cell('other-provider', { provider: provider === 'codex' ? 'claude' : 'codex' })] } };
+}
+
+for (const provider of ['codex', 'claude']) {
+  test(`account labels list only eligible aliases and preselect the actual default (${provider})`, () => {
+    const catalog = labelledAccountCatalog('primary', provider);
+    const model = catalog.profiles.desktop_manual[provider][0];
+    const labels = { codex: { primary: 'first-codex@example.invalid', spare: 'second-codex' },
+      claude: { primary: 'first-claude@example.invalid', spare: 'second-claude' } };
+    const ui = renderProfileForTest({ provider, model, effort: 'high' },
+      catalog.models[provider], [], catalog, [], [], labels);
+    const select = ui.container.querySelector('#spawn-account');
+    assert.deepEqual([...select.options].map(option => [option.value, option.textContent]),
+      [['primary', `first-${provider}`], ['spare', `second-${provider}`]]);
+    assert.equal(select.value, 'primary');
+    assert.doesNotMatch(select.textContent, /Host default|old|disabled|retired|foreign/);
+  });
+}
+
+test('returning to the default after effort edits omits the explicit account', async () => {
+  const catalog = labelledAccountCatalog(); const requests = [];
+  const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: 'spare' },
+    catalog.models.codex, [], catalog, [], requests);
+  const select = ui.container.querySelector('#spawn-account');
+  select.value = 'primary'; select.dispatchEvent(new ui.dom.window.Event('change'));
+  const effort = ui.container.querySelector('#spawn-effort');
+  effort.value = 'medium'; effort.dispatchEvent(new ui.dom.window.Event('change'));
+  await ui.submit(); assert.equal(requests[0].effort, 'medium');
+  assert.equal(Object.hasOwn(requests[0], 'account'), false);
+});
+
+test('no eligible accounts produces a disabled empty control without synthetic options', () => {
+  const catalog = labelledAccountCatalog(); catalog.account_status.accounts = [];
+  const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' },
+    catalog.models.codex, [], catalog);
+  const select = ui.container.querySelector('#spawn-account');
+  assert.equal(select.options.length, 0); assert.equal(select.disabled, true);
+});
+
+for (const selected of [undefined, 'primary', 'spare']) {
+  test(`account submit omits only the current default (${selected || 'preselected'})`, async () => {
+    const catalog = labelledAccountCatalog(); const requests = [];
+    const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: selected },
+      catalog.models.codex, [], catalog, [], requests);
+    await ui.submit();
+    assert.equal(requests.length, 1);
+    assert.equal(Object.hasOwn(requests[0], 'account'), selected === 'spare');
+    if (selected === 'spare') assert.equal(requests[0].account, 'spare');
+  });
+}
+
+test('default comparison uses current catalog and retains a deliberate different alias', async () => {
+  const catalog = labelledAccountCatalog(); const requests = [];
+  const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: 'primary' },
+    catalog.models.codex, [], catalog, [], requests);
+  catalog.account_status.defaults[0].alias = 'spare';
+  await ui.submit(); assert.equal(requests[0].account, 'primary');
+});
+
+test('an unavailable default or retained alias is never silently displayed as another account', () => {
+  for (const account of [undefined, 'old']) {
+    const catalog = labelledAccountCatalog('old');
+    const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account },
+      catalog.models.codex, [], catalog);
+    const select = ui.container.querySelector('#spawn-account');
+    assert.deepEqual([...select.options].map(option => option.value), ['primary', 'spare']);
+    assert.equal(select.selectedIndex, -1);
+  }
+});
+
+for (const selected of ['primary', 'spare']) {
+  test(`terminal account control uses labels/defaults and submit semantics (${selected})`, async () => {
+    const dom = new JSDOM('<div id="agents"></div>'); const calls = [];
+    const run = new Function('document', 'catalog', 'calls', `
+      const CONFIG = { chatStream: { accountLabels: { codex: { primary: 'first', spare: 'second' } } } };
+      const newSessionCatalog = catalog, newSessionLocation = 'fixture-host', newSessionTerminalMode = true;
+      const state = { workspace: {}, slots: [null] }, esc = String;
+      const getNewSessionHostOptions = () => [{ id: 'fixture-host', label: 'Fixture' }];
+      const getNewSessionAgentOptions = () => [{ id: 'codex', label: 'Codex' }];
+      const getSourceInitial = value => value[0], hideNewSessionModal = () => {}, placementSlot = () => 0;
+      const window = { cc: { newSession: async (...args) => { calls.push(args); return null; } } };
+      ${extractFunction('spawnAccountControl')}
+      ${extractFunction('renderNewSessionAgentOptions')}
+      ${extractFunction('newTerminalSession')}
+      renderNewSessionAgentOptions(document.getElementById('agents'));
+    `);
+    run(dom.window.document, labelledAccountCatalog(), calls);
+    const select = dom.window.document.querySelector('#terminal-account-codex');
+    assert.deepEqual([...select.options].map(option => option.textContent), ['first', 'second']);
+    assert.equal(select.value, 'primary');
+    select.value = selected; dom.window.document.querySelector('[data-agent]').click();
+    await Promise.resolve();
+    assert.deepEqual(calls[0], selected === 'primary' ? ['codex', 'fixture-host'] : ['codex', 'fixture-host', 'spare']);
+  });
+}
+
+for (const control of ['effort', 'model']) {
+  for (const previousAccount of [undefined, 'primary']) {
+    test(`account choice survives ${control} edit and submit (previous ${previousAccount || 'default'})`, async () => {
+      const selection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: previousAccount };
+      const models = { 'gpt-6.1-sol': { efforts: ['high', 'medium'] }, 'gpt-6.1-terra': { efforts: ['high', 'medium'] } };
+      const catalog = { profiles: { desktop_manual: { codex: ['gpt-6.1-sol', 'high'] } }, models: { codex: models },
+        account_status: { accounts: ['primary', 'spare'].map(alias => ({ host: 'fixture-host', provider: 'codex',
+          alias, active: true, enabled: true, health: 'healthy' })) } };
+      const submissions = [];
+      const ui = renderProfileForTest(selection, models, [], catalog, [], submissions);
+      const account = ui.container.querySelector('#spawn-account');
+      account.value = 'spare'; account.dispatchEvent(new ui.dom.window.Event('change'));
+      assert.equal(ui.selection().account, 'spare');
+      const edit = ui.container.querySelector('#spawn-' + control);
+      edit.value = control === 'effort' ? 'medium' : 'gpt-6.1-terra';
+      edit.dispatchEvent(new ui.dom.window.Event('change'));
+      assert.equal(ui.selection().account, 'spare');
+      await ui.submit();
+      assert.equal(submissions.length, 1);
+      assert.equal(submissions[0].account, 'spare');
+      assert.equal(submissions[0][control], edit.value);
+    });
+  }
+}
+
+test('account picker excludes unhealthy aliases, submits an alternate, and omits unsupported controls', () => {
+  const selection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' };
+  const catalog = { profiles: { desktop_manual: { codex: [selection.model, 'high'] } },
+    models: { codex: { [selection.model]: { efforts: ['high'] } } }, account_status: {
+      defaults: [{ host: 'fixture-host', provider: 'codex', alias: 'primary' }], accounts: [
+        { host: 'fixture-host', provider: 'codex', alias: 'spare', active: true, enabled: true, health: 'healthy' },
+        { host: 'fixture-host', provider: 'codex', alias: 'parked', active: true, enabled: false, health: 'parked' },
+        { host: 'other-host', provider: 'codex', alias: 'foreign', active: true, enabled: true, health: 'healthy' },
+      ],
+    } };
+  const ui = renderProfileForTest(selection, catalog.models.codex, [], catalog);
+  const picker = ui.container.querySelector('#spawn-account');
+  assert.deepEqual([...picker.options].map(o => o.value), ['spare']);
+  assert.equal(picker.selectedIndex, -1, 'unavailable default never silently falls back');
+  picker.value = 'spare'; picker.dispatchEvent(new ui.dom.window.Event('change'));
+  assert.equal(ui.selection().account, 'spare');
+  const cursor = renderProfileForTest({ provider: 'cursor', model: 'auto', effort: 'default' },
+    { auto: { efforts: ['default'] } }, []);
+  assert.equal(cursor.container.querySelector('#spawn-account'), null);
+});
+
+test('spawn picker displays mapped labels while retaining raw option values and emitted selections', () => {
+  const claudeEmissions = [];
+  const claude = renderProfileForTest(
+    { provider: 'claude', model: 'claude-opus-4-8', effort: 'high' },
+    { 'claude-opus-4-8': { efforts: ['high'] }, 'claude-fable-5': { efforts: ['high'] } },
+    claudeEmissions,
+  );
+  const claudeOptions = [...claude.container.querySelectorAll('#spawn-model option')];
+  assert.deepEqual(claudeOptions.map((option) => [option.value, option.textContent]), [
+    ['claude-opus-4-8', 'Opus 4.8'],
+    ['claude-fable-5', 'Fable 5'],
+  ]);
+  const claudeSelect = claude.container.querySelector('#spawn-model');
+  claudeSelect.value = 'claude-fable-5';
+  claudeSelect.dispatchEvent(new claude.dom.window.Event('change'));
+  assert.deepEqual(claudeEmissions, [{ provider: 'claude', model: 'claude-fable-5' }]);
+
+  const codexEmissions = [];
+  const codex = renderProfileForTest(
+    { provider: 'codex', model: 'gpt-5.6-sol', effort: 'high' },
+    { 'gpt-5.6-sol': { efforts: ['high'] }, 'gpt-5.6-terra': { efforts: ['high'] } },
+    codexEmissions,
+  );
+  const codexOptions = [...codex.container.querySelectorAll('#spawn-model option')];
+  assert.deepEqual(codexOptions.map((option) => [option.value, option.textContent]), [
+    ['gpt-5.6-sol', '5.6 Sol'],
+    ['gpt-5.6-terra', '5.6 Terra'],
+  ]);
+  const codexSelect = codex.container.querySelector('#spawn-model');
+  codexSelect.value = 'gpt-5.6-terra';
+  codexSelect.dispatchEvent(new codex.dom.window.Event('change'));
+  assert.deepEqual(codexEmissions, [{ provider: 'codex', model: 'gpt-5.6-terra' }]);
+});
+
+function loadCatalogForNewSession() {
+  return new Function(`${extractFunction('catalogForNewSession')}; return catalogForNewSession;`)();
+}
+
+function visibilityPicker(available, preferences = {}, selection = null) {
+  const models = {
+    claude: { 'claude-default': { efforts: ['high'] }, 'claude-visible': { efforts: ['low'] } },
+    codex: { 'codex-default': { efforts: ['high'] } },
+    gemini: { 'gemini-default': { efforts: ['default'] } },
+    cursor: { auto: { efforts: ['default'] } },
+  };
+  const catalog = {
+    profiles: { desktop_manual: Object.fromEntries(Object.entries(models).map(([p, entries]) => [p, [Object.keys(entries)[0], Object.values(entries)[0].efforts[0]]])) },
+    models,
+    available_models: available,
+  };
+  return new Function('response', 'prefs', 'initialSelection', `
+    let newSessionCatalog = null, newSessionSelection = initialSelection, newSessionError = '', observedSpawnPreferences = null;
+    const SPAWN_PREFERENCES_KEY = 'pentacle.spawnPreferences.v1';
+    let storageHandler;
+    const window = { addEventListener: (name, callback) => { storageHandler = callback; } };
+    const document = { getElementById: () => ({ style: { display: 'none' } }) };
+    const spawnPreferences = () => prefs;
+    const spawnCatalogLoader = { peek: () => null, load: async () => ({ ok: true, catalog: response }) };
+    const renderNewSessionModal = () => {};
+    ${['catalogForNewSession', 'catalogProviders', 'catalogTuple', 'selectionForProvider', 'loadSpawnCatalog', 'warmSpawnCatalog', 'preferenceIsNewer'].map(extractFunction).join('\n')}
+    ${app.match(/window\.addEventListener\('storage',[^]*?\n}\);/)[0]}
+    newSessionCatalog = catalogForNewSession(response);
+    return { catalogTuple, catalogProviders, selectionForProvider, loadSpawnCatalog, warmSpawnCatalog,
+      catalog: () => newSessionCatalog, selection: () => newSessionSelection,
+      storage: (incoming) => { Object.assign(prefs, incoming); storageHandler({ key: SPAWN_PREFERENCES_KEY, newValue: JSON.stringify(incoming) }); } };
+  `)(catalog, { defaultProvider: 'codex', byProvider: {}, ...preferences }, selection);
+}
+
+test('hidden provider has no tuple; saved hidden provider falls back to first advertised choice', () => {
+  const picker = visibilityPicker({ gemini: { 'gemini-default': { efforts: ['default'] } } });
+  assert.equal(picker.catalogTuple('codex'), null);
+  assert.deepEqual(picker.catalogProviders(picker.catalog()), ['gemini']);
+  assert.deepEqual(picker.selectionForProvider('codex'), { provider: 'gemini', model: 'gemini-default', effort: 'default' });
+});
+
+test('catalog fallback retains an account within its provider, never across providers', () => {
+  const selected = { provider: 'codex', model: 'removed-model', effort: 'medium', account: 'spare' };
+  const sameProvider = visibilityPicker({ codex: { 'codex-default': { efforts: ['high'] } } }, {}, selected);
+  assert.deepEqual(sameProvider.selectionForProvider('codex'),
+    { provider: 'codex', model: 'codex-default', effort: 'high', account: 'spare' });
+  const differentProvider = visibilityPicker({ gemini: { 'gemini-default': { efforts: ['default'] } } }, {}, selected);
+  assert.deepEqual(differentProvider.selectionForProvider('codex'),
+    { provider: 'gemini', model: 'gemini-default', effort: 'default' });
+});
+
+test('hidden default model and invalid effort fall back within the visible provider', () => {
+  const picker = visibilityPicker({ claude: { 'claude-visible': { efforts: ['low'] } } });
+  assert.deepEqual(picker.catalogProviders(picker.catalog()), ['claude']);
+  assert.deepEqual(picker.catalogTuple('claude', { model: 'claude-default', effort: 'high' }),
+    { provider: 'claude', model: 'claude-visible', effort: 'low' });
+});
+
+test('hidden provider and stale model recover to the first advertised model and effort', () => {
+  const picker = visibilityPicker({ claude: {
+    'claude-visible': { efforts: ['low', 'high'] },
+    'claude-default': { efforts: ['high', 'low'] },
+  } });
+  const first = { provider: 'claude', model: 'claude-visible', effort: 'low' };
+  assert.deepEqual(picker.selectionForProvider('codex'), first);
+  assert.deepEqual(picker.catalogTuple('claude', { model: 'removed-model', effort: 'high' }), first);
+  assert.deepEqual(picker.selectionForProvider('claude', { model: 'claude-default', effort: 'removed-effort' }), first);
+  assert.deepEqual(picker.catalogTuple('claude', { model: 'claude-default', effort: 'low' }),
+    { provider: 'claude', model: 'claude-default', effort: 'low' });
+  assert.deepEqual(picker.catalogTuple('claude'),
+    { provider: 'claude', model: 'claude-default', effort: 'high' });
+});
+
+test('visible saved choices survive, and an empty projection never restores full models', () => {
+  const picker = visibilityPicker({ claude: { 'claude-visible': { efforts: ['low', 'high'] } } });
+  assert.deepEqual(picker.selectionForProvider('claude', { model: 'claude-visible', effort: 'high' }),
+    { provider: 'claude', model: 'claude-visible', effort: 'high' });
+  const empty = visibilityPicker({});
+  assert.deepEqual(empty.catalogProviders(empty.catalog()), []);
+  assert.equal(empty.selectionForProvider('codex'), null);
+});
+
+test('storage preference for a hidden provider selects the first advertised provider', () => {
+  const picker = visibilityPicker({ gemini: { 'gemini-default': { efforts: ['default'] } } });
+  picker.storage({ schemaVersion: 1, revision: 2, defaultProvider: 'codex', byProvider: { codex: { model: 'codex-default', effort: 'high' } } });
+  assert.deepEqual(picker.selection(), { provider: 'gemini', model: 'gemini-default', effort: 'default' });
+});
+
+for (const method of ['loadSpawnCatalog', 'warmSpawnCatalog']) {
+  for (const visible of ['claude', 'gemini']) {
+    test(`${method} replaces a hidden Codex preference with advertised ${visible}`, async () => {
+      const model = `${visible}-default`;
+      const effort = visible === 'gemini' ? 'default' : 'high';
+      const picker = visibilityPicker({ [visible]: { [model]: { efforts: [effort] } } },
+        { defaultProvider: 'codex', byProvider: { codex: { model: 'codex-default', effort: 'high' } } });
+      await picker[method]();
+      await new Promise(setImmediate);
+      assert.deepEqual(picker.selection(), { provider: visible, model, effort });
+    });
+  }
+  test(`${method} retains a visible Gemini preference when other providers are visible`, async () => {
+    const picker = visibilityPicker({
+      claude: { 'claude-default': { efforts: ['high'] } }, gemini: { 'gemini-default': { efforts: ['default'] } },
+    }, { defaultProvider: 'gemini' });
+    await picker[method]();
+    await new Promise(setImmediate);
+    assert.equal(picker.selection().provider, 'gemini');
+  });
+}
+
+test('catalogForNewSession swaps in available_models and preserves its list order (operator 7c2717e4)', () => {
+  const catalogForNewSession = loadCatalogForNewSession();
+  const catalog = {
+    // full catalog in MODELS declaration order (luna is NOT first here)
+    models: { codex: { 'gpt-5.6-terra': { efforts: ['high'] }, 'gpt-6.1-sol': { efforts: ['high'] }, 'gpt-6-luna': { efforts: ['high'] } } },
+    available_models: {
+      codex: { 'gpt-6-luna': { efforts: ['high'] }, 'gpt-6.1-sol': { efforts: ['high'] }, 'gpt-6-astra': { efforts: ['high'] } },
+      claude: { 'claude-opus-4-8': { efforts: ['high'] }, 'claude-opus-5-5': { efforts: ['high'] }, 'claude-fable-5-1': { efforts: ['high'] } },
+    },
+  };
+  const narrowed = catalogForNewSession(catalog);
+  // The picker reads narrowed.models; its key order must equal available_models'
+  // config order (operator dispatch 7c2717e4), not the full-catalog order.
+  assert.deepEqual(Object.keys(narrowed.models.codex), ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']);
+  assert.deepEqual(Object.keys(narrowed.models.claude), ['claude-opus-4-8', 'claude-opus-5-5', 'claude-fable-5-1']);
+  // Absent available_models => unchanged full catalog (shipped public default).
+  assert.equal(catalogForNewSession({ models: { codex: {} } }).available_models, undefined);
+});
+
+test('spawn picker renders model options in catalog (available_models) order (operator 7c2717e4)', () => {
+  const options = [...renderProfileForTest(
+    { provider: 'codex', model: 'gpt-6-luna', effort: 'high' },
+    { 'gpt-6-luna': { efforts: ['high'] }, 'gpt-6.1-sol': { efforts: ['high'] }, 'gpt-6-astra': { efforts: ['high'] } },
+    [],
+  ).container.querySelectorAll('#spawn-model option')].map((option) => option.value);
+  // No client-side sort: options follow the catalog key order as given.
+  assert.deepEqual(options, ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']);
+});
+
+test('spawn picker offers 6.1 Terra beside 6 Luna from the fleet available_models list', () => {
+  const catalogForNewSession = loadCatalogForNewSession();
+  const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const fleet = { 'gpt-6-luna': { efforts }, 'gpt-6.1-sol': { efforts }, 'gpt-6.1-terra': { efforts }, 'gpt-6-astra': { efforts } };
+  const narrowed = catalogForNewSession({ models: { codex: { 'gpt-6-sol': { efforts }, ...fleet } }, available_models: { codex: fleet } });
+  const options = [...renderProfileForTest(
+    { provider: 'codex', model: 'gpt-6.1-terra', effort: 'xhigh' }, narrowed.models.codex, [],
+  ).container.querySelectorAll('#spawn-model option')].map((option) => [option.value, option.textContent]);
+  assert.deepEqual(options, [
+    ['gpt-6-luna', '6 Luna'], ['gpt-6.1-sol', '6.1 Sol'], ['gpt-6.1-terra', '6.1 Terra'], ['gpt-6-astra', '6 Astra'],
+  ]);
+});
+
+test('spawn picker enumerates catalog-backed providers and exposes Claude/Fable without fabricating providers', () => {
+  const providerSelections = [];
+  const catalog = {
+    profiles: {
+      desktop_manual: {
+        claude: ['claude-opus-4-8', 'high'],
+        codex: ['gpt-5.6-sol', 'high'],
+        unsupported: ['missing-model', 'high'],
+      },
+    },
+    models: {
+      claude: {
+        'claude-opus-4-8': { efforts: ['high'] },
+        'claude-fable-5': { efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      },
+      codex: { 'gpt-5.6-sol': { efforts: ['high'] } },
+      unsupported: { 'different-model': { efforts: ['high'] } },
+    },
+  };
+  const picker = renderProfileForTest(
+    { provider: 'codex', model: 'gpt-5.6-sol', effort: 'high' },
+    catalog.models.codex,
+    [],
+    catalog,
+    providerSelections,
+  );
+  const provider = picker.container.querySelector('#spawn-provider');
+  assert.equal(provider.tagName, 'SELECT');
+  assert.deepEqual([...provider.options].map((option) => [option.value, option.textContent]), [
+    ['claude', 'Claude'],
+    ['codex', 'Codex'],
+  ]);
+  provider.value = 'claude';
+  provider.dispatchEvent(new picker.dom.window.Event('change'));
+  assert.deepEqual(providerSelections, ['claude']);
+  assert.ok(catalog.models.claude['claude-fable-5'].efforts.includes('high'));
+});
+
+test('spawn picker stays catalog-driven — model list and efforts derive from the fetched catalog', () => {
+  // Drift protection (AC-3) is the catalog-driven fetch itself: models come from spawn_catalog_get,
+  // never a client-side literal. Positively assert the derivation chain so a regression that
+  // reintroduces a hardcoded list (in any order) fails: catalog ← IPC response, model options ←
+  // Object.keys(entries), efforts ← the selected catalog entry.
+  assert.match(app, /newSessionCatalog = catalogForNewSession\(response\.catalog\)/);
+  assert.match(app, /models: catalog\.available_models/);
+  assert.match(app, /const entries = newSessionCatalog\.models\?\.\[selection\.provider\]/);
+  assert.match(app, /const models = Object\.keys\(entries\)/);
+  assert.match(app, /const efforts = entries\[selection\.model\]\?\.efforts/);
+});
+
+test('manual spawn UI exposes account and native controls with modal live status', () => {
+  const labels = [...app.matchAll(/<label[^>]*>([^<]+)<\/label>/g)].map((match) => match[1]);
+  assert.deepEqual(labels, ['Account', 'Provider', 'Model', 'Effort']);
+  assert.doesNotMatch(app, /id="spawn-family"/);
+  assert.match(app, /id="spawn-provider"/);
+  assert.match(app, /<select id="spawn-provider"/);
+  assert.match(app, /id="spawn-model"/);
+  assert.match(app, /id="spawn-effort"/);
+  assert.match(html, /role="dialog"/);
+  assert.match(html, /role="status" aria-live="polite"/);
+});
+
+test('manual spawn preserves errors in the modal and never dismisses on background click', () => {
+  assert.match(app, /newSessionError = result\?\.error\?\.message/);
+  assert.match(app, /Background clicks never dismiss/);
+  assert.match(app, /newSessionSubmitting/);
+});
+
+test('spawn modal is always escapable — no close/nav path gates on submit state', () => {
+  // Cancel button is never disabled.
+  assert.match(app, /Cancel is NEVER disabled/);
+  assert.match(app, /if \(cancel\) cancel\.disabled = false;/);
+  // hideNewSessionModal always closes (no submit early-return) and aborts submit.
+  assert.doesNotMatch(app, /function hideNewSessionModal\(\) \{\s*if \(newSessionSubmitting\) return;/);
+  assert.match(app, /function hideNewSessionModal\(\) \{[\s\S]*?abortNewSessionSubmit\(\);/);
+  // ESC no longer guards on !newSessionSubmitting.
+  assert.doesNotMatch(app, /event\.key === 'Escape' && !newSessionSubmitting/);
+  assert.match(app, /if \(event\.key === 'Escape'\) \{/);
+  // Back aborts any in-flight submit before navigating.
+  assert.match(app, /Back must work even mid-spawn[\s\S]*?abortNewSessionSubmit\(\);/);
+});
+
+test('spawn stays escapable while the authoritative result remains pending', () => {
+  // Submitting flag is cleared in finally regardless of resolve/reject.
+  assert.match(app, /\} finally \{\s*\/\/ Only this submit clears the flag[\s\S]*?newSessionSubmitting = false;/);
+  // The old ceiling becomes an honest wait notice, not a false terminal error.
+  assert.match(app, /NEW_SESSION_LONG_WAIT_MS/);
+  assert.match(app, /waitForNewSessionSpawn\(/);
+  assert.match(app, /Still waiting for startup to finish/);
+  assert.doesNotMatch(app, /Spawn timed out — the machine did not respond/);
+  // Abort token: a late spawn resolving after an operator escape is abandoned.
+  assert.match(app, /let newSessionSubmitToken = 0;/);
+  assert.match(app, /const myToken = \+\+newSessionSubmitToken;/);
+  assert.match(app, /if \(myToken !== newSessionSubmitToken\) return null;/);
+  assert.match(app, /function abortNewSessionSubmit\(\) \{\s*newSessionSubmitToken\+\+;\s*newSessionSubmitting = false;/);
+  // Double-submit guard.
+  assert.match(app, /if \(newSessionSubmitting\) return null; \/\/ guard against overlapping spawns/);
+});
+
+test('queued boot admission closes the modal without a client lifecycle row', () => {
+  assert.doesNotMatch(app, /\['queued', 'starting'\]\.includes\(lifecycleState\)/);
+  assert.match(app, /if \(!result\.session\) \{\s*hideNewSessionModal\(\);\s*return null;/);
+  assert.doesNotMatch(app, /awaitQueuedNewSession|chatAwaitSpawn|NEW_SESSION_QUEUE_POLL_MS/);
+  assert.doesNotMatch(app, /newSessionQueued/);
+});
+
+function spawnWaitHarness() {
+  let timer = null;
+  const setTimeout = (fn, waitMs) => {
+    timer = { fn, waitMs, cleared: false };
+    return timer;
+  };
+  const clearTimeout = (candidate) => { candidate.cleared = true; };
+  const waitForNewSessionSpawn = new Function(
+    'setTimeout',
+    'clearTimeout',
+    `${extractFunction('waitForNewSessionSpawn')}; return waitForNewSessionSpawn;`,
+  )(setTimeout, clearTimeout);
+  return {
+    waitForNewSessionSpawn,
+    timer: () => timer,
+    fire: () => { if (timer && !timer.cleared) timer.fn(); },
+  };
+}
+
+test('slow spawn shows one non-terminal wait notice and preserves eventual success', async () => {
+  const harness = spawnWaitHarness();
+  let resolveSpawn;
+  const spawn = new Promise((resolve) => { resolveSpawn = resolve; });
+  let notices = 0;
+  const outcome = harness.waitForNewSessionSpawn(spawn, () => { notices++; }, 30000);
+
+  assert.equal(harness.timer().waitMs, 30000);
+  harness.fire();
+  assert.equal(notices, 1);
+  resolveSpawn({ ok: true, session: { sessionName: 'codex-1' } });
+  assert.deepEqual(await outcome, { ok: true, session: { sessionName: 'codex-1' } });
+  assert.equal(harness.timer().cleared, true);
+});
+
+test('late spawn error remains a real rejection after the wait notice', async () => {
+  const harness = spawnWaitHarness();
+  let rejectSpawn;
+  const spawn = new Promise((_, reject) => { rejectSpawn = reject; });
+  let notices = 0;
+  const outcome = harness.waitForNewSessionSpawn(spawn, () => { notices++; }, 30000);
+
+  harness.fire();
+  assert.equal(notices, 1);
+  rejectSpawn(new Error('attestation failed'));
+  await assert.rejects(outcome, /attestation failed/);
+  assert.equal(harness.timer().cleared, true);
+});
+
+test('fast spawn clears the wait notice without firing it', async () => {
+  const harness = spawnWaitHarness();
+  let notices = 0;
+  const outcome = await harness.waitForNewSessionSpawn(
+    Promise.resolve({ ok: true, session: { sessionName: 'claude-1' } }),
+    () => { notices++; },
+    30000,
+  );
+
+  harness.fire();
+  assert.equal(notices, 0);
+  assert.equal(harness.timer().cleared, true);
+  assert.equal(outcome.session.sessionName, 'claude-1');
+});
+
+test('post-spawn uses selection.provider, not a bare undeclared agent identifier', () => {
+  assert.match(app, /const agentConfig = CONFIG\.agents\[selection\.provider\]/);
+  assert.match(app, /emit\?\.\('session:spawn', \{[\s\S]*?provider: selection\.provider,[\s\S]*?kind: 'chat'/);
+  // The chat-spawn path must not reference a bare `agent` (that identifier is
+  // only a real parameter of newTerminalSession).
+  assert.doesNotMatch(app, /CONFIG\.agents\[agent\]/);
+});
+
+test('manual spawn leaves failure notification to the daemon terminal frame', () => {
+  const source = app.slice(app.indexOf('async function newSession('), app.indexOf('\nasync function newTerminalSession('));
+  assert.match(source, /newSessionError = result\?\.error\?\.message \|\| result\?\.error/);
+  const failure = source.slice(source.indexOf('if (!result?.ok)'), source.indexOf('if (!result.session)'));
+  assert.doesNotMatch(failure, /showToast/);
+  assert.doesNotMatch(app, /aria-label="Starting"/);
+});
+
+test('a remembered non-default tuple is sent as an explicit override for daemon validation', () => {
+  assert.match(app, /selection\.model === profileDefault\[0\]/);
+  assert.match(app, /'explicit_override'/);
+});
+
+test('preference writes initialize both providers and reconcile by revision plus writer', () => {
+  assert.match(app, /writerId: SPAWN_PREFERENCES_WRITER_ID/);
+  assert.match(app, /claude: storedTuple\('claude'/);
+  assert.match(app, /codex: storedTuple\('codex'/);
+  assert.match(app, /window\.addEventListener\('storage'/);
+  assert.match(app, /preferenceIsNewer/);
+});
+
+test('modal traps focus and restores an inert accessibility background', () => {
+  assert.match(app, /setNewSessionBackgroundInert\(true\)/);
+  assert.match(app, /setNewSessionBackgroundInert\(false\)/);
+  assert.match(app, /child\.inert = true/);
+  assert.match(app, /event\.key !== 'Tab'/);
+  assert.match(app, /spawnAck: \{ requested:/);
+});
+
+test('explicit Gemini picker selection uses its model and the CLI default effort', () => {
+  const emissions = [];
+  const { dom, container } = renderProfileForTest(
+    { provider: 'gemini', model: 'gemini-3.1-pro-preview', effort: 'default' },
+    { 'gemini-3.1-pro-preview': { efforts: ['default'] }, 'gemini-3.8-flash': { efforts: ['default'] } },
+    emissions,
+  );
+  const model = container.querySelector('#spawn-model');
+  assert.equal(model.value, 'gemini-3.1-pro-preview');
+  assert.deepEqual([...container.querySelectorAll('#spawn-effort option')].map(o => o.value), ['default']);
+  model.value = 'gemini-3.8-flash';
+  model.dispatchEvent(new dom.window.Event('change'));
+  assert.deepEqual(emissions, [{ provider: 'gemini', model: 'gemini-3.8-flash' }]);
+});
+
+test('Cursor uses existing catalog slots and provider/model names', () => {
+  const modelLabel = loadModelLabel();
+  assert.equal(modelLabel('auto'), 'Cursor Auto');
+  assert.equal(modelLabel('cursor-auto'), 'Cursor Auto');
+  const providerLabel = new Function(`${extractFunction('providerLabelForHero')}; return providerLabelForHero;`)();
+  assert.equal(providerLabel('cursor'), 'Cursor');
+  const picker = visibilityPicker({ cursor: { auto: { efforts: ['default'] } } });
+  assert.deepEqual(picker.catalogProviders(picker.catalog()), ['cursor']);
+  assert.deepEqual(picker.selectionForProvider('cursor'), { provider: 'cursor', model: 'auto', effort: 'default' });
+  const hidden = visibilityPicker({ cursor: {} });
+  assert.deepEqual(hidden.catalogProviders(hidden.catalog()), []);
+  assert.equal(hidden.catalogTuple('cursor'), null);
+});
+
+test('Cursor hero resolves the canonical provider through the real slot DOM update', () => {
+  const document = new JSDOM('<div id="header-0"><span class="cell-label">Chat</span></div>').window.document;
+  const state = {
+    slots: [{ name: 'v2-cursor', hostId: 'local' }], botSlots: [],
+    chatStream: { sessions: [{ session_name: 'v2-cursor', host: 'local', provider: 'cursor' }] },
+  };
+  new Function('state', 'document', 'streamHostForHostId', 'isCompositeSlot', `
+    ${extractFunction('providerForSession')}
+    ${extractFunction('providerLabelForHero')}
+    ${extractFunction('updateSlotProviderTag')}
+    updateSlotProviderTag(0);
+  `)(state, document, value => value, () => false);
+  assert.equal(document.querySelector('.cell-provider-tag').textContent, 'Cursor');
+  assert.equal(document.querySelectorAll('.cell-provider-tag').length, 1);
+});

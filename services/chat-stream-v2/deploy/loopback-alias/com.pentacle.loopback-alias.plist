@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Root launchd one-shot for the v2 multi-bind loopback prerequisite.
+
+  Install with the commands in README.md. __INSTALL_DIR__ is replaced with the
+  root-owned directory containing ensure_loopback_alias.sh.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pentacle.loopback-alias</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__INSTALL_DIR__/ensure_loopback_alias.sh</string>
+  </array>
+
+  <key>UserName</key>
+  <string>root</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/pentacle-loopback-alias.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/pentacle-loopback-alias.err</string>
+</dict>
+</plist>

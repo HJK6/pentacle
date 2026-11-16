@@ -1,0 +1,22 @@
+# systemd-user oneshot: one usage-state collection (Claude /usage scrape + Codex quota read).
+# Rendered by ../install_usage_collector.py (linux hosts, e.g. amaterasu). The paired
+# .timer runs it every 600 s. No secret belongs here: the probes read only the pinned
+# CLIs and the host's own ~/.claude.json cache fields; the OAuth probe path is disabled.
+[Unit]
+Description=Pentacle usage-state collector (per-host Claude/Codex quota observation)
+
+[Service]
+Type=oneshot
+WorkingDirectory=__PENTACLE_USAGE_CWD__
+Environment=PATH=__PENTACLE_PATH__
+Environment=PENTACLE_HOST_ID=__PENTACLE_HOST_ID__
+Environment=PENTACLE_CLAUDE_BIN=__PENTACLE_CLAUDE_BIN__
+Environment=PENTACLE_CODEX_BIN=__PENTACLE_CODEX_BIN__
+Environment=PENTACLE_USAGE_TMUX_BIN=__PENTACLE_TMUX_BIN__
+Environment=PENTACLE_USAGE_CWD=__PENTACLE_USAGE_CWD__
+Environment=PENTACLE_USAGE_CLAUDE_OAUTH=0
+ExecStart=__PENTACLE_PYTHON__ __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/collect_usage_state.py --state __PENTACLE_USER_HOME__/.local/share/pentacle-stream/usage_state.json --shared-scripts __PENTACLE_RELEASE_CHECKOUT__/scripts
+# Two probes of up to 75 s each; the cgroup kill on timeout also reaps any child they left.
+TimeoutStartSec=180
+StandardOutput=append:__PENTACLE_USER_HOME__/.pentacle/usage-state-collector.log
+StandardError=append:__PENTACLE_USER_HOME__/.pentacle/usage-state-collector.err

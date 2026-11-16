@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "codex-multi-sample",
+      "case_sha256": "c755af3f0daa45ed98b0c93ac8eaecfb58c0a0331421d3cf3b774ea72ef51aac",
+      "provider": "codex",
+      "native_session_id": "native-codex-redacted",
+      "source_file_identity_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "records": [
+        {
+          "type": "session_meta",
+          "payload": {"id": "native-codex-redacted"}
+        },
+        {
+          "type": "event_msg",
+          "payload": {
+            "type": "token_count",
+            "info": {
+              "total_token_usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 40,
+                "output_tokens": 20,
+                "reasoning_output_tokens": 7
+              }
+            }
+          }
+        },
+        {
+          "type": "event_msg",
+          "payload": {
+            "type": "token_count",
+            "info": {
+              "total_token_usage": {
+                "input_tokens": 150,
+                "cached_input_tokens": 60,
+                "output_tokens": 30,
+                "reasoning_output_tokens": 9
+              }
+            }
+          }
+        }
+      ],
+      "expected_tokens": {
+        "input_total": 150,
+        "cached_input": 60,
+        "output": 30,
+        "reasoning": 9
+      },
+      "expected_derived_tokens": {"uncached_input": 90},
+      "expected_derived_fields": {"uncached_input": "input_total - cached_input"}
+    },
+    {
+      "id": "claude-multi-sample",
+      "case_sha256": "187f29ca93fc88e8e29c072eede1a9b51c8397bb1fc5e06177b4037d4fe8a198",
+      "provider": "claude",
+      "native_session_id": "native-claude-redacted",
+      "source_file_identity_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "records": [
+        {
+          "type": "assistant",
+          "sessionId": "native-claude-redacted",
+          "message": {
+            "id": "message-1-redacted",
+            "usage": {
+              "input_tokens": 100,
+              "cache_read_input_tokens": 40,
+              "cache_creation_input_tokens": 10,
+              "output_tokens": 20
+            }
+          }
+        },
+        {
+          "type": "assistant",
+          "sessionId": "native-claude-redacted",
+          "message": {
+            "id": "message-2-redacted",
+            "usage": {
+              "input_tokens": 120,
+              "cache_read_input_tokens": 50,
+              "cache_creation_input_tokens": 12,
+              "output_tokens": 25
+            }
+          }
+        }
+      ],
+      "expected_tokens": {
+        "uncached_input": 220,
+        "cache_read": 90,
+        "cache_write": 22,
+        "output": 45
+      },
+      "expected_derived_tokens": {},
+      "expected_derived_fields": {}
+    }
+  ],
+  "fence_cases": [
+    {"id": "wrong-source-host-proof", "expected_reason": "unauthorized_source_host"},
+    {"id": "source-file-identity-change", "expected_reason": "source_identity_mismatch"},
+    {"id": "session-generation-change", "expected_reason": "generation_mismatch"},
+    {"id": "pane-pid-change", "expected_reason": "pane_pid_mismatch"},
+    {"id": "provider-change", "expected_reason": "provider_mismatch"}
+  ],
+  "replay_contract": {
+    "same_request_id": {"usage_recorded": 0, "usage_replayed": 1},
+    "new_request_id": {"usage_recorded": 0, "usage_replayed": 1},
+    "request_id_is": "correlation_only"
+  }
+}

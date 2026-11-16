@@ -1,0 +1,519 @@
+{
+  "caps": {
+    "title": 90,
+    "paragraph": 300,
+    "total": 1200,
+    "lines_per_block": 3,
+    "option_label": 40,
+    "note": 100
+  },
+  "cases": [
+    {
+      "label": "valid_natural_ask",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "title_90",
+      "input": {
+        "title": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "title_91",
+      "input": {
+        "title": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": [
+        "headline_length"
+      ]
+    },
+    {
+      "label": "paragraph_300",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "paragraph_301",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": [
+        "paragraph_length"
+      ]
+    },
+    {
+      "label": "total_1200",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "total_1201",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": [
+        "context_total"
+      ]
+    },
+    {
+      "label": "raw_lines_3",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "- Item\n- Item\n- Item",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "raw_lines_4",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "- Item\n- Item\n- Item\n- Item",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": [
+        "block_raw_lines"
+      ]
+    },
+    {
+      "label": "label_40",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "value": "a"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "label_41",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "value": "a"
+          }
+        ]
+      },
+      "expected_errors": [
+        "option_label_length"
+      ]
+    },
+    {
+      "label": "description_100",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "n",
+            "description": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "description_101",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "n",
+            "description": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected_errors": [
+        "option_note_length"
+      ]
+    },
+    {
+      "label": "options_5",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "0",
+            "value": "0"
+          },
+          {
+            "label": "1",
+            "value": "1"
+          },
+          {
+            "label": "2",
+            "value": "2"
+          },
+          {
+            "label": "3",
+            "value": "3"
+          },
+          {
+            "label": "4",
+            "value": "4"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "options_6",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "0",
+            "value": "0"
+          },
+          {
+            "label": "1",
+            "value": "1"
+          },
+          {
+            "label": "2",
+            "value": "2"
+          },
+          {
+            "label": "3",
+            "value": "3"
+          },
+          {
+            "label": "4",
+            "value": "4"
+          },
+          {
+            "label": "5",
+            "value": "5"
+          }
+        ]
+      },
+      "expected_errors": [
+        "option_count"
+      ]
+    },
+    {
+      "label": "literal_backslash_n_is_not_paragraph_break",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n\\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": [
+        "paragraph_length"
+      ]
+    },
+    {
+      "label": "crlf_normalized",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "One\r\n\r\nTwo",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "context_field_rejected",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ],
+        "context": "Separate prose"
+      },
+      "expected_errors": [
+        "context_in_body"
+      ]
+    },
+    {
+      "label": "unicode_codepoint_title",
+      "input": {
+        "title": "🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": []
+    },
+    {
+      "label": "unicode_codepoint_title_over",
+      "input": {
+        "title": "🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭🧭?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "North",
+            "value": "north"
+          },
+          {
+            "label": "South",
+            "value": "south"
+          }
+        ]
+      },
+      "expected_errors": [
+        "headline_length"
+      ]
+    },
+    {
+      "label": "multiline_label",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "One\nTwo",
+            "value": "x"
+          }
+        ]
+      },
+      "expected_errors": [
+        "option_label_one_line"
+      ]
+    },
+    {
+      "label": "multiline_note",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "One",
+            "value": "x",
+            "description": "One\nTwo"
+          }
+        ]
+      },
+      "expected_errors": [
+        "option_note_one_line"
+      ]
+    },
+    {
+      "label": "ack_rejected",
+      "input": {
+        "title": "Which route should I take?",
+        "body": "I need your destination before booking.",
+        "response_mode": "ack",
+        "options": [
+          {
+            "label": "Acknowledge",
+            "value": "ack"
+          }
+        ]
+      },
+      "expected_errors": [
+        "ack_removed"
+      ]
+    },
+    {
+      "label": "action_prerequisite",
+      "input": {
+        "title": "Please unlock the phone",
+        "body": "I can install once it is unlocked. Done resumes the install; Not yet leaves it pending.",
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "Done",
+            "value": "done"
+          },
+          {
+            "label": "Not yet",
+            "value": "not_yet"
+          }
+        ]
+      },
+      "expected_errors": []
+    }
+  ],
+  "guidance_cases": [
+    {
+      "label": "standing_authority",
+      "input": "Authorize the already-granted build",
+      "expected": "Proceed; do not create a question"
+    },
+    {
+      "label": "fyi",
+      "input": "The build passed",
+      "expected": "status/notify update"
+    },
+    {
+      "label": "action",
+      "input": "Please unlock the phone",
+      "expected": "Done / Not yet plus free text; resume / remain blocked"
+    },
+    {
+      "label": "semantic_limits",
+      "expected": "Natural-language asks, meaningful options and no footer require author/QA review; the admission validator enforces measurable structure, not semantic inference"
+    }
+  ]
+}

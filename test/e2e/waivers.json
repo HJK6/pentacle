@@ -1,0 +1,4 @@
+{
+  "_comment": "E2E scenario waivers. Each entry marks a (scenario,target,provider) cell as WAIVED with a reason. Empty by default.",
+  "waivers": []
+}

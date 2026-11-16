@@ -1,0 +1,593 @@
+#!/usr/bin/env node
+'use strict';
+
+// ── Pentacle headless web host ───────────────────────────────────────────────
+// Serves the esbuild-bundled renderer over HTTP and exposes the same
+// `window.cc` surface over a websocket, owning the tmux attachments and the
+// single chat-stream connection to the daemon.
+//
+//   node server --profile <name> [--port 7795] [--bind 127.0.0.1]
+//
+// Loopback only by default. Auth is a token cookie, or Tailscale identity
+// headers behind `tailscale serve` (`--auth tailscale`); multi-user isolation is
+// out of scope. See server/README.md § Security.
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const http = require('node:http');
+const crypto = require('node:crypto');
+const net = require('node:net');
+const { WebSocketServer } = require('ws');
+
+const ROOT = path.join(__dirname, '..');
+const { loadConfig } = require(path.join(ROOT, 'config-loader'));
+const { createMicStarter, micStartSameOrigin, isLoopbackPeer } = require('./mic_starter');
+const { createMicRequest } = require('../main/mic_request');
+const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
+const { createWsBridge } = require('./ws_bridge');
+const { freezeWebDist } = require('./web_build_id');
+const { createPrivateDashboardRoute } = require('./private_dashboards');
+const { createDesignRoutes } = require('./designs');
+const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
+
+const DEFAULT_PORT = 7795;
+const DEFAULT_BIND = '127.0.0.1';
+const WEB_DIST = path.join(ROOT, 'renderer', 'dist', 'web');
+// Per-browser-connection terminal ceiling. The renderer uses four slots; the
+// headroom covers reconnect churn while still bounding what one connection can
+// allocate on a shared (e.g. tailnet-hosted) instance.
+const MAX_PTYS_PER_CONNECTION = 8;
+
+const CONTENT_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.wasm': 'application/wasm',
+};
+
+function parseArgs(argv) {
+  const args = { port: DEFAULT_PORT, bind: DEFAULT_BIND, profile: null, tokenFile: null, tokenPath: null,
+    auth: 'token', allowLogins: [], origin: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--profile') args.profile = argv[++i];
+    else if (a === '--port') args.port = Number(argv[++i]);
+    else if (a === '--bind') args.bind = argv[++i];
+    else if (a === '--token-file') args.tokenFile = argv[++i];   // web login auth (this host)
+    else if (a === '--token-path') args.tokenPath = argv[++i];   // chat-stream daemon credential
+    else if (a === '--auth') args.auth = argv[++i];
+    else if (a === '--allow-login') args.allowLogins.push(...String(argv[++i] ?? '').split(',').map((l) => l.trim()).filter(Boolean));
+    else if (a === '--origin') args.origin = argv[++i];
+    else if (a === '--help' || a === '-h') args.help = true;
+    else throw new Error(`unknown argument: ${a}`);
+  }
+  if (!Number.isInteger(args.port) || args.port < 0 || args.port > 65535) {
+    throw new Error(`invalid --port: ${args.port}`);
+  }
+  // Normalize the bind so the address classified for auth is exactly the address
+  // node listens on; an empty/whitespace bind (a wildcard listener) is rejected.
+  args.bind = String(args.bind ?? '').trim();
+  if (!args.bind) throw new Error('invalid --bind: empty (a bind address is required; default is 127.0.0.1)');
+  if (args.auth !== 'token' && args.auth !== 'tailscale') throw new Error(`invalid --auth: ${args.auth} (token or tailscale)`);
+  return args;
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+// A loopback bind is single-user and needs no token, exactly as lane 1 shipped.
+// Any routable bind MUST present a token file, or the host refuses to start, so
+// a tailnet-hosted instance can never come up wide open. The browser posts the
+// token once at /login; the reply sets an HttpOnly, SameSite=Strict cookie
+// carrying sha256(token) (never the token itself), and every page, api call and
+// websocket upgrade is gated on that cookie. No `Secure` attribute: the tailnet
+// is the transport boundary, or a TLS proxy fronts a loopback bind (see server/README).
+
+function isLoopbackBind(bind) {
+  // Fail CLOSED: an empty/whitespace/unspecified bind makes node listen on the
+  // wildcard (all interfaces), so it must NOT be treated as loopback — otherwise
+  // a `--bind ''` would come up on every interface with auth disabled.
+  const b = String(bind ?? '').trim().toLowerCase();
+  if (!b) return false;
+  return b === 'localhost' || b === '::1' || b === '::ffff:127.0.0.1' || /^127(\.\d{1,3}){3}$/.test(b);
+}
+
+function readTokenFile(tokenFile) {
+  let raw;
+  try {
+    raw = fs.readFileSync(tokenFile, 'utf8');
+  } catch (e) {
+    throw new Error(`cannot read --token-file ${tokenFile}: ${e.code || e.message}`);
+  }
+  const token = raw.trim();
+  if (!token) throw new Error(`--token-file ${tokenFile} is empty`);
+  return token;
+}
+
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  for (const part of String(header).split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (name) out[name] = part.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+const COOKIE_NAME = 'pentacle_web';
+
+function createAuth(token) {
+  const cookieValue = crypto.createHash('sha256').update(token).digest('hex');
+  return {
+    mode: 'token',
+    isAuthed(req) {
+      const cookie = parseCookies(req.headers && req.headers.cookie)[COOKIE_NAME];
+      return !!cookie && safeEqual(cookie, cookieValue);
+    },
+    originAllowed(req) {
+      const values = headerValues(req, 'origin');
+      if (values.length === 0) return isLoopbackPeer(req.socket && req.socket.remoteAddress);
+      const authority = singleHeader(req, 'host');
+      return values.length === 1 && !!authority
+        && (values[0] === `http://${authority}` || values[0] === `https://${authority}`);
+    },
+    checkToken(candidate) { return safeEqual(candidate, token); },
+    setCookieHeader() {
+      return `${COOKIE_NAME}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800`;
+    },
+  };
+}
+
+function hostedDashboardAuthMode(auth) {
+  return auth?.mode === 'tailscale' ? 'identity' : auth?.mode === 'token' ? 'token' : 'unknown';
+}
+
+// ── Tailscale identity auth ──────────────────────────────────────────────────
+// `--auth tailscale` runs behind `tailscale serve` on the same machine: the
+// proxy terminates HTTPS, connects over loopback, and REPLACES any
+// client-supplied Tailscale-User-Login / X-Forwarded-* with its own values. A
+// request is the operator iff it arrived on a loopback socket, names an
+// allow-listed login exactly, was forwarded from https, and was forwarded for
+// exactly one tailnet address. There is no login page and no cookie.
+//
+// Trust boundary: any local process can reach the loopback port and send any
+// headers, so this mode is only as strong as the host's guarantee that no
+// other local principal can connect to the port (see server/README § Security).
+
+const TAILNET_V4_BASE = 0x64400000;   // 100.64/10 (Tailscale CGNAT)
+const TAILNET_V4_MASK = 0xffc00000;
+const TAILNET_V6_PREFIX = [0xfd7a, 0x115c, 0xa1e0];  // fd7a:115c:a1e0::/48
+
+function expandIPv6(ip) {
+  const [head, tail] = ip.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail !== undefined ? (tail ? tail.split(':') : []) : [];
+  const groups = tail !== undefined ? [...h, ...Array(8 - h.length - t.length).fill('0'), ...t] : h;
+  return groups.map((g) => parseInt(g, 16));
+}
+
+function isTailnetAddress(ip) {
+  const a = String(ip ?? '');
+  if (net.isIPv4(a)) {
+    const n = a.split('.').reduce((acc, o) => ((acc << 8) | Number(o)) >>> 0, 0);
+    return ((n & TAILNET_V4_MASK) >>> 0) === TAILNET_V4_BASE;
+  }
+  if (net.isIPv6(a) && !a.includes('.')) {
+    const g = expandIPv6(a.toLowerCase());
+    return g.length === 8 && TAILNET_V6_PREFIX.every((v, i) => g[i] === v);
+  }
+  return false;
+}
+
+// Every value of a header as sent on the wire, so a repeated header is visible
+// rather than merged into one string.
+function headerValues(req, name) {
+  const raw = req.rawHeaders || [];
+  const out = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    if (String(raw[i]).toLowerCase() === name) out.push(String(raw[i + 1]));
+  }
+  return out;
+}
+
+function singleHeader(req, name) {
+  const values = headerValues(req, name);
+  return values.length === 1 ? values[0].trim() : null;
+}
+
+// The unauthenticated single-user exception is for local tools and pages, not
+// arbitrary websites. Pin Host to a literal loopback authority (DNS rebinding)
+// and any browser-supplied Origin to that exact listener (cross-site WebSocket
+// hijacking). Browsers omit Origin on a no-cors GET but label every request
+// with Sec-Fetch-Site, so a request another site initiated is refused too,
+// except a top-level navigation, whose response the initiator cannot read.
+// Origin-less local CLI clients (no Sec-Fetch headers) remain supported.
+// Authenticated proxy modes have their own boundary and do not use this
+// local-only rule.
+function fetchSiteAllowed(req) {
+  const sites = headerValues(req, 'sec-fetch-site');
+  if (sites.length === 0) return true;
+  const site = singleHeader(req, 'sec-fetch-site');
+  if (site === 'same-origin' || site === 'none') return true;
+  return (site === 'same-site' || site === 'cross-site') && req.method === 'GET'
+    && singleHeader(req, 'sec-fetch-mode') === 'navigate' && singleHeader(req, 'sec-fetch-dest') === 'document';
+}
+
+function loopbackRequestAllowed(req) {
+  const authority = singleHeader(req, 'host');
+  if (!authority) return false;
+  let target;
+  try { target = new URL(`http://${authority}`); } catch { return false; }
+  if (target.username || target.password || target.pathname !== '/' || target.search || target.hash) return false;
+  const normalizedAuthority = authority.toLowerCase();
+  if (target.host !== normalizedAuthority && `${target.host}:80` !== normalizedAuthority) return false;
+  const hostname = target.hostname.replace(/^\[|\]$/g, '');
+  const ipv6 = net.isIPv6(hostname) ? expandIPv6(hostname) : null;
+  const mappedLoopback = ipv6 && ipv6.slice(0, 5).every(n => n === 0)
+    && ipv6[5] === 0xffff && (ipv6[6] >> 8) === 127;
+  if (!isLoopbackBind(hostname) && !mappedLoopback) return false;
+  if (Number(target.port || 80) !== req.socket?.localPort) return false;
+  if (!fetchSiteAllowed(req)) return false;
+  const origins = headerValues(req, 'origin');
+  return origins.length === 0 || (origins.length === 1 && origins[0] === target.origin);
+}
+
+function canonicalOrigin(origin) {
+  let u;
+  try { u = new URL(origin); } catch { throw new Error(`invalid --origin: ${origin} (an https origin is required)`); }
+  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash || u.pathname !== '/' || u.origin !== String(origin).replace(/\/$/, '')) {
+    throw new Error(`invalid --origin: ${origin} (use the bare https origin, e.g. https://host.tailnet.ts.net)`);
+  }
+  return u.origin;
+}
+
+function createTailscaleAuth({ allowLogins, origin }) {
+  const allowed = new Set(allowLogins);
+  return {
+    mode: 'tailscale',
+    origin,
+    isAuthed(req) {
+      if (!isLoopbackPeer(req.socket && req.socket.remoteAddress)) return false;
+      const login = singleHeader(req, 'tailscale-user-login');
+      if (!login || !allowed.has(login)) return false;
+      if (singleHeader(req, 'x-forwarded-proto') !== 'https') return false;
+      return isTailnetAddress(singleHeader(req, 'x-forwarded-for'));
+    },
+    originAllowed(req) {
+      const values = headerValues(req, 'origin');
+      return values.length === 1 && values[0] === origin;
+    },
+  };
+}
+
+function loginPage(error = '') {
+  const banner = error ? `<p class="err">${error}</p>` : '';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pentacle — sign in</title>
+<style>body{font:15px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;min-height:100vh;margin:0}
+form{background:#181b22;padding:28px;border-radius:12px;box-shadow:0 6px 30px rgba(0,0,0,.4);width:min(340px,90vw)}
+h1{font-size:18px;margin:0 0 14px}input{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #333;background:#0f1115;color:#e6e6e6;font-size:15px}
+button{margin-top:12px;width:100%;padding:10px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-size:15px;cursor:pointer}
+.err{color:#f87171;margin:0 0 12px}</style></head>
+<body><form method="POST" action="/login"><h1>Pentacle web host</h1>${banner}
+<input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password">
+<button type="submit">Sign in</button></form></body></html>`;
+}
+
+// Per-peer /login failure backoff: three free failures, then 1 s doubling to a
+// 5 min cap. State is in memory and capped, so a restart clears it.
+const LOGIN_FREE_FAILURES = 3;
+const LOGIN_MAX_DELAY_MS = 300000;
+const LOGIN_MAX_PEERS = 1000;
+
+function createLoginLimiter({ now = Date.now } = {}) {
+  const peers = new Map();  // peer -> { fails, until }
+  return {
+    retryAfterMs(peer) {
+      const entry = peers.get(peer);
+      return entry ? Math.max(0, entry.until - now()) : 0;
+    },
+    failed(peer) {
+      const fails = (peers.get(peer)?.fails || 0) + 1;
+      const delay = fails <= LOGIN_FREE_FAILURES ? 0
+        : Math.min(1000 * 2 ** (fails - LOGIN_FREE_FAILURES - 1), LOGIN_MAX_DELAY_MS);
+      peers.delete(peer);
+      if (peers.size >= LOGIN_MAX_PEERS) peers.delete(peers.keys().next().value);
+      peers.set(peer, { fails, until: now() + delay });
+    },
+    succeeded(peer) { peers.delete(peer); },
+  };
+}
+
+function handleLogin(req, res, auth, limiter) {
+  if (req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(loginPage());
+    return;
+  }
+  if (req.method !== 'POST') { res.writeHead(405).end('method not allowed'); return; }
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > 4096) { req.destroy(); }  // a token is short; cap the body
+  });
+  req.on('end', () => {
+    const peer = String(req.socket && req.socket.remoteAddress);
+    const wait = limiter.retryAfterMs(peer);
+    if (wait > 0) {
+      res.writeHead(429, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(Math.ceil(wait / 1000)) })
+        .end(loginPage('Too many attempts. Try again shortly.'));
+      return;
+    }
+    const token = new URLSearchParams(body).get('token') || '';
+    if (auth.checkToken(token)) {
+      limiter.succeeded(peer);
+      res.writeHead(302, { 'set-cookie': auth.setCookieHeader(), location: '/', 'cache-control': 'no-store' }).end();
+    } else {
+      limiter.failed(peer);
+      res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(loginPage('Incorrect token.'));
+    }
+  });
+}
+
+// Mirrors config-loader's candidate order for a named profile: a machine-local
+// override first, then the tracked config. A path (or a `*.js` argument) is
+// used verbatim so a test config outside configs/ can be passed straight
+// through.
+function resolveProfilePath(profile) {
+  if (!profile) return null;
+  if (profile.includes(path.sep) || profile.includes('/') || profile.endsWith('.js')) {
+    return path.resolve(profile);
+  }
+  const local = path.join(ROOT, 'configs', `${profile}.local.js`);
+  if (fs.existsSync(local)) return local;
+  return path.join(ROOT, 'configs', `${profile}.js`);
+}
+
+function serveStatic(res, urlPath, configJson, frozen) {
+  const rel = urlPath === '/' ? 'web.html' : urlPath === '/designs/' ? 'designs.html' : urlPath.replace(/^\/+/, '');
+  // Path traversal guard — a request must not escape the frozen bundle.
+  if (path.isAbsolute(rel) || rel.split('/').includes('..')) {
+    res.writeHead(403).end('forbidden');
+    return;
+  }
+  // Serve from the frozen startup snapshot so the bytes always match the build
+  // id computed over them (no old-page/new-id skew mid-deploy).
+  let body = frozen && frozen.files ? frozen.files.get(rel) : null;
+  if (!body) {
+    if (rel === 'web.html') {
+      res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
+        .end('The web bundle is not built yet. Run `npm run build:web`.');
+      return;
+    }
+    res.writeHead(404).end('not found');
+    return;
+  }
+  const ext = path.extname(rel).toLowerCase();
+  if (ext === '.html') {
+    // Inject the computed config before any bundle script runs, so the
+    // config-loader shim can answer synchronously exactly like the preload does.
+    body = Buffer.from(String(body).replace(
+      '<!--PENTACLE_CONFIG-->',
+      `<script>window.__PENTACLE_CONFIG__=${JSON.stringify(configJson).replace(/</g, '\\u003c')};</script>`,
+    ));
+  }
+  res.writeHead(200, {
+    'content-type': CONTENT_TYPES[ext] || 'application/octet-stream',
+    'cache-control': 'no-cache',
+  }).end(body);
+}
+
+async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    console.log('usage: node server --profile <name> [--port 7795] [--bind 127.0.0.1] [--token-file <path>] [--token-path <path>]\n'
+      + '       [--auth tailscale --allow-login <login>[,<login>…] --origin https://<host>.<tailnet>.ts.net]');
+    return 0;
+  }
+
+  // Bind guard, before anything is allocated: a routable bind without a token
+  // is a refusal, not a warning. Loopback stays open (single-user); a token on
+  // loopback opts that instance into auth anyway.
+  const requireAuth = !isLoopbackBind(args.bind);
+  let auth = null;
+  if (args.auth === 'tailscale') {
+    if (requireAuth) throw new Error(`--auth tailscale requires a loopback --bind (got ${args.bind}); the proxy must be the only way in`);
+    if (args.tokenFile) throw new Error('--auth tailscale does not take --token-file (identity replaces the token)');
+    if (!args.origin) throw new Error('--auth tailscale requires --origin <https origin of the proxy>');
+    if (!args.allowLogins.length) throw new Error('--auth tailscale requires --allow-login <login>[,<login>…]');
+    auth = createTailscaleAuth({ allowLogins: args.allowLogins, origin: canonicalOrigin(args.origin) });
+  } else if (args.allowLogins.length || args.origin) {
+    throw new Error('--allow-login and --origin are only valid with --auth tailscale');
+  } else if (requireAuth || args.tokenFile) {
+    if (requireAuth && !args.tokenFile) {
+      throw new Error(`refusing to bind routable address ${args.bind} without --token-file (a loopback bind needs no token)`);
+    }
+    auth = createAuth(readTokenFile(args.tokenFile));
+  }
+
+  const profilePath = resolveProfilePath(args.profile);
+  const env = profilePath ? { ...process.env, PENTACLE_CONFIG: profilePath } : process.env;
+  let CONFIG;
+  let configError = null;
+  let configWarnings = [];
+  let configPath = null;
+  try {
+    const loaded = loadConfig(ROOT, env);
+    CONFIG = loaded.config;
+    configPath = loaded.path;
+    configWarnings = loaded.warnings || [];
+  } catch (error) {
+    configError = error;
+    CONFIG = { appName: 'Pentacle', features: { mic: false }, hosts: { local: { kind: 'local' } }, agents: {} };
+  }
+
+  // The same handler set main.js registers on ipcMain, collected into a table.
+  // The chat-stream v2 operator auth refuses an *implicit* credential path
+  // (error `operator_auth_v2_private_path_required`), so a web host talking to a
+  // credentialed daemon must name the credential explicitly: `--token-path`, or
+  // `chatStream.tokenPath` in the profile. It stays server-side — `publicConfig`
+  // strips `token`/`tokenPath`, so it never reaches the browser.
+  if (args.tokenPath) {
+    CONFIG.chatStream = { ...(CONFIG.chatStream || {}), tokenPath: args.tokenPath };
+  }
+
+  // Freeze the served dist and derive the build id once, before any request.
+  const frozen = freezeWebDist(WEB_DIST);
+  const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
+    hostedDashboardAuthMode: hostedDashboardAuthMode(auth),
+    startMicServer: createMicStarter(CONFIG),
+    micRequest: createMicRequest(CONFIG),
+    buildId: frozen.buildId,
+    terminalOptions: { maxPtysPerConnection: MAX_PTYS_PER_CONNECTION } });
+  const collector = createCollector();
+  const stopTerminals = ccHandlers.register(collector);
+  const bridge = createWsBridge({ table: collector.table });
+
+  // One daemon connection per host process, exactly as the desktop does; every
+  // browser tab shares it and receives the frames as `chat-stream:frame` pushes.
+  if (CONFIG.chatStream?.url) {
+    chatStreamClient.init(CONFIG, (frame) => bridge.broadcast('chat-stream:frame', frame));
+  }
+
+  const configJson = ccHandlers.publicConfig();
+  // Authenticated private dashboard files (see server/private_dashboards.js).
+  const privateDashboards = createPrivateDashboardRoute({
+    catalogRoot: CONFIG.dashboards?.catalogRoot || null,
+    log: (line) => console.warn(line),
+  });
+  const designs = createDesignRoutes({ libraryRoot: CONFIG.dashboards?.designLibraryRoot || process.env.PENTACLE_DESIGN_LIBRARY_ROOT || null });
+  const loginLimiter = createLoginLimiter();
+  const server = http.createServer((req, res) => {
+    if (!auth && !loopbackRequestAllowed(req)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }).end('origin_refused');
+      return;
+    }
+    const urlPath = new URL(req.url, 'http://localhost').pathname;
+    // When auth is on, /login is the only unauthenticated surface; a GET
+    // navigation for anything else is redirected there and every api call gets
+    // a 401. Loopback (auth === null) is served exactly as before.
+    if (auth && auth.mode === 'tailscale') {
+      if (!auth.isAuthed(req)) {
+        res.writeHead(401, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-store' })
+          .end(JSON.stringify({ error: 'tailnet identity required' }));
+        return;
+      }
+      if (urlPath === '/login') { res.writeHead(404).end('not found'); return; }
+    } else if (auth) {
+      if (urlPath === '/login') { handleLogin(req, res, auth, loginLimiter); return; }
+      if (!auth.isAuthed(req)) {
+        if (req.method === 'GET' && !urlPath.startsWith('/api/')) {
+          res.writeHead(302, { location: '/login', 'cache-control': 'no-store' }).end();
+        } else {
+          res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' }).end('authentication required');
+        }
+        return;
+      }
+    }
+    if (urlPath === '/api/config') {
+      res.writeHead(200, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-cache' })
+        .end(JSON.stringify(ccHandlers.publicConfig()));
+      return;
+    }
+    if (urlPath === '/api/health') {
+      res.writeHead(200, { 'content-type': CONTENT_TYPES['.json'] })
+        .end(JSON.stringify({ ok: true, connections: bridge.connections.size,
+          build_id: frozen.buildId, build_commit: frozen.buildCommit }));
+      return;
+    }
+    if (designs.handle(req, res, urlPath)) return;
+    if (urlPath === '/designs') { res.writeHead(302, { location: '/designs/' }).end(); return; }
+    if (privateDashboards.handle(req, res, urlPath)) return;
+    serveStatic(res, urlPath, configJson, frozen);
+  });
+
+  const wss = new WebSocketServer({
+    server,
+    path: '/cc',
+    // The upgrade carries the browser's cookies; reject an unauthenticated one
+    // before it becomes a socket. Unauthenticated loopback also verifies the
+    // local Host and browser Origin before exposing the operator bridge.
+    // Both auth modes also pin the upgrade's Origin (identity mode: the proxy's
+    // canonical Origin; token mode: this host's own authority), so a page on any
+    // other origin cannot ride the operator's cookie or tailnet identity.
+    verifyClient: auth
+      ? (info, done) => {
+        if (!auth.isAuthed(info.req)) return done(false, 401, 'authentication required');
+        if (!auth.originAllowed(info.req)) return done(false, 403, 'origin_refused');
+        return done(true);
+      }
+      : (info, done) => loopbackRequestAllowed(info.req)
+        ? done(true) : done(false, 403, 'origin_refused'),
+  });
+  wss.on('connection', (socket, req) => {
+    bridge.addSocket(socket, { micStartAllowed: micStartSameOrigin(req) });
+    socket.on('message', (raw) => { bridge.handleMessage(socket, raw.toString()); });
+    socket.on('close', () => bridge.removeSocket(socket));
+    socket.on('error', () => bridge.removeSocket(socket));
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(args.port, args.bind, resolve);
+  });
+  const actual = server.address();
+  if (configError) console.warn(`[web] using fallback configuration: ${configError.message || configError}`);
+  console.log(`[web] config ${configPath || '(fallback)'}`);
+  console.log(`[web] serving ${WEB_DIST}`);
+  console.log(`[web] listening on http://${args.bind}:${actual.port}  (ws ${actual.port}/cc)`);
+  console.log(`[web] auth ${!auth ? 'disabled (loopback, single-user)'
+    : auth.mode === 'tailscale' ? `ENABLED (tailscale identity) origin=${auth.origin} logins=${args.allowLogins.length}`
+      : 'ENABLED (token cookie required)'}`);
+
+  // One close for everything the host owns, so a caller (tests, a harness) can
+  // shut it down without leaking timers or terminal attachments.
+  const close = async () => {
+    try { await stopTerminals(); } catch {}
+    try { chatStreamClient.destroy(); } catch {}
+    bridge.closeAll();
+    for (const socket of wss.clients) { try { socket.terminate(); } catch {} }
+    await new Promise((resolve) => wss.close(resolve));
+    await new Promise((resolve) => server.close(resolve));
+  };
+
+  const shutdown = () => {
+    close().finally(() => process.exit(0));
+    // Give auth cancellation its bounded target-child cleanup interval.
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  return { server, wss, bridge, handlers: collector.table, close, port: actual.port, url: `http://${args.bind}:${actual.port}` };
+}
+
+module.exports = { main, parseArgs, resolveProfilePath, serveStatic, WEB_DIST, isLoopbackBind, createAuth, COOKIE_NAME,
+  createTailscaleAuth, isTailnetAddress, hostedDashboardAuthMode, createLoginLimiter };
+
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(`[web] failed to start: ${e && e.stack ? e.stack : e}`);
+    process.exit(1);
+  });
+}

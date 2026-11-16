@@ -1,0 +1,7521 @@
+"""store.py — the ONLY module that touches SQLite.
+
+Contract (v2_design.md module table):
+  owns: SQLite in one worker thread, WAL, write queue.
+  notes: **only** module touching the DB; the daemon's bounded retention job
+         archives eligible history on a cadence so the hot set stays
+         O(open).
+
+The retention job lives in `retention.py` and runs its passes through `submit()`
+like any other caller, one bounded batch per trip. Its loop-rule knobs are
+documented on `retention.RetentionConfig`; the store's only obligations to it
+are `path` (to locate the archive beside the hot DB) and the configured paired
+history archive; compaction is offline maintenance.
+
+Architecture constraint 2 (spec): zero blocking I/O on the event loop. The
+asyncio side NEVER calls sqlite3 directly — it submits a callable to the queue
+and awaits a future resolved by the worker thread.
+
+Schema contract: v2 opens the SAME `sessions.db` as v1 (PK `(host,
+session_name)`; `stream_id` is derived as `f"{host}:{session_name}"`, never
+stored). v2-only auxiliary tables are prefixed `v2_` and are invisible to v1.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+import copy
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import logging
+import os
+import queue
+import re
+import sqlite3
+import threading
+import time
+from typing import Any, Callable
+import uuid
+
+from retention import (HistoryConnection, prepare_history_schema, history_query,
+                       next_receipt_rowid, bind_history_archive, default_archive_path,
+                       migrate_route_batch_archive, DELIVERY_PROOF_VALID,
+                       DELIVERY_PROOF_TARGET, DELIVERY_PROOF_WIRE)
+from send_metadata import normalize_send_meta
+from loop_watchdog import StoreProgress, request_timing
+import store_call_diag
+from prockill import canonical_start
+from session_summary import SUMMARY_TAIL_LIMIT, apply_message_summary
+
+import attachment_locks
+import store_exchange
+import store_attachments
+import store_usage
+import store_ingest_checkpoint
+import chat_recovery
+import store_capacity_retry
+import store_qa
+import spawn_creation
+import store_lifecycle_authority as lifecycle_authority
+import store_host_transfer as host_transfer
+from store_assistant_binding import (
+    ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL,
+    ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
+    ASSISTANT_RESTORE_EPISODE_DDL, ASSISTANT_RESTORE_ACTIVE_INDEX_DDL,
+    migrate_restore_episode_grant_columns,
+    ASSISTANT_RESTORE_AUDIT_DDL, ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL,
+    ASSISTANT_COMPOSITE_TELL_QUEUE_DDL, SCOPED_OWNERSHIP_DDL,
+    AssistantBindingStoreMixin, _binding_conn, migrate_binding_to_named,
+)
+from assistant_lane_rulings import RULING_REQUESTS_DDL, ASSISTANT_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
+from voice_answers import VOICE_ANSWER_ACKS_DDL, VOICE_ANSWER_BINDINGS_DDL, VoiceAnswersStoreMixin
+import store_consent as consent
+from store_qa import QaStoreMixin, SpecInputsUnavailable, spec_binding_source
+from store_exchange import ExchangeStoreMixin
+
+from store_work_lanes import _WorkLanesStoreMixin, ensure_work_lane_schema
+from store_work_index import WorkIndexStoreMixin
+from store_work_lane_episodes import WorkLaneEpisodesStoreMixin
+from store_screen_lease import SCREEN_LEASE_DDL, ScreenLeaseStoreMixin, release_holder_conn
+from store_external_work import EXTERNAL_WORK_DDL, _ExternalWorkStoreMixin
+from store_routing import (
+    ASSISTANT_COMPOSITE_LANES_DDL,
+    ASSISTANT_COMPOSITE_OPERATIONS_DDL,
+    ASSISTANT_COMPOSITE_PUBLICATIONS_DDL,
+    ASSISTANT_COMPOSITE_QUESTION_BRIDGES_DDL,
+    ASSISTANT_COMPOSITE_ROUTES_DDL,
+    ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL,
+    ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL,
+    OUTBOUND_NOTICE_DDL,
+    OUTBOUND_NOTICE_INDEX_DDL,
+    ROUTING_INTEGRITY_AUDIT_DDL,
+    ROUTING_INTEGRITY_DDL,
+    ROUTING_INTEGRITY_NOTICE_DDL,
+    _RoutingStoreMixin,
+    _routing_iso_now,
+)
+from store_specs import (
+    UNASSIGNED,
+    carried_assignment,
+    effective_assignment,
+    JSON_COLUMNS,
+    SPEC_BINDING_PROVENANCE_KINDS,
+    SPEC_JSON_COLUMNS,
+    _SpecPersistenceMixin,
+    _enc,
+    _normalize_session_fields,
+    _row,
+    _session_row,
+    normalize_spec_binding_provenance,
+    normalize_spec_ids,
+)
+from claude_jsonl_norm import strip_peer_delivery_envelope
+from submission_events import COMMITTED_PENDING_PROOF_STATUSES, provider_text_digest
+from v2_runtime import iso_now, primary_assistant_name
+
+
+log = logging.getLogger("chat_streamd_v2.store")
+
+EVENT_PUSH_TARGET_SHA_KEY = "event_push.target_sha"
+EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY = "event_push.target_sha.previous"
+_FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
+_RECEIPT_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_SEND_REQUEST_ID_RE = re.compile(r"send-[A-Za-z0-9_-]{1,123}\Z")
+_PROVENANCE_ID_MAX = 256
+#: 2 adds the usage provenance tables (store_usage.DDL); older daemons ignore both.
+SCHEMA_VERSION = 2
+_TRUSTED_STATUS_NOTICE_KINDS = frozenset({"status_card", "status_card_combined"})
+_TRUSTED_NOTIFICATION_ANSWER_METADATA_KEYS = frozenset({
+    "canonical_intent",
+    "notification_id",
+    "producer_session_generation",
+    "producer_stream_id",
+    "question_id",
+    "schema",
+})
+_TRUSTED_STATUS_BINDING_KEYS = frozenset({
+    "body_sha256",
+    "kind",
+    "notice_id",
+    "pre_input_watermark",
+    "proof_event_id",
+    "recipient_stream_id",
+    "session_generation",
+})
+_CLIENT_USER_BINDING_KEYS = (
+    "client_origin", "optimistic_id", "request_id", "receipt_id",
+)
+
+
+def _nonempty_client_binding(event: dict[str, Any]) -> bool:
+    raw = event.get("raw")
+    raw = raw if isinstance(raw, dict) else {}
+    for key in _CLIENT_USER_BINDING_KEYS:
+        value = event.get(key)
+        raw_value = raw.get(key)
+        if value is True or raw_value is True:
+            return True
+        for candidate in (value, raw_value):
+            if candidate is not None and candidate is not False:
+                if not isinstance(candidate, str) or candidate.strip():
+                    return True
+    return False
+
+
+def _strip_reserved_daemon_notice(event: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(event)
+    raw = projected.get("raw")
+    if isinstance(raw, dict) and "daemon_notice" in raw:
+        cleaned = dict(raw)
+        cleaned.pop("daemon_notice", None)
+        if cleaned:
+            projected["raw"] = cleaned
+        else:
+            projected.pop("raw", None)
+    return projected
+
+
+def _project_daemon_notice_events_conn(
+    conn: sqlite3.Connection,
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip the reserved namespace, then attach only an exact fixed proof.
+
+    This is the one projection authority used by both durable reads and live
+    broadcasts. Provider-supplied daemon_notice raw data never survives the
+    first line of this function.
+    """
+    stripped = [_strip_reserved_daemon_notice(event) for event in events]
+    event_ids_by_stream: dict[str, set[int]] = {}
+    for event in stripped:
+        # Necessary predicates of the final proof check only. Keep stripping
+        # universal, and leave authority to the exact binding checks below.
+        if (
+            str(event.get("kind") or "").upper() != "USER"
+            or _nonempty_client_binding(event)
+            or not str(event.get("text") or "").startswith("[pentacle-notice:")
+        ):
+            continue
+        stream_id = str(event.get("stream_id") or "")
+        event_id = event.get("daemon_seq")
+        if (
+            stream_id
+            and isinstance(event_id, int)
+            and not isinstance(event_id, bool)
+            and event_id > 0
+        ):
+            event_ids_by_stream.setdefault(stream_id, set()).add(event_id)
+    if not event_ids_by_stream:
+        return stripped
+
+    bindings: dict[tuple[str, int], dict[str, Any] | None] = {}
+    for stream_id, event_ids in event_ids_by_stream.items():
+        rows = conn.execute(
+            """SELECT notice_id, kind, recipient_stream_id, body, proof_binding
+               FROM v2_outbound_notices
+               WHERE recipient_stream_id=? AND proof_binding IS NOT NULL
+                 AND kind IN ('status_card','status_card_combined')""",
+            (stream_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                binding = json.loads(row["proof_binding"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(binding, dict) or frozenset(binding) != _TRUSTED_STATUS_BINDING_KEYS:
+                continue
+            event_id = binding.get("proof_event_id")
+            if (
+                not isinstance(event_id, int)
+                or isinstance(event_id, bool)
+                or event_id not in event_ids
+                or binding.get("recipient_stream_id") != stream_id
+                or not str(binding.get("session_generation") or "")
+                or binding.get("notice_id") != row["notice_id"]
+                or binding.get("kind") != row["kind"]
+                or row["kind"] not in _TRUSTED_STATUS_NOTICE_KINDS
+            ):
+                continue
+            key = (stream_id, event_id)
+            bindings[key] = binding if key not in bindings else None
+
+        answer_rows = conn.execute(
+            """SELECT n.notice_id, n.dedupe_key, n.recipient_stream_id,
+                      n.tell_id, n.body, n.metadata, t.reply AS tell_reply
+               FROM v2_outbound_notices n
+               JOIN v2_tell_deliveries t ON t.tell_id=n.tell_id
+               WHERE n.recipient_stream_id=? AND n.kind='notification_answer'
+                 AND n.delivered_at IS NOT NULL AND n.terminal_at IS NULL""",
+            (stream_id,),
+        ).fetchall()
+        for row in answer_rows:
+            try:
+                metadata = json.loads(row["metadata"])
+                tell_envelope = json.loads(row["tell_reply"])
+            except (TypeError, ValueError):
+                continue
+            reply = (
+                tell_envelope.get("reply")
+                if isinstance(tell_envelope, dict) else None
+            )
+            delivery = (
+                tell_envelope.get("delivery")
+                if isinstance(tell_envelope, dict) else None
+            )
+            notice_id = str(row["notice_id"] or "")
+            notification_id = (
+                str(metadata.get("notification_id") or "")
+                if isinstance(metadata, dict) else ""
+            )
+            generation = (
+                str(metadata.get("producer_session_generation") or "")
+                if isinstance(metadata, dict) else ""
+            )
+            event_id = delivery.get("proof_event_id") if isinstance(delivery, dict) else None
+            watermark = delivery.get("proof_watermark") if isinstance(delivery, dict) else None
+            expected_digest = hashlib.sha256(
+                f"{stream_id}\x00{str(row['body'] or '')}".encode()
+            ).hexdigest()
+            if (
+                not isinstance(metadata, dict)
+                or frozenset(metadata) != _TRUSTED_NOTIFICATION_ANSWER_METADATA_KEYS
+                or metadata.get("schema") != "v2_notification_answer_v1"
+                or not isinstance(metadata.get("canonical_intent"), dict)
+                or metadata.get("producer_stream_id") != stream_id
+                or not generation
+                or not notification_id
+                or not str(metadata.get("question_id") or "")
+                or notice_id != f"notification-answer-{notification_id}"
+                or row["dedupe_key"] != notice_id
+                or row["tell_id"] != notice_id
+                or not isinstance(reply, dict)
+                or not isinstance(delivery, dict)
+                or tell_envelope.get("payload_digest") != expected_digest
+                or delivery.get("request_payload_hash") != expected_digest
+                or reply.get("tell_id") != notice_id
+                or delivery.get("tell_id") != notice_id
+                or reply.get("to_stream_id") != stream_id
+                or delivery.get("to_stream_id") != stream_id
+                or delivery.get("text") != str(row["body"] or "")
+                or delivery.get("notification_answer_generation") != generation
+                or reply.get("delivery_status") != "delivered"
+                or delivery.get("delivery_status") != "delivered"
+                or reply.get("submission_confirmed") is not True
+                or delivery.get("submission_confirmed") is not True
+                or reply.get("confirmation_status") != "confirmed"
+                or reply.get("action_committed") is not True
+                or reply.get("confirmation_pending") is not False
+                or reply.get("proof_state") != "proven"
+                or delivery.get("proof_state") != "proven"
+                or not isinstance(event_id, int)
+                or isinstance(event_id, bool)
+                or event_id not in event_ids
+                or reply.get("proof_event_id") != event_id
+                or not isinstance(watermark, int)
+                or isinstance(watermark, bool)
+                or watermark < 0
+                or event_id <= watermark
+                or reply.get("proof_watermark") != watermark
+                or not str(row["body"] or "").startswith(
+                    f"[pentacle-notice:{notice_id}]\n[notification.answer]\n"
+                    f"notification_id={notification_id}\n"
+                )
+            ):
+                continue
+            binding = {
+                "body_sha256": hashlib.sha256(
+                    str(row["body"] or "").encode("utf-8")
+                ).hexdigest(),
+                "kind": "notification_answer",
+                "notice_id": notice_id,
+                "pre_input_watermark": watermark,
+                "proof_event_id": event_id,
+                "recipient_stream_id": stream_id,
+                "session_generation": generation,
+            }
+            key = (stream_id, event_id)
+            bindings[key] = binding if key not in bindings else None
+
+    projected: list[dict[str, Any]] = []
+    for event in stripped:
+        stream_id = str(event.get("stream_id") or "")
+        event_id = event.get("daemon_seq")
+        binding = bindings.get((stream_id, event_id))
+        if (
+            not isinstance(binding, dict)
+            or str(event.get("kind") or "").upper() != "USER"
+            or _nonempty_client_binding(event)
+        ):
+            projected.append(event)
+            continue
+        body = str(event.get("text") or "")
+        body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        notice_id = str(binding["notice_id"])
+        if (
+            body_sha256 != binding["body_sha256"]
+            or not body.startswith(f"[pentacle-notice:{notice_id}]\n")
+        ):
+            projected.append(event)
+            continue
+        raw = event.get("raw")
+        clean_raw = dict(raw) if isinstance(raw, dict) else {}
+        clean_raw["daemon_notice"] = {
+            "schema_version": 1,
+            "kind": binding["kind"],
+            "notice_id": notice_id,
+            "stream_id": stream_id,
+            "session_generation": binding["session_generation"],
+            "event_id": event_id,
+            "body_sha256": body_sha256,
+        }
+        projected.append({**event, "raw": clean_raw})
+    return projected
+
+
+class _EntryDropped:
+    """One entry whose lifecycle predicate missed inside a batch CAS.
+
+    Distinct from ``None`` (nothing new was stored — a durable replay, or a
+    superseded Claude binding) so a caller can report the miss for that one
+    entry instead of rejecting every entry the same host pushed alongside it.
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "ENTRY_DROPPED"
+
+
+#: Sentinel returned in place of a sequence for a per-entry predicate miss.
+ENTRY_DROPPED = _EntryDropped()
+
+
+def _send_wire_digest(value: str) -> str:
+    """Hash the normalized injected prompt without retaining staged paths."""
+    cleaned = _RECEIPT_ANSI_RE.sub("", value or "").replace("\r", "").replace("\u00a0", " ")
+    normalized = "\n".join(line.rstrip() for line in cleaned.split("\n")).strip()
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\s+", " ", normalized)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _safe_provenance_id(value: object) -> str | None:
+    """Keep actor claims bounded and metadata-only in durable projections."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:_PROVENANCE_ID_MAX]
+
+
+def _decode_spawn_outcome(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Decode the optional structured delivery receipt once at the store edge."""
+    if row and isinstance(row.get("delivery_receipt"), str):
+        try:
+            decoded = json.loads(row["delivery_receipt"])
+        except (TypeError, ValueError):
+            decoded = None
+        if isinstance(decoded, dict):
+            row["delivery_receipt"] = decoded
+    return row
+
+
+def _spawn_cancelled(conn: sqlite3.Connection, host: str, name: str, request_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM v2_spawn_cancellations WHERE host=? "
+        "AND COALESCE(request_id, '')=? AND (request_id != '' OR session_name=?)",
+        (host, request_id, name),
+    ).fetchone() is not None or conn.execute(
+        "SELECT 1 FROM v2_spawn_outcomes WHERE host=? AND session_name=? "
+        "AND COALESCE(request_id, '')=? AND state='cancelled'",
+        (host, name, request_id),
+    ).fetchone() is not None
+
+
+def _spawn_reservation(conn: sqlite3.Connection, host: str, name: str,
+                       request_id: str, nonce: str | None = None) -> dict[str, Any] | None:
+    row = _row(conn.execute(
+        "SELECT * FROM v2_stream_reservations WHERE host=? AND session_name=? "
+        "AND COALESCE(request_id, '')=?", (host, name, request_id),
+    ).fetchone())
+    if row is None or (nonce is not None and str(row.get("nonce") or "") != nonce):
+        return None
+    return None if _spawn_cancelled(conn, host, name, request_id) else row
+
+
+def _admission_held(conn: sqlite3.Connection, host: str, now: float) -> bool:
+    """Is a spawn admission freeze active for `host` right now? Read inside the
+    admitting store txn (QA cycle-3 astra-[3]) so the hold check and the claim
+    are ONE serialized operation -- a freeze set between a separate pre-check
+    and the claim can no longer let a new admission slip through."""
+    row = conn.execute(
+        "SELECT held_until FROM v2_spawn_admission_hold WHERE host=?", (host,)
+    ).fetchone()
+    return row is not None and float(row["held_until"]) >= now
+
+
+def _initial_admission_paused(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM kv WHERE k=?",("provider_cli.initial_admission_pause",)).fetchone() is not None
+
+
+def _insert_stream_reservation(
+    conn: sqlite3.Connection, *, host: str, session_name: str, request_id: str,
+    expires_at: float, nonce: str, owner_instance_id: str,
+    idempotency_key: str, request_payload_hash: str,
+) -> None:
+    """Write the one canonical stream-reservation row for both claim paths."""
+    if _spawn_cancelled(conn, host, session_name, request_id):
+        raise sqlite3.IntegrityError("spawn request was cancelled")
+    conn.execute(
+        "INSERT INTO v2_stream_reservations "
+        "(host, session_name, request_id, expires_at, nonce, owner_instance_id, "
+        "idempotency_key, request_payload_hash) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (host, session_name, request_id, expires_at, nonce or None,
+         owner_instance_id or None, idempotency_key or None,
+         request_payload_hash or None),
+    )
+
+
+def _upsert_spawn_outcome(
+    conn: sqlite3.Connection, host: str, session_name: str, state: str, **fields: Any
+) -> bool:
+    """Write one `v2_spawn_outcomes` row inside the CALLER's transaction (no
+    commit). Factored out of `set_spawn_outcome` so an atomic multi-write op
+    (e.g. `cancel_reservation_fenced`) can terminalize an outcome and mutate the
+    reservation in the SAME single-writer txn."""
+    request_id = str(fields.get("request_id") or "")
+    if _spawn_cancelled(conn, host, session_name, request_id):
+        return False
+    prior = conn.execute(
+        "SELECT state FROM v2_spawn_outcomes WHERE host=? AND session_name=?", (host, session_name),
+    ).fetchone()
+    if prior is not None and prior["state"] == "cancelled" and not _spawn_reservation(
+        conn, host, session_name, request_id,
+    ):
+        return False
+    conn.execute(
+        "INSERT INTO v2_spawn_outcomes (host, session_name, request_id, state, reason,"
+        " effective_model, effective_effort, delivery_evidence, delivery_receipt, updated_at,"
+        " idempotency_key, request_payload_hash, readiness_timed_out)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(host, session_name) DO UPDATE SET request_id=excluded.request_id,"
+        " state=excluded.state, reason=excluded.reason, effective_model=excluded.effective_model,"
+        " effective_effort=excluded.effective_effort,"
+        " delivery_evidence=excluded.delivery_evidence, delivery_receipt=excluded.delivery_receipt,"
+        " updated_at=excluded.updated_at,"
+        " idempotency_key=COALESCE(excluded.idempotency_key, v2_spawn_outcomes.idempotency_key),"
+        " request_payload_hash=COALESCE(excluded.request_payload_hash, v2_spawn_outcomes.request_payload_hash),"
+        " readiness_timed_out=excluded.readiness_timed_out"
+        " WHERE v2_spawn_outcomes.state != 'cancelled' "
+        " OR COALESCE(v2_spawn_outcomes.request_id, '') != COALESCE(excluded.request_id, '')",
+        (
+            host, session_name, fields.get("request_id"), state, fields.get("reason"),
+            fields.get("effective_model"), fields.get("effective_effort"),
+            fields.get("delivery_evidence"),
+            json.dumps(fields["delivery_receipt"], separators=(",", ":"))
+            if isinstance(fields.get("delivery_receipt"), dict) else fields.get("delivery_receipt"),
+            time.time(),
+            fields.get("idempotency_key"), fields.get("request_payload_hash"),
+            1 if fields.get("readiness_timed_out") else 0,
+        ),
+    )
+    if state == "cancelled":
+        # Persist the immutable request tombstone, carrying the creation nonce
+        # (QA cycle-3 luna-[2]) so cleanup/identity can survive name reuse even
+        # holding only the tombstone. Explicit columns: the cancellation table
+        # has the extra `nonce`, so `SELECT *` no longer aligns.
+        conn.execute(
+            f"INSERT OR IGNORE INTO v2_spawn_cancellations ({_SPAWN_OUTCOME_COLUMNS}, nonce) "
+            f"SELECT {_SPAWN_OUTCOME_COLUMNS}, ? FROM v2_spawn_outcomes "
+            "WHERE host=? AND session_name=? AND state='cancelled'",
+            (fields.get("nonce"), host, session_name),
+        )
+    return True
+
+
+def _effective_send_receipt_row(conn: sqlite3.Connection, target: str, request: str) -> sqlite3.Row | None:
+    """Canonical retained receipt row, shared by readers and transactional drain."""
+    from receipt_proof import epoch, proved_pending_precedence
+    rows = history_query(conn,
+        """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
+           WHERE to_stream_id=? AND request_id=?
+           ORDER BY rowid""",
+        (target, request),
+    ).fetchall()
+    if not rows:
+        return None
+    prior, _conflict = proved_pending_precedence(rows)
+    if prior is not None and ":" in target:
+        current = conn.execute(
+            "SELECT created_at FROM sessions WHERE host=? AND session_name=?",
+            tuple(target.split(":", 1))).fetchone()
+        if current is not None:
+            birth, claim = epoch(current["created_at"]), epoch(rows[0]["created_at"])
+            if birth is None or claim is None or birth >= claim:
+                prior = None
+    row = prior if prior is not None else rows[-1]
+    return row
+
+
+def _send_receipt_row(
+    row: sqlite3.Row, *, include_attachments: bool = False, include_display_text: bool = False,
+    include_rowid: bool = False,
+) -> dict[str, Any]:
+    """Project a receipt without leaking staged paths, wire text, or bytes."""
+    try:
+        attachments = json.loads(str(row["attachments_json"] or "[]"))
+    except (TypeError, ValueError):
+        attachments = []
+    if not isinstance(attachments, list):
+        attachments = []
+    result: dict[str, Any] = {
+        "receipt_id": str(row["receipt_id"]),
+        "request_id": str(row["request_id"]),
+        "to_stream_id": str(row["to_stream_id"]),
+        "state": str(row["state"]),
+        "content_kind": str(row["content_kind"]),
+        "attachment_count": len(attachments),
+        "delivery": str(row["delivery"]),
+        "submission_confirmed": bool(row["submission_confirmed"]),
+        "created_at": str(row["created_at"]),
+    }
+    if include_rowid:
+        result["receipt_rowid"] = int(row["receipt_rowid"])
+    columns = set(row.keys())
+    if "from_stream_id" in columns and row["from_stream_id"]:
+        result["from_stream_id"] = str(row["from_stream_id"])
+    if "actor_stream_id" in columns and row["actor_stream_id"]:
+        result["actor_stream_id"] = str(row["actor_stream_id"])
+    if "actor_trusted" in columns:
+        result["actor_trusted"] = bool(row["actor_trusted"])
+    if "meta_json" in columns:
+        try:
+            meta = json.loads(str(row["meta_json"] or "{}"))
+        except (TypeError, ValueError):
+            meta = {}
+        if isinstance(meta, dict) and meta:
+            result["meta"] = meta
+    if row["optimistic_id"]:
+        result["optimistic_id"] = str(row["optimistic_id"])
+    if row["reason"]:
+        result["reason"] = str(row["reason"])
+    if row["attempts"] is not None:
+        result["attempts"] = int(row["attempts"])
+    if include_attachments:
+        result["attachments"] = [dict(item) for item in attachments if isinstance(item, dict)]
+    # Only the existing USER event projection needs the already-safe display
+    # text.  The durable query stays metadata-only and never returns the
+    # injected attachment wire text (or a staged path).
+    if include_display_text:
+        result["display_text"] = str(row["display_text"] or "")
+    return result
+
+
+def _project_send_receipt_row(
+    conn: sqlite3.Connection, row: sqlite3.Row, **options: bool,
+) -> dict[str, Any]:
+    """Keep latest outcome fields, but bind meta to the request's first row."""
+    result = _send_receipt_row(row, **options)
+    original = history_query(conn,
+        "SELECT meta_json FROM v2_send_receipts "
+        "WHERE to_stream_id=? AND request_id=? ORDER BY rowid ASC LIMIT 1",
+        (row["to_stream_id"], row["request_id"]),
+    ).fetchone()
+    try:
+        raw = json.loads(str(original["meta_json"] or "{}")) if original is not None else {}
+    except (TypeError, ValueError):
+        raw = {}
+    meta = normalize_send_meta(raw)
+    # Composite admission owns this internal receipt marker and its stricter
+    # voice whitelist. Preserve the established composite receipt shape.
+    if isinstance(raw, dict) and raw.get("assistant_composite") is True:
+        meta["assistant_composite"] = True
+    result.pop("meta", None)
+    if meta:
+        result["meta"] = meta
+    return result
+
+
+def _restore_message_summary_conn(
+    conn: sqlite3.Connection, session: dict[str, Any], *, deliveries=None,
+) -> None:
+    """Rebuild one preview from a bounded, lifecycle-matched projected tail."""
+    tail = conn.execute(
+        "SELECT event_id, event_json FROM session_event_tail "
+        "WHERE stream_id=? AND session_created_at=? ORDER BY event_id DESC LIMIT ?",
+        (session["stream_id"], session["created_at"], SUMMARY_TAIL_LIMIT),
+    ).fetchall()
+    events = []
+    for item in tail:
+        try:
+            event = json.loads(item["event_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict):
+            events.append({**event, "daemon_seq": int(item["event_id"])})
+    for event in _project_session_events_conn(conn, events, deliveries=deliveries):
+        apply_message_summary(session, event)
+
+
+def _project_session_events_conn(
+    conn: sqlite3.Connection, events: list[dict[str, Any]], *, deliveries=None,
+) -> list[dict[str, Any]]:
+    """Project immutable history, including metadata on old stamped USER rows."""
+    projected = _project_daemon_notice_events_conn(conn, events)
+    from tell_proof import input_origin, delivery_wire
+    for index, event in enumerate(projected):
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        if event.get("kind") in {"USER", "TELL"}:
+            if raw.get("daemon_notice"):
+                origin = {"kind": "service", "verified": True, "generation": None}
+            elif deliveries is None:
+                origin = input_origin(conn, event, event.get("daemon_seq"))
+            else:
+                origin = input_origin(conn, event, event.get("daemon_seq"), deliveries=deliveries)
+            event = {**event, "raw": {**raw, "input_provenance": origin}}
+            if event.get("kind") == "TELL" and origin["kind"] != "peer":
+                event["raw"]["input_source_kind"] = "TELL"
+                event["text"] = delivery_wire(event)
+                event["kind"] = "USER"
+                for key in ("sender", "peer_payload"):
+                    event["raw"].pop(key, None)
+                if (event.get("message_envelope") or {}).get("kind") == "peer_delivery":
+                    event.pop("message_envelope", None)
+                if origin["kind"] == "unknown":
+                    event["raw"].update(subsystem="mixed_input", bug_ref="unproven_input_origin")
+            projected[index] = event
+        request_id = str(event.get("request_id") or "")
+        receipt_id = str(event.get("receipt_id") or "")
+        if event.get("kind") != "USER" or not receipt_id or not _SEND_REQUEST_ID_RE.fullmatch(request_id):
+            continue
+        row = history_query(conn,
+            "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? "
+            "AND receipt_id=? ORDER BY rowid DESC LIMIT 1",
+            (str(event.get("stream_id") or ""), request_id, receipt_id),
+        ).fetchone()
+        if row is None:
+            continue
+        text = str(event.get("text") or "")
+        if text != str(row["display_text"] or "") and _send_wire_digest(text) != row["wire_digest"]:
+            continue
+        meta = normalize_send_meta(_project_send_receipt_row(conn, row).get("meta"))
+        copy = dict(event)
+        copy.pop("meta", None)
+        if meta:
+            copy["meta"] = meta
+        projected[index] = copy
+    return projected
+
+
+def _insert_send_receipt_row(
+    conn: sqlite3.Connection, *, to_stream_id: str, request_id: str, receipt_id: str,
+    state: str, optimistic_id: str | None, wire_digest: str, display_text: str,
+    content_kind: str, attachments_json: str, delivery: str, submission_confirmed: bool,
+    reason: str | None, attempts: int | None, created_at: str,
+    from_stream_id: str | None, actor_stream_id: str | None, actor_trusted: bool,
+    meta_json: str = "{}",
+) -> dict[str, Any]:
+    """Append one immutable send-receipt row and return its rowid-bearing projection.
+
+    The single authoritative INSERT shared by ``append_send_receipt`` and the
+    atomic ``claim_or_coalesce_send`` claim, so both write identical column shapes.
+    """
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        receipt_rowid = next_receipt_rowid(conn)
+        cur = conn.execute(
+            """INSERT INTO v2_send_receipts (
+                rowid, to_stream_id, request_id, receipt_id, state, optimistic_id,
+                wire_digest, display_text, content_kind, attachments_json,
+                delivery, submission_confirmed, reason, attempts, created_at,
+                from_stream_id, actor_stream_id, actor_trusted, meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                receipt_rowid, to_stream_id, request_id, receipt_id, state, optimistic_id or None,
+                wire_digest, str(display_text or ""), str(content_kind),
+                attachments_json, str(delivery or state),
+                1 if submission_confirmed else 0, reason or None, attempts, created_at,
+                _safe_provenance_id(from_stream_id),
+                _safe_provenance_id(actor_stream_id),
+                1 if actor_trusted else 0,
+                str(meta_json or "{}"),
+            ),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    row = conn.execute(
+        "SELECT rowid AS receipt_rowid, * FROM v2_send_receipts WHERE rowid=?",
+        (int(cur.lastrowid),),
+    ).fetchone()
+    assert row is not None
+    return _send_receipt_row(row, include_rowid=True)
+
+
+# v1's `sessions` DDL plus v2's nullable title. Existing databases receive the
+# same column through the additive startup seam below, with no row rewrite.
+SESSIONS_DDL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    parent_stream_id TEXT,
+    objective TEXT,
+    objective_source TEXT,
+    role TEXT,
+    phase TEXT,
+    visibility TEXT NOT NULL,
+    created_at TEXT NOT NULL, handoff_from_stream_id TEXT, closed_at TEXT,
+    status TEXT NOT NULL DEFAULT 'open', spec_id TEXT, spec_resolution TEXT,
+    offline_since_ts INTEGER, self_close_on_completion INTEGER NOT NULL DEFAULT 0,
+    token_hash TEXT, token_hash_version TEXT, harness_run_id TEXT,
+    opened_by_host_id TEXT, jsonl_path TEXT, claude_session_id TEXT, claude_session_lineage TEXT,
+    spec_ids TEXT, presumed_dead_at TEXT, status_card TEXT,
+    context_tokens INTEGER, model_context_window INTEGER, context_updated_at TEXT,
+    context_level TEXT, pane_pid TEXT, observer_binding TEXT, account_binding TEXT,
+    pane_status TEXT NOT NULL DEFAULT 'pane_unknown',
+    requested_model TEXT, requested_effort TEXT, effective_model TEXT,
+    effective_effort TEXT, routing_integrity TEXT, routing_integrity_reason TEXT,
+    routing_integrity_updated_at TEXT, provider TEXT, presumed_dead_fired_at TEXT,
+    qualified_spec_ids TEXT, spec_binding_provenance TEXT, dead_open_closed_at TEXT,
+    close_kind TEXT, bootstrap_state TEXT, title TEXT,
+    PRIMARY KEY (host, session_name)
+)
+"""
+
+# v2-only. Ledger req 4: spawn reserves a stream id ATOMICALLY with a TTL; a
+# failed spawn releases it; a reserved id can never be adopted by an unrelated
+# live session. Prefixed `v2_` so v1 never sees it.
+#
+# The row doubles as the crash-safe SPAWN INTENT (QA #5). `payload` is written
+# before `tmux new-session`, `tmux_created` immediately after it, so a daemon
+# death anywhere in that window still leaves a discoverable record that boot
+# reconciliation can adopt (pane alive) or release (pane gone). Normal adoption
+# never kills; if the fenced session-row registration itself fails, reconciliation
+# rolls back only after confirming pane death. Without the intent, a live pane can
+# become an orphan no row points at.
+RESERVATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS v2_stream_reservations (
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    request_id TEXT,
+    expires_at REAL NOT NULL,
+    payload TEXT,
+    tmux_created INTEGER NOT NULL DEFAULT 0,
+    nonce TEXT,
+    owner_instance_id TEXT,
+    pane_pid INTEGER,
+    pane_started_at TEXT,
+    idempotency_key TEXT,
+    request_payload_hash TEXT,
+    PRIMARY KEY (host, session_name)
+)
+"""
+# In-flight dedupe marker: a same-key spawn arriving while a reservation still
+# holds resolves to that in-flight session instead of minting a second pane
+# (rpc_delivery_determinism lane). Content-hash lets a same-key/different-payload
+# retry be rejected as a conflict rather than silently deduped.
+STREAM_RESERVATION_IDEMPOTENCY_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS v2_stream_reservations_idempotency_key "
+    "ON v2_stream_reservations (host, idempotency_key)"
+)
+
+# v2-only. `tell_id` is the caller's idempotency key (QA #6): a retried tell
+# must not inject twice, so the durable delivery envelope is remembered and
+# replayed (including a Codex ``pasted_unsubmitted`` outcome).
+# Bounded by TELL_RETENTION rows — this is a dedupe window, not a ledger.
+TELL_DELIVERY_DDL = """
+CREATE TABLE IF NOT EXISTS v2_tell_deliveries (
+    tell_id TEXT PRIMARY KEY,
+    reply TEXT NOT NULL,
+    created_at REAL NOT NULL
+)
+"""
+
+# v2-only. Post-hoc role provenance. `role` itself stays on the sessions row —
+# window_schedule authority reads `sessions.role` directly — so a `role set`
+# needs no sessions-column migration. This aux row only records that the role
+# was set on a LIVE seat via `role set` (vs spawn/handoff), plus the acting
+# principal and timestamp, so inspect/list can project `role_source`. A NEW
+# table (not a sessions column) is deliberate: `CREATE TABLE IF NOT EXISTS`
+# lands it on the existing production DB at the next boot, while store boot
+# never reshapes the `sessions` table (see test_store_schema_floor).
+SESSION_ROLE_DDL = """
+CREATE TABLE IF NOT EXISTS v2_session_role (
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    role_source TEXT NOT NULL,
+    actor TEXT,
+    changed_at TEXT,
+    PRIMARY KEY (host, session_name)
+)
+"""
+
+TELL_RETENTION = 1000
+
+
+def role_source_for(row: Any, stored: str | None) -> str | None:
+    """Project a session's role provenance. A stored marker (written by a
+    post-hoc `role set`) wins; otherwise derive from the row — a handoff
+    successor is ``handoff``, any other roled seat is ``spawn``, a roleless
+    seat is ``None``. Migration-safe: a session with no aux row reads as its
+    derived source, so legacy rows need no backfill."""
+    if stored:
+        return stored
+    row = row if isinstance(row, dict) else {}
+    if str(row.get("handoff_from_stream_id") or "").strip():
+        return "handoff"
+    if str(row.get("role") or "").strip():
+        return "spawn"
+    return None
+
+
+# v2-only. Restart-safe per-session nudge cooldown (the pinned dead-nudge-spam
+# class, D2). v1 kept the last-nudge time in memory, so a daemon restart or a
+# host sleep/wake flap re-minted it and the "please title yourself" reminder
+# re-fired every pass. Persisting `(stream_id, kind) -> last_nudged_at` here
+# means a mid-cooldown restart still honors the cooldown. `basis` records the
+# state that was stale when we nudged (the status card's `updated_at`); a later
+# card write moves past it, which resets the episode so a genuinely-updated
+# session is free to be nudged again once it later goes stale. Bounded to the
+# open-session set — closed rows are pruned each pass.
+NUDGE_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS v2_nudge_state (
+    stream_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    last_nudged_at REAL NOT NULL,
+    basis TEXT,
+    PRIMARY KEY (stream_id, kind)
+)
+"""
+
+# Durable close/reap readback.  The v1 contract keeps this outside the stable
+# sessions row; v2 uses the same child-table shape while retaining additive
+# schema migration for databases that predate this lane.
+SESSION_REAP_DDL = """
+CREATE TABLE IF NOT EXISTS session_reap (
+    stream_id TEXT PRIMARY KEY,
+    reap_status TEXT NOT NULL CHECK (reap_status IN ('reaped', 'survivors', 'unknown')),
+    survivors TEXT NOT NULL DEFAULT '[]',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    exhausted_at TEXT,
+    updated_at TEXT NOT NULL
+)
+"""
+SESSION_REAP_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_session_reap_status_next "
+    "ON session_reap (reap_status, next_attempt_at)"
+)
+MAX_SESSION_REAP_SURVIVORS = 256
+
+# Operator intent is not evidence of death. Keep it out of session_reap until
+# a reachable peer confirms the pane gone. Retain completed records for audit.
+DEFERRED_REAP_DDL = """
+CREATE TABLE IF NOT EXISTS v2_deferred_reap (
+    stream_id TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    done_at TEXT,
+    exhausted_at TEXT,
+    pane_identity TEXT
+)
+"""
+DEFERRED_REAP_MAX_ATTEMPTS = 5
+
+# v2-only.  `created_at` is a display/ordering field and is only second
+# resolution in the shared sessions contract.  Reconciliation needs a durable
+# per-open-generation identity so a close/reopen in one second cannot let an
+# old death episode CAS the successor row.  Keeping it in a v2 table preserves
+# the v1 sessions schema and makes the migration additive.
+SESSION_GENERATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS v2_session_generations (
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    PRIMARY KEY (host, session_name)
+)
+"""
+
+# A single-row counter bumped by database triggers whenever a mutation could
+# change what `list_session_lineage` returns: new or removed sessions/generations
+# and changes to the exact columns that read projects (`parent_stream_id`,
+# `handoff_from_stream_id`, `visibility`; the joined `generation`). It is the
+# invalidation key for the in-process lineage cache. Because the triggers live in
+# the database, every writer is covered — including the direct-SQL paths in
+# store_host_transfer, store_routing's composite projection, and the close
+# reapers — without a hand-maintained Python writer list. Non-lineage column
+# updates (e.g. observer_binding, context_tokens) deliberately do not fire, so
+# routine usage polling does not invalidate the cache.
+LINEAGE_CACHE_VERSION_DDL = [
+    "CREATE TABLE IF NOT EXISTS _lineage_cache_version ("
+    "id INTEGER PRIMARY KEY CHECK(id=0), version INTEGER NOT NULL DEFAULT 0)",
+    "INSERT OR IGNORE INTO _lineage_cache_version(id, version) VALUES (0, 0)",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_sessions_ai AFTER INSERT ON sessions "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_sessions_ad AFTER DELETE ON sessions "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_sessions_au AFTER UPDATE OF "
+    "parent_stream_id, handoff_from_stream_id, visibility ON sessions "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_generations_ai AFTER INSERT ON v2_session_generations "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_generations_ad AFTER DELETE ON v2_session_generations "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_generations_au AFTER UPDATE OF generation ON v2_session_generations "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+]
+
+# v1's `session_event_tail` DDL, VERBATIM (not `v2_`-prefixed — this is a v1
+# table both daemons share, so pre-cutover rows render after the swap and v1's
+# retention/archive tool keeps working). Chat transcript events (B13 ingest)
+# land here as one row per normalized event; `request_stream_events` serves the
+# newest N. `identity` is the source-independent durable dedup key (live tail vs
+# turn-end resync describe one record differently), NULLABLE so pre-migration
+# rows are untouched. Created IF NOT EXISTS so the live DB (which already has it)
+# is a no-op and a fresh test DB gets it.
+SESSION_EVENT_TAIL_DDL = """
+CREATE TABLE IF NOT EXISTS session_event_tail (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id TEXT NOT NULL,
+    session_created_at TEXT NOT NULL DEFAULT '',
+    event_key TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    event_ts TEXT,
+    recorded_at REAL NOT NULL,
+    identity TEXT,
+    UNIQUE(stream_id, session_created_at, event_key)
+)
+"""
+SESSION_EVENT_TAIL_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_session_event_tail_stream_event "
+    "ON session_event_tail(stream_id, session_created_at, event_id DESC)"
+)
+SESSION_EVENT_TAIL_IDENTITY_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_event_tail_identity "
+    "ON session_event_tail(stream_id, session_created_at, identity)"
+)
+SESSION_EVENT_TAIL_RECORDED_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_session_event_tail_recorded "
+    "ON session_event_tail(recorded_at)"
+)
+# Shared event vocabulary retained by normalizer tests and callers.
+INBOUND_TURN_KINDS = ("USER", "TELL")
+
+# v2-only. The receipt lane deliberately owns one append-only log and no
+# cache or retry machinery. The paired-history allocator owns each committed
+# rowid across hot/archive; callers read the newest physical row for one
+# (to_stream_id, request_id) key.
+SEND_RECEIPT_DDL = """
+CREATE TABLE IF NOT EXISTS v2_send_receipts (
+    to_stream_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    receipt_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('accepted', 'landed', 'not_landed')),
+    optimistic_id TEXT,
+    wire_digest TEXT NOT NULL DEFAULT '',
+    display_text TEXT NOT NULL DEFAULT '',
+    content_kind TEXT NOT NULL,
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    delivery TEXT NOT NULL,
+    submission_confirmed INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
+    attempts INTEGER,
+    created_at TEXT NOT NULL,
+    from_stream_id TEXT,
+    actor_stream_id TEXT,
+    actor_trusted INTEGER NOT NULL DEFAULT 0,
+    meta_json TEXT NOT NULL DEFAULT '{}'
+)
+"""
+
+# Durable attribution for every close (spec: unaudited operator close of a live
+# seat).  v2 has no lifecycle_audit subsystem, so this append-only, v2-prefixed
+# table is the equivalent durable store: one row per close disposition
+# (`closed`/`deferred`/`fenced`/`presumed_dead`) naming WHO closed the seat, with
+# what auth, why, and under which request.  Patterned on v2_routing_integrity_audit.
+CLOSE_AUDIT_DDL = """
+CREATE TABLE IF NOT EXISTS v2_close_audit (
+    audit_id TEXT PRIMARY KEY,
+    stream_id TEXT NOT NULL,
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    close_kind TEXT,
+    disposition TEXT NOT NULL,
+    actor_kind TEXT,
+    closed_by TEXT,
+    auth_kind TEXT,
+    peer TEXT,
+    reason TEXT,
+    request_id TEXT,
+    defer_if_working INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+)
+"""
+CLOSE_AUDIT_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS ix_v2_close_audit_stream "
+    "ON v2_close_audit (stream_id, created_at)"
+)
+
+# When no rich caller attribution is threaded (internal close paths), the actor
+# kind is derived from the close_kind so every audit row still names a who.
+_CLOSE_ACTOR_BY_KIND = {
+    "operator_close": "operator",
+    "idle_reap": "reaper",
+    "spawn_rollback": "spawnctl",
+    "session_close": "self_or_parent",
+    "reconciler_dead": "reconciler_dead",
+}
+_CLOSE_AUDIT_COLUMNS = (
+    "audit_id, stream_id, host, session_name, close_kind, disposition, "
+    "actor_kind, closed_by, auth_kind, peer, reason, request_id, "
+    "defer_if_working, created_at"
+)
+
+
+def _close_audit_payload(
+    *,
+    host: str,
+    session_name: str,
+    close_kind: str | None,
+    disposition: str,
+    attribution: dict[str, Any] | None,
+    reason: str | None,
+) -> dict[str, Any]:
+    attribution = attribution or {}
+    actor_kind = str(attribution.get("actor_kind") or "").strip() or (
+        _CLOSE_ACTOR_BY_KIND.get(str(close_kind or ""), "unknown")
+    )
+
+    def _clean(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    return {
+        "audit_id": uuid.uuid4().hex,
+        "stream_id": f"{host}:{session_name}",
+        "host": host,
+        "session_name": session_name,
+        "close_kind": close_kind,
+        "disposition": disposition,
+        "actor_kind": actor_kind,
+        "closed_by": _clean(attribution.get("closed_by")),
+        "auth_kind": _clean(attribution.get("auth_kind")),
+        "peer": _clean(attribution.get("peer")),
+        "reason": _clean(reason),
+        "request_id": _clean(attribution.get("request_id")),
+        "defer_if_working": 1 if attribution.get("defer_if_working") else 0,
+        "created_at": _routing_iso_now(),
+    }
+
+
+def _insert_close_audit(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    conn.execute(
+        f"INSERT OR IGNORE INTO v2_close_audit ({_CLOSE_AUDIT_COLUMNS}) VALUES ("
+        ":audit_id, :stream_id, :host, :session_name, :close_kind, :disposition, "
+        ":actor_kind, :closed_by, :auth_kind, :peer, :reason, :request_id, "
+        ":defer_if_working, :created_at)",
+        payload,
+    )
+
+# First-class v2 scheduled-spawn state and its operation receipts.  Every object
+# is additive and v2-prefixed so a v1 rollback ignores it while a later forward
+# redeploy can still reconcile terminal rows and receipts.
+SCHEDULE_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS v2_operation_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      surface TEXT NOT NULL CHECK(surface IN ('schedule')),
+      verb TEXT NOT NULL,
+      actor_kind TEXT NOT NULL CHECK(actor_kind IN ('seat','nexus','operator','service')),
+      actor_id TEXT NOT NULL,
+      canonical_payload_sha256 TEXT NOT NULL CHECK(length(canonical_payload_sha256)=64),
+      target_id TEXT,
+      measured_state_json TEXT NOT NULL CHECK(json_valid(measured_state_json)),
+      result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+      measured_at TEXT NOT NULL,
+      retain_until TEXT NOT NULL,
+      UNIQUE(request_id,phase)
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS ix_v2_receipt_target
+       ON v2_operation_receipts(target_id)""",
+    """CREATE INDEX IF NOT EXISTS ix_v2_receipt_retain
+       ON v2_operation_receipts(retain_until)""",
+    """
+    CREATE TABLE IF NOT EXISTS v2_schedules (
+      schedule_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL UNIQUE,
+      owner_stream_id TEXT,
+      owner_service_actor TEXT,
+      owner_spec_ids_json TEXT NOT NULL CHECK(json_valid(owner_spec_ids_json)),
+      owner_spec_provenance_json TEXT NOT NULL CHECK(json_valid(owner_spec_provenance_json)),
+      parent_stream_id TEXT,
+      objective TEXT,
+      objective_source TEXT,
+      handoff_from_stream_id TEXT,
+      created_by_stream_id TEXT,
+      target_host TEXT NOT NULL,
+      role TEXT,
+      phase TEXT,
+      visibility TEXT,
+      requested_provider TEXT NOT NULL,
+      requested_model TEXT NOT NULL,
+      requested_effort TEXT NOT NULL,
+      resolved_provider TEXT NOT NULL,
+      resolved_model TEXT NOT NULL,
+      resolved_effort TEXT NOT NULL,
+      disposition_waived_reason TEXT,
+      confirm_model_change INTEGER NOT NULL DEFAULT 0 CHECK(confirm_model_change IN (0,1)),
+      fires_at_utc TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('pending','retry_pending','firing','fired','cancelled','failed','indeterminate','expired')),
+      generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 1),
+      prompt_sha256 TEXT,
+      prompt_b64 TEXT,
+      prompt_blob_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      terminal_at TEXT,
+      last_error_code TEXT,
+      target_sha TEXT,
+      attestation_json TEXT CHECK(attestation_json IS NULL OR json_valid(attestation_json)),
+      reparent_children INTEGER CHECK(reparent_children IS NULL OR reparent_children IN (0,1)),
+      self_close_on_completion INTEGER CHECK(self_close_on_completion IS NULL OR self_close_on_completion IN (0,1)),
+      CHECK(owner_stream_id IS NOT NULL OR owner_service_actor IS NOT NULL),
+      CHECK(prompt_b64 IS NULL OR prompt_blob_id IS NULL),
+      CHECK(prompt_sha256 IS NOT NULL OR (prompt_b64 IS NULL AND prompt_blob_id IS NULL))
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS ix_v2_schedule_due
+       ON v2_schedules(state,fires_at_utc)""",
+    """CREATE INDEX IF NOT EXISTS ix_v2_schedule_owner_state
+       ON v2_schedules(owner_stream_id,state)""",
+    """
+    CREATE TABLE IF NOT EXISTS v2_schedule_dispatches (
+      schedule_id TEXT NOT NULL REFERENCES v2_schedules(schedule_id),
+      generation INTEGER NOT NULL CHECK(generation >= 1),
+      spawn_key TEXT NOT NULL UNIQUE,
+      phase TEXT NOT NULL CHECK(phase IN ('prepared','dispatch_claimed','dispatch_transmitted','spawn_delivered','failed','indeterminate')),
+      spawn_request_id TEXT NOT NULL,
+      prepared_at TEXT NOT NULL,
+      claimed_at TEXT,
+      transmitted_at TEXT,
+      outcome_at TEXT,
+      spawn_outcome_id TEXT,
+      child_stream_id TEXT,
+      prompt_delivery_status TEXT,
+      error_code TEXT,
+      evidence_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(evidence_json)),
+      PRIMARY KEY(schedule_id,generation)
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS ix_v2_dispatch_phase
+       ON v2_schedule_dispatches(phase)""",
+    """
+    CREATE TABLE IF NOT EXISTS v2_recurring_schedules (
+      recurring_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('active','paused')),
+      recurrence_json TEXT NOT NULL CHECK(json_valid(recurrence_json)),
+      next_fire_at_utc TEXT NOT NULL,
+      last_fired_at_utc TEXT,
+      last_schedule_id TEXT,
+      missed_count INTEGER NOT NULL DEFAULT 0 CHECK(missed_count >= 0),
+      last_missed_at TEXT,
+      last_missed_reason TEXT,
+      parent_mode TEXT NOT NULL,
+      target_host TEXT NOT NULL,
+      requested_provider TEXT NOT NULL,
+      requested_model TEXT NOT NULL,
+      requested_effort TEXT NOT NULL,
+      resolved_provider TEXT NOT NULL,
+      resolved_model TEXT NOT NULL,
+      resolved_effort TEXT NOT NULL,
+      role TEXT,
+      phase TEXT,
+      visibility TEXT,
+      objective TEXT,
+      objective_source TEXT,
+      prompt_sha256 TEXT NOT NULL,
+      prompt_b64 TEXT NOT NULL,
+      owner_spec_ids_json TEXT NOT NULL CHECK(json_valid(owner_spec_ids_json)),
+      owner_spec_provenance_json TEXT NOT NULL CHECK(json_valid(owner_spec_provenance_json)),
+      created_by_stream_id TEXT,
+      self_close_on_completion INTEGER CHECK(self_close_on_completion IS NULL OR self_close_on_completion IN (0,1)),
+      generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 1),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS ix_v2_recurring_due
+       ON v2_recurring_schedules(state,next_fire_at_utc)""",
+)
+
+#: v1 `STREAM_TOKEN_HASH_VERSION`. grant_token persists only the hash.
+STREAM_TOKEN_HASH_VERSION = "sha256:v1"
+
+# v2-only. Durable spawn outcome so `await_spawn` answers from the store and is
+# never indeterminate once the row exists (design § spawn / B9).
+SPAWN_OUTCOME_DDL = """
+CREATE TABLE IF NOT EXISTS v2_spawn_outcomes (
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    request_id TEXT,
+    state TEXT NOT NULL,
+    reason TEXT,
+    effective_model TEXT,
+    effective_effort TEXT,
+    delivery_evidence TEXT,
+    delivery_receipt TEXT,
+    updated_at REAL NOT NULL,
+    idempotency_key TEXT,
+    request_payload_hash TEXT,
+    readiness_timed_out INTEGER,
+    PRIMARY KEY (host, session_name)
+)
+"""
+
+# Request-keyed, insert-only terminal records survive cleanup and name reuse.
+# An additive table keeps old reservation/outcome rows and the v1 schema readable.
+# It carries an extra `nonce` column (QA cycle-3 luna-[2]) so a recovery/identity
+# path holding ONLY the tombstone can reconstruct the pane's creation identity
+# across name reuse -- the reservation (the other nonce source) is deleted at
+# cancel. Backfilled/legacy tombstones have a NULL nonce.
+SPAWN_CANCELLATION_DDL = SPAWN_OUTCOME_DDL.replace(
+    "v2_spawn_outcomes", "v2_spawn_cancellations"
+).replace(
+    "PRIMARY KEY (host, session_name)",
+    "nonce TEXT,\n    PRIMARY KEY (host, session_name, request_id)",
+)
+# Explicit column list for the outcome->cancellation backfill: the cancellation
+# table has one extra column (nonce), so `SELECT *` no longer aligns.
+_SPAWN_OUTCOME_COLUMNS = (
+    "host, session_name, request_id, state, reason, effective_model, effective_effort, "
+    "delivery_evidence, delivery_receipt, updated_at, idempotency_key, request_payload_hash, "
+    "readiness_timed_out"
+)
+
+# Daemon-side admission freeze: one row per host. A deploy window sets a TTL'd
+# hold so new spawns are refused (`spawn_frozen`) while the daemon is being
+# cut over; the deployer clears it in its finally. `held_until` is an absolute
+# epoch so an abandoned hold self-expires instead of wedging admission forever.
+SPAWN_ADMISSION_HOLD_DDL = """
+CREATE TABLE IF NOT EXISTS v2_spawn_admission_hold (
+    host TEXT PRIMARY KEY,
+    held_until REAL NOT NULL,
+    reason TEXT,
+    set_at REAL NOT NULL
+)
+"""
+# readiness_timed_out (spawn_outcomes coverage/semantics spec, Defect 2): 1 when
+# `state='failed'` came from the bounded readiness poll timing out
+# (`VerbError` code `boot_not_ready`) rather than a genuine boot/registration
+# failure. A readiness timeout does NOT mean the seat is dead -- admission
+# (the `sessions` row) always precedes this poll, so `readiness_timed_out=1`
+# implies admitted-and-possibly-live, not admitted-and-dead. 0/NULL for every
+# other `failed` reason. Consumers must branch on this column, not parse
+# `reason` prose, to tell a readiness timeout apart from a real boot failure.
+SPAWN_OUTCOME_REQUEST_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS v2_spawn_outcomes_request_id "
+    "ON v2_spawn_outcomes (request_id, updated_at DESC)"
+)
+# Durable key->outcome index: a same-key retry after the first spawn already
+# succeeded (and released its reservation) replays the recorded outcome instead
+# of minting a duplicate pane (rpc_delivery_determinism lane AC1).
+SPAWN_OUTCOME_IDEMPOTENCY_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS v2_spawn_outcomes_idempotency_key "
+    "ON v2_spawn_outcomes (host, idempotency_key, updated_at DESC)"
+)
+
+# v2-only. THE durable report ledger (B9): `await_report` answers from this
+# table and never from transport, so a report ingested while nobody is awaiting
+# is still returned by a later await. Every validated payload field gets its own
+# typed column — the v1 class where `findings` arrived NULL while `summary`
+# survived came from persisting a subset and reconstructing the rest.
+REPORTS_DDL = """
+CREATE TABLE IF NOT EXISTS v2_reports (
+    ledger_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id TEXT NOT NULL UNIQUE,
+    from_stream_id TEXT NOT NULL,
+    msg_id INTEGER NOT NULL DEFAULT 0,
+    session_generation TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    summary TEXT,
+    findings TEXT,
+    next_action TEXT,
+    details TEXT,
+    extras TEXT,
+    reason TEXT,
+    completion_kind TEXT,
+    qa_verdict TEXT,
+    target_sha TEXT,
+    qa_attestation TEXT,
+    ac_claim TEXT,
+    claim_verified TEXT,
+    ac_claim_mismatch TEXT,
+    agent_orch_attestation TEXT,
+    qa_attestation_validation TEXT,
+    to_stream_id TEXT,
+    request_payload_hash TEXT,
+    effective_model TEXT,
+    effective_effort TEXT,
+    provenance_version TEXT,
+    provenance_generation TEXT,
+    provenance_qualified_spec_ids TEXT,
+    provenance_routing_integrity TEXT,
+    provenance_requested_model TEXT,
+    provenance_requested_effort TEXT,
+    provenance_effective_model TEXT,
+    provenance_effective_effort TEXT,
+    ingested_at TEXT NOT NULL,
+    created_at REAL NOT NULL
+)
+"""
+REPORTS_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS v2_reports_by_stream ON v2_reports (from_stream_id, msg_id)"
+)
+
+# v2-only. An await request is durable before its in-memory future is parked.
+# The row is shared by identical `(stream_id, msg_id)` requests and survives a
+# daemon restart, so a confirmed-dead close can settle a re-issued await
+# without relying on the old process's asyncio state. `-1` represents a
+# stream-only await (`msg_id` omitted).
+AWAITERS_DDL = """
+CREATE TABLE IF NOT EXISTS v2_awaiters (
+    awaiter_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id TEXT NOT NULL,
+    session_generation TEXT NOT NULL DEFAULT '',
+    target_msg_id INTEGER NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('pending', 'report', 'closed_without_report')),
+    report_id TEXT,
+    ledger_row_id INTEGER,
+    reason TEXT,
+    requested_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE(stream_id, session_generation, target_msg_id)
+)
+"""
+AWAITERS_PENDING_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS v2_awaiters_pending "
+    "ON v2_awaiters (outcome, stream_id, session_generation, target_msg_id)"
+)
+
+# v2-only (pop2). A schema-rejected TERMINAL report from a
+# `self_close_on_completion` seat never becomes a `v2_reports` row (the daemon
+# raises before persisting), so a finished seat that botched its report payload
+# left NO durable completion signal and the self-close backlog sweep — which
+# requires a valid terminal report — could never reap it. This table is that
+# missing trace: the reason plus the seat/generation, so the sweep can close the
+# finished seat and the coordinator can read WHY the report was refused.
+REPORT_REJECTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS v2_report_rejections (
+    rejection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id TEXT NOT NULL,
+    session_generation TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    reason TEXT,
+    created_at REAL NOT NULL
+)
+"""
+REPORT_REJECTIONS_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS v2_report_rejections_by_stream "
+    "ON v2_report_rejections (stream_id, session_generation)"
+)
+
+REPORT_COLUMNS = (
+    "usage_snapshot", "report_id", "from_stream_id", "msg_id", "session_generation", "status", "summary", "findings",
+    "next_action", "details", "extras", "reason", "completion_kind", "qa_verdict", "target_sha",
+    "qa_attestation", "ac_claim", "claim_verified", "ac_claim_mismatch", "agent_orch_attestation",
+    "qa_attestation_validation", "to_stream_id", "request_payload_hash",
+    "effective_model", "effective_effort", "ingested_at",
+    "provenance_version", "provenance_generation", "provenance_qualified_spec_ids",
+    "provenance_routing_integrity", "provenance_requested_model", "provenance_requested_effort",
+    "provenance_effective_model", "provenance_effective_effort",
+)
+REPORT_IDENTITY_COLUMNS = (
+    "report_id", "from_stream_id", "msg_id", "status", "summary", "findings",
+    "next_action", "details", "extras", "reason", "completion_kind", "qa_verdict",
+    "target_sha", "qa_attestation", "agent_orch_attestation",
+    "ac_claim",
+)
+#: Report columns holding JSON, decoded on read so a caller never sees a blob.
+REPORT_JSON_COLUMNS = (
+    "usage_snapshot",
+    "findings", "details", "extras", "qa_attestation", "ac_claim", "ac_claim_mismatch",
+    "agent_orch_attestation", "qa_attestation_validation",
+    "provenance_qualified_spec_ids",
+)
+
+QA_ATTESTATION_REASON_ORDER = (
+    "missing_attestation",
+    "self_reference",
+    "unknown_qa_stream",
+    "spec_binding_mismatch",
+    "unknown_qa_report",
+    "qa_report_stream_mismatch",
+    "qa_report_not_done",
+    "qa_verdict_not_accept",
+    "qa_report_lower_trust",
+)
+
+_REPORT_PROVENANCE_VALUE_FIELDS = (
+    "requested_model",
+    "requested_effort",
+    "effective_model",
+    "effective_effort",
+    "routing_integrity",
+)
+
+
+def _complete_report_provenance(
+    snapshot: dict[str, Any] | None, fields: dict[str, Any],
+) -> bool:
+    """Accept only the complete snapshot derived for this exact report source."""
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("stream_id") != str(fields.get("from_stream_id") or ""):
+        return False
+    if not str(snapshot.get("generation") or ""):
+        return False
+    if not str(snapshot.get("session_generation") or ""):
+        return False
+    if not isinstance(snapshot.get("qualified_spec_ids"), list):
+        return False
+    return all(field in snapshot for field in _REPORT_PROVENANCE_VALUE_FIELDS)
+
+
+class ReportProvenanceUnavailable(RuntimeError):
+    """No complete source-backed provenance snapshot is available for a report."""
+
+    def __init__(self, snapshot: dict[str, Any] | None) -> None:
+        self.snapshot = snapshot
+        super().__init__("report provenance is unavailable")
+
+
+class ReportProvenanceChanged(RuntimeError):
+    """The source session changed after its report provenance was observed."""
+
+    def __init__(self, expected: dict[str, Any], current: dict[str, Any] | None) -> None:
+        self.expected = expected
+        self.current = current
+        super().__init__("report provenance changed during write")
+
+
+class ReportReplayConflict(RuntimeError):
+    """A durable report id was reused with different request material."""
+
+    def __init__(self, report_id: str) -> None:
+        super().__init__("report_id_replay_conflict")
+        self.report_id = report_id
+
+
+class QAAttestationUnverified(RuntimeError):
+    """An enforce-mode READY report failed durable attestation validation."""
+
+    def __init__(self, validation: dict[str, Any]) -> None:
+        super().__init__("qa_attestation_unverified")
+        self.validation = validation
+
+
+from store_watch_wake import _WatchWakeStoreMixin, WATCH_WAKE_DDL, install_default_conn, lifecycle_watch_conn, report_watch_conn
+
+
+#: A re-ingested turn is a replay only when it arrives this long after its
+#: own source timestamp; live turns are ingested within seconds.
+_MIRROR_REPLAY_MIN_AGE_S = 300.0
+
+
+def _iso_epoch(value: object) -> float | None:
+    """Parse an ISO-8601 instant; None when absent or malformed."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+from store_voice_operations import VoiceOperationsStoreMixin, DDL as VOICE_OPERATIONS_DDL
+
+
+class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
+    """SQLite owned by exactly one worker thread; async callers use await."""
+
+    def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000,
+                 archive_path: str | None = None) -> None:
+        self._path = path
+        # Shared with Sessions: ownership/binding writes cannot outrun a close
+        # between its final authoritative admission and process termination.
+        self.session_graph_lock = asyncio.Lock()
+        # Primary direct-binding coordinates; set by AssistantPolicy.front_desk.
+        self.lifecycle_front_desk: dict[str, Any] | None = None
+        # Serializes primary binding changes with effects attributed to the
+        # front desk (ruling releases, logical FD input). Writers take it
+        # inside the composite binding lock and outside the graph lock.
+        self.front_desk_effect_gate = asyncio.Lock()
+        self._front_desk_fence_owner: asyncio.Task | None = None
+        self._configured_archive_path = archive_path
+        self._spec_identity_resolver: Callable[[str | None], str | None] | None = None
+        self._spec_identities_resolver: Callable[[Any], dict] | None = None
+        # (stream_id, session_created_at) -> the stream's other event lifecycles;
+        # read and written only on the store thread.
+        self._other_event_lifecycles: dict[tuple[str, str], tuple[str, ...]] = {}
+        # (version, rows) cache for list_session_lineage; read and written only on
+        # the store thread. `version` is the trigger-maintained _lineage_cache_version
+        # row, so the cache is reused only while no lineage-relevant session or
+        # generation mutation has happened.
+        self._lineage_cache: tuple[int, list[dict[str, Any]]] | None = None
+        # The version table + triggers are created on the first lineage read,
+        # not at init (only question/asset scope read lineage), so most Stores
+        # never pay the DDL. Store-thread only.
+        self._lineage_ddl_ready = False
+        self.schedule_schema_health = "initializing"
+        # Bounded (QA #8): an unbounded write queue is exactly the growth that
+        # helped wedge v1 — a stalled store thread let callers pile work up
+        # without limit. Past the cap `submit` fails fast rather than growing.
+        self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=max_pending)
+        self.progress = StoreProgress()
+        self.call_diag = store_call_diag.StoreCallDiag()
+        self._thread: threading.Thread | None = None
+        # Serializes the start/stop transition against `submit` so no callable is
+        # ever enqueued after the stop sentinel — such a future would never run
+        # (QA #8). Held only for the enqueue/transition, never across I/O.
+        self._lock = threading.Lock()
+        self._closing = False
+        self._ready = threading.Event()
+        self._start_error: BaseException | None = None
+        self._columns: set[str] = set()
+        # Written and read on the store thread after the composite projection
+        # is ready. Keyed by composite stream id so each named assistant
+        # carries its own mirror; empty keeps every non-direct
+        # deployment unchanged.  Tuple: (composite_stream_id, source_stream_id,
+        # source_generation, enabled_default, name).
+        self._assistant_strict_publication: dict[str, bool] = {}
+        self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
+        self._init_routing_integrity_state()
+
+    @property
+    def path(self) -> str:
+        """The DB file this store owns. `:memory:` for the ephemeral default."""
+        return self._path
+
+    def pending(self) -> int:
+        """Callables queued but not yet run. Read from the store thread by the
+        retention job and diagnostics. Bounded batches allow waiting callers
+        to interleave; whole-database compaction is never routine live work."""
+        return self._queue.qsize()
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def set_spec_identity_resolver(
+        self, resolver: Callable[[str | None], str | None] | None,
+        batch: Callable[[Any], dict] | None = None,
+    ) -> None:
+        """Configure resolver-proven identity lookup for attestation reads.
+
+        ``batch`` resolves several ids from one work-tree snapshot; QA
+        admission runs it off the Store thread before its write transaction.
+        """
+        self._spec_identity_resolver = resolver
+        self._spec_identities_resolver = batch
+
+    def start(self, timeout: float = 10.0) -> None:
+        """Start the worker; idempotent while it runs. A worker that exited
+        (stopped, or failed to initialize) has closed its connection and failed
+        its queued callers, so the Store may start a fresh one. While a timed-out
+        stop's worker is still alive it owns the database: refuse rather than
+        open a second owner (F11).
+
+        Returns only once this call's worker is ready. A worker still
+        initializing at the deadline raises TimeoutError and stays the owner;
+        a retry waits on that same worker."""
+        timeout = float(timeout)
+        if timeout != timeout or abs(timeout) == float("inf") or timeout < 0:
+            raise ValueError(f"store start timeout must be finite and nonnegative, got {timeout!r}")
+        with self._lock:
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                if self._closing:
+                    raise RuntimeError("store is still stopping: its worker still owns the database")
+            else:
+                self._closing = False
+                self._ready.clear()
+                self._start_error = None
+                thread = self._thread = threading.Thread(target=self._run, name="store", daemon=True)
+                thread.start()
+        ready = self._ready.wait(timeout=timeout)
+        with self._lock:
+            if self._thread is not thread:
+                raise RuntimeError("store worker was stopped or replaced before it became ready")
+            if self._start_error is not None:
+                raise self._start_error
+            if not ready:
+                raise TimeoutError(f"store worker still initializing after {timeout:g}s")
+            if self._closing:
+                raise RuntimeError("store is stopping: its worker is no longer the ready owner")
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Stop the worker, waiting at most `timeout` s in total (one deadline
+        for the transition lock, the stop signal and the join; 0 = signal
+        only). Queued callables still run before the worker exits.
+
+        Returns True once the worker has exited: connection closed and queued
+        callers resolved. False means the deadline expired while it still runs
+        a callable: it keeps owning the connection, `submit` and `start` keep
+        refusing, and the callable's outcome is whatever it actually does. A
+        later stop() observes the exit. The thread is a daemon thread, so an
+        overrun cannot hold process exit."""
+        timeout = float(timeout)
+        if timeout != timeout or abs(timeout) == float("inf"):
+            raise ValueError(f"store stop timeout must be finite, got {timeout!r}")
+        deadline = time.monotonic() + max(0.0, timeout)
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            log.warning("store stop deadline (%.2fs) expired before closing; worker still running", timeout)
+            return False
+        try:
+            thread = self._thread
+            if thread is None:
+                return True
+            if not self._closing:
+                # From here `submit` refuses, so nothing lands after the
+                # sentinel. Never block on a full queue: the worker also
+                # exits once it drains the queue while closing (see `_run`).
+                self._closing = True
+                try:
+                    if thread.is_alive():  # an exited worker would never take it
+                        self._queue.put_nowait(None)
+                except queue.Full:
+                    pass
+        finally:
+            self._lock.release()
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            log.warning("store stop deadline (%.2fs) expired; worker still owns the database, still stopping", timeout)
+            return False
+        if self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            try:
+                if self._thread is thread:
+                    self._thread = None
+                    self._closing = False
+            finally:
+                self._lock.release()
+        log.info("store stopped: worker exited and its connection is closed")
+        return True
+
+    def _fail_pending(self, why: str) -> None:
+        """Resolve every still-queued callable with an error so no `submit`
+        awaiter hangs after the worker exits. Runs on the worker thread as it
+        tears down; the futures are completed on their own event loops."""
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                continue
+            _fn, fut, loop, *metrics = item
+            # The teardown seam also accepts directly queued legacy/test work,
+            # which was never admitted through the progress bookkeeping.
+            if metrics:
+                self.progress.discard()
+            loop.call_soon_threadsafe(_set_exception, fut, RuntimeError(why))
+
+    # -- worker thread -----------------------------------------------------
+
+    def _run(self) -> None:
+        conn = None
+        # A fresh connection (first start, or a stop()/start() restart on a
+        # :memory: or re-created DB) has no lineage version table yet, and any
+        # cache from a previous connection is stale. Re-arm lazy creation and
+        # drop the cache so the first lineage read on this connection rebuilds
+        # the table+triggers and re-scans, exactly as init did before.
+        self._lineage_ddl_ready = False
+        self._lineage_cache = None
+        try:
+            # Escape the literal store filename while enabling no-create URI
+            # ATTACH for configured retention archives. Memory stores stay local.
+            from pathlib import Path
+            database = self._path if self._path in (':memory:', '') else Path(self._path).absolute().as_uri()
+            conn = sqlite3.connect(database, uri=True, factory=HistoryConnection)
+            conn.row_factory = sqlite3.Row
+            # A fresh connection gets a fresh delivery parse memo, bound to the
+            # connection lifetime, so a stop()/start() restart drops it.
+            from tell_proof import TellDeliveryParseCache
+            conn.delivery_parse_cache = TellDeliveryParseCache()
+            # A provisioned empty file or auxiliary-only database is still a
+            # fresh Store. Existing core/history schema, even with zero rows,
+            # must never be mistaken for proof that its archive never existed.
+            fresh_history = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name IN "
+                "('sessions','session_event_tail','v2_send_receipts',"
+                "'v2_assistant_composite_routes','v2_send_receipt_sequence') LIMIT 1"
+            ).fetchone() is None
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("BEGIN")
+            conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
+            conn.execute(SESSIONS_DDL)
+            conn.execute(VOICE_OPERATIONS_DDL)
+            for ddl in store_attachments.DDL:
+                conn.execute(ddl)
+            conn.execute(chat_recovery.DDL)
+            conn.execute(chat_recovery.RANGE_DDL)
+            for ddl in store_usage.DDL:
+                conn.execute(ddl)
+            if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN no_watch INTEGER NOT NULL DEFAULT 0")
+            for ddl in WATCH_WAKE_DDL:
+                conn.execute(ddl)
+            conn.execute(RESERVATIONS_DDL)
+            conn.execute(SPAWN_OUTCOME_DDL)
+            conn.execute(SPAWN_CANCELLATION_DDL)
+            # Additive migration (QA cycle-3 luna-[2]): an older table created
+            # before the nonce column gains it here; a fresh DDL already has it.
+            if "nonce" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_spawn_cancellations)")
+            }:
+                conn.execute("ALTER TABLE v2_spawn_cancellations ADD COLUMN nonce TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS v2_spawn_cancellations_identity "
+                "ON v2_spawn_cancellations (host, session_name, COALESCE(request_id, ''))"
+            )
+            conn.execute(
+                f"INSERT OR IGNORE INTO v2_spawn_cancellations ({_SPAWN_OUTCOME_COLUMNS}, nonce) "
+                f"SELECT {_SPAWN_OUTCOME_COLUMNS}, NULL FROM v2_spawn_outcomes "
+                "WHERE state='cancelled'"
+            )
+            conn.execute(SPAWN_ADMISSION_HOLD_DDL)
+            from maintenance_delegation import DDL as MAINTENANCE_DELEGATIONS_DDL
+            conn.execute(MAINTENANCE_DELEGATIONS_DDL)
+            conn.execute(SPAWN_OUTCOME_REQUEST_INDEX_DDL)
+            conn.execute(TELL_DELIVERY_DDL)
+            conn.execute(SESSION_ROLE_DDL)
+            conn.execute(NUDGE_STATE_DDL)
+            conn.execute(SESSION_REAP_DDL)
+            conn.execute(DEFERRED_REAP_DDL)
+            conn.execute(SESSION_REAP_INDEX_DDL)
+            conn.execute(SESSION_GENERATIONS_DDL)
+            # Seats opened under a previous daemon get a (second-precision)
+            # history row so their spans have a candidate generation.
+            store_usage.history_backfill_conn(conn)
+            conn.execute(ROUTING_INTEGRITY_DDL)
+            conn.execute(ROUTING_INTEGRITY_AUDIT_DDL)
+            conn.execute(OUTBOUND_NOTICE_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_outbound_notices_recipient "
+                         "ON v2_outbound_notices(recipient_stream_id)")
+            # Measured error-alert dependency lookups. Partial indexes exclude
+            # unrelated notice families without imposing a second notice store.
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_notification ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.notification_id')) "
+                         "WHERE json_extract(metadata,'$.notification_id') IS NOT NULL")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_predecessor ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.predecessor_notice_id')) "
+                         "WHERE json_extract(metadata,'$.predecessor_notice_id') IS NOT NULL")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_pending ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.error_alert_v1'),terminal_at,delivered_at) "
+                         "WHERE json_extract(metadata,'$.error_alert_v1')=1")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_recent ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.error_alert_v1'),kind,created_at) "
+                         "WHERE kind='error_alert' AND json_extract(metadata,'$.error_alert_v1')=1")
+            if "proof_binding" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_outbound_notices)")
+            }:
+                conn.execute("ALTER TABLE v2_outbound_notices ADD COLUMN proof_binding TEXT")
+            conn.execute(OUTBOUND_NOTICE_INDEX_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_ROUTES_DDL)
+            conn.execute(ASSISTANT_BINDING_DDL)
+            # One-time: convert the legacy single-row (id=1) binding to the
+            # name-keyed form, seeding the existing row under the primary name.
+            migrate_binding_to_named(conn)
+            conn.execute(ASSISTANT_REBIND_AUDIT_DDL)
+            conn.execute(ASSISTANT_REBIND_AUDIT_INDEX_DDL)
+            conn.execute(ASSISTANT_HANDOFF_PROOF_DDL)
+            conn.execute(ASSISTANT_RESTORE_EPISODE_DDL)
+            migrate_restore_episode_grant_columns(conn)
+            conn.execute(ASSISTANT_RESTORE_ACTIVE_INDEX_DDL)
+            conn.execute(ASSISTANT_RESTORE_AUDIT_DDL)
+            conn.execute(ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_TELL_QUEUE_DDL)
+            if "service_ingress_body" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_tell_queue)")
+            }:
+                # Legacy sender/header text cannot prove service admission.
+                conn.execute("ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN service_ingress_body TEXT")
+            queue_columns = {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_tell_queue)")}
+            for column in ("verified_from_stream_id", "verified_generation"):
+                if column not in queue_columns:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN {column} TEXT")
+            conn.execute(SCOPED_OWNERSHIP_DDL)
+            conn.execute(RULING_REQUESTS_DDL)
+            if "covered" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_lane_rulings)")}:
+                conn.execute("ALTER TABLE v2_assistant_lane_rulings ADD COLUMN covered INTEGER NOT NULL DEFAULT 0")
+            conn.execute(ASSISTANT_LANE_OWNERSHIP_DDL)
+            conn.execute(RULING_AUDIT_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_event "
+                         "ON v2_assistant_composite_publications(event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_window "
+                         "ON v2_assistant_composite_publications(stream_id,created_at)")
+            conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_QUESTION_BRIDGES_DDL)
+            conn.execute(VOICE_ANSWER_BINDINGS_DDL)
+            conn.execute(VOICE_ANSWER_ACKS_DDL)
+            if "route_target_generation" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_routes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_routes "
+                    "ADD COLUMN route_target_generation TEXT"
+                )
+            # Dispatch batching (spec_pentacle__assistant_duplicate_reply_sources_2026_10).
+            for column, ddl in (("batched_into_dispatch_id", "TEXT"), ("answered_by_event_id", "INTEGER")):
+                if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_routes)")}:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_routes ADD COLUMN {column} {ddl}")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v2_assistant_composite_routes_batch "
+                "ON v2_assistant_composite_routes (batched_into_dispatch_id)"
+            )
+            if "summary" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
+                )
+            if "pending_question_id" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN pending_question_id TEXT"
+                )
+            if "version" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+                )
+            if "bound_generation" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute("ALTER TABLE v2_assistant_composite_lanes ADD COLUMN bound_generation TEXT")
+            if "bound_backend_kind" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute("ALTER TABLE v2_assistant_composite_lanes ADD COLUMN bound_backend_kind TEXT")
+            if "question_bridge_operation_id" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN question_bridge_operation_id TEXT"
+                )
+            for column, ddl in (
+                ("canonical_payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("reply_to_question_id", "TEXT"),
+                ("publish_kind", "TEXT NOT NULL DEFAULT 'prose'"),
+                ("attachment_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("evidence_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("merged_into_event_id", "INTEGER"),
+            ):
+                if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_publications)")}:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_publications ADD COLUMN {column} {ddl}")
+            for column, ddl in (
+                ("stream_id", "TEXT NOT NULL DEFAULT ''"),
+                ("dispatch_id", "TEXT NOT NULL DEFAULT ''"),
+                ("reply_to_message_id", "TEXT"),
+                ("payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("evidence_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("expected_lane_version", "INTEGER"),
+            ):
+                if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_operations)")}:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_operations ADD COLUMN {column} {ddl}")
+            operation_schema = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='v2_assistant_composite_operations'").fetchone()[0]
+            if "'authority.request'" not in operation_schema:
+                # SQLite cannot widen a CHECK in place. Preserve every existing
+                # receipt verbatim while replacing only this table's constraint.
+                conn.execute("SAVEPOINT assistant_operation_constraint")
+                try:
+                    columns = ",".join(r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_operations)"))
+                    conn.execute("ALTER TABLE v2_assistant_composite_operations RENAME TO v2_assistant_composite_operations_previous")
+                    conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
+                    conn.execute(f"INSERT INTO v2_assistant_composite_operations ({columns}) SELECT {columns} FROM v2_assistant_composite_operations_previous")
+                    conn.execute("DROP TABLE v2_assistant_composite_operations_previous")
+                    conn.execute("RELEASE assistant_operation_constraint")
+                except BaseException:
+                    conn.execute("ROLLBACK TO assistant_operation_constraint")
+                    conn.execute("RELEASE assistant_operation_constraint")
+                    raise
+            ensure_work_lane_schema(conn)
+            for ddl in (*EXTERNAL_WORK_DDL, *SCREEN_LEASE_DDL):
+                conn.execute(ddl)
+            conn.execute(REPORTS_DDL)
+            conn.execute(REPORTS_INDEX_DDL)
+            conn.execute(AWAITERS_DDL)
+            conn.execute(AWAITERS_PENDING_INDEX_DDL)
+            conn.execute(REPORT_REJECTIONS_DDL)
+            conn.execute(REPORT_REJECTIONS_INDEX_DDL)
+            conn.execute(SESSION_EVENT_TAIL_DDL)
+            conn.execute(SESSION_EVENT_TAIL_INDEX_DDL)
+            conn.execute(SESSION_EVENT_TAIL_IDENTITY_DDL)
+            conn.execute(SESSION_EVENT_TAIL_RECORDED_DDL)
+            from native_input_lookup import ensure_schema as ensure_native_input_schema
+            ensure_native_input_schema(conn)
+            conn.execute(SEND_RECEIPT_DDL)
+            # Additive migration: an older receipts table gains meta_json (carries
+            # meta.voice={duration_s} for the voice-input lane); a fresh DDL has it.
+            if "meta_json" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_send_receipts)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_send_receipts ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            conn.execute(CLOSE_AUDIT_DDL)
+            conn.execute(CLOSE_AUDIT_INDEX_DDL)
+            for ddl in SCHEDULE_DDL:
+                conn.execute(ddl)
+            for table in ("v2_schedules", "v2_recurring_schedules"):
+                for column in ("account", "account_owner_json"):
+                    if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+            if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_schedules)")}:
+                conn.execute("ALTER TABLE v2_schedules ADD COLUMN no_watch INTEGER NOT NULL DEFAULT 0")
+            conn.execute(SPAWN_OUTCOME_IDEMPOTENCY_INDEX_DDL)
+            conn.execute(STREAM_RESERVATION_IDEMPOTENCY_INDEX_DDL)
+            if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            for table in ("sessions", "v2_schedules"):
+                if "objective" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
+            store_qa.initialize(conn)
+            store_ingest_checkpoint.initialize(conn)
+            lifecycle_authority.initialize(conn)
+            host_transfer.initialize(conn)
+            consent.initialize(conn)
+            store_exchange.initialize(conn)
+            if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN objective_source TEXT")
+                conn.execute("UPDATE sessions SET objective_source='explicit' WHERE objective IS NOT NULL")
+            if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_schedules)")}:
+                conn.execute("ALTER TABLE v2_schedules ADD COLUMN objective_source TEXT")
+                conn.execute("UPDATE v2_schedules SET objective_source='explicit' WHERE objective IS NOT NULL")
+            if "exchange_json" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
+                conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
+            if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN observer_binding TEXT")
+            if "account_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN account_binding TEXT")
+            import account_store
+            account_store.migrate(conn)
+            if "assigned_spec_id" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN assigned_spec_id TEXT")
+            # The explicit work assignment of a single-spec seat is its only spec. Idempotent;
+            # multi-spec legacy seats stay unassigned until `spec assign` (spec R6).
+            conn.execute("UPDATE sessions SET assigned_spec_id=spec_id WHERE assigned_spec_id IS NULL"
+                         " AND status='open' AND spec_id IS NOT NULL AND json_valid(spec_ids)"
+                         " AND json_array_length(spec_ids)=1")
+            if "usage_snapshot" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
+                conn.execute("ALTER TABLE v2_reports ADD COLUMN usage_snapshot TEXT")
+            store_exchange.repair(conn)
+            history_path = None if self._path in (':memory:', '') else default_archive_path(Path(self._path).absolute())
+            prepare_history_schema(conn, fresh=fresh_history, archive_path=history_path)
+            self.schedule_schema_health = "ok"
+            conn.commit()
+            migrate_route_batch_archive(conn)
+            if self._configured_archive_path is not None:
+                bind_history_archive(conn, Path(self._configured_archive_path))
+            self._columns = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+            from tell_proof import DeliveryLookup
+            conn.delivery_lookup = DeliveryLookup(conn)
+        except BaseException as exc:
+            # Callers may have queued work while initialization ran; it will
+            # never run, so close admission and fail it before reporting.
+            with self._lock:
+                self._closing = True
+            self._start_error = exc
+            try:
+                if conn is not None:
+                    conn.close()
+            finally:
+                self._fail_pending("store failed to start before this callable ran")
+                self._ready.set()
+            return
+        self._ready.set()
+        try:
+            while True:
+                item = self._queue.get()
+                if item is None:
+                    break
+                fn, fut, loop, queued, timing, name, quiet = item
+                started = time.monotonic()
+                self.progress.start(started)
+                try:
+                    conn.lifecycle_front_desk = self.lifecycle_front_desk
+                    result = fn(conn)
+                except BaseException as exc:
+                    outcome, failed = exc, True
+                else:
+                    outcome, failed = result, False
+                finally:
+                    finished = time.monotonic()
+                    self.progress.finish()
+                if timing is not None:
+                    loop.call_soon_threadsafe(timing.add, queued, started, finished)
+                loop.call_soon_threadsafe(_set_exception if failed else _set_result, fut, outcome)
+                self.call_diag.record(name, quiet, loop, queued, started, finished)
+                # A stop that found the queue full queued no sentinel; once
+                # closing, exit when the queue drains. Checked under the lock so
+                # a concurrent stop's sentinel is either queued or not needed.
+                with self._lock:
+                    if self._closing and self._queue.empty():
+                        break
+        finally:
+            # However the worker exits (stop, or an unexpected error), close
+            # admission first: nothing, including a stop sentinel, can be
+            # queued after the drain below, so a restart never inherits one.
+            with self._lock:
+                self._closing = True
+            try:
+                conn.close()
+            finally:
+                # Belt-and-suspenders (QA #8): resolve anything still queued so
+                # no awaiter hangs forever. With the stop lock nothing should
+                # land here after the sentinel, but a future that never runs
+                # must never be left pending.
+                self._fail_pending("store stopped before this callable ran")
+
+    # -- async API ---------------------------------------------------------
+
+    async def submit(self, fn: Callable[[sqlite3.Connection], Any], *, settle_on_cancel: bool = False) -> Any:
+        """Run `fn(conn)` on the store thread; await its result.
+
+        `settle_on_cancel` callers (attachment lock owners) keep awaiting an
+        enqueued callable through caller cancellation until it has actually
+        run or been drained, then re-raise the cancellation."""
+        # Name the caller's operation before any wrapper replaces it.
+        name, quiet = store_call_diag.admit(fn)
+        actor = host_transfer.actor_context.get()
+        if actor is not None:
+            operation = fn
+            def fn(conn):
+                host_transfer.require_active(conn, *actor)
+                return operation(conn)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        with self._lock:
+            if self._thread is None or self._closing:
+                # Nothing will ever drain this future, so it would hang for the
+                # life of the process (QA #8): fail loudly instead. The lock
+                # makes the check-and-enqueue atomic against `stop`, so a
+                # callable can never be queued behind the stop sentinel.
+                raise RuntimeError("store is not running")
+            try:
+                # Never block the event loop: past the cap fail fast rather than
+                # wait for the worker to drain (QA #8).
+                self.progress.enqueue(self._queue.put_nowait,
+                                      (fn, fut, loop, time.monotonic(), request_timing.get(), name, quiet))
+            except queue.Full as exc:
+                raise RuntimeError("store overloaded: pending write queue is full") from exc
+        if settle_on_cancel:
+            return await attachment_locks.settle_future(fut)
+        return await fut
+
+    async def transfer_authority_state(self, stream_id, generation):
+        return await self.submit(lambda conn: host_transfer.authority_state(conn, stream_id, generation))
+
+    async def transfer_successor(self, stream_id, generation):
+        return await self.submit(lambda conn: host_transfer.successor(conn, stream_id, generation))
+
+    @asynccontextmanager
+    async def front_desk_fence(self):
+        """Hold the FD effect gate; re-entrant only within the owning task."""
+        task = asyncio.current_task()
+        if task is not None and self._front_desk_fence_owner is task:
+            yield
+            return
+        async with self.front_desk_effect_gate:
+            self._front_desk_fence_owner = task
+            try:
+                yield
+            finally:
+                self._front_desk_fence_owner = None
+
+    async def require_current_actor(self, stream_id, generation):
+        def op(conn):
+            host_transfer.require_active(conn, stream_id, generation)
+            row = host_transfer._seat_conn(conn, stream_id)
+            if not row or row['status'] != 'open' or row['session_generation'] != generation:
+                raise host_transfer.TransferError('actor_generation_changed')
+        return await self.submit(op)
+
+    async def put(self, key: str, value: str) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)", (key, value))
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def get(self, key: str) -> str | None:
+        def _op(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute("SELECT v FROM kv WHERE k = ?", (key,)).fetchone()
+            return None if row is None else row[0]
+
+        return await self.submit(_op)
+
+    async def configure_assistant_mirror(
+        self, *, composite_stream_id: str, source_stream_id: str,
+        source_generation: str, enabled_default: bool, name: str | None = None,
+        strict_publication_default: bool | None = None,
+    ) -> None:
+        name = name or primary_assistant_name()
+        """Install one named assistant's trusted direct-primary mirror binding."""
+        def _op(_conn: sqlite3.Connection) -> None:
+            self._assistant_strict_publication[composite_stream_id] = (
+                name == primary_assistant_name() if strict_publication_default is None else strict_publication_default
+            )
+            self._assistant_mirror_binding[composite_stream_id] = (
+                composite_stream_id, source_stream_id, source_generation, enabled_default, name,
+            )
+        await self.submit(_op)
+
+    @staticmethod
+    def _mirror_kv_key(name: str) -> str:
+        # The primary keeps the legacy unprefixed key byte-identical; other assistants
+        # (daff) get their own per-name override key.
+        return ("assistant.mirror.enabled" if name == primary_assistant_name()
+                else f"assistant.mirror.{name}.enabled")
+
+    def _strict_publication_state_conn(self, conn, composite_stream_id):
+        binding = self._assistant_mirror_binding.get(composite_stream_id)
+        if binding is None:
+            return {"enabled": False, "source": "unbound"}
+        name = binding[4]
+        key = ("assistant.strict_publication.enabled" if name == primary_assistant_name()
+               else f"assistant.strict_publication.{name}.enabled")
+        override = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+        if override is None:
+            return {"enabled": self._assistant_strict_publication[composite_stream_id], "source": "env"}
+        normalized = str(override[0]).strip().lower()
+        return {"enabled": normalized in {"1", "true", "on"},
+                "source": "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"}
+
+    async def strict_publication_state(self, composite_stream_id):
+        return await self.submit(lambda conn: self._strict_publication_state_conn(conn, composite_stream_id))
+
+    def _effective_mirror_source_conn(
+        self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str] | None,
+    ) -> tuple[str, str, str] | None:
+        """Resolve the live direct-primary source seat for the mirror.
+
+        The composite target and the enable default stay pinned to the daemon's
+        configured binding, but the *source* seat follows the durable binding
+        (through the shared ``_binding_conn`` resolver that routing, delivery and
+        wake already use) so a no-restart hot rebind carries the mirror with
+        them.  Returns ``(stream_id, generation, source)`` or ``None`` when no
+        usable source is bound.  Fails closed on a corrupt or unconfigured
+        binding rather than break source-event ingestion.
+        """
+        if binding is None:
+            return None
+        try:
+            effective = _binding_conn(
+                conn, {"stream_id": binding[1], "generation": binding[2]},
+                name=binding[4], include_target=False,
+            )
+        except ValueError:
+            return None
+        if effective["source"] == "unconfigured" or not effective["stream_id"] or not effective["generation"]:
+            return None
+        return effective["stream_id"], effective["generation"], effective["source"]
+
+    def _assistant_mirror_state_conn(
+        self, conn: sqlite3.Connection, composite_stream_id: str,
+    ) -> dict[str, Any]:
+        binding = self._assistant_mirror_binding.get(composite_stream_id)
+        if binding is None:
+            return {"enabled": False, "source": "unbound", "binding": None}
+        override = conn.execute(
+            "SELECT v FROM kv WHERE k=?", (self._mirror_kv_key(binding[4]),),
+        ).fetchone()
+        if override is None:
+            enabled, source = binding[3], "env"
+        else:
+            normalized = str(override[0]).strip().lower()
+            enabled = normalized in {"1", "true", "on"}
+            source = "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"
+        effective = self._effective_mirror_source_conn(conn, binding)
+        if effective is None:
+            source_stream_id, source_generation, source_binding = binding[1], binding[2], "unavailable"
+        else:
+            source_stream_id, source_generation, source_binding = effective
+        return {
+            "enabled": enabled, "source": source,
+            "binding": {"composite_stream_id": binding[0],
+                        "source_stream_id": source_stream_id,
+                        "source_generation": source_generation,
+                        "source_binding": source_binding},
+        }
+
+    async def assistant_mirror_state(self, composite_stream_id: str) -> dict[str, Any]:
+        return await self.submit(
+            lambda conn: self._assistant_mirror_state_conn(conn, composite_stream_id)
+        )
+
+    def _mirror_source_event_conn(
+        self, conn: sqlite3.Connection, *, source_stream_id: str,
+        source_event: dict[str, Any], source_event_id: int, recorded_at: float,
+    ) -> None:
+        """Project an admitted source event for whichever named assistant owns it.
+
+        Each named assistant has at most one mirror binding and a
+        distinct source seat, so at most one binding matches ``source_stream_id``.
+        """
+        for binding in list(self._assistant_mirror_binding.values()):
+            self._mirror_source_event_for_binding(
+                conn, binding, source_stream_id=source_stream_id,
+                source_event=source_event, source_event_id=source_event_id,
+                recorded_at=recorded_at,
+            )
+
+    def _assistant_turn_inputs_conn(self, conn, source_stream_id, session_created_at,
+                                    source_event_id, transcript, window_start=0):
+        """Inputs in the existing assistant turn window, nearest first."""
+        current = conn.execute("SELECT json_extract(event_json,'$.raw.jsonl_record_uuid') FROM session_event_tail WHERE event_id=?",
+                               (source_event_id,)).fetchone()
+        current_record = str(current[0] or "") if current else ""
+        boundary = conn.execute(
+            "SELECT MAX(event_id) FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id<? AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
+            "AND (?='' OR COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>?) "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
+            "AND (json_extract(event_json,'$.raw.phase')='final_answer' "
+            "OR json_extract(event_json,'$.raw.stop_reason')='end_turn')",
+            (source_stream_id, session_created_at, source_event_id, transcript, current_record, current_record),
+        ).fetchone()[0]
+        return conn.execute(
+            "SELECT event_id,event_json FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id>? AND event_id<? AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND json_extract(event_json,'$.kind') IN ('USER','TELL') "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 ORDER BY event_id DESC",
+            (source_stream_id, session_created_at, max(window_start, boundary or 0), source_event_id, transcript),
+        ).fetchall()
+
+    def _assistant_mirror_trigger_conn(
+        self, conn: sqlite3.Connection, *, composite_stream_id: str,
+        source_stream_id: str, source_generation: str, session_created_at: str,
+        source_event_id: int, transcript: Any,
+    ) -> str:
+        """A proven operator remains owner across later excluded inputs."""
+        if not isinstance(transcript, str) or not transcript:
+            return "unknown"
+        from tell_proof import input_origin, delivery_wire
+        excluded = False
+        for row in self._assistant_turn_inputs_conn(conn, source_stream_id, session_created_at,
+                                                    source_event_id, transcript):
+            event = json.loads(row["event_json"])
+            if not str(delivery_wire(event) or "").strip():
+                continue
+            origin = input_origin(conn, event, row["event_id"])
+            if origin["kind"] == "operator":
+                return "operator"
+            if origin["kind"] in {"peer", "service"} and origin["verified"]:
+                excluded = True
+                continue
+            return "unknown"
+        return "excluded" if excluded else "unknown"
+
+    def _project_dispatch_turn_final_conn(
+        self, conn: sqlite3.Connection, composite_stream_id: str, *, composite_created_at: str,
+        source_stream_id: str, source_generation: str, session_created_at: str, transcript: str,
+        window_start: int, source_event: dict[str, Any], source_event_id: int, body: str,
+        recorded_at: float,
+    ) -> bool:
+        """Project the proven operator dispatch across later excluded peer inputs."""
+        from tell_proof import input_origin, operator_dispatch, delivery_wire
+        route = None
+        for candidate in self._assistant_turn_inputs_conn(conn, source_stream_id, session_created_at,
+                                                          source_event_id, transcript, window_start):
+            event = json.loads(candidate["event_json"])
+            if not str(delivery_wire(event) or "").strip():
+                continue
+            origin = input_origin(conn, event, candidate["event_id"])
+            if origin["kind"] in {"peer", "service"} and origin["verified"]:
+                continue
+            if origin["kind"] != "operator":
+                return False
+            dispatch = operator_dispatch(conn, source_stream_id, delivery_wire(event), source_generation)
+            route = conn.execute(
+                "SELECT dispatch_id,input_identity,reply_to_question_id FROM v2_assistant_composite_routes "
+                "WHERE stream_id=? AND dispatch_id=? AND routing_state='resolved' "
+                "AND route_target=? AND route_target_generation=? AND delivery_state='landed' "
+                "AND json_extract(route_json,'$.admission_mode')='direct_primary'",
+                (composite_stream_id, dispatch["dispatch_id"], source_stream_id, source_generation),
+            ).fetchone() if dispatch else None
+            break
+        if route is None:
+            return False
+        dispatch_id = str(route["dispatch_id"])
+        if conn.execute(
+            "SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=? LIMIT 1",
+            (composite_stream_id, dispatch_id),
+        ).fetchone() is not None:
+            return False
+        reply_to_message_id = route["input_identity"]
+        reply_to_question_id = route["reply_to_question_id"]
+        origin = {"stream_id": source_stream_id, "generation": source_generation,
+                  "event_id": source_event_id, "event_ts": source_event.get("timestamp")}
+        publication_key = f"turnfinal:{dispatch_id}"
+        canonical_payload = {
+            "composite_stream_id": composite_stream_id, "dispatch_id": dispatch_id,
+            "reply_to_message_id": reply_to_message_id, "reply_to_question_id": reply_to_question_id,
+            "publish_kind": "status", "response_state": "acknowledged", "message": body,
+            "attachment_ids": [], "evidence_refs": [], "mirrored_from": origin,
+        }
+        canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        event = {
+            "stream_id": composite_stream_id, "provider": "composite", "kind": "ASSIST_TEXT",
+            "text": body, "message_id": "publication:" + publication_key,
+            "reply_to_message_id": reply_to_message_id, "reply_to_question_id": reply_to_question_id,
+            "publish_kind": "status", "attachments": [],
+            "timestamp": source_event.get("timestamp"),
+            "raw": {"assistant_composite": True, "publish_kind": "status",
+                    "response_state": "acknowledged", "dispatch_id": dispatch_id,
+                    "reply_to_message_id": reply_to_message_id,
+                    "reply_to_question_id": reply_to_question_id, "mirrored_from": origin,
+                    "attachment_ids": [], "evidence_refs": []},
+        }
+        event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cur = conn.execute(
+            "INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,"
+            "event_ts,recorded_at,identity) VALUES (?,?,?,?,?,?,?)",
+            (composite_stream_id, composite_created_at, hashlib.sha256(event_json.encode()).hexdigest(),
+             event_json, source_event.get("timestamp"), recorded_at,
+             "assistant-mirror:" + publication_key),
+        )
+        conn.execute(
+            "INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,"
+            "canonical_payload_json,dispatch_id,reply_to_message_id,reply_to_question_id,publish_kind,"
+            "attachment_ids_json,evidence_refs_json,event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (publication_key, composite_stream_id, hashlib.sha256(canonical_json.encode()).hexdigest(),
+             canonical_json, dispatch_id, reply_to_message_id, reply_to_question_id, "status", "[]", "[]",
+             int(cur.lastrowid), _routing_iso_now()),
+        )
+        log.info(
+            "assistant_mirror_turnfinal_projected source_event_id=%s trigger_event_id=%s "
+            "dispatch_id=%s composite_event_id=%s",
+            source_event_id, int(candidate["event_id"]), dispatch_id, int(cur.lastrowid),
+            extra={"subsystem": "assistant_mirror",
+                   "bug_ref": "pentacle__dispatch_turn_final_projection_2026_10"},
+        )
+        return True
+
+    def _proactive_turn_publication_conn(
+        self, conn: sqlite3.Connection, composite_stream_id: str, *, source_stream_id: str,
+        source_generation: str, session_created_at: str, transcript: str,
+        boundary: sqlite3.Row | None, source_event_id: int,
+    ) -> str | None:
+        """Return the key of this turn's own proactive publication, if any.
+
+        Candidates are the bound seat's proactive publications in its current
+        generation. One belongs to the turn only when a tool row of this
+        transcript, after the previous final, names its request key: lag-free
+        and order-independent, with no text comparison. A key built at run time
+        is not matched, and the final mirrors as before (fail open).
+        """
+        rows = conn.execute(
+            "SELECT p.publication_key,json_extract(t.event_json,'$.raw.tool_input') AS tool_input "
+            "FROM v2_assistant_composite_publications p "
+            "JOIN session_event_tail e ON e.event_id=p.event_id "
+            "JOIN session_event_tail t ON t.stream_id=? AND t.session_created_at=? "
+            "AND t.event_id>? AND t.event_id<? "
+            "AND json_extract(t.event_json,'$.kind')='TOOL_USE' "
+            "AND json_extract(t.event_json,'$.raw.source_session_identity')=? "
+            "AND instr(COALESCE(json_extract(t.event_json,'$.raw.tool_input'),''),p.publication_key)>0 "
+            "WHERE p.stream_id=? AND p.dispatch_id='' AND p.publish_kind IN ('prose','status') "
+            "AND json_extract(e.event_json,'$.raw.actor_stream_id')=? "
+            "AND json_extract(e.event_json,'$.raw.actor_generation')=? "
+            "ORDER BY p.event_id DESC",
+            (source_stream_id, session_created_at,
+             boundary["event_id"] if boundary is not None else 0, source_event_id, transcript,
+             composite_stream_id, source_stream_id, source_generation),
+        ).fetchall()
+        for row in rows:
+            # The whole key, never a substring: publish:x-1 does not match publish:x-10.
+            key = str(row["publication_key"])
+            if re.search(r"(?<![\w.:/-])" + re.escape(key) + r"(?![\w.:/-])", str(row["tool_input"] or "")):
+                return key
+        return None
+
+    @staticmethod
+    def _assistant_turn_boundary_conn(conn, source_stream_id, created_at, event_id, transcript, record):
+        """Fence unclassified prior assistant rows and exclude this provider record."""
+        return conn.execute(
+            "SELECT event_id FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id<? AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
+            "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
+            "AND NOT ((COALESCE(json_extract(event_json,'$.raw.transport'),'')='claude-jsonl' "
+            "AND COALESCE(json_extract(event_json,'$.raw.stop_reason'),'')='tool_use') "
+            "OR (COALESCE(json_extract(event_json,'$.raw.transport'),'')='codex-rollout' "
+            "AND COALESCE(json_extract(event_json,'$.raw.phase'),'')='commentary')) "
+            "ORDER BY event_id DESC LIMIT 1",
+            (source_stream_id, created_at, event_id, transcript, record)).fetchone()
+
+    def _notice_unanswered_turn_conn(self, conn, composite_stream_id, source_stream_id,
+                                     generation, event, event_id):
+        """Persist a missing-reply notice atomically with the structured turn end."""
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        transcript, record = raw.get("source_session_identity"), raw.get("jsonl_record_uuid")
+        if (event.get("kind") != "ASSIST_TEXT" or raw.get("is_sidechain")
+                or not isinstance(transcript, str) or not transcript
+                or not isinstance(record, str) or not record
+                or not (raw.get("transport") == "claude-jsonl" and raw.get("stop_reason") == "end_turn"
+                        or raw.get("transport") == "codex-rollout" and raw.get("phase") == "final_answer")):
+            return
+        host, _, name = source_stream_id.partition(":")
+        source = conn.execute(
+            "SELECT s.created_at FROM sessions s JOIN v2_session_generations g "
+            "ON g.host=s.host AND g.session_name=s.session_name "
+            "WHERE s.host=? AND s.session_name=? AND s.status='open' AND g.generation=?",
+            (host, name, generation)).fetchone()
+        if source is None:
+            return
+        # Preserve the mirror's conservative legacy/commentary boundary: an
+        # unclassified older assistant row must not lend its input to this turn.
+        boundary = self._assistant_turn_boundary_conn(conn, source_stream_id, source["created_at"],
+                                                      event_id, transcript, record)
+        from tell_proof import delivery_wire, input_origin, operator_dispatch
+        for candidate in self._assistant_turn_inputs_conn(conn, source_stream_id, source["created_at"],
+                                                          event_id, transcript,
+                                                          boundary["event_id"] if boundary else 0):
+            item = json.loads(candidate["event_json"])
+            wire = delivery_wire(item)
+            if not str(wire or "").strip():
+                continue
+            origin = input_origin(conn, item, candidate["event_id"])
+            if origin["kind"] in {"peer", "service"} and origin["verified"]:
+                continue
+            if origin["kind"] != "operator":
+                return
+            dispatch = operator_dispatch(conn, source_stream_id, wire, generation)
+            if dispatch is None:
+                return
+            route = conn.execute(
+                "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND dispatch_id=? "
+                "AND routing_state='resolved' AND delivery_state='landed'",
+                (composite_stream_id, dispatch["dispatch_id"])).fetchone()
+            if route is None or json.loads(route["route_json"] or "{}").get("desk_dispatch"):
+                return
+            dispatch_id = route["dispatch_id"]
+            notice_id = "dispatch_no_reply:" + dispatch_id
+            if conn.execute("SELECT 1 FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone():
+                return
+            if conn.execute("SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=? LIMIT 1",
+                            (composite_stream_id, dispatch_id)).fetchone():
+                return
+            import shlex
+            from outbound_notices import ensure_notice_marker
+            from store_routing import _insert_outbound_notice_conn
+            args = (f"--composite-stream-id {shlex.quote(composite_stream_id)} "
+                    f"--dispatch-id {shlex.quote(dispatch_id)} "
+                    f"--reply-to-message-id {shlex.quote(route['input_identity'])} ")
+            question = route["reply_to_question_id"]
+            if question:
+                args += f"--reply-to-question-id {shlex.quote(question)} "
+            ack = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id + ':ack')} "
+                   f"{args}--publish-kind status --response-state acknowledged --message 'I received your message.'")
+            final = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id)} "
+                     f"{args}--publish-kind prose --response-state final --message '<final answer>'")
+            body = (f"No reply was published for dispatch {dispatch_id}.\n"
+                    f"Message: {str(route['body'] or '')[:80]}\nAcknowledgment: {ack}\nFinal: {final}")
+            _insert_outbound_notice_conn(conn, notice_id=notice_id, kind="dispatch_no_reply",
+                                         dedupe_key=notice_id, recipient_stream_id=source_stream_id,
+                                         tell_id=notice_id, body=ensure_notice_marker(notice_id, body))
+            return
+
+    def _mirror_source_event_for_binding(
+        self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
+        source_stream_id: str, source_event: dict[str, Any], source_event_id: int,
+        recorded_at: float,
+    ) -> None:
+        """Project an admitted source event in its ingest transaction only."""
+        effective = self._effective_mirror_source_conn(conn, binding)
+        if effective is None:
+            return
+        effective_source_stream_id, source_generation, _source_binding = effective
+        if source_stream_id != effective_source_stream_id:
+            return
+        if self._strict_publication_state_conn(conn, binding[0])["enabled"]:
+            self._notice_unanswered_turn_conn(conn, binding[0], source_stream_id,
+                                               source_generation, source_event, source_event_id)
+            return
+        if not self._assistant_mirror_state_conn(conn, binding[0])["enabled"]:
+            return
+        if source_event.get("kind") != "ASSIST_TEXT" or source_event.get("attachments"):
+            return
+        body = source_event.get("text")
+        if not isinstance(body, str) or not body.strip() or re.fullmatch(r"[❯›⏺•●◦]", body.strip()):
+            return
+        host, separator, name = source_stream_id.partition(":")
+        if not separator:
+            return
+        source = conn.execute(
+            "SELECT s.status,s.created_at,g.generation FROM sessions s "
+            "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+            "WHERE s.host=? AND s.session_name=?", (host, name),
+        ).fetchone()
+        if source is None or source["status"] != "open" or source["generation"] != source_generation:
+            return
+        raw = source_event.get("raw")
+        raw = raw if isinstance(raw, dict) else {}
+        if raw.get("is_sidechain"):
+            return
+        trigger = self._assistant_mirror_trigger_conn(
+            conn, composite_stream_id=binding[0], source_stream_id=source_stream_id,
+            source_generation=source_generation, session_created_at=source["created_at"],
+            source_event_id=source_event_id, transcript=raw.get("source_session_identity"),
+        )
+        if trigger == "unknown":
+            log.info("assistant_mirror_unknown_trigger source_stream_id=%s source_event_id=%s mirror_action=suppressed",
+                     source_stream_id, source_event_id,
+                     extra={"subsystem": "assistant_mirror",
+                            "bug_ref": "spec_pentacle__fd_peer_turn_mirror_leak_2026_11"})
+        if trigger != "operator":
+            return
+        composite_host, _, composite_name = binding[0].partition(":")
+        composite = conn.execute(
+            "SELECT created_at FROM sessions WHERE host=? AND session_name=? "
+            "AND status='open' AND provider='composite'", (composite_host, composite_name),
+        ).fetchone()
+        if composite is None:
+            raise ValueError("assistant_mirror_projection_unavailable")
+        transcript = raw.get("source_session_identity")
+        record = raw.get("jsonl_record_uuid")
+        structured_final = bool(isinstance(transcript, str) and transcript
+                               and isinstance(record, str) and record
+                               and not raw.get("is_sidechain") and (
+            raw.get("transport") == "claude-jsonl" and raw.get("stop_reason") == "end_turn"
+            or raw.get("transport") == "codex-rollout" and raw.get("phase") == "final_answer"
+        ))
+        boundary = None
+        if structured_final:
+            # Ingest order belongs to the source transcript; canonical publication
+            # can precede even its USER row. A sibling block in this same provider
+            # record is not a previous turn. Unknown legacy assistant rows fence
+            # the search too, preventing old dispatches crossing a metadata upgrade.
+            boundary = self._assistant_turn_boundary_conn(conn, source_stream_id, source["created_at"],
+                                                          source_event_id, transcript, record)
+            if self._project_dispatch_turn_final_conn(
+                conn, binding[0], composite_created_at=composite["created_at"],
+                source_stream_id=source_stream_id, source_generation=source_generation,
+                session_created_at=source["created_at"], transcript=transcript,
+                window_start=boundary["event_id"] if boundary else 0,
+                source_event=source_event, source_event_id=source_event_id,
+                body=body, recorded_at=recorded_at,
+            ):
+                return
+        # A direct intent is durable before any provider input. Suppress through
+        # all ambiguous delivery states, including a held receipt, until the
+        # matching final publication or a proven no-submit failure. A landed,
+        # unpublished dispatch's own turn final was projected above.
+        open_route = conn.execute(
+            "SELECT 1 FROM v2_assistant_composite_routes r "
+            "WHERE r.stream_id=? AND r.routing_state='resolved' "
+            "AND r.route_target=? AND r.route_target_generation=? "
+            "AND r.dispatch_id IS NOT NULL "
+            "AND r.delivery_state IN ('intent','committed_pending','uncertain','landed') "
+            "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+            "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
+            "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
+            "AND p.publish_kind='prose' "
+            "AND json_extract(p.canonical_payload_json,'$.response_state')='final') "
+            "LIMIT 1", (binding[0], source_stream_id, source_generation),
+        ).fetchone()
+        if open_route is not None:
+            return
+        if structured_final:
+            published_turn = conn.execute(
+                "SELECT r.dispatch_id FROM v2_assistant_composite_routes r "
+                "JOIN v2_assistant_composite_publications p "
+                "ON p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
+                "JOIN session_event_tail u ON u.stream_id=r.route_target "
+                "AND json_extract(u.event_json,'$.text')="
+                "json_extract(r.route_json,'$.direct_envelope.wire_body') "
+                "WHERE r.stream_id=? AND r.route_target=? AND r.route_target_generation=? "
+                "AND r.routing_state='resolved' "
+                "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+                "AND p.publish_kind='prose' "
+                "AND json_extract(p.canonical_payload_json,'$.response_state')='final' "
+                "AND u.session_created_at=? AND u.event_id>? AND u.event_id<? "
+                "AND json_extract(u.event_json,'$.kind')='USER' "
+                "AND json_extract(u.event_json,'$.raw.source_session_identity')=? "
+                "AND COALESCE(json_extract(u.event_json,'$.raw.is_sidechain'),0)=0 LIMIT 1",
+                (binding[0], source_stream_id, source_generation, source["created_at"],
+                 boundary["event_id"] if boundary else 0, source_event_id, transcript),
+            ).fetchone()
+            if published_turn is not None:
+                log.info(
+                    "assistant mirror skipped published turn source_event_id=%s dispatch_id=%s",
+                    source_event_id, published_turn["dispatch_id"],
+                    extra={"subsystem": "assistant_mirror",
+                           "bug_ref": "assistant_reply_dedup"},
+                )
+                return
+            proactive = self._proactive_turn_publication_conn(
+                conn, binding[0], source_stream_id=source_stream_id,
+                source_generation=source_generation, session_created_at=source["created_at"],
+                transcript=transcript, boundary=boundary, source_event_id=source_event_id,
+            )
+            if proactive is not None:
+                log.info(
+                    "assistant mirror skipped proactive-published turn source_event_id=%s "
+                    "publication_key=%s",
+                    source_event_id, proactive,
+                    extra={"subsystem": "assistant_mirror",
+                           "bug_ref": "spec_pentacle__assistant_duplicate_reply_sources_2026_10"},
+                )
+                return
+        # Keep the old fallback for unclassified events only. A known ordinary
+        # final must remain visible even when its text equals a recent publication.
+        recent = None if structured_final else conn.execute(
+            "SELECT p.created_at FROM v2_assistant_composite_publications p "
+            "JOIN v2_assistant_composite_routes r ON r.dispatch_id=p.dispatch_id "
+            "WHERE p.stream_id=? AND p.publish_kind='prose' "
+            "AND r.route_target=? AND r.route_target_generation=? "
+            "AND json_extract(p.canonical_payload_json,'$.response_state')='final' "
+            "AND json_extract(p.canonical_payload_json,'$.message')=? "
+            "ORDER BY p.event_id DESC LIMIT 1",
+            (binding[0], source_stream_id, source_generation, body),
+        ).fetchone()
+        if recent is not None:
+            published_at = datetime.fromisoformat(str(recent["created_at"]).replace("Z", "+00:00")).timestamp()
+            if 0 <= recorded_at - published_at < 120:
+                return
+        # A restart re-ingests the source transcript and mints a NEW
+        # source_event_id for an already-mirrored turn, defeating the
+        # "mirror:<source_event_id>" key dedup. Skip a source event that is both
+        # OLDER than the newest source turn already mirrored for this
+        # binding+source+generation and arriving LATE (a replay is hours old; a
+        # live turn is ingested within seconds, so a small clock step or
+        # out-of-order delivery never drops it). The latest turn itself stays
+        # inside the append-layer identity-dedup window. The watermark is read
+        # from the durable publication payload, so it survives both the restart
+        # and retention pruning of the composite event tail. Accepted limit: if
+        # source timestamps fall five minutes or more behind the daemon clock
+        # and behind the prior watermark (a backward provider clock step, with
+        # or without daemon downtime), EVERY such turn is skipped until source
+        # time passes the watermark again.
+        source_ts = source_event.get("timestamp")
+        src_epoch = _iso_epoch(source_ts)
+        if src_epoch is not None and recorded_at - src_epoch >= _MIRROR_REPLAY_MIN_AGE_S:
+            # Compare instants, not text: providers may write offsets or mixed precision.
+            mirrored = [_iso_epoch(row[0]) for row in conn.execute(
+                "SELECT DISTINCT json_extract(canonical_payload_json,'$.mirrored_from.event_ts') "
+                "FROM v2_assistant_composite_publications "
+                "WHERE stream_id=? AND publish_kind='status' AND dispatch_id='' "
+                "AND json_extract(canonical_payload_json,'$.mirrored_from.stream_id')=? "
+                "AND json_extract(canonical_payload_json,'$.mirrored_from.generation')=?",
+                (binding[0], source_stream_id, source_generation),
+            )]
+            watermark = max((epoch for epoch in mirrored if epoch is not None), default=None)
+            if watermark is not None and src_epoch < watermark:
+                log.info(
+                    "assistant mirror skipped stale re-ingest source_event_id=%s event_ts=%s watermark=%s",
+                    source_event_id, source_ts, watermark,
+                    extra={"subsystem": "assistant_mirror",
+                           "bug_ref": "pentacle__assistant_mirror_restart_reingest_2026_10"},
+                )
+                return
+        origin = {"stream_id": source_stream_id, "generation": source_generation,
+                  "event_id": source_event_id, "event_ts": source_event.get("timestamp")}
+        publication_key = f"mirror:{source_event_id}"
+        canonical_payload = {
+            "composite_stream_id": binding[0], "dispatch_id": "",
+            "reply_to_message_id": None, "reply_to_question_id": None,
+            "publish_kind": "status", "message": body,
+            "attachment_ids": [], "evidence_refs": [], "mirrored_from": origin,
+        }
+        canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        event = {
+            "stream_id": binding[0], "provider": "composite", "kind": "ASSIST_TEXT",
+            "text": body, "message_id": "publication:" + publication_key,
+            "reply_to_message_id": None, "reply_to_question_id": None,
+            "publish_kind": "status", "attachments": [],
+            "timestamp": source_event.get("timestamp"),
+            "raw": {"assistant_composite": True, "publish_kind": "status",
+                    "dispatch_id": "", "mirrored_from": origin,
+                    "attachment_ids": [], "evidence_refs": []},
+        }
+        event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cur = conn.execute(
+            "INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,"
+            "event_ts,recorded_at,identity) VALUES (?,?,?,?,?,?,?)",
+            (binding[0], composite["created_at"], hashlib.sha256(event_json.encode()).hexdigest(),
+             event_json, source_event.get("timestamp"), recorded_at,
+             "assistant-mirror:" + publication_key),
+        )
+        conn.execute(
+            "INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,"
+            "canonical_payload_json,dispatch_id,reply_to_message_id,reply_to_question_id,publish_kind,"
+            "attachment_ids_json,evidence_refs_json,event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (publication_key, binding[0], hashlib.sha256(canonical_json.encode()).hexdigest(),
+             canonical_json, "", None, None, "status", "[]", "[]", int(cur.lastrowid),
+             _routing_iso_now()),
+        )
+        log.info(
+            "assistant mirror committed source_event_id=%s canonical_event_id=%s",
+            source_event_id, int(cur.lastrowid),
+            extra={"subsystem": "assistant_mirror",
+                   "bug_ref": "assistant_chat_prose_mirror"},
+        )
+
+    async def assistant_mirror_event_for_source(self, source_event_id: int) -> dict[str, Any] | None:
+        """Return the committed canonical row for the live broadcaster."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT t.event_id,t.event_json FROM v2_assistant_composite_publications p "
+                "JOIN session_event_tail t ON t.event_id=p.event_id "
+                "WHERE p.publication_key=? AND p.publish_kind='status' AND p.dispatch_id=''",
+                (f"mirror:{source_event_id}",),
+            ).fetchone()
+            if row is None:
+                # A dispatch turn final is keyed by its dispatch, so resolve it by origin.
+                row = conn.execute(
+                    "SELECT t.event_id,t.event_json FROM v2_assistant_composite_publications p "
+                    "JOIN session_event_tail t ON t.event_id=p.event_id "
+                    "WHERE p.publication_key LIKE 'turnfinal:%' AND p.publish_kind='status' "
+                    "AND json_extract(p.canonical_payload_json,'$.mirrored_from.event_id')=?",
+                    (source_event_id,),
+                ).fetchone()
+            if row is None:
+                return None
+            return dict(json.loads(row["event_json"])) | {"daemon_seq": int(row["event_id"])}
+        return await self.submit(_op)
+
+    # -- event.push target pin ------------------------------------------------
+
+    @staticmethod
+    def _require_full_git_sha(value: object, *, label: str) -> str:
+        if not isinstance(value, str) or _FULL_GIT_SHA.fullmatch(value) is None:
+            raise ValueError(f"{label} must be an exact 40-character hexadecimal git SHA")
+        return value
+
+    async def stage_event_push_target_sha(self, target_sha: str) -> str | None:
+        """Durably record the current pin, stage ``target_sha``, then read it back.
+
+        This is the sole manual deploy-window writer for ``event_push.target_sha``.
+        It deliberately has no deploy/restart behavior: the Nexus-serialized window
+        owns invocation and rollback timing.  An empty/missing old pin is recorded
+        as an empty string, which preserves the reader's existing no-pin semantics.
+        """
+        target = self._require_full_git_sha(target_sha, label="target_sha")
+        previous = await self.get(EVENT_PUSH_TARGET_SHA_KEY)
+        if previous == target:
+            # Resume observation without destroying the original rollback pin.
+            captured = await self.get(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY)
+            return captured or None
+        if previous:
+            self._require_full_git_sha(previous, label="existing event.push target")
+
+        # Persist this before changing the live key.  Calls share this Store's
+        # serialized queue; the external deploy window supplies cross-process
+        # serialization with the daemon's single store owner.
+        await self.put(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY, previous or "")
+        await self.put(EVENT_PUSH_TARGET_SHA_KEY, target)
+        readback = await self.get(EVENT_PUSH_TARGET_SHA_KEY)
+        if readback != target:
+            raise RuntimeError(
+                "event.push target pin readback mismatch after stage: "
+                f"expected {target}, got {readback!r}"
+            )
+        return previous
+
+    async def rollback_event_push_target_sha(self) -> str | None:
+        """Restore the preceding pin captured by :meth:`stage_event_push_target_sha`."""
+        previous = await self.get(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY)
+        if previous is None:
+            raise RuntimeError("no captured previous event.push target pin to restore")
+        if previous:
+            self._require_full_git_sha(previous, label="captured previous event.push target")
+
+        await self.put(EVENT_PUSH_TARGET_SHA_KEY, previous)
+        readback = await self.get(EVENT_PUSH_TARGET_SHA_KEY)
+        if readback != previous:
+            raise RuntimeError(
+                "event.push target pin readback mismatch after rollback: "
+                f"expected {previous!r}, got {readback!r}"
+            )
+        return previous or None
+
+    # -- sessions table ----------------------------------------------------
+
+    async def open_session(
+        self, host: str, session_name: str, *, spawn_request_id: str | None = None, **fields: Any,
+    ) -> dict[str, Any] | None:
+        """Insert (or re-open) a session row. Returns the stored row."""
+        fields = _normalize_session_fields(fields)
+        generation = str(fields.pop("session_generation", "") or uuid.uuid4().hex)
+        cols = self._known(fields)
+        cols.setdefault("visibility", "default")
+        cols.setdefault("created_at", iso_now())
+        cols["status"] = "open"
+        cols["closed_at"] = None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
+            if conn.execute(
+                "SELECT 1 FROM v2_deferred_reap WHERE stream_id=? AND done_at IS NULL",
+                (f"{host}:{session_name}",),
+            ).fetchone():
+                # Includes exhausted intents: automatic adoption must never
+                # undo the operator's close, even after retries stop.
+                return None
+            if spawn_request_id is not None:
+                reservation = _spawn_reservation(conn, host, session_name, spawn_request_id)
+                if reservation is None:
+                    return None
+                intent = json.loads(reservation.get("payload") or "{}")
+                expected = (intent.get("open_fields") or {}).get("session_generation")
+                if expected and expected != generation:
+                    return None
+                observer = cols.get("observer_binding")
+                if isinstance(observer, dict):
+                    cols["observer_binding"] = {
+                        "executable": observer.get("executable", ""),
+                        "pane_pid": str(reservation.get("pane_pid") or ""),
+                        "pane_started_at": str(reservation.get("pane_started_at") or ""),
+                        "generation": generation,
+                        **({"cursor": dict(observer["cursor"])} if cols.get("provider") == "cursor"
+                           and isinstance(observer.get("cursor"), dict) else {}),
+                    }
+            stream_id = f"{host}:{session_name}"
+            existing = conn.execute(
+                "SELECT status, jsonl_path FROM sessions WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            prior_generation = conn.execute(
+                "SELECT generation FROM v2_session_generations WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            generation_changed = (
+                prior_generation is None
+                or str(prior_generation[0] or "") != generation
+            )
+            if not generation_changed and {"objective", "objective_source"}.intersection(cols):
+                prior_objective = conn.execute("SELECT objective,objective_source FROM sessions WHERE host=? AND session_name=?", (host, session_name)).fetchone()
+                if prior_objective and any(key in cols and prior_objective[index] != cols[key]
+                                           for index, key in enumerate(("objective", "objective_source"))):
+                    raise ValueError("objective and objective_source are immutable within a session generation")
+            if not generation_changed and "account_binding" in cols:
+                prior_account = conn.execute("SELECT account_binding FROM sessions WHERE host=? AND session_name=?", (host, session_name)).fetchone()
+                if prior_account and prior_account[0] != _enc("account_binding", cols["account_binding"]):
+                    raise ValueError("account_binding is immutable within a session generation")
+            if generation_changed:
+                observer = cols.get("observer_binding")
+                if isinstance(observer, dict):
+                    cols["observer_binding"] = {
+                        key: observer.get(key, "")
+                        for key in ("executable", "pane_pid", "pane_started_at")
+                    } | {"generation": generation} | (
+                        {"cursor": dict(observer["cursor"])} if cols.get("provider") == "cursor"
+                        and isinstance(observer.get("cursor"), dict) else {})
+                    cols["observer_binding"]["pane_pid"] = str(
+                        cols["observer_binding"].get("pane_pid") or cols.get("pane_pid") or "")
+                else:
+                    cols["observer_binding"] = None
+            reopened = existing is not None and str(existing[0] or "") == "closed"
+            if reopened:
+                # A host/session name is reusable, but a routing quarantine is
+                # bound to the prior lifecycle. Retire its active delivery state
+                # before the caller seeds the new row.
+                stamp = _routing_iso_now()
+                conn.execute(
+                    """UPDATE v2_outbound_notices
+                       SET terminal_at=?, last_error=?
+                       WHERE source_stream_id=? AND kind='routing_integrity'
+                         AND terminal_at IS NULL""",
+                    (stamp, "session_reopened", stream_id),
+                )
+                conn.execute(
+                    "DELETE FROM v2_routing_integrity WHERE stream_id=?",
+                    (stream_id,),
+                )
+                # Post-hoc role provenance is bound to the prior lifecycle too:
+                # drop it so a reused name reopened as a fresh spawn derives its
+                # role_source (spawn/handoff) instead of inheriting a stale
+                # `role_set` marker from the closed generation.
+                conn.execute(
+                    "DELETE FROM v2_session_role WHERE host=? AND session_name=?",
+                    (host, session_name),
+                )
+                # `created_at` is v2's existing durable lifecycle generation.
+                # Always mint it on a closed-name reopen, even if a stale row
+                # was forwarded as input, so late observations from the prior
+                # worker cannot pass the generation CAS.
+                cols["created_at"] = stamp
+                reopen_defaults = {
+                    "objective": None,
+                    "objective_source": None,
+                    "parent_stream_id": None,
+                    "role": None,
+                    "phase": None,
+                    "handoff_from_stream_id": None,
+                    "spec_id": None,
+                    "spec_resolution": None,
+                    "offline_since_ts": None,
+                    "self_close_on_completion": 0,
+                    "no_watch": 0,
+                    "token_hash": None,
+                    "token_hash_version": None,
+                    "harness_run_id": None,
+                    "opened_by_host_id": None,
+                    "jsonl_path": None,
+                    "observer_binding": None,
+                    "account_binding": None,
+                    "claude_session_id": None,
+                    "claude_session_lineage": None,
+                    "spec_ids": None,
+                    "presumed_dead_at": None,
+                    "status_card": None,
+                    "context_tokens": None,
+                    "model_context_window": None,
+                    "context_updated_at": None,
+                    "context_level": None,
+                    "pane_pid": None,
+                    "pane_status": "pane_unknown",
+                    "requested_model": None,
+                    "requested_effort": None,
+                    "effective_model": None,
+                    "effective_effort": None,
+                    "routing_integrity": None,
+                    "routing_integrity_reason": None,
+                    "routing_integrity_updated_at": None,
+                    "provider": None,
+                    "presumed_dead_fired_at": None,
+                    "qualified_spec_ids": None,
+                    "spec_binding_provenance": None,
+                    "assigned_spec_id": None,
+                    "title": None,
+                    "dead_open_closed_at": None,
+                    # A fresh generation has not closed; never inherit a close class.
+                    "close_kind": None,
+                    "bootstrap_state": None,
+                }
+                for name, default in reopen_defaults.items():
+                    if name not in cols:
+                        cols[name] = default
+                # These read-model fields are daemon-owned and must never be
+                # accepted from a caller forwarding a closed row. A new spawn
+                # seeds effective_* explicitly; jsonl_path is intentionally
+                # preserved when the new lifecycle supplies one.
+                cols["routing_integrity"] = None
+                cols["routing_integrity_reason"] = None
+                cols["routing_integrity_updated_at"] = None
+            names = ["host", "session_name", *cols]
+            values = [host, session_name, *(_enc(k, v) for k, v in cols.items())]
+            updates = ", ".join(f"{k}=excluded.{k}" for k in cols)
+            conn.execute(
+                f"INSERT INTO sessions ({','.join(names)}) VALUES ({','.join('?' * len(names))}) "
+                f"ON CONFLICT(host, session_name) DO UPDATE SET {updates}",
+                values,
+            )
+            conn.execute(
+                "INSERT INTO v2_session_generations (host, session_name, generation) "
+                "VALUES (?,?,?) ON CONFLICT(host, session_name) DO UPDATE SET generation=excluded.generation",
+                (host, session_name, generation),
+            )
+            # Per-generation usage history (AC10): the row survives a
+            # same-name reopen that overwrites `sessions` and the generation key.
+            opened = conn.execute(
+                "SELECT pane_pid, provider FROM sessions WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            store_usage.history_open_conn(
+                conn, host, session_name, generation,
+                pane_pid=opened["pane_pid"], provider=opened["provider"],
+            )
+            store_usage.history_fill_conn(
+                conn, host, session_name, pane_pid=opened["pane_pid"], provider=opened["provider"],
+            )
+            if generation_changed and cols.get("handoff_from_stream_id"):
+                predecessor = str(cols["handoff_from_stream_id"])
+                source_host, separator, source_name = predecessor.partition(":")
+                if separator and predecessor != stream_id:
+                    source = conn.execute(
+                        "SELECT g.generation FROM sessions s "
+                        "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+                        "WHERE s.host=? AND s.session_name=? AND s.status='open' "
+                        "AND s.closed_at IS NULL AND s.pane_status='pane_alive'",
+                        (source_host, source_name),
+                    ).fetchone()
+                    if source and source["generation"]:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO v2_assistant_direct_handoff_proofs "
+                            "(successor_stream_id,successor_generation,predecessor_stream_id,"
+                            "predecessor_generation,created_at) VALUES (?,?,?,?,?)",
+                            (stream_id, generation, predecessor, source["generation"], iso_now()),
+                        )
+            if spawn_request_id is not None:
+                reservation = _spawn_reservation(conn, host, session_name, spawn_request_id)
+                intent = json.loads(reservation.get("payload") or "{}")
+                if "exchange_binding" not in intent:
+                    intent["exchange_binding"] = store_exchange.direct_pair(conn, cols.get("parent_stream_id"), stream_id)
+                    conn.execute("UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?", (json.dumps(intent), host, session_name))
+            if generation_changed:
+                # A new lifecycle must not inherit either kind's cooldown or
+                # stale basis from the predecessor.  This delete is inside the
+                # same store transaction as the open + generation update, so a
+                # crash cannot expose a successor with predecessor nudge state.
+                conn.execute(
+                    "DELETE FROM v2_nudge_state WHERE stream_id=?",
+                    (stream_id,),
+                )
+            try:
+                lifecycle_watch_conn(conn, time.time())
+                install_default_conn(conn, f"{host}:{session_name}", time.time())
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+
+        lifecycle_lock = self.routing_integrity_lifecycle_lock(f"{host}:{session_name}")
+        async with lifecycle_lock:
+            return await self.submit(_op)
+
+    async def update_session(
+        self,
+        host: str,
+        session_name: str,
+        *,
+        expected_generation: str | None = None,
+        expected_spec_source: dict[str, Any] | None = None,
+        transfer_child_watch_custody: bool = False,
+        **fields: Any,
+    ) -> dict[str, Any] | None:
+        """Patch named columns on one row. Returns the row, or None if absent."""
+        if {"objective", "objective_source", "account_binding"}.intersection(fields):
+            raise ValueError("objective, objective_source and account_binding are immutable within a session generation")
+        fields = _normalize_session_fields(fields)
+        cols = self._known(fields)
+        if not cols:
+            row = await self.fetch_session(host, session_name)
+            if (
+                expected_generation is not None
+                and isinstance(row, dict)
+                and str(row.get("created_at") or "") != expected_generation
+            ):
+                return None
+            return row
+        closing = str(cols.get("status") or "") == "closed"
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            if expected_spec_source is not None:
+                current = _session_for_stream_conn(conn, f"{host}:{session_name}")
+                if spec_binding_source(current) != expected_spec_source:
+                    raise SpecInputsUnavailable("spec_inputs_changed")
+            if expected_generation is not None:
+                current = conn.execute(
+                    "SELECT created_at FROM sessions WHERE host=? AND session_name=?",
+                    (host, session_name),
+                ).fetchone()
+                if current is None or str(current[0] or "") != expected_generation:
+                    conn.commit()
+                    return None
+            custody_child = _session_for_stream_conn(conn, f"{host}:{session_name}") if transfer_child_watch_custody else None
+            assign = ", ".join(f"{k}=?" for k in cols)
+            cur = conn.execute(
+                f"UPDATE sessions SET {assign} WHERE host=? AND session_name=?",
+                [*(_enc(k, v) for k, v in cols.items()), host, session_name],
+            )
+            if cur.rowcount == 0:
+                conn.commit()
+                return None
+            if "pane_pid" in cols or "provider" in cols:
+                store_usage.history_fill_conn(
+                    conn, host, session_name, pane_pid=cols.get("pane_pid"), provider=cols.get("provider"),
+                )
+            if closing:
+                store_usage.history_close_conn(conn, host, session_name)
+                stream_id = f"{host}:{session_name}"
+                conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
+                stamp = _routing_iso_now()
+                # Closing is a lifecycle boundary. Retire active routing
+                # delivery/quarantine state before a later reopen seeds a fresh row.
+                conn.execute(
+                    """UPDATE v2_outbound_notices
+                       SET terminal_at=?, last_error=?
+                       WHERE source_stream_id=? AND kind='routing_integrity'
+                         AND terminal_at IS NULL""",
+                    (stamp, "session_closed", stream_id),
+                )
+                conn.execute(
+                    "DELETE FROM v2_routing_integrity WHERE stream_id=?",
+                    (stream_id,),
+                )
+            try:
+                if custody_child and custody_child.get("parent_stream_id") != cols.get("parent_stream_id"):
+                    from store_watch_wake import move_watch_custody_conn, _session
+                    source = _session(conn, custody_child.get("parent_stream_id"))
+                    target = _session(conn, cols.get("parent_stream_id"))
+                    if source and target and source["status"] == "open":
+                        move_watch_custody_conn(conn, custody_child["parent_stream_id"], source["session_generation"],
+                            cols["parent_stream_id"], target["session_generation"],
+                            child=(f"{host}:{session_name}", custody_child["session_generation"]))
+                lifecycle_watch_conn(conn, time.time())
+                install_default_conn(conn, f"{host}:{session_name}", time.time())
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+
+        if closing or "parent_stream_id" in cols:
+            stream_id = f"{host}:{session_name}"
+            lifecycle_lock = self.routing_integrity_lifecycle_lock(stream_id)
+            try:
+                async with lifecycle_lock:
+                    result = await self.submit(_op)
+            finally:
+                self._retire_routing_integrity_lifecycle_lock(stream_id)
+            return result
+        if expected_spec_source is not None:
+            return await self._submit_spec_commit(_op)
+        return await self.submit(_op)
+
+    async def update_context(
+        self, host: str, session_name: str, *, expected_generation: str,
+        context_tokens: int, model_context_window: int,
+        context_level: str, context_updated_at: str,
+    ) -> dict[str, Any] | None:
+        """Persist telemetry and every threshold transition in one transaction.
+
+        The observer holds the source lifecycle lock, also used by NudgeJob.
+        Recording transitions here preserves a compaction between nudge sweeps.
+        The existing nudge basis holds the episode; no sessions schema changes.
+        """
+        ranks = {"none": 0, "advisory": 1, "compact": 2}
+        if context_level not in ranks or context_tokens < 0 or model_context_window <= 0:
+            return None
+        def epoch(stamp: str) -> float | None:
+            try:
+                dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                return dt.timestamp() if dt.utcoffset() is not None else None
+            except (ValueError, TypeError, OverflowError):
+                return None
+        observed = epoch(context_updated_at)
+        if observed is None:
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT * FROM sessions WHERE host=? AND session_name=?",
+                               (host, session_name)).fetchone()
+            if row is None or row["status"] != "open" or row["created_at"] != expected_generation:
+                return None
+            prior_at = epoch(str(row["context_updated_at"] or ""))
+            created_at = epoch(expected_generation)
+            if (prior_at is not None and observed < prior_at
+                    or created_at is not None and observed < created_at):
+                return None
+            sid = f"{host}:{session_name}"
+            try:
+                conn.execute("""UPDATE sessions SET context_tokens=?, model_context_window=?,
+                             context_level=?, context_updated_at=? WHERE host=? AND session_name=?""",
+                             (context_tokens, model_context_window, context_level,
+                              context_updated_at, host, session_name))
+                for level in ("advisory", "compact"):
+                    kind = "context_" + level
+                    prior = conn.execute("SELECT basis FROM v2_nudge_state WHERE stream_id=? AND kind=?",
+                                         (sid, kind)).fetchone()
+                    basis = json.loads(prior[0]) if prior is not None else {}
+                    # A compact crossing stays in one episode through the
+                    # advisory band. Only an observation below advisory, or a
+                    # new generation, rearms a later crossing.
+                    active = (
+                        ranks[context_level] >= 1 and
+                        (context_level == "compact" or basis.get("active"))
+                        if level == "compact"
+                        else ranks[context_level] >= 1
+                    )
+                    if level == "compact" and basis.get("generation") != expected_generation:
+                        active = context_level == "compact"
+                    if prior is None and not active:
+                        continue
+                    if basis.get("generation") != expected_generation or active and not basis.get("active"):
+                        # A below-advisory observation starts a new crossing,
+                        # but it cannot erase proof debt from possible pane
+                        # input in the previous crossing. Keep that fence
+                        # across same-generation rearms until its USER event
+                        # is reconciled; a new generation never inherits it.
+                        pending_prior = None
+                        if level == "compact" and basis.get("generation") == expected_generation:
+                            for key in ("attempt", "pending_prior_attempt"):
+                                candidate = basis.get(key)
+                                if (isinstance(candidate, dict)
+                                        and candidate.get("outcome") == "pending_input"):
+                                    pending_prior = candidate
+                                    break
+                        basis = {
+                            "version": 1, "generation": expected_generation,
+                            "epoch": uuid.uuid4().hex, "deliveries": {},
+                            "crossing": {"observed_at": context_updated_at,
+                                         "tokens": context_tokens, "window": model_context_window,
+                                         "level": level},
+                        }
+                        if pending_prior is not None:
+                            basis["pending_prior_attempt"] = pending_prior
+                    basis["active"] = active
+                    if level == "advisory":
+                        basis.pop("superseded", None)
+                    conn.execute("""INSERT INTO v2_nudge_state (stream_id,kind,last_nudged_at,basis)
+                                 VALUES (?,?,0,?) ON CONFLICT(stream_id,kind)
+                                 DO UPDATE SET basis=excluded.basis""",
+                                 (sid, kind, json.dumps(basis, sort_keys=True)))
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            return _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+        return await self.submit(_op)
+
+    async def nudge_state(self, stream_id: str, kind: str) -> dict[str, Any] | None:
+        """Read one episode after acquiring its source lifecycle lock."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT * FROM v2_nudge_state WHERE stream_id=? AND kind=?",
+                               (stream_id, kind)).fetchone()
+            return dict(row) if row is not None else None
+        return await self.submit(_op)
+
+    async def set_session_role_source(
+        self, host: str, session_name: str, *,
+        role_source: str, actor: str | None, changed_at: str | None,
+    ) -> None:
+        """Upsert the post-hoc role provenance for one seat (`role set`)."""
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO v2_session_role "
+                "(host, session_name, role_source, actor, changed_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(host, session_name) DO UPDATE SET "
+                "role_source=excluded.role_source, actor=excluded.actor, "
+                "changed_at=excluded.changed_at",
+                (host, session_name, role_source, actor, changed_at),
+            )
+            conn.commit()
+        await self.submit(_op)
+
+    async def fetch_role_source(self, host: str, session_name: str) -> dict[str, Any] | None:
+        """The stored role provenance for one seat, or None if never set post hoc."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT role_source, actor, changed_at FROM v2_session_role "
+                "WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        return await self.submit(_op)
+
+    async def all_role_sources(self) -> dict[tuple[str, str], dict[str, Any]]:
+        """Every stored role provenance keyed by (host, session_name) for the
+        list projection — one bulk read, never a per-row round trip."""
+        def _op(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+            return {
+                (str(r["host"]), str(r["session_name"])): {
+                    "role_source": r["role_source"],
+                    "actor": r["actor"],
+                    "changed_at": r["changed_at"],
+                }
+                for r in conn.execute(
+                    "SELECT host, session_name, role_source, actor, changed_at "
+                    "FROM v2_session_role"
+                )
+            }
+        return await self.submit(_op)
+
+    async def mark_closed(
+        self,
+        host: str,
+        session_name: str,
+        *,
+        closed_at: str,
+        pane_status: str,
+        expected_generation: str | None = None,
+        close_kind: str | None = None,
+        reason: str | None = None,
+        attribution: dict[str, Any] | None = None,
+        request_task: asyncio.Task | None = None,
+    ) -> dict[str, Any] | None:
+        """Close one open generation with a durable compare-and-set.
+
+        A same-name reopen replaces the generation token while the old close
+        operation may still be awaiting tmux. The token predicate makes that
+        stale close a no-op instead of closing the replacement row.
+
+        `close_kind` (spawn-admission rollback-truth spec, AC5) records the
+        close origin (e.g. ``spawn_rollback`` vs a live/self/operator close) so
+        a failed-boot rollback is queryably distinct from a live-session death.
+
+        The CAS's ``status='open'`` predicate already refuses to re-close a row
+        that is already closed. AC1: that drop is now AUDIBLE — a stale
+        spawn-admission retry landing on an already-closed row emits one WARN
+        naming the stream, generation, and dropped reason instead of returning
+        None silently (the silent-drop was indistinguishable from a benign
+        generation-mismatch no-op).
+        """
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            set_cols = "status='closed', closed_at=?, pane_status=?"
+            params: list[Any] = [closed_at, pane_status]
+            if close_kind is not None:
+                set_cols += ", close_kind=?"
+                params.append(close_kind)
+            if close_kind == "operator_offline_close":
+                set_cols += ", dead_open_closed_at=?"
+                params.append(closed_at)
+            params += [host, session_name]
+            predicate = "host=? AND session_name=? AND status='open'"
+            if expected_generation:
+                predicate += " AND EXISTS ("
+                predicate += (
+                    "SELECT 1 FROM v2_session_generations g "
+                    "WHERE g.host=sessions.host AND g.session_name=sessions.session_name "
+                    "AND g.generation=?"
+                )
+                predicate += ")"
+                params.append(expected_generation)
+            cur = conn.execute(
+                f"UPDATE sessions SET {set_cols} WHERE {predicate}",
+                params,
+            )
+            if cur.rowcount == 0:
+                # AC1: distinguish an already-closed drop (a stale/duplicate
+                # spawn-admission retry trying to falsify a legitimate close)
+                # from a benign generation-mismatch or absent-row no-op, and
+                # make it audible so the falsification attempt is nameable in
+                # the daemon log even though the CAS correctly refused it.
+                existing = conn.execute(
+                    "SELECT status, closed_at FROM sessions WHERE host=? AND session_name=?",
+                    (host, session_name),
+                ).fetchone()
+                conn.commit()
+                if existing is not None and str(existing[0] or "") == "closed":
+                    log.warning(
+                        "mark_closed dropped: row already closed "
+                        "stream=%s generation=%s dropped_kind=%s dropped_reason=%s "
+                        "existing_closed_at=%s (stale spawn-admission retry refused)",
+                        f"{host}:{session_name}",
+                        expected_generation or "(current)",
+                        close_kind or "(none)",
+                        reason or "(none)",
+                        existing[1],
+                    )
+                return None
+            store_usage.history_close_conn(conn, host, session_name)
+            stream_id = f"{host}:{session_name}"
+            release_holder_conn(conn, stream_id, time.time())
+            store_capacity_retry.cancel(conn, stream_id, reason="close")
+            if close_kind == "operator_offline_close":
+                generation_row = conn.execute(
+                    "SELECT generation FROM v2_session_generations WHERE host=? AND session_name=?",
+                    (host, session_name),
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR REPLACE INTO v2_deferred_reap "
+                    "(stream_id,host,session_name,generation,requested_at) VALUES (?,?,?,?,?)",
+                    (stream_id, host, session_name, generation_row[0], closed_at),
+                )
+            stamp = _routing_iso_now()
+            conn.execute(
+                """UPDATE v2_outbound_notices
+                   SET terminal_at=?, last_error=?
+                   WHERE source_stream_id=? AND kind='routing_integrity'
+                     AND terminal_at IS NULL""",
+                (stamp, "session_closed", stream_id),
+            )
+            conn.execute("DELETE FROM v2_routing_integrity WHERE stream_id=?", (stream_id,))
+            conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
+            # Attribute the close in the SAME transaction as the CAS UPDATE, so a
+            # closed row can never exist without its audit row.
+            _insert_close_audit(conn, _close_audit_payload(
+                host=host, session_name=session_name, close_kind=close_kind,
+                disposition="closed", attribution=attribution, reason=reason,
+            ))
+            with conn:
+                lifecycle_watch_conn(conn, time.time())
+            conn.commit()
+            return _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+
+        stream_id = f"{host}:{session_name}"
+        lifecycle_lock = self.routing_integrity_lifecycle_lock(stream_id)
+        try:
+            async with lifecycle_lock:
+                # A shielded close can wait here after its requester disconnects.
+                # Without confirmed death, cancellation still prevents enqueue;
+                # once queued, the transaction and inventory follow-up must finish.
+                if request_task is not None and request_task.cancelling():
+                    raise asyncio.CancelledError
+                def transaction(conn: sqlite3.Connection) -> dict[str, Any] | None:
+                    with conn:
+                        return _op(conn)
+                return await self.submit(transaction)
+        finally:
+            self._retire_routing_integrity_lifecycle_lock(stream_id)
+
+    async def mark_reconciled_dead(
+        self,
+        host: str,
+        session_name: str,
+        *,
+        expected_generation: str,
+        presumed_dead_at: str,
+        closed_at: str,
+    ) -> dict[str, Any] | None:
+        """CAS the reconciler's death transition to one unreserved row generation."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            cur = conn.execute(
+                "UPDATE sessions SET status='closed', closed_at=?, pane_status='pane_dead', "
+                "presumed_dead_at=?, presumed_dead_fired_at=?, dead_open_closed_at=? "
+                "WHERE host=? AND session_name=? AND status='open' AND EXISTS ("
+                "SELECT 1 FROM v2_session_generations g "
+                "WHERE g.host=sessions.host AND g.session_name=sessions.session_name "
+                "AND g.generation=?) AND NOT EXISTS ("
+                "SELECT 1 FROM v2_stream_reservations r "
+                "WHERE r.host=sessions.host AND r.session_name=sessions.session_name "
+                "AND r.expires_at >= ?)",
+                (
+                    closed_at, presumed_dead_at, closed_at, closed_at,
+                    host, session_name, expected_generation, time.time(),
+                ),
+            )
+            if cur.rowcount == 0:
+                conn.commit()
+                return None
+            store_usage.history_close_conn(conn, host, session_name)
+            stream_id = f"{host}:{session_name}"
+            release_holder_conn(conn, stream_id, time.time())
+            stamp = _routing_iso_now()
+            conn.execute(
+                """UPDATE v2_outbound_notices
+                   SET terminal_at=?, last_error=?
+                   WHERE source_stream_id=? AND kind='routing_integrity'
+                     AND terminal_at IS NULL""",
+                (stamp, "session_closed", stream_id),
+            )
+            conn.execute("DELETE FROM v2_routing_integrity WHERE stream_id=?", (stream_id,))
+            conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
+            # The presumed-dead reconciler transition bypasses mark_closed but is
+            # still an affirmative close — attribute it in the same transaction.
+            _insert_close_audit(conn, _close_audit_payload(
+                host=host, session_name=session_name, close_kind="reconciler_dead",
+                disposition="presumed_dead", attribution=None,
+                reason="reconciler_confirmed_dead",
+            ))
+            with conn:
+                lifecycle_watch_conn(conn, time.time())
+            conn.commit()
+            return _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+
+        stream_id = f"{host}:{session_name}"
+        lifecycle_lock = self.routing_integrity_lifecycle_lock(stream_id)
+        try:
+            async with lifecycle_lock:
+                return await self.submit(_op)
+        finally:
+            self._retire_routing_integrity_lifecycle_lock(stream_id)
+
+    async def record_close_audit(
+        self,
+        *,
+        host: str,
+        session_name: str,
+        close_kind: str | None,
+        disposition: str,
+        attribution: dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one close-attribution row for a disposition that does NOT reach
+        mark_closed (``deferred``/``fenced`` refusals). ``closed`` and
+        ``presumed_dead`` are written in their own close transactions instead."""
+        payload = _close_audit_payload(
+            host=host, session_name=session_name, close_kind=close_kind,
+            disposition=disposition, attribution=attribution, reason=reason,
+        )
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            _insert_close_audit(conn, payload)
+            conn.commit()
+            return payload
+
+        return await self.submit(_op)
+
+    async def latest_close_audit(self, stream_id: str) -> dict[str, Any] | None:
+        """The most recent close-attribution row for a stream, or None."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                f"SELECT {_CLOSE_AUDIT_COLUMNS} FROM v2_close_audit "
+                "WHERE stream_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (stream_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            keys = [c.strip() for c in _CLOSE_AUDIT_COLUMNS.split(",")]
+            return dict(zip(keys, row))
+
+        return await self.submit(_op)
+
+    async def fetch_session(self, host: str, session_name: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            return _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+
+        return await self.submit(_op)
+
+    async def sessions_for_claude_session_id(
+        self, claude_session_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return retained lifecycle rows bound to one native Claude identity.
+
+        Closed rows are intentionally included: resume reuses their stream name
+        and descriptive metadata when retention still has them. An empty result
+        is not an error because the provider transcript can outlive row
+        retention; the caller then uses the normal authorized spawn lifecycle.
+        """
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE claude_session_id=? "
+                "ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, "
+                "created_at DESC, host, session_name",
+                (claude_session_id,),
+            ).fetchall()
+            return [_session_row(conn, row) for row in rows]
+
+        return await self.submit(_op)
+
+    async def list_sessions(self, status: str | None = "open") -> list[dict[str, Any]]:
+        """Rows by status. The hot path never calls this — `sessions.Registry`
+        keeps an in-memory inventory and refreshes from here (design: the
+        `list_sessions` verb is UI polling and must be O(open))."""
+
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            if status is None:
+                rows = conn.execute("SELECT * FROM sessions").fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM sessions WHERE status=?", (status,)).fetchall()
+            return [_session_row(conn, r) for r in rows]
+
+        return await self.submit(_op)
+
+    async def list_session_lineage(self) -> list[dict[str, Any]]:
+        """Ownership fields for every retained session, including closed rows.
+
+        Scope walks do not need session JSON, usage or report hydration. Keep
+        table order so question scope retains the full-read API's ordering.
+
+        Called on the order of thousands of times an hour by question/asset
+        scope. The rows change only on a lineage-relevant session or generation
+        mutation, tracked by the trigger-maintained `_lineage_cache_version`, so
+        an unchanged version serves the cached rows instead of re-scanning every
+        session. Rows and order are identical to the direct query.
+        """
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            if not self._lineage_ddl_ready:
+                # Create the version table and its triggers on the first lineage
+                # read rather than at every Store init. Idempotent (IF NOT
+                # EXISTS), so a reopened DB that already has them is cheap; a
+                # fresh process re-arms the flag and re-asserts them once.
+                for ddl in LINEAGE_CACHE_VERSION_DDL:
+                    conn.execute(ddl)
+                conn.commit()
+                self._lineage_ddl_ready = True
+            version = conn.execute(
+                "SELECT version FROM _lineage_cache_version WHERE id=0").fetchone()[0]
+            cache = self._lineage_cache
+            if cache is not None and cache[0] == version:
+                return cache[1]
+            rows = conn.execute(
+                """SELECT s.host, s.session_name, s.parent_stream_id,
+                          s.handoff_from_stream_id, s.visibility, g.generation
+                   FROM sessions s
+                   LEFT JOIN v2_session_generations g
+                     ON g.host=s.host AND g.session_name=s.session_name
+                   ORDER BY s.rowid"""
+            ).fetchall()
+            result = [{
+                "stream_id": f"{row['host']}:{row['session_name']}",
+                "parent_stream_id": row["parent_stream_id"],
+                "handoff_from_stream_id": row["handoff_from_stream_id"],
+                "visibility": row["visibility"],
+                "session_generation": str(row["generation"]) if row["generation"] is not None else "",
+            } for row in rows]
+            self._lineage_cache = (version, result)
+            return result
+
+        return await self.submit(_op)
+
+    # -- durable close/reap state -----------------------------------------
+
+    async def get_deferred_reap(self, stream_id: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT * FROM v2_deferred_reap WHERE stream_id=?", (stream_id,)).fetchone()
+            return dict(row) if row else None
+        return await self.submit(_op)
+
+    async def list_deferred_reaps(self) -> list[dict[str, Any]]:
+        return await self.submit(lambda conn: [dict(row) for row in conn.execute(
+            "SELECT * FROM v2_deferred_reap WHERE done_at IS NULL AND exhausted_at IS NULL "
+            "ORDER BY requested_at, stream_id"
+        )])
+
+    async def update_deferred_reap(
+        self, stream_id: str, generation: str, *, error: str | None = None,
+        done: bool = False, pane_identity: dict[str, Any] | None = None,
+    ) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            with conn:
+                if pane_identity is not None:
+                    conn.execute(
+                        "UPDATE v2_deferred_reap SET pane_identity=? "
+                        "WHERE stream_id=? AND generation=? AND done_at IS NULL",
+                        (json.dumps(pane_identity, sort_keys=True), stream_id, generation),
+                    )
+                    return
+                stamp = iso_now()
+                conn.execute(
+                    "UPDATE v2_deferred_reap SET attempts=attempts+1, last_error=?, done_at=?, "
+                    "exhausted_at=CASE WHEN ?=0 AND attempts+1>=? THEN ? ELSE exhausted_at END "
+                    "WHERE stream_id=? AND generation=? AND done_at IS NULL AND exhausted_at IS NULL",
+                    (error, stamp if done else None, int(done), DEFERRED_REAP_MAX_ATTEMPTS,
+                     stamp, stream_id, generation),
+                )
+                if done:
+                    conn.execute(
+                        "UPDATE sessions SET pane_status='pane_dead' WHERE host || ':' || session_name=? "
+                        "AND status='closed' AND close_kind='operator_offline_close' AND EXISTS "
+                        "(SELECT 1 FROM v2_session_generations g WHERE g.host=sessions.host "
+                        "AND g.session_name=sessions.session_name AND g.generation=?)",
+                        (stream_id, generation),
+                    )
+        await self.submit(_op)
+
+    async def upsert_session_reap(
+        self,
+        stream_id: str,
+        *,
+        reap_status: str,
+        survivors: list[dict[str, Any]] | None = None,
+        attempts: int = 0,
+        next_attempt_at: str | None = None,
+        exhausted_at: str | None = None,
+        updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        if reap_status not in {"reaped", "survivors", "unknown"}:
+            raise ValueError("invalid session reap status")
+        survivor_json = json.dumps(_sanitize_session_reap_survivors(survivors), separators=(",", ":"))
+        timestamp = updated_at or iso_now()
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute(
+                "INSERT INTO session_reap "
+                "(stream_id,reap_status,survivors,attempts,next_attempt_at,exhausted_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(stream_id) DO UPDATE SET "
+                "reap_status=excluded.reap_status,survivors=excluded.survivors,"
+                "attempts=excluded.attempts,next_attempt_at=excluded.next_attempt_at,"
+                "exhausted_at=excluded.exhausted_at,updated_at=excluded.updated_at",
+                (stream_id, reap_status, survivor_json, int(attempts), next_attempt_at, exhausted_at, timestamp),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM session_reap WHERE stream_id=?", (stream_id,)).fetchone()
+            return _session_reap_row(row)
+
+        return await self.submit(_op)
+
+    async def get_session_reap(self, stream_id: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            return _session_reap_row(
+                conn.execute("SELECT * FROM session_reap WHERE stream_id=?", (stream_id,)).fetchone()
+            )
+
+        return await self.submit(_op)
+
+    async def list_session_reap_unreaped(
+        self, *, lookback_h: int = 48, now: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return pending survivor rows in the bounded closed-row lookback."""
+        now_value = now or iso_now()
+        try:
+            parsed = datetime.fromisoformat(now_value.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = datetime.now(timezone.utc)
+        cutoff = (parsed - timedelta(hours=int(lookback_h))).isoformat().replace("+00:00", "Z")
+
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT r.* FROM session_reap r "
+                "JOIN sessions s ON s.host || ':' || s.session_name = r.stream_id "
+                "WHERE r.reap_status != 'reaped' AND s.status = 'closed' "
+                "AND s.closed_at IS NOT NULL AND s.closed_at >= ? "
+                "AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= ?) "
+                "ORDER BY r.updated_at",
+                (cutoff, now_value),
+            ).fetchall()
+            return [_session_reap_row(row) for row in rows]
+
+        return await self.submit(_op)
+
+    async def list_session_reap_all(self) -> dict[str, dict[str, Any]]:
+        """Read the child table in one trip for the read-only status surface."""
+        def _op(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+            rows = conn.execute("SELECT * FROM session_reap").fetchall()
+            return {
+                str(item["stream_id"]): item
+                for item in (_session_reap_row(row) for row in rows)
+                if item is not None
+            }
+
+        return await self.submit(_op)
+
+    async def count_closed_tree_alive(self, *, lookback_h: int = 48, now: str | None = None) -> int:
+        now_value = now or iso_now()
+        try:
+            parsed = datetime.fromisoformat(now_value.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = datetime.now(timezone.utc)
+        cutoff = (parsed - timedelta(hours=int(lookback_h))).isoformat().replace("+00:00", "Z")
+
+        def _op(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM sessions s "
+                "LEFT JOIN session_reap r ON r.stream_id=s.host || ':' || s.session_name "
+                "WHERE s.status='closed' AND s.closed_at IS NOT NULL AND s.closed_at >= ? "
+                "AND (s.pane_status='pane_alive' OR (r.reap_status IS NOT NULL AND r.reap_status != 'reaped'))",
+                (cutoff,),
+            ).fetchone()
+            return int(row["n"] if row else 0)
+
+        return await self.submit(_op)
+
+    async def find_successor(self, stream_id: str) -> str | None:
+        """The session handed off FROM `stream_id`, if any — the forward link for
+        handoff-lineage tell routing.
+
+        A live successor is preferred (a direct hop wins), but a CLOSED successor
+        is still returned so `resolve_route_target` can follow the chain THROUGH
+        an already-retired intermediate to the live tail — v1 progeny-follow
+        parity, pinned by the lifted route-reliability regression. The caller's
+        loop guard bounds depth and breaks cycles."""
+
+        def _op(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT host, session_name FROM sessions WHERE handoff_from_stream_id=?"
+                " ORDER BY (status='open') DESC, created_at DESC LIMIT 1",
+                (stream_id,),
+            ).fetchone()
+            return None if row is None else f"{row['host']}:{row['session_name']}"
+
+        return await self.submit(_op)
+
+    # -- nudge cooldown (dead-nudge-spam class, D2) ------------------------
+
+    async def nudge_states(self, keep_stream_ids: set[str] | None = None) -> dict[tuple[str, str], dict[str, Any]]:
+        """Every recorded nudge episode, keyed `(stream_id, kind)`. When
+        `keep_stream_ids` is given, rows for any stream not in that set are first
+        deleted — the cooldown table follows the open-session set and never
+        accumulates closed rows (D2 hygiene). One store-thread trip per pass."""
+
+        def _op(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+            if keep_stream_ids is not None:
+                live = {str(s) for s in keep_stream_ids}
+                stale = [
+                    r[0] for r in conn.execute("SELECT DISTINCT stream_id FROM v2_nudge_state").fetchall()
+                    if r[0] not in live
+                ]
+                if stale:
+                    conn.executemany("DELETE FROM v2_nudge_state WHERE stream_id=?", [(s,) for s in stale])
+                    conn.commit()
+            out: dict[tuple[str, str], dict[str, Any]] = {}
+            for r in conn.execute("SELECT stream_id, kind, last_nudged_at, basis FROM v2_nudge_state").fetchall():
+                out[(r["stream_id"], r["kind"])] = dict(r)
+            return out
+
+        return await self.submit(_op)
+
+    async def record_nudge(self, stream_id: str, kind: str, at: float, basis: str = "") -> None:
+        """Stamp `(stream_id, kind)` with the time it was last nudged. Written on
+        every attempt — success OR failure — so a flapping pane that never echoes
+        the receipt is still paced by the cooldown rather than nudged every pass."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO v2_nudge_state (stream_id, kind, last_nudged_at, basis) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(stream_id, kind) DO UPDATE SET last_nudged_at=excluded.last_nudged_at, "
+                "basis=excluded.basis",
+                (stream_id, kind, float(at), basis),
+            )
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def record_nudges(self, records: list[tuple[str, str, float, str]]) -> None:
+        """Record multiple kinds in one transaction.
+
+        Combined title/card tells use this boundary so success and failure both
+        leave an all-or-neither cooldown episode.  Explicit rollback matters
+        when a later row fails: SQLite otherwise leaves the earlier write in
+        the connection's open transaction for a future callable to commit.
+        """
+        if not records:
+            return
+
+        def _op(conn: sqlite3.Connection) -> None:
+            try:
+                conn.executemany(
+                    "INSERT INTO v2_nudge_state (stream_id, kind, last_nudged_at, basis) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(stream_id, kind) DO UPDATE SET "
+                    "last_nudged_at=excluded.last_nudged_at, basis=excluded.basis",
+                    [(stream_id, kind, float(at), basis) for stream_id, kind, at, basis in records],
+                )
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
+        await self.submit(_op)
+
+    # -- reserved stream-id fencing (ledger req 4) -------------------------
+
+    async def children_of(self, parent_stream_id: str) -> list[dict[str, Any]]:
+        """Open sessions whose direct parent is `parent_stream_id` — the handoff
+        reparent set (v1 Pin 7: enumerate by `parent_stream_id ==` plainly, no
+        visibility/online filter)."""
+
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE parent_stream_id=? AND status='open'",
+                (parent_stream_id,),
+            ).fetchall()
+            return [_session_row(conn, r) for r in rows]
+
+        return await self.submit(_op)
+
+    async def reserve_stream_id(
+        self, host: str, session_name: str, *, ttl_s: float, request_id: str = "",
+        nonce: str = "", owner_instance_id: str = "",
+        idempotency_key: str = "", request_payload_hash: str = "",
+        refuse_if_held: bool = False,
+    ) -> bool:
+        """Atomically claim `host:session_name`. False if a live session holds
+        it, an unexpired reservation exists, OR (with `refuse_if_held`, the
+        keyless NEW-admission path) a spawn admission hold is active -- the hold
+        check and claim run in ONE serialized txn (QA cycle-3 astra-[3]) so a
+        freeze set after a separate pre-check can no longer slip a claim
+        through. The caller re-reads the sticky hold only to pick the error.
+
+        `nonce` (spec §D1) is the creation nonce injected into the pane's
+        environment; `owner_instance_id` (spec §D3/INV-2) is the durable
+        ownership token of the daemon instance that owns this in-flight spawn.
+        Both are written in the SAME atomic INSERT that claims the id, so no
+        reservation ever exists without its identity."""
+
+        def _op(conn: sqlite3.Connection) -> bool:
+            host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
+            now = time.time()
+            if _initial_admission_paused(conn):
+                conn.commit()
+                return False
+            # The keyless path is always a NEW admission (no replay), so a live
+            # hold refuses it in this same serialized txn.
+            if refuse_if_held and _admission_held(conn, host, now):
+                conn.commit()
+                return False
+            # INV-6 (intent-aware expiry): sweep only reservations that are BOTH
+            # pane-less (`tmux_created = 0`) AND intent-less (`payload IS NULL`).
+            # A payload is a persisted spawn intent — a recovery handle for a
+            # pane that may already be live in the F1 crash window — so it is
+            # TTL-exempt until reconciliation settles it (never deleted before
+            # adoption). Bounded terminalization retires stale intents instead.
+            conn.execute(
+                "DELETE FROM v2_stream_reservations "
+                "WHERE expires_at < ? AND tmux_created = 0 AND payload IS NULL", (now,)
+            )
+            live = conn.execute(
+                "SELECT 1 FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                (host, session_name),
+            ).fetchone()
+            if live is not None:
+                conn.commit()
+                return False
+            try:
+                _insert_stream_reservation(
+                    conn, host=host, session_name=session_name, request_id=request_id,
+                    expires_at=now + ttl_s, nonce=nonce,
+                    owner_instance_id=owner_instance_id,
+                    idempotency_key=idempotency_key,
+                    request_payload_hash=request_payload_hash,
+                )
+            except sqlite3.IntegrityError:
+                conn.commit()
+                return False
+            conn.commit()
+            return True
+
+        return await self.submit(_op)
+
+    async def release_stream_id_fenced(
+        self, host: str, session_name: str, request_id: str, *, cleanup_confirmed: bool = False,
+    ) -> bool:
+        def _op(conn: sqlite3.Connection) -> bool:
+            if not cleanup_confirmed and _spawn_cancelled(conn, host, session_name, request_id):
+                held = conn.execute(
+                    "SELECT 1 FROM v2_stream_reservations WHERE host=? AND session_name=? "
+                    "AND payload IS NOT NULL", (host, session_name),
+                ).fetchone()
+                if held is not None:
+                    return False
+            cursor = conn.execute(
+                "DELETE FROM v2_stream_reservations "
+                "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=?",
+                (host, session_name, request_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+        return await self.submit(_op)
+
+    async def claim_spawn_intent(
+        self, host: str, session_name: str, *, request_id: str,
+        prior_owner: str, owner_instance_id: str,
+    ) -> bool:
+        """CAS one existing reservation onto the reconciling daemon instance."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                "UPDATE v2_stream_reservations SET owner_instance_id=? "
+                "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=? "
+                "AND COALESCE(owner_instance_id, '')=?",
+                (owner_instance_id, host, session_name, request_id, prior_owner),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+        return await self.submit(_op)
+
+    async def restore_spawn_intent_owner(
+        self, host: str, session_name: str, *, request_id: str,
+        owner_instance_id: str, prior_owner: str,
+    ) -> bool:
+        """Release a reconcile claim only when this instance still owns it."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                "UPDATE v2_stream_reservations SET owner_instance_id=? "
+                "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=? "
+                "AND COALESCE(owner_instance_id, '')=?",
+                (prior_owner or None, host, session_name, request_id, owner_instance_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+        return await self.submit(_op)
+
+    async def reservations(self, *, include_expired: bool = False) -> list[dict[str, Any]]:
+        """Live reservations; `include_expired` is for boot reconciliation,
+        which must see intents whose TTL lapsed while the daemon was down."""
+
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            if include_expired:
+                rows = conn.execute("SELECT * FROM v2_stream_reservations").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM v2_stream_reservations WHERE expires_at >= ?", (time.time(),)
+                ).fetchall()
+            return [_row(r) for r in rows]
+
+        return await self.submit(_op)
+
+    async def record_spawn_intent(
+        self, host: str, session_name: str, payload: dict[str, Any], *,
+        request_id: str | None = None, nonce: str | None = None,
+        expected_spec_sources=(), prepared_qa=None, lane_admission=None,
+    ) -> bool:
+        """Persist what it would take to finish this spawn's row, BEFORE the
+        pane exists. Written to the reservation the spawn already holds."""
+
+        def _op(conn: sqlite3.Connection) -> bool:
+            host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
+            for stream_id, expected in expected_spec_sources:
+                if spec_binding_source(_session_for_stream_conn(conn, stream_id)) != expected:
+                    raise SpecInputsUnavailable("spec_inputs_changed")
+            held = conn.execute(
+                "SELECT request_id FROM v2_stream_reservations WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            identity = request_id if request_id is not None else str((held[0] if held else "") or "")
+            res = _spawn_reservation(conn, host, session_name, identity, nonce)
+            if not res:
+                return False
+            # Local TTL fence (QA cycle-3 luna-[1]): a payload-LESS reservation
+            # whose TTL already lapsed is not a valid pre-pane creation handle.
+            # Fail closed here so the spawn aborts BEFORE new_session instead of
+            # creating a pane with no recoverable intent. Scoped to this pre-pane
+            # record CAS: an intent-bearing reservation stays TTL-exempt (INV-6),
+            # and record_spawn_intent runs before payload exists.
+            if res.get("payload") is None and float(res.get("expires_at") or 0.0) < time.time():
+                return False
+            if lane_admission:
+                from store_work_lanes import fd_backend_conn, _session_conn
+                from work_lane_progress import seat_live
+                context = dict(lane_admission)
+                auth = context.pop("provisioning_auth", None)
+                if context.get("provisioning"):
+                    actor = _session_conn(conn, auth["stream_id"]) if auth else None
+                    if (not actor or not auth.get("token_verified") or not seat_live(actor)
+                            or actor.get("session_generation") != auth.get("session_generation")
+                            or not fd_backend_conn(conn, auth["stream_id"])):
+                        from sessions import VerbError
+                        raise VerbError("work_lane_provisioning_forbidden", "The current FD binding changed before provisioning")
+            existing = json.loads(res.get("payload") or "{}")
+            prior_intent = dict(payload)
+            for key in ("exchange_binding", spawn_creation.KEY):
+                if key in existing:
+                    prior_intent[key] = existing[key]
+                elif res.get("payload") is not None and key == spawn_creation.KEY:
+                    # Refreshing an old intent cannot invent an empty completed
+                    # history for commands dispatched before this reader.
+                    prior_intent.pop(key, None)
+            if prepared_qa is not None:
+                prepared_qa(conn)
+            cursor = conn.execute(
+                "UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?",
+                (json.dumps(prior_intent, separators=(",", ":")), host, session_name),
+            )
+            normalization = prior_intent.get("parent_closed_resume_top_level")
+            if cursor.rowcount == 1 and isinstance(normalization, dict):
+                # The admission decision and recoverable intent commit together;
+                # interruption before pane creation cannot lose or repeat it.
+                episode = conn.execute(
+                    "SELECT episode_id,attempt_seq FROM v2_assistant_restore_episode "
+                    "WHERE spawn_key=? AND stream_id=? AND attempt_generation=?",
+                    (normalization["spawn_key"], normalization["stream_id"], normalization["new_generation"]),
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR IGNORE INTO v2_assistant_restore_audit"
+                    "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                    "VALUES(?,?,'parent_closed_resume_top_level',?,?,?,?)",
+                    (episode["episode_id"] if episode else None, episode["attempt_seq"] if episode else 0,
+                     normalization["reason"], json.dumps(normalization),
+                     "restore-parent:" + normalization["spawn_key"], iso_now()),
+                )
+            conn.commit()
+            return cursor.rowcount == 1
+
+        def transaction(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                return _op(conn)
+        return await self.submit(transaction)
+
+    async def issue_remote_creation(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str, attempt_id: str,
+    ) -> bool:
+        """Register one physical dispatch before it can reach the peer."""
+        def operation(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = _spawn_reservation(conn, host, session_name, request_id, nonce)
+                if not row or str(row.get("owner_instance_id") or "") != owner_instance_id:
+                    return False
+                value = spawn_creation.witness(row.get("payload"))
+                if value is None or not attempt_id or any(a["id"] == attempt_id for a in value["attempts"]):
+                    return False
+                value["attempts"].append({"id": attempt_id, "owner": owner_instance_id, "terminal": False})
+                payload = json.loads(row["payload"])
+                payload[spawn_creation.KEY] = value
+                conn.execute("UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?",
+                             (json.dumps(payload), host, session_name))
+                return True
+        return await self.submit(operation, settle_on_cancel=True)
+
+    async def acknowledge_remote_creation(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str, attempt_id: str,
+    ) -> bool:
+        """Persist exact command success even if cancellation already won."""
+        def operation(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = _row(conn.execute(
+                    "SELECT * FROM v2_stream_reservations WHERE host=? AND session_name=? "
+                    "AND request_id=? AND nonce=?",
+                    (host, session_name, request_id, nonce),
+                ).fetchone())
+                if not row or str(row.get("owner_instance_id") or "") != owner_instance_id:
+                    return False
+                value = spawn_creation.witness(row.get("payload"))
+                if value is None:
+                    return False
+                attempt = next((a for a in value["attempts"] if a["id"] == attempt_id), None)
+                if attempt is None or attempt["owner"] != owner_instance_id:
+                    return False
+                attempt["terminal"] = True
+                payload = json.loads(row["payload"])
+                payload[spawn_creation.KEY] = value
+                conn.execute("UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?",
+                             (json.dumps(payload), host, session_name))
+                return True
+        return await self.submit(operation, settle_on_cancel=True)
+
+    async def cancelled_creation_snapshot(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str,
+    ) -> dict[str, Any] | None:
+        def operation(conn):
+            row = _row(conn.execute(
+                "SELECT * FROM v2_stream_reservations WHERE host=? AND session_name=? "
+                "AND request_id=? AND nonce=?", (host, session_name, request_id, nonce),
+            ).fetchone())
+            if (not row or str(row.get("owner_instance_id") or "") != owner_instance_id
+                    or not _spawn_cancelled(conn, host, session_name, request_id)):
+                return None
+            value = spawn_creation.witness(row.get("payload"))
+            return value if spawn_creation.terminal(value) else None
+        return await self.submit(operation)
+
+    async def release_cancelled_remote_creation(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str, observed_witness: dict[str, Any],
+    ) -> bool:
+        """Compare the sealed witness observed BEFORE a fresh absence read."""
+        def operation(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = _row(conn.execute(
+                    "SELECT * FROM v2_stream_reservations WHERE host=? AND session_name=? "
+                    "AND request_id=? AND nonce=?", (host, session_name, request_id, nonce),
+                ).fetchone())
+                if (not row or str(row.get("owner_instance_id") or "") != owner_instance_id
+                        or not _spawn_cancelled(conn, host, session_name, request_id)):
+                    return False
+                value = spawn_creation.witness(row.get("payload"))
+                if not spawn_creation.terminal(value) or value != observed_witness:
+                    return False
+                conn.execute("DELETE FROM v2_stream_reservations WHERE host=? AND session_name=?",
+                             (host, session_name))
+                return True
+        return await self.submit(operation, settle_on_cancel=True)
+
+    async def mark_tmux_created(
+        self, host: str, session_name: str, *,
+        request_id: str | None = None, nonce: str | None = None,
+        pane_pid: str = "", pane_started_at: str = "",
+    ) -> None:
+        """The pane now exists. From here the reservation is orphan evidence.
+
+        Persist the observed pane identity (spec §D1) when known: it is the
+        corroborating adoption signal once the pane is marked, and the ONLY
+        adoption key for a legacy nonce-less row (spec A2). Absent in the F1
+        crash window (the pane died before this write), where the nonce carried
+        in the pane's environment is the primary signal instead. Existing
+        identity is never clobbered by a later mark with no new values."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            held = conn.execute(
+                "SELECT request_id FROM v2_stream_reservations WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            identity = request_id if request_id is not None else str((held[0] if held else "") or "")
+            if not _spawn_reservation(conn, host, session_name, identity, nonce):
+                return
+            conn.execute(
+                "UPDATE v2_stream_reservations "
+                "SET tmux_created=1, "
+                "    pane_pid=COALESCE(?, pane_pid), "
+                "    pane_started_at=COALESCE(?, pane_started_at) "
+                "WHERE host=? AND session_name=?",
+                (pane_pid or None, pane_started_at or None, host, session_name),
+            )
+            conn.commit()
+
+        await self.submit(_op)
+
+    # -- tell idempotency (QA #6) ------------------------------------------
+
+    async def get_tell_delivery(self, tell_id: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT rowid AS ledger_row_id, reply, created_at "
+                "FROM v2_tell_deliveries WHERE tell_id=?", (tell_id,)
+            ).fetchone()
+            return _decode_tell_envelope(row)
+
+        return await self.submit(_op)
+
+    async def get_tell_delivery_by_ledger_row_id(self, ledger_row_id: int) -> dict[str, Any] | None:
+        """Read one completed tell by its durable row identity.
+
+        This is a SELECT-only companion to ``get_tell_delivery``. The row id
+        is exposed in ``tell.ok`` so an audit can bind a recipient's frame to
+        the exact stored delivery record without touching delivery.
+        """
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT rowid AS ledger_row_id, reply, created_at "
+                "FROM v2_tell_deliveries WHERE rowid=?", (ledger_row_id,)
+            ).fetchone()
+            return _decode_tell_envelope(row)
+
+        return await self.submit(_op)
+
+    async def list_tell_deliveries(
+        self, to_stream_id: str, *, limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return durable delivery envelopes for one recipient, newest first.
+
+        ``v2_tell_deliveries`` is the durable record used for tell idempotency.
+        The audit view filters that bounded record set; it does not create a
+        recipient inbox, pending state, or another copy of an undelivered
+        message.
+        """
+        if not to_stream_id or limit <= 0:
+            return []
+        effective_limit = min(int(limit), TELL_RETENTION)
+
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT rowid AS ledger_row_id, reply, created_at "
+                "FROM v2_tell_deliveries ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (TELL_RETENTION,),
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                envelope = _decode_tell_envelope(row)
+                if envelope is None:
+                    continue
+                delivery = envelope.get("delivery")
+                reply = envelope.get("reply")
+                target = (
+                    delivery.get("to_stream_id")
+                    if isinstance(delivery, dict) else None
+                ) or (reply.get("to_stream_id") if isinstance(reply, dict) else None)
+                if str(target or "") != to_stream_id:
+                    continue
+                result.append(envelope)
+                if len(result) >= effective_limit:
+                    break
+            return result
+
+        return await self.submit(_op)
+
+    async def list_delivered_tell_ids(self, *, prefix: str, limit: int) -> list[str]:
+        """List v2's own durably delivered tell IDs under one fixed namespace.
+
+        The answer-card startup cleanup uses this as its sole ownership proof:
+        it never scans shared question rows first.  A row is eligible only when
+        this v2-local ledger contains a structurally complete, delivered record
+        for its deterministic tell ID.  Old/partial and ``pasted_unsubmitted``
+        records intentionally fail closed.
+        """
+        if not prefix or limit <= 0:
+            return []
+        effective_limit = min(int(limit), TELL_RETENTION)
+
+        def _op(conn: sqlite3.Connection) -> list[str]:
+            rows = conn.execute(
+                "SELECT rowid AS ledger_row_id, tell_id, reply, created_at FROM v2_tell_deliveries "
+                "WHERE tell_id LIKE ? ORDER BY created_at ASC, rowid ASC LIMIT ?",
+                (f"{prefix}%", TELL_RETENTION),
+            ).fetchall()
+            result: list[str] = []
+            for row in rows:
+                tell_id = str(row["tell_id"] or "")
+                envelope = _decode_tell_envelope(row)
+                if envelope is None:
+                    continue
+                delivery = envelope.get("delivery")
+                reply = envelope.get("reply")
+                if (
+                    not isinstance(delivery, dict)
+                    or not isinstance(reply, dict)
+                    or delivery.get("tell_id") != tell_id
+                    or reply.get("tell_id") != tell_id
+                    or delivery.get("delivery_status") != "delivered"
+                    or reply.get("delivery_status") != "delivered"
+                ):
+                    continue
+                result.append(tell_id)
+                if len(result) >= effective_limit:
+                    break
+            return result
+
+        return await self.submit(_op)
+
+    async def put_tell_delivery(self, tell_id: str, envelope: dict[str, Any]) -> int:
+        """Remember a tell delivery envelope so a retry replays it instead of
+        injecting again, and return its ledger row id — the row's `rowid`, which
+        `tell.ok` surfaces as v1's `ledger_row_id` (QA #10). The id is stamped
+        back into the stored envelope's `reply` so a replayed `tell.ok`
+        reproduces it. A provider-proven failure is not a transport exception;
+        it remains as `pasted_unsubmitted` on this same idempotency row.
+
+        `envelope` is comms' own record: `{"payload_digest", "reply", "delivery"}`.
+        The optional ``delivery`` object is the exact text and route metadata
+        written after the unconditional paste. Only row identities are stamped
+        here; the digest and delivered text are opaque to the store."""
+
+        def _op(conn: sqlite3.Connection) -> int:
+            conn.execute(
+                "INSERT INTO v2_tell_deliveries (tell_id, reply, created_at) VALUES (?,?,?)"
+                " ON CONFLICT(tell_id) DO NOTHING",
+                (tell_id, json.dumps(envelope, separators=(",", ":")), time.time()),
+            )
+            stored = conn.execute(
+                "SELECT rowid AS ledger_row_id, reply FROM v2_tell_deliveries WHERE tell_id=?",
+                (tell_id,),
+            ).fetchone()
+            row_id = int(stored["ledger_row_id"])
+            payload = json.loads(stored["reply"])
+            changed = False
+            reply = payload.get("reply")
+            if isinstance(reply, dict) and reply.get("ledger_row_id") != row_id:
+                reply["ledger_row_id"] = row_id
+                changed = True
+            delivery = payload.get("delivery")
+            if isinstance(delivery, dict) and delivery.get("ledger_row_id") != row_id:
+                delivery["ledger_row_id"] = row_id
+                changed = True
+            if changed:
+                conn.execute(
+                    "UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                    (json.dumps(payload, separators=(",", ":")), tell_id),
+                )
+            if isinstance(delivery, dict):
+                store_exchange.append(conn, delivery.get("exchange"))
+                conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?", (json.dumps(payload, separators=(",", ":")), tell_id))
+            # Unresolved ordinary tells keep their no-second-paste custody.
+            # Notice-owned rows retain their existing settlement/retention rules.
+            conn.execute(
+                "DELETE FROM v2_tell_deliveries WHERE "
+                "((json_extract(reply,'$.reply.delivery_status')='delivered' "
+                "AND COALESCE(json_extract(reply,'$.delivery.delivery_status'),'delivered')='delivered') "
+                "OR EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.tell_id=v2_tell_deliveries.tell_id)) "
+                "AND NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) "
+                "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.tell_id=v2_tell_deliveries.tell_id "
+                "AND (n.kind IN ('notification_answer','error_alert') OR (n.terminal_at IS NULL AND n.delivered_at IS NULL))) "
+                "AND tell_id NOT IN"
+                " (SELECT tell_id FROM v2_tell_deliveries ORDER BY created_at DESC LIMIT ?)",
+                (TELL_RETENTION,),
+            )
+            conn.commit()
+            return row_id
+
+        row_id = await self.submit(_op)
+        return row_id
+
+    async def promote_tell_delivery(
+        self, tell_id: str, payload_digest: str, *, proof: dict[str, Any] | None = None,
+        reconcile: bool = False,
+        prepared_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically promote one matching proof-pending tell.
+
+        This is the only later state transition for a tell row.  It is
+        deliberately same-ID and same-digest constrained so an evidence-only
+        outbound sweep cannot rewrite another payload or create a second row.
+        ``None`` means the row was absent, had a different digest, or was
+        already in a different state.
+        """
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT rowid AS ledger_row_id, reply, created_at "
+                    "FROM v2_tell_deliveries WHERE tell_id=?",
+                    (tell_id,),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return None
+                try:
+                    payload = json.loads(row["reply"])
+                except (TypeError, ValueError, KeyError):
+                    conn.rollback()
+                    return None
+                if not isinstance(payload, dict) or payload.get("payload_digest") != payload_digest:
+                    conn.rollback()
+                    return None
+                reply = payload.get("reply")
+                delivery = payload.get("delivery")
+                if not isinstance(reply, dict) or not isinstance(delivery, dict):
+                    conn.rollback()
+                    return None
+                if prepared_result is not None:
+                    from tell_proof import finalize_prepared
+                    completed = finalize_prepared(conn, payload, prepared_result)
+                    if completed is None:
+                        conn.rollback()
+                        return None
+                    completed["reply"]["ledger_row_id"] = int(row["ledger_row_id"])
+                    completed["delivery"]["ledger_row_id"] = int(row["ledger_row_id"])
+                    store_exchange.append(conn, completed["delivery"].get("exchange"))
+                    conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                                 (json.dumps(completed, separators=(",", ":")), tell_id))
+                    conn.commit()
+                    return _decode_tell_envelope(conn.execute(
+                        "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+                        (tell_id,)).fetchone())
+                if reconcile and delivery.get("delivery_status") == "delivered":
+                    from tell_proof import retained_proof
+                    exact = retained_proof(conn, payload)
+                    if exact is None:
+                        conn.rollback()
+                        return None
+                    reply.update(exact)
+                    delivery.update(exact)
+                    conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                                 (json.dumps(payload, separators=(",", ":")), tell_id))
+                    conn.commit()
+                    return _decode_tell_envelope(conn.execute(
+                        "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+                        (tell_id,)).fetchone())
+                if (
+                    reply.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
+                    or delivery.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
+                ):
+                    conn.rollback()
+                    return None
+
+                resolved_proof = proof
+                if reconcile:
+                    from tell_proof import retained_proof
+                    resolved_proof = retained_proof(conn, payload)
+                    if resolved_proof is None:
+                        conn.rollback()
+                        return None
+
+                acknowledged_at = iso_now()
+                reply["delivery_status"] = "delivered"
+                reply["submission_confirmed"] = True
+                reply["delivery_ack_at"] = acknowledged_at
+                reply.pop("reason", None)
+                if reconcile:
+                    reply.update(action_status="committed", action_committed=True,
+                                 confirmation_pending=False, confirmation_status="confirmed")
+                    delivery.update(action_status="committed", action_committed=True,
+                                    confirmation_pending=False, confirmation_status="confirmed")
+                    reply["submission_attempts"] = max(1, int(reply.get("submission_attempts") or 0))
+                    delivery["submission_attempts"] = reply["submission_attempts"]
+                if delivery.get("notification_answer_generation"):
+                    reply.update(action_status="committed", action_committed=True,
+                                 confirmation_pending=False, confirmation_status="confirmed")
+                    # Exact USER proof establishes the one owned input. The
+                    # prepared row stays at zero while its outcome is unknown.
+                    reply["submission_attempts"] = 1
+                    delivery["submission_attempts"] = 1
+                delivery["delivery_status"] = "delivered"
+                delivery["submission_confirmed"] = True
+                delivery["delivered_at"] = acknowledged_at
+                delivery["delivery_ack_at"] = acknowledged_at
+                if isinstance(resolved_proof, dict):
+                    reply.update(resolved_proof)
+                    delivery.update(resolved_proof)
+                conn.execute(
+                    "UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                    (json.dumps(payload, separators=(",", ":")), tell_id),
+                )
+                conn.commit()
+                updated = conn.execute(
+                    "SELECT rowid AS ledger_row_id, reply, created_at "
+                    "FROM v2_tell_deliveries WHERE tell_id=?",
+                    (tell_id,),
+                ).fetchone()
+                return _decode_tell_envelope(updated)
+            except Exception:
+                conn.rollback()
+                raise
+
+        return await self.submit(_op)
+
+
+    # -- durable spawn outcome (await_spawn answers from here) -------------
+
+    async def set_spawn_outcome(self, host: str, session_name: str, state: str, **fields: Any) -> bool:
+        def _op(conn: sqlite3.Connection) -> bool:
+            source_fields = dict(fields)
+            prior = _decode_spawn_outcome(_row(conn.execute("SELECT * FROM v2_spawn_outcomes WHERE host=? AND session_name=?", (host, session_name)).fetchone()))
+            prior_exchange = ((prior or {}).get("delivery_receipt") or {}).get("exchange")
+            if prior_exchange and (prior or {}).get("request_id") == fields.get("request_id"):
+                source_fields["delivery_receipt"] = {**(fields.get("delivery_receipt") or {}), "exchange": prior_exchange}
+            if state == "delivered" and not prior_exchange:
+                reservation = _spawn_reservation(conn, host, session_name, str(fields.get("request_id") or ""))
+                intent = json.loads((reservation or {}).get("payload") or "{}")
+                receipt = dict(fields.get("delivery_receipt") or {})
+                if intent.get("brief") and intent.get("exchange_binding"):
+                    receipt["exchange"] = store_exchange.source(intent["exchange_binding"], "brief", fields["request_id"], intent["brief"], receipt.get("delivery_ack_at") or receipt.get("delivered_at") or iso_now())
+                    source_fields["delivery_receipt"] = receipt
+            written = _upsert_spawn_outcome(conn, host, session_name, state, **source_fields)
+            if written:
+                store_exchange.append(conn, (source_fields.get("delivery_receipt") or {}).get("exchange"))
+                if source_fields.get("delivery_receipt"):
+                    conn.execute("UPDATE v2_spawn_outcomes SET delivery_receipt=? WHERE host=? AND session_name=?", (json.dumps(source_fields["delivery_receipt"]), host, session_name))
+            conn.commit()
+            return written
+
+        return await self.submit(_op)
+
+    async def record_handoff_outcome(self, host: str, session_name: str, request_id: str,
+                                     disposition: dict[str, Any]) -> bool:
+        """Attach post-step truth to this request's existing delivered receipt."""
+        def op(conn: sqlite3.Connection) -> bool:
+            row = conn.execute("SELECT delivery_receipt FROM v2_spawn_outcomes"
+                               " WHERE host=? AND session_name=? AND request_id=?",
+                               (host, session_name, request_id)).fetchone()
+            if row is None:
+                return False
+            receipt = json.loads(row[0] or "{}")
+            receipt["handoff"] = disposition
+            conn.execute("UPDATE v2_spawn_outcomes SET delivery_receipt=?"
+                         " WHERE host=? AND session_name=? AND request_id=?",
+                         (json.dumps(receipt), host, session_name, request_id))
+            conn.commit()
+            return True
+        return await self.submit(op)
+
+    async def cancel_reservation_fenced(
+        self, host: str, session_name: str, request_id: str,
+    ) -> dict[str, Any]:
+        """Cancel and persist an immutable request tombstone in the bind transaction.
+
+        Intent-bearing reservations survive as cleanup obligations; an intent-less
+        reservation can be released because recording intent now fails closed.
+        Bound requests return already_bound, including a concurrent row release."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            if _spawn_cancelled(conn, host, session_name, request_id):
+                return {"status": "cancelled"}
+            row = _row(conn.execute(
+                "SELECT tmux_created, request_id, idempotency_key, request_payload_hash, payload, nonce "
+                "FROM v2_stream_reservations WHERE host=? AND session_name=? AND COALESCE(request_id, '')=?",
+                (host, session_name, request_id),
+            ).fetchone())
+            if row is None:
+                conn.commit()
+                bound = conn.execute(
+                    "SELECT 1 FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                    (host, session_name),
+                ).fetchone()
+                if bound is not None:
+                    return {"status": "already_bound"}
+                return {"status": "no_reservation"}
+            if row.get("tmux_created"):
+                conn.commit()
+                return {"status": "already_bound"}
+            conn.execute(
+                "DELETE FROM v2_stream_reservations "
+                "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=? AND payload IS NULL",
+                (host, session_name, request_id),
+            )
+            _upsert_spawn_outcome(
+                conn, host, session_name, "cancelled",
+                request_id=row.get("request_id"),
+                idempotency_key=row.get("idempotency_key"),
+                request_payload_hash=row.get("request_payload_hash"),
+                nonce=row.get("nonce"),
+                reason="cancelled_before_bind",
+            )
+            conn.commit()
+            return {
+                "status": "cancelled",
+                "idempotency_key": row.get("idempotency_key"),
+                "request_payload_hash": row.get("request_payload_hash"),
+            }
+
+        return await self.submit(_op)
+
+    async def commit_tmux_created_fenced(
+        self, host: str, session_name: str, *,
+        request_id: str, nonce: str | None = None,
+        pane_pid: str = "", pane_started_at: str = "",
+    ) -> bool:
+        """Bind only the owning request and creation nonce, unless cancellation won.
+
+        Absence or a replaced reservation always fails closed. The same CAS is
+        used by normal creation and restart adoption before admitting a seat."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            if not _spawn_reservation(conn, host, session_name, request_id, nonce):
+                return False
+            conn.execute(
+                "UPDATE v2_stream_reservations "
+                "SET tmux_created=1, "
+                "    pane_pid=COALESCE(?, pane_pid), "
+                "    pane_started_at=COALESCE(?, pane_started_at) "
+                "WHERE host=? AND session_name=?",
+                (pane_pid or None, pane_started_at or None, host, session_name),
+            )
+            conn.commit()
+            return True
+
+        return await self.submit(_op)
+
+    async def get_spawn_outcome(self, host: str, session_name: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            value = _row(conn.execute(
+                "SELECT * FROM v2_spawn_outcomes WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+            return _decode_spawn_outcome(value)
+
+        return await self.submit(_op)
+
+    async def get_spawn_outcome_by_request_id(
+        self, request_id: str, *, host: str | None = None
+    ) -> dict[str, Any] | None:
+        """Find the terminal spawn outcome when the requester lost its stream id.
+
+        The request id is the durable identity printed in a spawn
+        ``reconcile_command``. It must be sufficient to resolve an abandoned or
+        indeterminate spawn without first reconstructing ``host:session_name``.
+
+        `host` scopes the lookup: a request id is only per-host unique, so a
+        cancel/status on host X must never import another host's row that
+        happens to share the id (QA cycle-3 finding [2]). Callers that already
+        know the host MUST pass it; the hostless form stays for legacy audit."""
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            # Explicit columns: the cancellation table has an extra `nonce`, so
+            # `SELECT *` no longer aligns across the UNION (QA cycle-3 luna-[2]).
+            sql = (
+                f"SELECT * FROM (SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_outcomes UNION ALL "
+                f"SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_cancellations) WHERE request_id=?"
+            )
+            params: tuple[Any, ...] = (request_id,)
+            if host is not None:
+                sql += " AND host=?"
+                params = (request_id, host)
+            sql += " ORDER BY updated_at DESC LIMIT 1"
+            value = _row(conn.execute(sql, params).fetchone())
+            return _decode_spawn_outcome(value)
+
+        return await self.submit(_op)
+
+    async def spawn_cancellations(self, host: str, target: str) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [_decode_spawn_outcome(dict(row)) for row in conn.execute(
+                "SELECT * FROM v2_spawn_cancellations WHERE host=? "
+                "AND (COALESCE(request_id, '')=? OR idempotency_key=?)",
+                (host, target, target),
+            )]
+        return await self.submit(_op)
+
+    async def spawn_cancelled(self, host: str, name: str, request_id: str) -> bool:
+        return await self.submit(lambda conn: _spawn_cancelled(conn, host, name, request_id))
+
+    async def owns_spawn_intent(
+        self, host: str, name: str, request_id: str, nonce: str,
+    ) -> bool:
+        return await self.submit(lambda conn: bool(
+            (row := _spawn_reservation(conn, host, name, request_id, nonce))
+            and row.get("payload") is not None
+        ))
+
+    async def admitted_session_names_for_key(
+        self, host: str, idempotency_key: str
+    ) -> list[str]:
+        """Distinct session names admitted for an idempotency key across
+        reservations + outcomes (AC9 truthful enumeration). rpc_delivery_
+        determinism lane."""
+        idempotency_key = str(idempotency_key or "").strip()
+        if not idempotency_key:
+            return []
+
+        def _op(conn: sqlite3.Connection) -> list[str]:
+            names: list[str] = []
+            seen: set[str] = set()
+            for tbl in ("v2_spawn_outcomes", "v2_stream_reservations", "v2_spawn_cancellations"):
+                for r in conn.execute(
+                    f"SELECT session_name FROM {tbl} WHERE host=? AND idempotency_key=?",
+                    (host, idempotency_key),
+                ).fetchall():
+                    name = str(r[0])
+                    if name not in seen:
+                        seen.add(name)
+                        names.append(name)
+            return sorted(names)
+
+        return await self.submit(_op)
+
+    async def set_spawn_admission_hold(
+        self, host: str, *, held_until: float, reason: str = ""
+    ) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO v2_spawn_admission_hold (host, held_until, reason, set_at)"
+                " VALUES (?,?,?,?)"
+                " ON CONFLICT(host) DO UPDATE SET held_until=excluded.held_until,"
+                " reason=excluded.reason, set_at=excluded.set_at",
+                (host, float(held_until), reason or None, time.time()),
+            )
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def clear_spawn_admission_hold(self, host: str) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM v2_spawn_admission_hold WHERE host=?", (host,))
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def get_spawn_admission_hold(self, host: str) -> dict[str, Any] | None:
+        """Active hold for `host`, or None. An expired hold is swept so a
+        forgotten freeze never wedges admission."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = _row(conn.execute(
+                "SELECT * FROM v2_spawn_admission_hold WHERE host=?", (host,)
+            ).fetchone())
+            if row is None:
+                return None
+            if float(row.get("held_until") or 0) < time.time():
+                conn.execute("DELETE FROM v2_spawn_admission_hold WHERE host=?", (host,))
+                conn.commit()
+                return None
+            return row
+
+        return await self.submit(_op)
+
+    async def spawn_record_for_key(self, host: str, idempotency_key: str) -> dict[str, Any] | None:
+        """Read-only twin of `atomic_claim_or_replay`'s lookup: never reserves."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            outcome = _row(conn.execute(
+                f"SELECT * FROM (SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_outcomes UNION ALL "
+                f"SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_cancellations) "
+                "WHERE host=? AND idempotency_key=? AND state != 'failed' ORDER BY updated_at DESC LIMIT 1",
+                (host, idempotency_key),
+            ).fetchone())
+            if outcome is not None:
+                conn.commit()
+                return {"kind": "terminal", "row": _decode_spawn_outcome(outcome) or {}}
+            reservation = _row(conn.execute(
+                "SELECT * FROM v2_stream_reservations WHERE host=? AND idempotency_key=? LIMIT 1",
+                (host, idempotency_key),
+            ).fetchone())
+            conn.commit()
+            return {"kind": "in_flight", "row": reservation} if reservation is not None else None
+
+        return await self.submit(_op)
+
+    async def atomic_claim_or_replay(
+        self, host: str, session_name: str, *, idempotency_key: str,
+        request_payload_hash: str, ttl_s: float, request_id: str = "",
+        nonce: str = "", owner_instance_id: str = "", refuse_if_held: bool = False,
+    ) -> dict[str, Any]:
+        """Atomically resolve a keyed spawn in ONE single-writer op — closing the
+        lookup-then-reserve race that let concurrent / re-fired same-key spawns
+        each mint a pane (Multi-fire #4). Returns one of:
+
+        - ``{"status": "replay", "kind": "terminal"|"in_flight", "row": <row>}``
+          — this key already resolved (or is in flight); the caller replays that
+          session instead of creating a second one.
+        - ``{"status": "conflict"}`` — the key is bound to a different payload.
+        - ``{"status": "claimed"}`` — this caller won the claim and reserved
+          ``session_name``; it proceeds to create.
+        - ``{"status": "unavailable"}`` — name live or already reserved.
+
+        Because the whole check+claim runs in the single store thread, N
+        concurrent same-key callers see exactly one ``claimed`` and the rest
+        ``replay``. rpc_delivery_determinism lane."""
+        idempotency_key = str(idempotency_key or "").strip()
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            now = time.time()
+            if idempotency_key:
+                outcome = _row(conn.execute(
+                    f"SELECT * FROM (SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_outcomes UNION ALL "
+                    f"SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_cancellations) "
+                    "WHERE host=? AND idempotency_key=? AND state != 'failed' ORDER BY updated_at DESC LIMIT 1",
+                    (host, idempotency_key),
+                ).fetchone())
+                existing = outcome
+                kind = "terminal"
+                if existing is None:
+                    reservation = _row(conn.execute(
+                        "SELECT * FROM v2_stream_reservations WHERE host=? AND idempotency_key=? "
+                        "AND (expires_at >= ? OR tmux_created=1 OR payload IS NOT NULL) LIMIT 1",
+                        (host, idempotency_key, now),
+                    ).fetchone())
+                    existing = reservation
+                    kind = "in_flight"
+                if existing is not None:
+                    recorded_hash = str(existing.get("request_payload_hash") or "")
+                    if recorded_hash and request_payload_hash and recorded_hash != request_payload_hash:
+                        conn.commit()
+                        return {"status": "conflict"}
+                    if kind == "terminal":
+                        existing = _decode_spawn_outcome(existing) or {}
+                    conn.commit()
+                    return {"status": "replay", "kind": kind, "row": existing}
+            # A NEW keyed admission during an active hold is refused in the SAME
+            # serialized txn that would otherwise claim it (QA cycle-3 astra-[3]);
+            # the already-admitted-key replay resolved above is unaffected, so an
+            # interrupted caller's retry still gets its seat during a deploy hold.
+            if _initial_admission_paused(conn) or (refuse_if_held and _admission_held(conn, host, now)):
+                conn.commit()
+                return {"status": "frozen"}
+            # No prior claim for this key (or keyless): reserve exactly as
+            # reserve_stream_id does, atomically in this same op.
+            conn.execute(
+                "DELETE FROM v2_stream_reservations "
+                "WHERE expires_at < ? AND tmux_created = 0 AND payload IS NULL", (now,)
+            )
+            live = conn.execute(
+                "SELECT 1 FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                (host, session_name),
+            ).fetchone()
+            if live is not None:
+                conn.commit()
+                return {"status": "unavailable"}
+            try:
+                _insert_stream_reservation(
+                    conn, host=host, session_name=session_name, request_id=request_id,
+                    expires_at=now + ttl_s, nonce=nonce,
+                    owner_instance_id=owner_instance_id,
+                    idempotency_key=idempotency_key,
+                    request_payload_hash=request_payload_hash,
+                )
+            except sqlite3.IntegrityError:
+                conn.commit()
+                return {"status": "unavailable"}
+            conn.commit()
+            return {"status": "claimed"}
+
+        return await self.submit(_op)
+
+    # -- operator-designated lifecycle authority ---------------------------
+
+    async def consent_notifications(self, auth=None, registry=None) -> list[dict[str, Any]]:
+        def _op(conn):
+            from _shared import operator_auth
+            import store_consent_offers as offers
+            import store_consent_intents as intents
+            if registry is None or not auth:
+                return []
+            try:
+                with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                    credentials = dict(registry.load().credentials)
+            except operator_auth.OperatorRegistryUnavailable:
+                # This optional read surface must not turn registry loss into a
+                # failure of hello or ordinary notifications. Mutation admission
+                # retains its separate registry-required path; never reuse an
+                # earlier credential snapshot to authorize consent projection.
+                now = time.monotonic()
+                if now >= getattr(self, "_consent_projection_warn_after", 0.0):
+                    log.warning("consent projection unavailable: registry unavailable; returning empty set")
+                    self._consent_projection_warn_after = now + 60.0
+                return []
+            try:
+                actor = consent.principal(conn, auth, credentials)
+            except consent.ConsentError:
+                return []
+            cid = actor['identity'].removeprefix('operator:')
+            mobile = actor['kind'] == 'operator' and auth.get('connection_client') == 'pentacle-mobile'
+            host = actor['kind'] == 'operator' and auth.get('connection_client') == 'pentacle'
+            records = []
+            if mobile and offers.support(conn, cid, 'consent_enrollment_offer_v1'):
+                for raw, in conn.execute('SELECT data FROM v2_consent_offers WHERE credential_id=? ORDER BY expires_at DESC LIMIT 20', (cid,)):
+                    row = json.loads(raw)
+                    records.append(offers.notification(offers.view(conn, row)))
+                for oid, in conn.execute('SELECT offer_id FROM v2_consent_security_notices WHERE credential_id=?', (cid,)):
+                    records.append({'notification_id': 'consent-security:' + oid, 'producer': 'consent.security.v1',
+                        'title': 'Approval key setup conflict', 'body': 'Ask this host to review or revoke this Approval key.',
+                        'state': 'open', 'severity': 'warning', 'actions': [{'kind':'consent_security','action_id':'review'}], 'offer_id': oid,
+                        'host_id': offers.load(conn, oid)['host_id']})
+            if mobile and offers.support(conn, cid, 'consent_open_v1') or host:
+                for raw, in conn.execute('SELECT data FROM v2_consent_intents ORDER BY expires_at DESC LIMIT 100'):
+                    row = json.loads(raw)
+                    if intents.visible(row, actor, auth):
+                        record = intents.notification(intents.view(row))
+                        if host: record['consent'].pop('audience_key_ids', None)
+                        records.append(record)
+            if host:
+                for oid, in conn.execute('SELECT offer_id FROM v2_consent_security_notices'):
+                    records.append({'notification_id': 'consent-security:' + oid, 'producer': 'consent.security.v1',
+                        'title': 'Approval key setup conflict', 'body': 'Review the targeted setup offer; revoke from the host if needed.',
+                        'state': 'open', 'severity': 'warning', 'actions': [{'kind':'consent_security','action_id':'review'}], 'offer_id': oid,
+                        'host_id': offers.load(conn, oid)['host_id']})
+            return records
+        return await self.submit(_op)
+
+    async def consent_expire(self, registry: Any, protected_role='assistant') -> list[dict[str, Any]]:
+        def _op(conn):
+            try:
+                from _shared import operator_auth
+                import store_consent_offers as offers
+                import store_consent_intents as intents
+                with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                    credentials = dict(registry.load().credentials)
+                    now = time.time()
+                conn.execute("BEGIN IMMEDIATE")
+                changed = []
+                for raw, in conn.execute("SELECT data FROM v2_consent_offers WHERE state='pending'").fetchall():
+                    row = json.loads(raw)
+                    state = 'expired' if row['expires_at'] <= now else None
+                    if not state:
+                        try: offers.valid_binding(conn, row, credentials)
+                        except consent.ConsentError: state = 'superseded'
+                    if state:
+                        row['state'] = state; offers.save(conn, row)
+                        consent.audit(conn, 'consent_key.expire', row['offer_id'], {'kind': 'server'}, now, state)
+                        changed.append(offers.notification(offers.view(conn, row)))
+                for raw, in conn.execute("SELECT data FROM v2_consent_intents WHERE state='pending'").fetchall():
+                    row = json.loads(raw)
+                    state = 'expired' if row['expires_at'] <= now else None
+                    if not state:
+                        try: intents.validate_parent(conn, row, credentials, protected_role)
+                        except consent.ConsentError: state = 'superseded'
+                    if state:
+                        intents.terminal(conn, row, state)
+                        consent.audit(conn, 'consent.expire', row['request_id'], {'kind': 'server'}, now, state)
+                        changed.append(intents.notification(intents.view(row)))
+                conn.execute("UPDATE v2_consent_challenges SET state='expired' WHERE state='pending' AND expires_at<=?", (now,))
+                conn.commit()
+                return changed
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def consent_push_due(self, registry, protected_role):
+        def _op(conn):
+            from _shared import operator_auth
+            import store_consent_push as push
+            with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + '.lock')):
+                credentials = dict(registry.load().credentials)
+            jobs = push.due(conn, credentials, time.time(), protected_role)
+            conn.commit()
+            return jobs
+        return await self.submit(_op)
+
+    async def consent_push_finish(self, job, outcome):
+        def _op(conn):
+            import store_consent_push as push
+            push.finish(conn, job, outcome, time.time()); conn.commit()
+        return await self.submit(_op)
+
+    async def consent_operation(self, verb: str, msg: dict[str, Any], auth: dict[str, Any],
+                                registry: Any, protected_role: str) -> dict[str, Any]:
+        """Caller holds authority_lock; registry snapshot and effects stay in worker.
+
+        Registry revocation linearizes at this locked snapshot, not at commit.
+        Refusals commit only their audit (and an admitted expiry), never a grant.
+        """
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            try:
+                from _shared import operator_auth
+                snapshot_at = time.time()
+                try:
+                    with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                        credentials = dict(registry.load().credentials)
+                        snapshot_at = time.time()
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("SAVEPOINT consent_effect")
+                    if verb.startswith("consent_key."):
+                        result = consent.key_operation(conn, verb, msg, auth, credentials, snapshot_at)
+                    else:
+                        result = consent.transition(conn, verb, msg, auth, credentials, snapshot_at, protected_role)
+                    conn.execute("RELEASE consent_effect")
+                    refusal_code = "consent_pending_exists" if result.get("code") == "consent_pending_exists" else None
+                    consent.audit(conn, verb, msg.get("challenge_id") or msg.get("offer_id") or msg.get("intent_id") or (result.get("offer") or {}).get("offer_id") or (result.get("intent") or {}).get("request_id"),
+                                  {"identity": auth.get("operator_principal") or auth.get("stream_id")},
+                                  snapshot_at, "refused" if refusal_code else "applied", refusal_code)
+                except (consent.ConsentError, lifecycle_authority.AuthorityError) as exc:
+                    conn.execute("ROLLBACK TO consent_effect")
+                    conn.execute("RELEASE consent_effect")
+                    if getattr(exc, 'security_notice', None):
+                        oid, cid = exc.security_notice
+                        conn.execute('INSERT OR IGNORE INTO v2_consent_security_notices VALUES (?,?,?)', (oid, cid, time.time()))
+                    consent.audit(conn, verb, msg.get("challenge_id") or msg.get("offer_id") or msg.get("intent_id"),
+                                  {"identity": auth.get("operator_principal") or auth.get("stream_id")},
+                                  snapshot_at, "refused", exc.code)
+                    conn.commit()
+                    raise
+                except operator_auth.OperatorRegistryUnavailable as exc:
+                    conn.rollback()
+                    consent.audit(conn, verb, msg.get("challenge_id"), {}, snapshot_at,
+                                  "refused", "consent_registry_unavailable")
+                    conn.commit()
+                    raise consent.ConsentError("consent_registry_unavailable") from exc
+                conn.commit()
+                return result
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def consent_approve_and_mutate(self, msg: dict[str, Any], auth: dict[str, Any],
+                                         registry: Any, protected_role: str) -> dict[str, Any]:
+        return await self.consent_operation("consent.approve", msg, auth, registry, protected_role)
+
+    async def lifecycle_authority_mutate(
+        self, msg: dict[str, Any], auth: dict[str, Any], protected_role: str,
+    ) -> dict[str, Any]:
+        """Atomic designate/transfer/revoke; a refusal commits only its audit row."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            if msg.get('retire_fd_generation') is True:
+                try:
+                    return host_transfer.transaction(conn, lambda c: host_transfer.emergency_revoke(c,msg,auth,protected_role))
+                except (host_transfer.TransferError, lifecycle_authority.AuthorityError) as exc:
+                    host_transfer.audit(conn,None,'fd_revoke_refused',code=exc.code)
+                    conn.commit()
+                    raise
+            if auth.get('_emergency_verified') and conn.execute(
+                    'SELECT 1 FROM v2_host_transfer_revoke_receipts WHERE request_id=?',(msg.get('request_id'),)).fetchone():
+                raise lifecycle_authority.AuthorityError('authority_request_conflict')
+            try:
+                receipt = lifecycle_authority.mutate(conn, msg, auth, protected_role)
+            except lifecycle_authority.AuthorityError:
+                conn.commit()
+                raise
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return receipt
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_current(self) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            grant = lifecycle_authority.current(conn)
+            conn.commit()
+            return grant
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_effective(self) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            readback = lifecycle_authority.effective(conn, lifecycle_authority.configured(conn))
+            conn.commit()
+            return readback
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_activate(self) -> bool:
+        """Idempotent front-desk policy activation audit (daemon startup)."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            try:
+                written = lifecycle_authority.activate_front_desk_policy(conn, lifecycle_authority.configured(conn))
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return written
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_project_for_rollback(self, request_id: str) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            front_desk = lifecycle_authority.configured(conn)
+            if not front_desk:
+                raise lifecycle_authority.AuthorityError("front_desk_unconfigured")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                receipt = lifecycle_authority.project_for_rollback(conn, front_desk, request_id)
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return receipt
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_target(self, stream_id: str, protected_role: str) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            readback = lifecycle_authority.target_readback(conn, stream_id, protected_role)
+            conn.commit()
+            return readback
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_holder(self, stream_id: str, generation: str | None) -> bool:
+        def _op(conn: sqlite3.Connection) -> bool:
+            held = lifecycle_authority.holder_is(conn, stream_id, generation)
+            conn.commit()
+            return held
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_audit(self, **fields: Any) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            lifecycle_authority.audit(conn, **fields)
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def lifecycle_authority_audit_rows(self, target_stream_id: str | None = None,
+                                             limit: int = 20) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            where, params = ("WHERE target_stream_id=?", [target_stream_id]) if target_stream_id else ("", [])
+            cur = conn.execute(f"SELECT * FROM v2_lifecycle_authority_audit {where} "
+                               "ORDER BY id DESC LIMIT ?", (*params, limit))
+            rows = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+            conn.commit()
+            return rows
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_carry_on_handoff(
+        self, source: str, source_generation: str, successor: str,
+        successor_generation: str, protected_role: str,
+    ) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            try:
+                moved = lifecycle_authority.carry_on_handoff(
+                    conn, source, source_generation, successor, successor_generation, protected_role)
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return moved
+
+        return await self.submit(_op)
+
+    async def record_assistant_handoff_receipt(
+        self, host: str, key: str, source: str, source_generation: str,
+        token_hash: str, payload_hash: str, successor_name: str,
+    ) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            lifecycle_authority.record_handoff_receipt(
+                conn, host, key, source, source_generation, token_hash, payload_hash, successor_name)
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def retired_assistant_handoff_receipt(
+        self, host: str, key: str, owner: dict[str, Any], payload_hash: str,
+    ) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            try:
+                return lifecycle_authority.retired_handoff_receipt(conn, host, key, owner, payload_hash)
+            finally:
+                conn.commit()
+
+        return await self.submit(_op)
+
+    # -- durable report ledger (B9) ----------------------------------------
+
+    async def put_report(
+        self,
+        fields: dict[str, Any],
+        *,
+        routing_snapshot: dict[str, Any] | None = None,
+        qa_attestation_mode: str = "warn",
+        announce: bool = True,
+        _cancel_owner: asyncio.Task | None = None,
+    ) -> dict[str, Any]:
+        """Persist one validated report and return the stored row.
+
+        Ingest is idempotent on `report_id`: a retried `report` returns the row
+        already written rather than a second ledger row. The row is the answer
+        `await_report` will give, so it is written whole — the caller has
+        already validated it and nothing here is allowed to drop a field.
+
+        ``routing_snapshot`` is the complete source snapshot observed immediately
+        before this write. The worker re-reads that source in the same serialized
+        store boundary and refuses a changed source before inserting anything.
+        """
+
+        fields, routing_snapshot = copy.deepcopy(fields), copy.deepcopy(routing_snapshot)
+
+        def capture(conn):
+            reporter = _session_for_stream_conn(conn, str(fields.get("from_stream_id") or ""))
+            attestation = fields.get("qa_attestation")
+            qa_id = attestation.get("stream_id") if isinstance(attestation, dict) else None
+            report_id = attestation.get("report_id") if isinstance(attestation, dict) else None
+            reviewer = _session_for_stream_conn(conn, qa_id) if qa_id else None
+            report = conn.execute("SELECT * FROM v2_reports WHERE report_id=?", (report_id,)).fetchone() if report_id else None
+            return (spec_binding_source(reporter), spec_binding_source(reviewer), dict(report) if report else None)
+
+        def replay(conn):
+            row = conn.execute("SELECT * FROM v2_reports WHERE report_id=?", (fields["report_id"],)).fetchone()
+            if row is None:
+                return None
+            stored = _report_row(row)
+            if not _report_replay_matches(stored, fields):
+                raise ReportReplayConflict(str(fields["report_id"]))
+            stored["_report_inserted"] = False
+            return stored
+
+        def _put(conn: sqlite3.Connection) -> dict[str, Any]:
+            existing = conn.execute(
+                "SELECT * FROM v2_reports WHERE report_id=?", (fields["report_id"],)
+            ).fetchone()
+            if existing is not None:
+                stored = _report_row(existing)
+                if stored is not None:
+                    if not _report_replay_matches(stored, fields):
+                        raise ReportReplayConflict(str(fields["report_id"]))
+                    stored["_report_inserted"] = False
+                return stored
+            if capture(conn) != source:
+                raise SpecInputsUnavailable("spec_inputs_changed")
+            if not _complete_report_provenance(routing_snapshot, fields):
+                raise ReportProvenanceUnavailable(routing_snapshot)
+            stream_id = str(fields.get("from_stream_id") or "")
+            host, _, session_name = stream_id.partition(":")
+            current_row = None
+            if host and session_name:
+                current_row = conn.execute(
+                    "SELECT s.created_at, s.requested_model, s.requested_effort, "
+                    "s.effective_model, s.effective_effort, s.qualified_spec_ids, "
+                    "g.generation AS session_generation "
+                    "FROM sessions s LEFT JOIN v2_session_generations g "
+                    "ON g.host=s.host AND g.session_name=s.session_name "
+                    "WHERE s.host=? AND s.session_name=?",
+                    (host, session_name),
+                ).fetchone()
+            current = dict(current_row) if current_row is not None else None
+            tuple_fields = (
+                "requested_model", "requested_effort", "effective_model", "effective_effort",
+            )
+            changed = current is None or (
+                str((current or {}).get("created_at") or "")
+                != str(routing_snapshot.get("generation") or "")
+            ) or (
+                str((current or {}).get("session_generation") or "")
+                != str(routing_snapshot.get("session_generation") or "")
+            ) or any(
+                str((current or {}).get(field) or "")
+                != str(routing_snapshot.get(field) or "")
+                for field in tuple_fields
+            ) or (
+                normalize_spec_ids((current or {}).get("qualified_spec_ids"))
+                != normalize_spec_ids(routing_snapshot.get("qualified_spec_ids"))
+            )
+            if changed:
+                raise ReportProvenanceChanged(routing_snapshot, current)
+            stored_fields = dict(fields)
+            checkpoint = (stored_fields.get("extras") or {}).get("work_checkpoint")
+            if stored_fields.get("completion_kind") == "implementation_ready" and checkpoint:
+                # The coherent file snapshot must still belong to this exact
+                # assignment/generation at the report commit. Replay returned above.
+                if (checkpoint.get("spec_id") != effective_assignment(source[0])
+                        or checkpoint.get("session_generation") != (current or {}).get("session_generation")):
+                    raise SpecInputsUnavailable("checkpoint_assignment_changed")
+            usage_row = _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+            stored_fields["usage_snapshot"] = usage_row["usage"]
+            stored_fields.update({
+                "session_generation": str(routing_snapshot["session_generation"]),
+                "effective_model": routing_snapshot.get("effective_model"),
+                "effective_effort": routing_snapshot.get("effective_effort"),
+                "provenance_version": "v1",
+                "provenance_generation": str(routing_snapshot["session_generation"]),
+                "provenance_qualified_spec_ids": normalize_spec_ids(
+                    routing_snapshot.get("qualified_spec_ids"),
+                ),
+                "provenance_routing_integrity": routing_snapshot.get("routing_integrity"),
+                "provenance_requested_model": routing_snapshot.get("requested_model"),
+                "provenance_requested_effort": routing_snapshot.get("requested_effort"),
+                "provenance_effective_model": routing_snapshot.get("effective_model"),
+                "provenance_effective_effort": routing_snapshot.get("effective_effort"),
+            })
+            validation = _qa_attestation_validation_conn(
+                conn,
+                reporting_stream_id=str(stored_fields.get("from_stream_id") or ""),
+                completion_kind=stored_fields.get("completion_kind"),
+                attestation=stored_fields.get("qa_attestation"),
+                mode=qa_attestation_mode,
+                canonical_spec_identity=lookup,
+            )
+            if qa_attestation_mode == "enforce" and validation and validation["state"] == "unverified":
+                raise QAAttestationUnverified(validation)
+            stored_fields["qa_attestation_validation"] = validation
+            values = [_enc_report(col, stored_fields.get(col)) for col in REPORT_COLUMNS]
+            inserted = conn.execute(
+                f"INSERT INTO v2_reports ({','.join(REPORT_COLUMNS)}, created_at)"
+                f" VALUES ({','.join('?' * len(REPORT_COLUMNS))}, ?)"
+                " ON CONFLICT(report_id) DO NOTHING",
+                [*values, time.time()],
+            ).rowcount == 1
+            stored = _report_row(conn.execute(
+                "SELECT * FROM v2_reports WHERE report_id=?", (stored_fields["report_id"],)
+            ).fetchone())
+            if stored is not None and not inserted and not _report_replay_matches(stored, fields):
+                raise ReportReplayConflict(str(fields["report_id"]))
+            if inserted and stored is not None:
+                binding = store_exchange.direct_pair(conn, stream_id, stored.get("to_stream_id"))
+                text = "\n".join(str(part) for part in (stored.get("summary"), *(finding.get(key) for finding in stored.get("findings") or [] for key in ("where", "issue", "suggested_fix"))) if part)
+                observation = store_exchange.source(binding, "report", stored["report_id"], text, stored["ingested_at"])
+                store_exchange.append(conn, observation)
+                conn.execute("UPDATE v2_reports SET exchange_json=? WHERE report_id=?", (json.dumps(observation), stored["report_id"]))
+                live = store_exchange.session(conn, stream_id)
+                if live and live["status"] == "open" and live["generation"] == stored["session_generation"]:
+                    conn.execute("INSERT INTO v2_agent_report_state VALUES (?,?,?,?) ON CONFLICT(stream_id) DO UPDATE SET generation=excluded.generation,status=excluded.status,ts=CASE WHEN v2_agent_report_state.generation=excluded.generation AND (v2_agent_report_state.status=excluded.status OR (v2_agent_report_state.status IN ('done','aborted') AND excluded.status IN ('done','aborted'))) THEN v2_agent_report_state.ts ELSE excluded.ts END", (stream_id, stored["session_generation"], stored["status"], stored["ingested_at"]))
+            if inserted and stored is not None and stored["status"] in {"done", "error", "aborted"}:
+                # A real report has higher trust than a close outcome. Keep the
+                # report insert and await-result promotion in one store-thread
+                # transaction so a close/report race has one durable winner.
+                _resolve_awaiters_for_report_conn(conn, stored)
+            # D2 composes the accepted-report transaction; D1 append stays before this hook.
+            with conn:
+                if inserted and stored is not None and announce:
+                    stored["_watch_notice_created"] = report_watch_conn(conn, stored)
+            conn.commit()
+            if stored is not None:
+                stored["_report_inserted"] = inserted
+            return stored
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                return _put(conn)
+
+        existing = await self.submit(replay)
+        if existing is not None:
+            return existing
+        for attempt in range(2):
+            source = await self.submit(capture)
+            ids = []
+            if fields.get("completion_kind") == "implementation_ready" and qa_attestation_mode != "off" and fields.get("qa_attestation") is not None:
+                for row in source[:2]:
+                    row = row or {}
+                    ids.extend(normalize_spec_ids(row.get("qualified_spec_ids") or row.get("spec_ids"), row.get("spec_id")))
+            try:
+                lookup = await self._resolve_spec_inputs(ids, warn_single=qa_attestation_mode == "warn")
+                return await self._submit_spec_commit(_op, cancel_owner=_cancel_owner)
+            except SpecInputsUnavailable:
+                if attempt:
+                    raise ReportProvenanceUnavailable(routing_snapshot) from None
+
+
+    # -- durable awaiters (C5) --------------------------------------------
+
+    async def register_awaiter(
+        self, stream_id: str, msg_id: int | None,
+    ) -> dict[str, Any]:
+        """Record an await before its caller parks an asyncio future.
+
+        Registration is also the late-awaiter recovery path: a terminal report
+        or a confirmed-closed target is converted to a durable result in the
+        same transaction that observes it. A reopened host/session name gets a
+        fresh generation key and cannot inherit the predecessor's close result.
+        """
+        target_msg_id = _awaiter_target_msg_id(msg_id)
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            generation, terminal = _awaiter_session_state_conn(conn, stream_id)
+            existing = conn.execute(
+                "SELECT * FROM v2_awaiters "
+                "WHERE stream_id=? AND session_generation=? AND target_msg_id=?",
+                (stream_id, generation, target_msg_id),
+            ).fetchone()
+            report = _report_for_awaiter_conn(conn, stream_id, target_msg_id)
+            now = iso_now()
+            if report is not None:
+                _write_awaiter_report_conn(
+                    conn, stream_id, generation, target_msg_id, report, now,
+                )
+            elif existing is None:
+                outcome = "closed_without_report" if terminal else "pending"
+                conn.execute(
+                    "INSERT INTO v2_awaiters "
+                    "(stream_id,session_generation,target_msg_id,outcome,reason,requested_at,resolved_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        stream_id, generation, target_msg_id, outcome,
+                        "target_closed_without_report" if terminal else None,
+                        now, now if terminal else None,
+                    ),
+                )
+            elif existing["outcome"] == "pending" and terminal:
+                conn.execute(
+                    "UPDATE v2_awaiters SET outcome='closed_without_report', "
+                    "reason=?, resolved_at=? WHERE awaiter_id=?",
+                    ("target_closed_without_report", now, existing["awaiter_id"]),
+                )
+            row = conn.execute(
+                "SELECT * FROM v2_awaiters "
+                "WHERE stream_id=? AND session_generation=? AND target_msg_id=?",
+                (stream_id, generation, target_msg_id),
+            ).fetchone()
+            conn.commit()
+            return _awaiter_row(conn, row)
+
+        return await self.submit(_op)
+
+    async def get_awaiter_result(
+        self, stream_id: str, msg_id: int | None,
+    ) -> dict[str, Any] | None:
+        """Read the current-generation durable await result, if registered."""
+        target_msg_id = _awaiter_target_msg_id(msg_id)
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            generation, _terminal = _awaiter_session_state_conn(conn, stream_id)
+            row = conn.execute(
+                "SELECT * FROM v2_awaiters "
+                "WHERE stream_id=? AND session_generation=? AND target_msg_id=?",
+                (stream_id, generation, target_msg_id),
+            ).fetchone()
+            return _awaiter_row(conn, row)
+
+        return await self.submit(_op)
+
+    async def resolve_awaiters_on_close(
+        self, stream_id: str, *, session_generation: str | None = None,
+        reason: str = "confirmed_dead_close",
+    ) -> list[dict[str, Any]]:
+        """Resolve pending awaiters after a confirmed-dead lifecycle close.
+
+        The report lookup is inside the same SQLite transaction as the
+        close-result write. If a terminal report was durably ingested first it
+        wins; otherwise the one await row becomes `closed_without_report`.
+        """
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            generation = session_generation
+            if generation is None:
+                generation, _terminal = _awaiter_session_state_conn(conn, stream_id)
+            rows = conn.execute(
+                "SELECT * FROM v2_awaiters WHERE stream_id=? AND outcome='pending' "
+                "AND session_generation IN (?, '') ORDER BY awaiter_id",
+                (stream_id, generation),
+            ).fetchall()
+            outcomes: list[dict[str, Any]] = []
+            now = iso_now()
+            for row in rows:
+                target_msg_id = int(row["target_msg_id"])
+                report = _report_for_awaiter_conn(conn, stream_id, target_msg_id)
+                if report is not None:
+                    _write_awaiter_report_conn(
+                        conn, stream_id, str(row["session_generation"] or generation),
+                        target_msg_id, report, now,
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE v2_awaiters SET outcome='closed_without_report', "
+                        "reason=?, resolved_at=? WHERE awaiter_id=? AND outcome='pending'",
+                        (reason, now, row["awaiter_id"]),
+                    )
+                updated = conn.execute(
+                    "SELECT * FROM v2_awaiters WHERE awaiter_id=?",
+                    (row["awaiter_id"],),
+                ).fetchone()
+                outcomes.append(_awaiter_row(conn, updated))
+            conn.commit()
+            return outcomes
+
+        return await self.submit(_op)
+
+    async def resolve_closed_awaiters(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Re-drive pending rows whose child is durably terminal/dead.
+
+        An explicitly open session always wins over stale reap metadata, which
+        is the live-worker exclusion. The join also lets a restart recover a
+        closed row before an in-memory callback can run.
+        """
+        cap = max(1, int(limit))
+
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT a.* FROM v2_awaiters a "
+                "LEFT JOIN sessions s ON s.host || ':' || s.session_name = a.stream_id "
+                "LEFT JOIN session_reap r ON r.stream_id = a.stream_id "
+                "LEFT JOIN v2_session_generations g "
+                "ON g.host=s.host AND g.session_name=s.session_name "
+                "WHERE a.outcome='pending' "
+                "AND ("
+                "  (s.status IS NOT NULL AND s.status <> 'open' "
+                "   AND a.session_generation IN (COALESCE(g.generation, ''), '')) "
+                "  OR (s.status IS NULL AND r.reap_status='reaped')"
+                ") ORDER BY a.awaiter_id LIMIT ?",
+                (cap,),
+            ).fetchall()
+            outcomes: list[dict[str, Any]] = []
+            now = iso_now()
+            for row in rows:
+                target_msg_id = int(row["target_msg_id"])
+                report = _report_for_awaiter_conn(conn, row["stream_id"], target_msg_id)
+                if report is not None:
+                    _write_awaiter_report_conn(
+                        conn, row["stream_id"], row["session_generation"],
+                        target_msg_id, report, now,
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE v2_awaiters SET outcome='closed_without_report', "
+                        "reason='terminal_session_without_report', resolved_at=? "
+                        "WHERE awaiter_id=? AND outcome='pending'",
+                        (now, row["awaiter_id"]),
+                    )
+                updated = conn.execute(
+                    "SELECT * FROM v2_awaiters WHERE awaiter_id=?",
+                    (row["awaiter_id"],),
+                ).fetchone()
+                outcomes.append(_awaiter_row(conn, updated))
+            conn.commit()
+            return outcomes
+
+        return await self.submit(_op)
+
+    async def find_report(
+        self, from_stream_id: str, msg_id: int | None = None, *, statuses: tuple[str, ...] = (), session_generation: str | None = None
+    ) -> dict[str, Any] | None:
+        """The report an `await` is asking for: newest row for the stream,
+        narrowed to one `msg_id` when the caller named one. `statuses` filters
+        to terminal statuses so a `progress` report never settles an await."""
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            sql = "SELECT * FROM v2_reports WHERE from_stream_id=?"
+            args: list[Any] = [from_stream_id]
+            if session_generation is not None:
+                sql += " AND session_generation=?"; args.append(session_generation)
+            if msg_id is not None:
+                sql += " AND msg_id=?"
+                args.append(msg_id)
+            if statuses:
+                sql += f" AND status IN ({','.join('?' * len(statuses))})"
+                args.extend(statuses)
+            sql += " ORDER BY ledger_row_id DESC LIMIT 1"
+            return _report_row(conn.execute(sql, args).fetchone())
+
+        return await self.submit(_op)
+
+    async def record_report_rejection(
+        self, stream_id: str, *, session_generation: str, status: str, reason: str,
+    ) -> None:
+        """Durably record a REJECTED terminal-report attempt (pop2). Keyed to the
+        seat's current generation so a resumed seat is never reaped on a stale
+        rejection. Append-only; the sweep reads the newest."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO v2_report_rejections "
+                "(stream_id, session_generation, status, reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (stream_id, session_generation, status, reason, time.time()),
+            )
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def find_report_rejection(
+        self, stream_id: str, *, session_generation: str | None = None,
+        statuses: tuple[str, ...] = (),
+    ) -> dict[str, Any] | None:
+        """Newest recorded terminal-report rejection for the stream, mirroring
+        `find_report`: generation- and status-scoped so the self-close sweep
+        matches only a rejection of the row's CURRENT generation."""
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            sql = (
+                "SELECT stream_id, session_generation, status, reason, created_at "
+                "FROM v2_report_rejections WHERE stream_id=?"
+            )
+            args: list[Any] = [stream_id]
+            if session_generation is not None:
+                sql += " AND session_generation=?"; args.append(session_generation)
+            if statuses:
+                sql += f" AND status IN ({','.join('?' * len(statuses))})"
+                args.extend(statuses)
+            sql += " ORDER BY rejection_id DESC LIMIT 1"
+            row = conn.execute(sql, args).fetchone()
+            if row is None:
+                return None
+            return {
+                "stream_id": row[0], "session_generation": row[1],
+                "status": row[2], "reason": row[3], "created_at": row[4],
+            }
+
+        return await self.submit(_op)
+
+    async def get_report(self, report_id: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            return _report_row(conn.execute(
+                "SELECT * FROM v2_reports WHERE report_id=?", (report_id,)
+            ).fetchone())
+
+        return await self.submit(_op)
+
+    # -- grant_token / register_push (UI-sent verbs) -----------------------
+
+    async def grant_stream_token(self, host: str, session_name: str, token_hash: str, version: str) -> str:
+        """Bootstrap-once, race-safe (v1 `set_token_hash_if_unset`): set the hash
+        only on an OPEN row that has none. Returns `ok` / `stream_unknown` /
+        `token_already_set` so the caller maps v1's grant_token vocabulary."""
+
+        def _op(conn: sqlite3.Connection) -> str:
+            row = conn.execute(
+                "SELECT token_hash FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                (host, session_name),
+            ).fetchone()
+            if row is None:
+                return "stream_unknown"
+            if row[0]:
+                return "token_already_set"
+            cur = conn.execute(
+                "UPDATE sessions SET token_hash=?, token_hash_version=? WHERE host=? AND session_name=?"
+                " AND status='open' AND (token_hash IS NULL OR token_hash='')",
+                (token_hash, version, host, session_name),
+            )
+            conn.commit()
+            return "ok" if cur.rowcount == 1 else "token_already_set"
+
+        return await self.submit(_op)
+
+    async def stream_id_for_token_hash(self, token_hash: str) -> str | None:
+        """The OPEN stream whose granted token hashes to `token_hash`, or None.
+
+        The daemon's proof of a report/close caller's authenticated identity: a
+        presented `stream_token` is hashed and matched here, so a spoofed
+        `from_stream_id` can be rejected against the token-owner. Empty hash
+        never matches (a tokenless caller has no authenticated identity)."""
+        if not token_hash:
+            return None
+
+        def _op(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT host, session_name FROM sessions"
+                " WHERE token_hash=? AND token_hash_version=? AND status='open'",
+                (token_hash, STREAM_TOKEN_HASH_VERSION),
+            ).fetchone()
+            return f"{row[0]}:{row[1]}" if row is not None else None
+
+        return await self.submit(_op)
+
+    async def stream_token_state(self, token_hash: str) -> dict[str, str] | None:
+        """Return the lifecycle state for a token hash without exposing it.
+
+        Verification telemetry needs to distinguish a token that belonged to a
+        closed seat (expired) from a token that belongs to another open seat
+        (wrong-seat). The hash itself never leaves this store method.
+        """
+        if not token_hash:
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, str] | None:
+            row = conn.execute(
+                """SELECT s.host, s.session_name, s.status, s.token_hash_version, g.generation
+                   FROM sessions s
+                   LEFT JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name
+                   WHERE s.token_hash=?
+                   ORDER BY CASE WHEN s.status='open' THEN 0 ELSE 1 END, s.rowid DESC
+                   LIMIT 1""",
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "stream_id": f"{row['host']}:{row['session_name']}",
+                "status": str(row["status"] or ""),
+                "token_hash_version": str(row["token_hash_version"] or ""),
+                "session_generation": str(row["generation"] or ""),
+            }
+
+        return await self.submit(_op)
+
+    # -- helpers -----------------------------------------------------------
+
+    # -- session_event_tail: chat transcript events (B13 ingest + backfill) --
+
+    async def fetch_open_session_lifecycle(
+        self,
+        stream_id: str,
+        *,
+        pane_pid: str,
+    ) -> dict[str, str] | None:
+        """Return the current open lifecycle proven by one observed pane PID.
+
+        This is an admission snapshot only.  Callers still must use
+        :meth:`append_session_events_lifecycle_cas`, whose transaction repeats
+        every predicate before writing; a snapshot alone is never authority to
+        append after a close/reopen or pane replacement.
+        """
+        host, separator, session_name = str(stream_id or "").partition(":")
+        expected_pid = str(pane_pid or "").strip()
+        if not separator or not host or not session_name or not expected_pid:
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, str] | None:
+            row = conn.execute(
+                """SELECT s.created_at AS session_created_at, g.generation, s.pane_pid
+                   FROM sessions s
+                   JOIN v2_session_generations g
+                     ON g.host=s.host AND g.session_name=s.session_name
+                   WHERE s.host=? AND s.session_name=? AND s.status='open'
+                     AND s.pane_pid IS NOT NULL
+                     AND CAST(s.pane_pid AS TEXT)=?
+                """,
+                (host, session_name, expected_pid),
+            ).fetchone()
+            if row is None:
+                return None
+            lifecycle = str(row["session_created_at"] or "").strip()
+            generation = str(row["generation"] or "").strip()
+            actual_pid = str(row["pane_pid"] or "").strip()
+            if not lifecycle or not generation or not actual_pid:
+                return None
+            return {
+                "pane_pid": actual_pid,
+                "session_created_at": lifecycle,
+                "generation": generation,
+            }
+
+        return await self.submit(_op)
+
+    def _recorded_by_other_lifecycle_conn(
+        self, conn: sqlite3.Connection, stream_id: str, session_created_at: str,
+        identity: str | None, event_id: int,
+    ) -> bool:
+        """True when another lifecycle of this stream already holds this record.
+
+        De-duplication is per lifecycle (`session_created_at`), and a resumed
+        seat is reopened with a new one while ingest re-reads its transcript
+        from the start. A record with the same transcript identity under any
+        other lifecycle of the same stream is that re-read history: the caller
+        keeps the row and reports it as not new, so it is neither broadcast as
+        a live event nor mirrored again. The other lifecycles of a stream are
+        fixed once a lifecycle starts appending, so they are listed once.
+        """
+        if identity is None:
+            return False
+        key = (stream_id, session_created_at)
+        others = self._other_event_lifecycles.get(key)
+        if others is None:
+            # One index seek per lifecycle, not a scan of the stream's rows.
+            rows = conn.execute(
+                """WITH RECURSIVE lifecycles(created) AS (
+                       SELECT min(session_created_at) FROM session_event_tail WHERE stream_id=?1
+                       UNION ALL
+                       SELECT (SELECT min(session_created_at) FROM session_event_tail
+                               WHERE stream_id=?1 AND session_created_at > lifecycles.created)
+                       FROM lifecycles WHERE lifecycles.created IS NOT NULL)
+                   SELECT created FROM lifecycles WHERE created IS NOT NULL""",
+                (stream_id,),
+            ).fetchall()
+            others = tuple(str(r[0]) for r in rows if str(r[0]) != session_created_at)
+            if len(self._other_event_lifecycles) >= 4096:
+                self._other_event_lifecycles.clear()
+            self._other_event_lifecycles[key] = others
+        for other in others:
+            if conn.execute(
+                "SELECT 1 FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+                "AND identity=? AND event_id<>? LIMIT 1",
+                (stream_id, other, identity, event_id),
+            ).fetchone():
+                return True
+        return False
+
+    async def prepare_native_input_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from tell_proof import split_native_input
+        from native_input_lookup import PREPARE_SECONDS
+        def prepare(conn):
+            deadline = time.monotonic() + PREPARE_SECONDS
+            return [segment for event in events
+                    for segment in split_native_input(conn, event, lookup_deadline=deadline)]
+        return await self.submit(prepare)
+
+    @staticmethod
+    def _insert_session_event_conn(conn, stream_id, session_created_at, event, identity):
+        """The shared insert/dedupe floor for live and retained transcript reads."""
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        if raw.get("native_input_version") == 1:
+            # A pre-upgrade record is immutable. All its new segments inherit
+            # the original record's replay floor, including changed event kinds.
+            from ingest import _identity_key
+            for legacy in raw.get("legacy_input_events") or []:
+                row = conn.execute("SELECT event_json FROM session_event_tail WHERE stream_id=? AND identity=? LIMIT 1",
+                                   (stream_id, _identity_key(legacy))).fetchone()
+                if row and not (json.loads(row[0]).get("raw") or {}).get("native_input_version"):
+                    return None
+        event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO session_event_tail "
+            "(stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (stream_id, session_created_at, hashlib.sha256(event_json.encode("utf-8")).hexdigest(),
+             event_json, event.get("timestamp"), time.time(), identity),
+        )
+        return int(cur.lastrowid) if cur.rowcount > 0 else None
+
+    async def record_satellite_runtime(self, host, sha, pid, incarnation, *, admitted,
+                                       useful=0, recovery_pending=None, recovery_gaps=None):
+        def operation(conn):
+            key = f"event_push.runtime.{host}"
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+                try:
+                    previous = json.loads(row[0]) if row else {}
+                except (TypeError, ValueError):
+                    previous = {}
+                same = previous.get("sha") == sha and previous.get("incarnation") == incarnation
+                runtime = {"sha": sha, "pid": pid if type(pid) is int and pid > 0 else None,
+                    "incarnation": incarnation, "observed_at": iso_now(), "observed_at_epoch": time.time(),
+                    "admitted": admitted, "useful_events": (previous.get("useful_events", 0) if same else 0) + useful,
+                    "useful_observed_at_epoch": time.time() if useful else
+                        previous.get("useful_observed_at_epoch") if same else None,
+                    "recovery_pending": recovery_pending, "recovery_gaps": recovery_gaps}
+                conn.execute("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                             (key, json.dumps(runtime, sort_keys=True)))
+        await self.submit(operation)
+
+    async def bind_chat_checkpoints(self, host, sources):
+        if not sources:
+            return []
+        return await self.submit(lambda conn: chat_recovery.bind_live_conn(conn, host, sources))
+
+    async def append_chat_recovery(self, host, batches):
+        if not batches:
+            return []
+        # Historical append deliberately stops at the common durable insert.
+        # No mirror, capacity observation, rebind or session mutation runs.
+        return await self.submit(lambda conn: chat_recovery.append_recovery_conn(
+            conn, host, batches, self._insert_session_event_conn,
+        ))
+
+    async def append_session_events_lifecycle_cas(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[int | None | _EntryDropped] | None:
+        """Append one submitted batch, fencing each lifecycle-bound row.
+
+        An entry may carry ``lifecycle`` with the previously admitted
+        ``pane_pid``, ``session_created_at``, and ``generation``, or a
+        ``claude_binding`` fenced against an open row.  Each such append
+        repeats its predicate inside this one transaction.  A miss is that
+        ONE entry's verdict: it yields :data:`ENTRY_DROPPED` and the rest of
+        the batch still commits, because a batch spans every session on a
+        host and one stale pane must never stop the others from ingesting.
+        Every predicate for an entry is evaluated before any write for it, so
+        a drop leaves nothing partial behind.  Storage faults still fail the
+        whole batch closed.  Entries without a lifecycle or binding retain the
+        existing non-Codex ingest behaviour.
+        """
+        if limit <= 0:
+            return None
+        prepared: list[tuple[str, str, str, str | None, float, dict[str, str] | None, str | None]] = []
+        for entry in entries:
+            stream_id = str(entry.get("stream_id") or "")
+            event = entry.get("event")
+            if not stream_id or not isinstance(event, dict):
+                return None
+            event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+            event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
+            identity = entry.get("identity")
+            lifecycle = entry.get("lifecycle")
+            if lifecycle is not None:
+                if not isinstance(lifecycle, dict):
+                    return None
+                lifecycle = {
+                    "pane_pid": str(lifecycle.get("pane_pid") or "").strip(),
+                    "session_created_at": str(lifecycle.get("session_created_at") or "").strip(),
+                    "generation": str(lifecycle.get("generation") or "").strip(),
+                }
+                if not all(lifecycle.values()):
+                    return None
+            prepared.append((
+                stream_id,
+                event_json,
+                event_key,
+                None if identity is None else str(identity),
+                time.time(),
+                lifecycle,
+                str(entry.get("claude_binding") or "").strip() or None,
+            ))
+        if not prepared:
+            return []
+
+        def _op(conn: sqlite3.Connection) -> list[int | None | _EntryDropped] | None:
+            conn.execute("BEGIN")
+            try:
+                inserted: list[int | None | _EntryDropped] = []
+                for stream_id, event_json, event_key, identity, recorded_at, lifecycle, binding in prepared:
+                    host, separator, session_name = stream_id.partition(":")
+                    rebind: tuple[str, str] | None = None
+                    if binding:
+                        row = conn.execute(
+                            "SELECT claude_session_id, claude_session_lineage FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                            (host, session_name),
+                        ).fetchone()
+                        if row is None:
+                            inserted.append(ENTRY_DROPPED)
+                            continue
+                        current = str(row["claude_session_id"] or "")
+                        lineage = str(row["claude_session_lineage"] or "").split(",") if row["claude_session_lineage"] else []
+                        if binding != current:
+                            if binding in lineage:
+                                inserted.append(None)
+                                continue
+                            # Deferred until every predicate below has passed:
+                            # a drop must not leave this rebind committed.
+                            rebind = (binding, ",".join(dict.fromkeys([*lineage, current])))
+                    if lifecycle is not None:
+                        if not separator or not host or not session_name:
+                            inserted.append(ENTRY_DROPPED)
+                            continue
+                        current = conn.execute(
+                            """SELECT s.created_at
+                               FROM sessions s
+                               JOIN v2_session_generations g
+                                 ON g.host=s.host AND g.session_name=s.session_name
+                               WHERE s.host=? AND s.session_name=? AND s.status='open'
+                                 AND s.pane_pid IS NOT NULL
+                                 AND CAST(s.pane_pid AS TEXT)=?
+                                 AND s.created_at=? AND g.generation=?
+                            """,
+                            (
+                                host, session_name, lifecycle["pane_pid"],
+                                lifecycle["session_created_at"], lifecycle["generation"],
+                            ),
+                        ).fetchone()
+                        if current is None:
+                            inserted.append(ENTRY_DROPPED)
+                            continue
+                        session_created_at = lifecycle["session_created_at"]
+                    else:
+                        session_created_at = ""
+                        if separator:
+                            row = conn.execute(
+                                "SELECT created_at FROM sessions WHERE host=? AND session_name=?",
+                                (host, session_name),
+                            ).fetchone()
+                            session_created_at = str(row["created_at"] or "") if row else ""
+                    if rebind is not None:
+                        conn.execute(
+                            "UPDATE sessions SET claude_session_id=?, claude_session_lineage=? WHERE host=? AND session_name=?",
+                            (*rebind, host, session_name),
+                        )
+                    source_id = self._insert_session_event_conn(
+                        conn, stream_id, session_created_at, json.loads(event_json), identity,
+                    )
+                    if source_id is not None and self._recorded_by_other_lifecycle_conn(
+                            conn, stream_id, session_created_at, identity, source_id):
+                        # Re-read history of a resumed seat: the row stays for this
+                        # lifecycle's history, but it is not a new event.
+                        inserted.append(None)
+                        continue
+                    if source_id is not None:
+                        store_capacity_retry.observe(conn, stream_id, json.loads(event_json),
+                                                     source_id, lifecycle, recorded_at)
+                    # The prose mirror must run for every admitted source event,
+                    # whichever fence proved the append. A remote claude seat
+                    # (satellite event.push) carries a `claude_binding`, not a
+                    # `lifecycle` snapshot — the lifecycle CAS is codex-only — so
+                    # gating the mirror on `lifecycle is not None` alone silently
+                    # skipped a remote-hosted bound assistant's turn text, which
+                    # only mirrored while it ran daemon-local (local ingest builds
+                    # a lifecycle). `_mirror_source_event_conn` re-validates the
+                    # durable binding stream/generation itself, so firing it on
+                    # the binding fence is safe.
+                    # bug_ref: assistant_proactive_chat_status_publish
+                    if source_id is not None and (lifecycle is not None or binding is not None):
+                        self._mirror_source_event_conn(
+                            conn, source_stream_id=stream_id,
+                            source_event=json.loads(event_json), source_event_id=source_id,
+                            recorded_at=recorded_at,
+                        )
+                    inserted.append(source_id)
+                conn.commit()
+                return inserted
+            except BaseException:
+                conn.rollback()
+                raise
+
+        inserted = await self.submit(_op)
+        if inserted is not None:
+            for entry, result in zip(entries, inserted):
+                if result is not ENTRY_DROPPED:
+                    await self._reconcile_ingested_tell(entry["event"])
+        return inserted
+
+    # -- durable send receipts -------------------------------------------
+
+    async def append_send_receipt(
+        self,
+        *,
+        to_stream_id: str,
+        request_id: str,
+        receipt_id: str,
+        state: str,
+        wire_text: str,
+        display_text: str,
+        attachments: list[dict[str, Any]],
+        delivery: str,
+        submission_confirmed: bool,
+        optimistic_id: str | None = None,
+        reason: str | None = None,
+        attempts: int | None = None,
+        content_kind: str | None = None,
+        created_at: str | None = None,
+        from_stream_id: str | None = None,
+        actor_stream_id: str | None = None,
+        actor_trusted: bool = False,
+        meta_json: str = "{}",
+    ) -> dict[str, Any]:
+        """Append one immutable send receipt and return its safe wire shape.
+
+        This intentionally has no upsert, uniqueness constraint, or payload
+        comparison. A same-key retry is another physical attempt; confirmed
+        delivery takes precedence only within the same immutable attempt.
+        """
+        if state not in {"accepted", "landed", "not_landed"}:
+            raise ValueError("invalid_send_receipt_state")
+        target = str(to_stream_id or "").strip()
+        request = str(request_id or "").strip()
+        receipt = str(receipt_id or "").strip()
+        if not target or not request or not receipt:
+            raise ValueError("invalid_send_receipt_key")
+        normalized_attachments = [dict(item) for item in attachments if isinstance(item, dict)]
+        kind = content_kind or (
+            "image_and_text" if normalized_attachments and display_text else
+            "attachment_only" if normalized_attachments else "text"
+        )
+        encoded_attachments = json.dumps(
+            normalized_attachments, separators=(",", ":"), sort_keys=True,
+        )
+        timestamp = created_at or iso_now()
+
+        # A peer send is pasted with a `[from …]` envelope but the normalizer
+        # stores only the header-stripped payload as the event text; hash the
+        # stripped basis so both the operator (unstamped) and peer (stamped→TELL)
+        # events correlate here.
+        wire_digest = _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or "")))
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            return _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=receipt,
+                state=state, optimistic_id=optimistic_id, wire_digest=wire_digest,
+                display_text=display_text, content_kind=kind,
+                attachments_json=encoded_attachments, delivery=delivery,
+                submission_confirmed=submission_confirmed, reason=reason,
+                attempts=attempts, created_at=timestamp, from_stream_id=from_stream_id,
+                actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
+                meta_json=meta_json,
+            )
+
+        receipt = await self.submit(_op)
+        return receipt
+
+    async def get_send_receipt(self, to_stream_id: str, request_id: str, *, include_display_text: bool = False, include_submission_identity: bool = False) -> dict[str, Any] | None:
+        """Project latest outcome, preserving same-attempt confirmed delivery."""
+        target = str(to_stream_id or "").strip()
+        request = str(request_id or "").strip()
+        if not target or not request:
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = _effective_send_receipt_row(conn, target, request)
+            if row is None:
+                return None
+            result = _project_send_receipt_row(conn, row, include_display_text=include_display_text)
+            if include_submission_identity:
+                first = history_query(conn, "SELECT created_at FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid LIMIT 1", (target, request)).fetchone()
+                result["wire_digest"] = row["wire_digest"]
+                result["first_created_at"] = first[0] if first else None
+            return result
+
+        return await self.submit(_op)
+
+    async def reconcile_send_receipt(
+        self, to_stream_id: str, request_id: str, *, original_generation: str,
+    ) -> dict[str, Any] | None:
+        """Append evidence-only landed proof; never perform another delivery."""
+        import asyncio
+        import receipt_proof as proof
+        from pathlib import Path
+        from retention import default_archive_path
+
+        target, request = str(to_stream_id or "").strip(), str(request_id or "").strip()
+        if not target or not request or self.path == ":memory:":
+            return await self.get_send_receipt(target, request)
+
+        def rows_for(conn):
+            return history_query(conn,
+                "SELECT rowid AS receipt_rowid,* FROM v2_send_receipts "
+                "WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, request)).fetchall()
+
+        def lifecycle(conn):
+            if ":" not in target:
+                return None
+            host, name = target.split(":", 1)
+            return conn.execute(
+                "SELECT s.created_at,g.generation FROM sessions s "
+                "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+                "WHERE s.host=? AND s.session_name=?", (host, name)).fetchone()
+
+        def sequence(conn):
+            row = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name='session_event_tail'").fetchone()
+            return int(row[0]) if row else 0
+
+        def peers(conn, row, birth):
+            return history_query(conn,
+                "SELECT COUNT(*) FROM v2_send_receipts r JOIN "
+                "(SELECT request_id,MAX(rowid) AS rid FROM v2_send_receipts "
+                "WHERE to_stream_id=? GROUP BY request_id) x ON x.rid=r.rowid "
+                "WHERE r.to_stream_id=? AND r.state!='not_landed' AND r.wire_digest=? AND r.created_at>=?",
+                (target, target, row["wire_digest"], birth), receipt_stream=target).fetchone()[0]
+
+        def observe(conn):
+            rows = rows_for(conn)
+            if not rows:
+                return {"ready": False, "result": None}
+            latest, current = rows[-1], lifecycle(conn)
+            result = _project_send_receipt_row(conn, latest)
+            if (current is None or current["generation"] != original_generation or
+                    not proof.pending(latest) or len({r["receipt_id"] for r in rows}) != 1):
+                return {"ready": False, "result": result}
+            claim, birth_time = proof.epoch(rows[0]["created_at"]), proof.epoch(current["created_at"])
+            if claim is None or birth_time is None or birth_time >= claim:
+                return {"ready": False, "result": result}
+            prior, conflict = proof.proved_pending_precedence(rows)
+            if prior is not None:
+                return {"ready": False, "result": _project_send_receipt_row(conn, prior)}
+            if conflict or any(not proof.pending(r) or
+                               proof.immutable_identity(r) != proof.immutable_identity(latest)
+                               for r in rows):
+                return {"ready": False, "result": result}
+            birth = str(current["created_at"])
+            if peers(conn, latest, birth) != 1:
+                return {"ready": False, "result": result}
+            events = conn.execute(
+                "SELECT * FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+                "ORDER BY event_id DESC LIMIT ?", (target, birth, proof.HOT_ROW_LIMIT + 1)).fetchall()
+            if len(events) > proof.HOT_ROW_LIMIT:
+                return {"ready": False, "result": result}
+            hot = [{**dict(r), "proof_store": "hot"} for r in events if float(r["recorded_at"]) >= claim]
+            return {"ready": True, "result": result, "hot": hot, "sequence": sequence(conn),
+                    "birth": birth, "claim": claim, "signature": proof.immutable_identity(latest),
+                    "first": (rows[0]["receipt_rowid"], rows[0]["created_at"], rows[0]["receipt_id"])}
+
+        observed = await self.submit(observe)
+        if not observed["ready"]:
+            return observed["result"]
+        archive, complete = await asyncio.to_thread(
+            proof.scan_archive, await self.submit(lambda conn: conn.history_archive_path),
+            target, observed["birth"], observed["claim"])
+        if not complete:
+            return await self.get_send_receipt(target, request)
+
+        def finish(conn):
+            rows = rows_for(conn)
+            if not rows:
+                return None
+            latest, current = rows[-1], lifecycle(conn)
+            result = _project_send_receipt_row(conn, latest)
+            if latest["state"] == "landed":
+                return result
+            if (current is None or current["generation"] != original_generation or
+                    current["created_at"] != observed["birth"] or
+                    sequence(conn) != observed["sequence"] or
+                    (rows[0]["receipt_rowid"], rows[0]["created_at"], rows[0]["receipt_id"]) != observed["first"] or
+                    len({r["receipt_id"] for r in rows}) != 1 or
+                    proof.immutable_identity(latest) != observed["signature"] or
+                    not proof.pending(latest) or peers(conn, latest, observed["birth"]) != 1):
+                return result
+            prior, conflict = proof.proved_pending_precedence(rows)
+            if prior is not None:
+                return _project_send_receipt_row(conn, prior)
+            if conflict or any(not proof.pending(r) or
+                               proof.immutable_identity(r) != observed["signature"]
+                               for r in rows):
+                return result
+            valid, _reason = proof.decide(
+                observed["hot"] + archive, latest, observed["birth"], observed["claim"], _send_wire_digest)
+            if not valid:
+                return result
+            inserted = _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=latest["receipt_id"],
+                state="landed", optimistic_id=latest["optimistic_id"], wire_digest=latest["wire_digest"],
+                display_text=latest["display_text"], content_kind=latest["content_kind"],
+                attachments_json=latest["attachments_json"], delivery="landed", submission_confirmed=True,
+                reason="late_user_proof", attempts=latest["attempts"], created_at=iso_now(),
+                from_stream_id=latest["from_stream_id"], actor_stream_id=latest["actor_stream_id"],
+                actor_trusted=bool(latest["actor_trusted"]), meta_json=latest["meta_json"])
+            row = history_query(conn, "SELECT rowid AS receipt_rowid,* FROM v2_send_receipts WHERE rowid=?",
+                               (inserted["receipt_rowid"],)).fetchone()
+            return _project_send_receipt_row(conn, row)
+
+        return await self.submit(finish)
+
+    async def claim_or_coalesce_send(
+        self,
+        *,
+        to_stream_id: str,
+        request_id: str,
+        receipt_id: str,
+        wire_text: str,
+        display_text: str,
+        attachments: list[dict[str, Any]],
+        optimistic_id: str | None,
+        window_floor: str,
+        from_stream_id: str | None = None,
+        actor_stream_id: str | None = None,
+        actor_trusted: bool = False,
+        content_kind: str | None = None,
+        created_at: str | None = None,
+        meta_json: str = "{}",
+    ) -> dict[str, Any]:
+        """Atomically decide winner-vs-coalesced for one logical send, in ONE
+        serialized op so concurrent retries cannot both race past the check.
+
+        Returns ``{"coalesced": True, "winner": <existing receipt>}`` when a prior
+        NON-failed receipt already carries this send's delivery, else
+        ``{"coalesced": False, "receipt": <the freshly appended 'accepted' claim>}``.
+
+        A prior receipt matches when it shares this EXACT ``request_id`` (a
+        reconnect replay reuses it — collapse at any age) OR the client's logical
+        identity (same ``to_stream_id`` + ``actor_stream_id`` + ``optimistic_id`` +
+        ``display_text`` + canonical ``attachments_json``) and was created
+        at/after ``window_floor``. The logical payload stays stable through
+        materialization; ``wire_digest`` separately correlates provider events.
+        Failed (``not_landed``) receipts never match, so a genuinely failed attempt stays
+        retryable; and an empty ``optimistic_id`` disables the logical-identity arm
+        (direct in-process callers keep today's request_id-only behavior).
+        """
+        target = str(to_stream_id or "").strip()
+        request = str(request_id or "").strip()
+        receipt = str(receipt_id or "").strip()
+        if not target or not request or not receipt:
+            raise ValueError("invalid_send_receipt_key")
+        opt = str(optimistic_id or "").strip()
+        actor = _safe_provenance_id(actor_stream_id)
+        wire_digest = _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or "")))
+        normalized_attachments = [dict(item) for item in attachments if isinstance(item, dict)]
+        kind = content_kind or (
+            "image_and_text" if normalized_attachments and display_text else
+            "attachment_only" if normalized_attachments else "text"
+        )
+        encoded_attachments = json.dumps(
+            normalized_attachments, separators=(",", ":"), sort_keys=True,
+        )
+        timestamp = created_at or iso_now()
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            # Select the NEWEST receipt for this send's identity regardless of
+            # state, so the latest outcome is authoritative: a later not_landed
+            # supersedes an earlier 'accepted' preclaim (the claim is appended
+            # before materialization/paste). Coalescing then requires that latest
+            # outcome to be a live/landed delivery, so a send that actually FAILED
+            # stays retryable (a rotated retry re-delivers instead of coalescing
+            # onto its own stale accepted claim). A prior attempt that truly landed
+            # would already have made THIS attempt coalesce and append a mirrored
+            # landed row, so 'newest is not_landed' reliably means not-yet-landed.
+            # A policy refusal is a terminal result for this exact request ID.
+            # A sender-chosen new ID retains ordinary failed-send recovery.
+            from account_pool_control import POOL_ERRORS
+            exact=history_query(conn,"SELECT rowid AS receipt_rowid,* FROM v2_send_receipts "
+                "WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1",(target,request)).fetchone()
+            if exact is not None and exact['reason'] in POOL_ERRORS:
+                return {"coalesced":True,"winner":_send_receipt_row(exact,include_rowid=True)}
+            latest = history_query(conn,
+                """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
+                   WHERE to_stream_id=?
+                     AND (
+                           request_id=?
+                        OR (? != '' AND optimistic_id=? AND display_text=?
+                            AND attachments_json=?
+                            AND actor_stream_id IS ? AND created_at >= ?)
+                     )
+                   ORDER BY rowid DESC LIMIT 1""",
+                (target, request, opt, opt, str(display_text or ""),
+                 encoded_attachments, actor, window_floor),
+            ).fetchone()
+            if (
+                latest is not None
+                and str(latest["state"]) != "not_landed"
+                and str(latest["delivery"]) != "not_landed"
+            ):
+                return {"coalesced": True, "winner": _send_receipt_row(latest, include_rowid=True)}
+            row = _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=receipt,
+                state="accepted", optimistic_id=opt or None, wire_digest=wire_digest,
+                display_text=display_text, content_kind=kind,
+                attachments_json=encoded_attachments, delivery="accepted",
+                submission_confirmed=False, reason=None, attempts=None,
+                created_at=timestamp, from_stream_id=from_stream_id,
+                actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
+                meta_json=meta_json,
+            )
+            return {"coalesced": False, "receipt": row}
+
+        return await self.submit(_op)
+
+    async def stamp_event_with_send_receipt(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Stamp one existing USER or peer-TELL event from its send-receipt projection.
+
+        The event remains on the established ingest/broadcast route. This is a
+        read at event acceptance time, not an observation row or a receipt push.
+        A peer send now normalizes as TELL, and its receipt still carries the
+        clean display_text/attachments; correlate it too so the card never shows
+        the raw staged attachment path.
+        """
+        payload = dict(event)
+        # This proof field is owned by ingress, never trusted from a producer.
+        payload.pop("provider_text_digest", None)
+        kind = str(payload.get("kind") or "")
+        stream_id = str(payload.get("stream_id") or "").strip()
+        text = str(payload.get("text") or "")
+        request_id = str(payload.get("request_id") or "").strip()
+        # A peer delivery (tell/send) carries its receipt identity as the
+        # envelope anchor (raw.tell_id). Peer traffic correlates ONLY by that
+        # anchor; the text-digest fallback below must never see it, or two
+        # distinct peer sends with identical text would collapse onto one
+        # receipt (re-QA reject #2, 2026-09-07).
+        raw = payload.get("raw")
+        peer_anchor = (
+            str(raw.get("tell_id") or "").strip()
+            if kind == "TELL" and isinstance(raw, dict) else ""
+        )
+        if kind not in ("USER", "TELL") or not stream_id or not text:
+            return payload
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            # Peer deliveries correlate solely by their envelope anchor, never
+            # by text digest; an anchorless peer TELL correlates to nothing.
+            if kind == "TELL":
+                if not peer_anchor:
+                    return None
+                anchored = history_query(conn,
+                    """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
+                       WHERE to_stream_id=? AND request_id=?
+                       ORDER BY rowid DESC LIMIT 1""",
+                    (stream_id, peer_anchor),
+                ).fetchone()
+                if (
+                    anchored is not None
+                    and str(anchored["wire_digest"] or "") == _send_wire_digest(text)
+                ):
+                    return _project_send_receipt_row(
+                        conn, anchored, include_attachments=True, include_display_text=True,
+                    )
+                return None
+
+            # An event already stamped with a client-minted request ID must
+            # stay bound to that durable attempt when it is replayed.
+            if _SEND_REQUEST_ID_RE.fullmatch(request_id):
+                exact = history_query(conn,
+                    """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
+                       WHERE to_stream_id=? AND request_id=?
+                       ORDER BY rowid DESC LIMIT 1""",
+                    (stream_id, request_id),
+                ).fetchone()
+                if (
+                    exact is not None
+                    and str(exact["wire_digest"] or "") == _send_wire_digest(text)
+                ):
+                    return _project_send_receipt_row(
+                        conn, exact, include_attachments=True, include_display_text=True,
+                    )
+                return None
+
+            # Legacy events without a valid client request key can only use the
+            # prior text-digest projection, preserving compatibility. Digest the
+            # event once and let SQLite pick the newest current receipt with that
+            # digest; per-row digesting re-normalized the event text once for
+            # every receipt on the stream.
+            digest = _send_wire_digest(text)
+            if not digest:
+                return None
+            row = history_query(conn,
+                """SELECT r.rowid AS receipt_rowid, r.*
+                   FROM v2_send_receipts AS r
+                   JOIN (
+                       SELECT request_id, MAX(rowid) AS receipt_rowid
+                       FROM v2_send_receipts
+                       WHERE to_stream_id=?
+                       GROUP BY request_id
+                   ) AS current ON current.receipt_rowid=r.rowid
+                   WHERE r.to_stream_id=? AND r.wire_digest=?
+                   ORDER BY r.rowid DESC LIMIT 1""",
+                (stream_id, stream_id, digest), receipt_stream=stream_id,
+            ).fetchone()
+            if row is not None:
+                return _project_send_receipt_row(
+                    conn, row, include_attachments=True, include_display_text=True,
+                )
+            return None
+
+        receipt = await self.submit(_op)
+        if receipt is None:
+            return payload
+        # The transcript's USER record includes the literal staged attachment
+        # path used for injection.  Its raw identity was captured by the caller
+        # before this projection, so replacing that presentation text preserves
+        # dedupe while preventing the path from entering public chat history.
+        display_text = str(receipt.pop("display_text", ""))
+        if display_text != text:
+            payload["provider_text_digest"] = provider_text_digest(text)
+        payload["text"] = display_text
+        # A peer TELL renders from raw.peer_payload; restore the clean display
+        # text there too so an attachment send's staged path never surfaces.
+        if kind == "TELL" and isinstance(payload.get("raw"), dict):
+            payload["raw"] = {**payload["raw"], "peer_payload": display_text}
+        payload.update({
+            "receipt_id": receipt["receipt_id"],
+            "request_id": receipt["request_id"],
+            "receipt_state": receipt["state"],
+            "receipt_delivery": receipt["delivery"],
+            "attachment_count": receipt["attachment_count"],
+        })
+        if receipt.get("optimistic_id"):
+            payload["optimistic_id"] = receipt["optimistic_id"]
+        # Echo durable send metadata (meta.voice={duration_s}) so the voice-input
+        # mic-glyph caption survives reload/reconcile. Additive; ignored by clients
+        # that do not read it.
+        payload.pop("meta", None)
+        if receipt.get("meta"):
+            payload["meta"] = receipt["meta"]
+        attachments = receipt.pop("attachments", [])
+        if attachments:
+            payload["attachments"] = attachments
+        return payload
+
+    async def outbound_notice_for_dedupe(self, dedupe_key: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM v2_outbound_notices WHERE dedupe_key=?",
+                (dedupe_key,),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+        return await self.submit(_op)
+
+    async def complete_trusted_status_notice(
+        self,
+        notice_id: str,
+        *,
+        owner: str,
+        proof: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Fix one immutable status origin binding and settle its queue row."""
+        proof_state = str(proof.get("proof_state") or "")
+        proof_event_id = proof.get("proof_event_id")
+        watermark = proof.get("proof_watermark")
+        if (
+            proof_state != "proven"
+            or not isinstance(proof_event_id, int)
+            or isinstance(proof_event_id, bool)
+            or not isinstance(watermark, int)
+            or isinstance(watermark, bool)
+            or watermark < 0
+            or proof_event_id <= watermark
+            or str(proof.get("to_stream_id") or "") == ""
+        ):
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                notice = conn.execute(
+                    "SELECT * FROM v2_outbound_notices WHERE notice_id=?",
+                    (notice_id,),
+                ).fetchone()
+                if (
+                    notice is None
+                    or notice["kind"] not in _TRUSTED_STATUS_NOTICE_KINDS
+                    or notice["lease_owner"] != owner
+                    or notice["delivered_at"] is not None
+                    or notice["terminal_at"] is not None
+                ):
+                    conn.rollback()
+                    return None
+                stream_id = str(notice["recipient_stream_id"] or "")
+                if str(proof.get("to_stream_id") or "") != stream_id:
+                    conn.rollback()
+                    return None
+                host, separator, session_name = stream_id.partition(":")
+                if not separator or not host or not session_name:
+                    conn.rollback()
+                    return None
+                lifecycle = conn.execute(
+                    """SELECT s.created_at, g.generation
+                       FROM sessions s
+                       LEFT JOIN v2_session_generations g
+                         ON g.host=s.host AND g.session_name=s.session_name
+                       WHERE s.host=? AND s.session_name=? AND s.status='open'""",
+                    (host, session_name),
+                ).fetchone()
+                if lifecycle is None:
+                    conn.rollback()
+                    return None
+                tell_row = conn.execute(
+                    "SELECT reply FROM v2_tell_deliveries WHERE tell_id=?",
+                    (str(notice["tell_id"] or ""),),
+                ).fetchone()
+                try:
+                    tell_envelope = json.loads(tell_row["reply"]) if tell_row else None
+                except (TypeError, ValueError):
+                    tell_envelope = None
+                delivery = (
+                    tell_envelope.get("delivery")
+                    if isinstance(tell_envelope, dict) else None
+                )
+                expected_payload_digest = hashlib.sha256(
+                    f"{stream_id}\x00{str(notice['body'] or '')}".encode()
+                ).hexdigest()
+                if (
+                    not isinstance(delivery, dict)
+                    or tell_envelope.get("payload_digest") != expected_payload_digest
+                    or delivery.get("to_stream_id") != stream_id
+                    or delivery.get("text") != str(notice["body"] or "")
+                    or delivery.get("proof_watermark") != watermark
+                    or delivery.get("proof_event_id") != proof_event_id
+                ):
+                    conn.rollback()
+                    return None
+                generation = str(lifecycle["generation"] or "")
+                event_row = conn.execute(
+                    """SELECT event_json FROM session_event_tail
+                       WHERE stream_id=? AND session_created_at=? AND event_id=?""",
+                    (stream_id, str(lifecycle["created_at"] or ""), proof_event_id),
+                ).fetchone()
+                if event_row is None or not generation:
+                    conn.rollback()
+                    return None
+                try:
+                    event = json.loads(event_row["event_json"])
+                except (TypeError, ValueError):
+                    conn.rollback()
+                    return None
+                body = str(notice["body"] or "")
+                if (
+                    not isinstance(event, dict)
+                    or str(event.get("kind") or "").upper() != "USER"
+                    or str(event.get("stream_id") or stream_id) != stream_id
+                    or str(event.get("text") or "") != body
+                    or _nonempty_client_binding(event)
+                ):
+                    conn.rollback()
+                    return None
+                binding = {
+                    "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                    "kind": str(notice["kind"]),
+                    "notice_id": str(notice["notice_id"]),
+                    "pre_input_watermark": watermark,
+                    "proof_event_id": proof_event_id,
+                    "recipient_stream_id": stream_id,
+                    "session_generation": generation,
+                }
+                binding_json = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+                existing = notice["proof_binding"]
+                if existing is not None and existing != binding_json:
+                    conn.rollback()
+                    return None
+                stamp = _routing_iso_now()
+                cur = conn.execute(
+                    """UPDATE v2_outbound_notices
+                       SET proof_binding=?, delivered_at=?, last_error=NULL,
+                           next_action=NULL, lease_owner=NULL, lease_until=NULL
+                       WHERE notice_id=? AND lease_owner=?
+                         AND proof_binding IS NULL
+                         AND delivered_at IS NULL AND terminal_at IS NULL""",
+                    (binding_json, stamp, notice_id, owner),
+                )
+                if cur.rowcount != 1:
+                    conn.rollback()
+                    return None
+                stored = conn.execute(
+                    "SELECT * FROM v2_outbound_notices WHERE notice_id=?",
+                    (notice_id,),
+                ).fetchone()
+                conn.commit()
+                return dict(stored)
+            except BaseException:
+                conn.rollback()
+                raise
+
+        return await self.submit(_op)
+
+    async def project_session_events(
+        self, events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not events:
+            return []
+        copies = [dict(event) for event in events]
+        return await self.submit(
+            lambda conn: _project_session_events_conn(conn, copies)
+        )
+
+    async def fetch_projected_session_event(
+        self, stream_id: str, event_id: int,
+    ) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            host, separator, session_name = str(stream_id or "").partition(":")
+            if not separator or not host or not session_name:
+                return None
+            row = conn.execute(
+                """SELECT t.event_json FROM session_event_tail t
+                   JOIN sessions s ON s.host=? AND s.session_name=?
+                   WHERE t.stream_id=? AND t.session_created_at=s.created_at
+                     AND t.event_id=?""",
+                (host, session_name, stream_id, int(event_id)),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                event = json.loads(row["event_json"])
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(event, dict):
+                return None
+            event["daemon_seq"] = int(event_id)
+            return _project_session_events_conn(conn, [event])[0]
+
+        return await self.submit(_op)
+
+    async def append_session_event(
+        self, stream_id: str, event: dict[str, Any], *, identity: str | None, limit: int,
+    ) -> int | None:
+        """Durably record one normalized transcript event; return its `event_id`
+        (the durable per-daemon `daemon_seq`) iff it was newly inserted, else None
+        (a same-event/same-identity durable replay). The truthy id lets the caller
+        stamp the live `chat.event` broadcast with the SAME value the backfill
+        (`fetch_session_event_tail`) later serves for that row — the identity the
+        shared chat-core reducer's dedupe needs across a fetch/live overlap.
+
+        Simplified lift of v1's `append_session_event`: the INSERT OR IGNORE keyed
+        on `event_key` (sha256 of the canonical JSON) AND the `identity` unique
+        index is the exactly-once floor B13 needs — a replay-from-start after a
+        rediscovery re-appends nothing. v1's suppression_frontier / send-correlation
+        machinery is NOT lifted (D3 removed in v2). The caller broadcasts
+        `chat.event` iff this returns True, so a duplicate never re-broadcasts."""
+        if not stream_id or limit <= 0:
+            return False
+        event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
+        recorded_at = time.time()
+
+        def _op(conn: sqlite3.Connection) -> int | None:
+            conn.execute("BEGIN")
+            session_created_at = ""
+            if ":" in stream_id:
+                host, session_name = stream_id.split(":", 1)
+                row = conn.execute(
+                    "SELECT created_at FROM sessions WHERE host = ? AND session_name = ?",
+                    (host, session_name),
+                ).fetchone()
+                session_created_at = str(row["created_at"] or "") if row else ""
+            event_id = self._insert_session_event_conn(conn, stream_id, session_created_at, event, identity)
+            if event_id is not None and self._recorded_by_other_lifecycle_conn(
+                    conn, stream_id, session_created_at, identity, event_id):
+                event_id = None  # re-read history of a resumed seat; kept, not new
+            conn.commit()
+            return event_id
+
+        def transaction(conn):
+            try:
+                return _op(conn)
+            except BaseException:
+                conn.rollback()
+                raise
+        event_id = await self.submit(transaction)
+        await self._reconcile_ingested_tell(event)
+        return event_id
+
+    async def _reconcile_ingested_tell(self, event: dict[str, Any]) -> None:
+        """Late native peer input uses the existing same-ID proof transition.
+
+        Run on durable replays too, so a crash after append cannot strand proof.
+        The promotion rechecks original text, digest, watermark and generation;
+        an ingest envelope alone never establishes delivery.
+        """
+        from tell_proof import send_proofs, delivery_wire, retained_proof
+        target = str(event.get("stream_id") or "")
+        wire = delivery_wire(event)
+        def bind_send_occurrence(conn):
+            if not isinstance(wire, str):
+                return
+            for payload, row in send_proofs(conn, target, wire):
+                if payload["delivery"].get("proof_event_id") is not None:
+                    continue
+                proof = retained_proof(conn, payload)
+                if proof is None:
+                    continue
+                meta = json.loads(row["meta_json"])
+                meta["_input_proof"].update(proof)
+                _insert_send_receipt_row(conn, to_stream_id=row["to_stream_id"], request_id=row["request_id"],
+                    receipt_id=row["receipt_id"], state=row["state"], optimistic_id=row["optimistic_id"],
+                    wire_digest=row["wire_digest"], display_text=row["display_text"], content_kind=row["content_kind"],
+                    attachments_json=row["attachments_json"], delivery=row["delivery"],
+                    submission_confirmed=bool(row["submission_confirmed"]), reason=row["reason"],
+                    attempts=row["attempts"], created_at=iso_now(), from_stream_id=row["from_stream_id"],
+                    actor_stream_id=row["actor_stream_id"], actor_trusted=bool(row["actor_trusted"]),
+                    meta_json=json.dumps(meta, separators=(",", ":")))
+        await self.submit(bind_send_occurrence)
+        raw = event.get("raw")
+        tell_id = raw.get("tell_id") if event.get("kind") == "TELL" and isinstance(raw, dict) else None
+        if (not isinstance(tell_id, str) or not tell_id) and event.get("kind") == "USER":
+            # Queued native inputs retain their historical USER identity. Decode
+            # only a candidate; promotion still requires exact occurrence proof.
+            from message_envelopes import parse_peer_delivery
+            candidate = parse_peer_delivery(wire) if isinstance(wire, str) else None
+            if candidate:
+                tell_id = candidate["id"]
+            elif isinstance(wire, str) and wire.startswith("[pentacle-notice:"):
+                tell_id = await self.submit(lambda conn: next((row[0] for row in conn.execute(
+                    f"SELECT tell_id FROM v2_tell_deliveries WHERE {DELIVERY_PROOF_VALID} "
+                    f"AND {DELIVERY_PROOF_TARGET}=? AND {DELIVERY_PROOF_WIRE}=?", (target, wire))), None))
+        if not isinstance(tell_id, str) or not tell_id:
+            return
+        prior = await self.get_tell_delivery(tell_id)
+        if (prior is not None and isinstance(prior.get("delivery"), dict)
+                and isinstance(prior.get("payload_digest"), str)
+                and prior["delivery"].get("delivery_status") in COMMITTED_PENDING_PROOF_STATUSES | {"delivered"}
+                and not (prior["delivery"].get("delivery_status") == "proof_unavailable"
+                         and prior["delivery"].get("submission_attempts") == 0)
+                and not prior["delivery"].get("notification_answer_generation")
+                and prior["delivery"].get("to_stream_id") == event.get("stream_id")):
+            await self.promote_tell_delivery(tell_id, prior["payload_digest"], reconcile=True)
+
+    async def tell_event_identity(
+        self, stream_id: str, identity: str, event: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Probe, and when `event` is given atomically append, one backend
+        routine event by its retained `(stream_id, session_created_at, identity)`.
+
+        Returns `{"state": "existing"|"absent"|"inserted", "event": ...}`. An
+        existing row is returned untouched so the caller can compare it with the
+        retried payload; nothing is ever overwritten. Used by keyed tell/send
+        routine ingress; other event writers use `append_session_event`."""
+        event_json = (
+            json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+            if event is not None else None
+        )
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            session_created_at = ""
+            if ":" in stream_id:
+                host, session_name = stream_id.split(":", 1)
+                row = conn.execute(
+                    "SELECT created_at FROM sessions WHERE host = ? AND session_name = ?",
+                    (host, session_name),
+                ).fetchone()
+                session_created_at = str(row["created_at"] or "") if row else ""
+            retained = conn.execute(
+                "SELECT event_json FROM session_event_tail "
+                "WHERE stream_id = ? AND session_created_at = ? AND identity = ?",
+                (stream_id, session_created_at, identity),
+            ).fetchone()
+            if retained is not None:
+                try:
+                    prior = json.loads(retained["event_json"])
+                except (TypeError, ValueError):
+                    prior = None
+                return {"state": "existing", "event": prior if isinstance(prior, dict) else {}}
+            if event_json is None:
+                return {"state": "absent", "event": None}
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO session_event_tail(
+                    stream_id, session_created_at, event_key, event_json, event_ts,
+                    recorded_at, identity
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (stream_id, session_created_at,
+                 hashlib.sha256(event_json.encode("utf-8")).hexdigest(), event_json,
+                 event.get("timestamp"), time.time(), identity),
+            )
+            conn.commit()
+            return {"state": "inserted", "event": event}
+
+        return await self.submit(_op)
+
+    async def chat_history_readable(self, stream_id, generation):
+        host, _, name = stream_id.partition(":")
+        return await self.submit(lambda conn: conn.execute(
+            "SELECT 1 FROM v2_chat_checkpoints c JOIN v2_session_generation_history h "
+            "USING(host,session_name,generation) WHERE c.host=? AND c.session_name=? "
+            "AND c.generation=? LIMIT 1", (host, name, generation),
+        ).fetchone() is not None)
+
+    def _history_deliveries(self, conn, shared):
+        """Called only on the Store thread, inside the reader's savepoint."""
+        return conn.delivery_lookup.get(conn, shared=shared)
+
+    async def fetch_session_event_page(
+        self,
+        stream_id: str,
+        *,
+        before_daemon_seq: int | None,
+        limit: int,
+        generation: str | None = None,
+        after_daemon_seq: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch one newest-first cursor page, returned oldest-first.
+
+        The SQL limit is the page bound, not the requested history length. A
+        caller can therefore walk a permanently large tail without loading the
+        whole stream into one Python list or frame.
+        ``after_daemon_seq`` filters raw rows before that bound and projection;
+        it preserves filtering the returned newest page by the same watermark.
+
+        The connection keeps its delivery lookup across unrelated local writes.
+        A caller's outer transaction always gets a private lookup instead.
+        """
+        if not stream_id or limit <= 0:
+            return []
+
+        host, separator, session_name = str(stream_id or "").partition(":")
+        if not separator or not host or not session_name:
+            return []
+
+        def _op(conn: sqlite3.Connection, shared: bool) -> list[dict[str, Any]]:
+            where = "t.stream_id = ? AND t.session_created_at = s.created_at"
+            params: list[Any] = [host, session_name, stream_id]
+            if generation is not None:
+                proof = conn.execute(
+                    "SELECT c.session_created_at FROM v2_chat_checkpoints c "
+                    "JOIN v2_session_generation_history h USING(host,session_name,generation) "
+                    "WHERE c.host=? AND c.session_name=? AND c.generation=? LIMIT 1",
+                    (host, session_name, generation),
+                ).fetchone()
+                if proof is None:
+                    return []
+                where = "t.stream_id = ? AND t.session_created_at = ?"
+                params = [stream_id, proof[0]]
+            if before_daemon_seq is not None:
+                where += " AND t.event_id < ?"
+                params.append(int(before_daemon_seq))
+            if after_daemon_seq is not None:
+                where += " AND t.event_id > ?"
+                params.append(int(after_daemon_seq))
+            params.append(int(limit))
+            join = "JOIN sessions s ON s.host=? AND s.session_name=?" if generation is None else ""
+            rows = conn.execute(
+                f"""
+                SELECT t.event_id, t.event_json FROM session_event_tail t
+                {join}
+                WHERE {where}
+                ORDER BY t.event_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            newest_first: list[dict[str, Any]] = []
+            for row in rows:
+                try:
+                    event = json.loads(row["event_json"])
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(event, dict):
+                    # Stamp the durable per-daemon `daemon_seq` the reducer keys on.
+                    # event_id is NOT persisted inside event_json (it's the row id,
+                    # assigned post-serialize), so the same row carries the same
+                    # value here as on its live broadcast (append_session_event).
+                    event["daemon_seq"] = int(row["event_id"])
+                    newest_first.append(event)
+            deliveries = self._history_deliveries(conn, shared)
+            try:
+                return list(reversed(_project_session_events_conn(
+                    conn, newest_first, deliveries=deliveries)))
+            finally:
+                deliveries.reuse = None
+
+        def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            shared = not conn.in_transaction
+            conn.execute("SAVEPOINT session_history_snapshot")
+            try:
+                return _op(conn, shared)
+            finally:
+                conn.execute("RELEASE session_history_snapshot")
+
+        return await self.submit(snapshot)
+
+    async def fetch_session_event_watermark(self, stream_id: str) -> int:
+        """Newest durable row in the current session, without decode/projection.
+
+        Undecodable rows still fence the next append: all future events receive
+        larger IDs, so they cannot change a post-watermark proof outcome.
+        """
+        host, separator, session_name = str(stream_id or "").partition(":")
+        if not separator or not host or not session_name:
+            return 0
+
+        def _op(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                "SELECT max(t.event_id) FROM session_event_tail t "
+                "JOIN sessions s ON s.host=? AND s.session_name=? "
+                "WHERE t.stream_id=? AND t.session_created_at=s.created_at",
+                (host, session_name, stream_id),
+            ).fetchone()
+            return int(row[0] or 0)
+
+        return await self.submit(_op)
+
+    async def fetch_session_event_tail(
+        self, stream_id: str, *, limit: int, generation: str | None = None,
+        after_daemon_seq: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Newest `limit` raw rows after an optional watermark, oldest-first.
+
+        The bound applies before decoding, exactly as for an unfiltered tail.
+        """
+        return await self.fetch_session_event_page(
+            stream_id, before_daemon_seq=None, limit=limit, generation=generation,
+            after_daemon_seq=after_daemon_seq,
+        )
+
+    async def list_open_usage_fence_rows(self, host: str) -> list[dict[str, Any]]:
+        """Current host fence metadata in one snapshot, without history hydration."""
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """SELECT s.host, s.session_name, s.provider, s.pane_pid,
+                          s.created_at, s.account_binding,
+                          g.generation AS session_generation
+                   FROM sessions s
+                   LEFT JOIN v2_session_generations g
+                     ON g.host=s.host AND g.session_name=s.session_name
+                   WHERE s.host=? AND s.status='open'
+                     AND s.provider IN ('codex','claude')
+                   ORDER BY s.rowid""",
+                (host,),
+            ).fetchall()
+            # Preserve the ordinary row decoder's optional binding semantics;
+            # _session_row would also hydrate usage/report/capacity state.
+            return [_row(row) for row in rows]
+
+        return await self.submit(_op)
+
+    async def list_open_sessions_with_event_summary(self) -> list[dict[str, Any]]:
+        """Open rows plus lifecycle-matched event state from one DB snapshot."""
+
+        def _op(conn: sqlite3.Connection, shared: bool) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """
+                SELECT s.*,
+                       EXISTS (
+                           SELECT 1 FROM session_event_tail t
+                           WHERE t.stream_id = s.host || ':' || s.session_name
+                             AND t.session_created_at = s.created_at
+                       ) AS _bootstrap_event_seen,
+                       COALESCE((
+                           SELECT t.event_ts FROM session_event_tail t
+                           WHERE t.stream_id = s.host || ':' || s.session_name
+                             AND t.session_created_at = s.created_at
+                             AND julianday(t.event_ts) IS NOT NULL
+                           ORDER BY julianday(t.event_ts) DESC, t.event_id DESC
+                           LIMIT 1
+                       ), '') AS last_event_at
+                FROM sessions s
+                WHERE s.status = 'open'
+                """
+            ).fetchall()
+            result = [_session_row(conn, row) for row in rows]
+            deliveries = self._history_deliveries(conn, shared)
+            try:
+                for session in result:
+                    _restore_message_summary_conn(conn, session, deliveries=deliveries)
+                return result
+            finally:
+                deliveries.reuse = None
+
+        def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            shared = not conn.in_transaction
+            conn.execute("SAVEPOINT session_inventory_snapshot")
+            try:
+                return _op(conn, shared)
+            finally:
+                conn.execute("RELEASE session_inventory_snapshot")
+
+        return await self.submit(snapshot)
+
+    async def bind_observer_transcript(
+        self, stream_id: str, *, generation: str, pane_pid: str,
+        expected: dict[str, Any], transcript: dict[str, Any],
+    ) -> bool:
+        """Retain the first proven file under the same open provider birth."""
+        host, _, name = stream_id.partition(":")
+        def op(conn: sqlite3.Connection) -> bool:
+            row = _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                (host, name),
+            ).fetchone())
+            if not row or row.get("session_generation") != generation or str(row.get("pane_pid") or "") != pane_pid:
+                return False
+            binding = row.get("observer_binding")
+            if not isinstance(binding, dict) or binding != expected or binding.get("generation") != generation:
+                return False
+            prior = binding.get("transcript")
+            if prior is not None and prior != transcript:
+                return False
+            conn.execute("UPDATE sessions SET observer_binding=? WHERE host=? AND session_name=?",
+                         (json.dumps({**binding, "transcript": transcript}, separators=(",", ":")), host, name))
+            conn.commit()
+            return True
+        return await self.submit(op)
+
+    async def rebind_observer_pane(
+        self, stream_id: str, *, generation: str, pane_pid: str,
+        pane_started_at: str, expected: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Retarget a PROVEN binding's stale pane PID/start to the in-place
+        replacement process within the SAME generation, keeping every other
+        proven field (generation, executable, transcript). Returns the new
+        binding on success, else None.
+
+        The atomic CAS against ``expected`` is the only guarantee here: it fails
+        closed if the binding changed underneath (a concurrent rebind), if the
+        row is no longer open or on a different generation, if the durable row's
+        pane_pid is not already the replacement pane (so a rebind can only follow
+        the reconciler, never lead it), or if the binding has no proven transcript
+        anchor. Same-rollout identity is the caller's proof (see
+        ``Ingest._maybe_rebind_observer_pane``)."""
+        pane_started_at = canonical_start(pane_started_at)
+        if not pane_started_at:
+            return None
+        host, _, name = stream_id.partition(":")
+        def op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                (host, name),
+            ).fetchone())
+            if not row or row.get("session_generation") != generation or str(row.get("pane_pid") or "") != pane_pid:
+                return None
+            binding = row.get("observer_binding")
+            if not isinstance(binding, dict) or binding != expected or binding.get("generation") != generation:
+                return None
+            if not isinstance(binding.get("transcript"), dict):
+                return None
+            if binding.get("pane_pid") == pane_pid and canonical_start(binding.get("pane_started_at")) == pane_started_at:
+                return None
+            updated = {**binding, "pane_pid": pane_pid, "pane_started_at": pane_started_at}
+            conn.execute("UPDATE sessions SET observer_binding=? WHERE host=? AND session_name=?",
+                         (json.dumps(updated, separators=(",", ":")), host, name))
+            conn.commit()
+            return updated
+        return await self.submit(op)
+
+    async def count_session_events(
+        self,
+        stream_id: str,
+        *,
+        kind: str,
+        minimum: int | None = None,
+        session_created_at: str | None = None,
+        provider: str | None = None,
+        exclude_sidechain: bool = False,
+        recorded_before: float | None = None,
+        operator_only: bool = False,
+    ) -> int:
+        """Count matching normalized events without crossing lifecycle bounds.
+
+        ``session_created_at`` is the durable v2 lifecycle boundary copied onto
+        each tail row. Callers that need lifecycle-scoped evidence must provide
+        it; an empty supplied boundary fails closed because legacy rows without
+        a boundary cannot be proven to belong to the live generation. Optional
+        provider and sidechain filters are applied to the normalized JSON.
+        When ``recorded_before`` is supplied, only rows durably recorded at or
+        before that wall-clock cutoff are considered.
+        When ``minimum`` is supplied, stop after reaching that threshold while
+        iterating the cursor rather than materializing the complete tail.
+        """
+        if not stream_id or not kind:
+            return 0
+        threshold = None if minimum is None else max(0, int(minimum))
+        if threshold == 0:
+            return 0
+        lifecycle = None if session_created_at is None else str(session_created_at or "").strip()
+        if lifecycle == "":
+            return 0
+        provider_name = None if provider is None else str(provider or "").strip().lower()
+        if provider is not None and not provider_name:
+            return 0
+        host, separator, session_name = str(stream_id or "").partition(":")
+        if not separator or not host or not session_name:
+            return 0
+
+        def _op(conn: sqlite3.Connection) -> int:
+            clauses = ["t.stream_id = ?", "t.session_created_at = s.created_at"]
+            params: list[Any] = [host, session_name, stream_id]
+            if lifecycle is not None:
+                clauses.append("t.session_created_at = ?")
+                params.append(lifecycle)
+            if recorded_before is not None:
+                clauses.append("t.recorded_at <= ?")
+                params.append(float(recorded_before))
+            rows = conn.execute(
+                "SELECT t.event_json FROM session_event_tail t "
+                "JOIN sessions s ON s.host=? AND s.session_name=? WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY t.event_id DESC",
+                params,
+            )
+            count = 0
+            for row in rows:
+                try:
+                    event = json.loads(row["event_json"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(event, dict) or str(event.get("kind") or "") != kind:
+                    continue
+                if provider_name is not None and str(event.get("provider") or "").lower() != provider_name:
+                    continue
+                if exclude_sidechain:
+                    raw = event.get("raw")
+                    if isinstance(raw, dict) and bool(raw.get("is_sidechain", raw.get("isSidechain", False))):
+                        continue
+                if operator_only:
+                    from sessions import operator_user_epoch
+                    if operator_user_epoch(event, lifecycle) is None:
+                        continue
+                count += 1
+                if threshold is not None and count >= threshold:
+                    return count
+            return count
+
+        return await self.submit(_op)
+
+    def _known(self, fields: dict[str, Any]) -> dict[str, Any]:
+        """Drop keys that are not real `sessions` columns — callers pass
+        presentation-only fields such as `stream_id` alongside durable columns."""
+        return {k: v for k, v in fields.items() if k in self._columns and k not in ("host", "session_name")}
+
+
+def _enc_report(column: str, value: Any) -> Any:
+    if value is None:
+        return None
+    return json.dumps(value, separators=(",", ":")) if column in REPORT_JSON_COLUMNS else value
+
+
+def _decode_tell_envelope(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Decode a durable tell envelope without changing its state."""
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["reply"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload.setdefault("ledger_row_id", int(row["ledger_row_id"]))
+    payload.setdefault("created_at", row["created_at"])
+    return payload
+
+
+def _report_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    out = dict(row)
+    out.pop("exchange_json", None)
+    for col in REPORT_JSON_COLUMNS:
+        raw = out.get(col)
+        out[col] = json.loads(raw) if isinstance(raw, str) and raw else None
+    return out
+
+
+def _report_replay_matches(stored: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    recorded_hash = str(stored.get("request_payload_hash") or "")
+    incoming_hash = str(incoming.get("request_payload_hash") or "")
+    if recorded_hash and incoming_hash:
+        return recorded_hash == incoming_hash
+    return all(stored.get(column) == incoming.get(column) for column in REPORT_IDENTITY_COLUMNS)
+
+
+def _session_for_stream_conn(conn: sqlite3.Connection, stream_id: str) -> dict[str, Any] | None:
+    host, separator, session_name = str(stream_id or "").partition(":")
+    if not separator or not host or not session_name:
+        return None
+    return _session_row(conn, conn.execute(
+        "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+    ).fetchone())
+
+
+def _attestation_spec_identities(
+    session: dict[str, Any] | None,
+    canonical_spec_identity: Callable[[str | None], str | None] | None,
+) -> set[str]:
+    """Return only resolver-proven canonical IDs for QA attestation.
+
+    Stored raw spellings remain readable for historical compatibility, but no
+    raw value may authorize READY when catalog resolution is unavailable,
+    ambiguous, missing, or errors.
+    """
+    if not callable(canonical_spec_identity):
+        return set()
+    source = (session or {}).get("qualified_spec_ids") or (session or {}).get("spec_ids")
+    identities: set[str] = set()
+    for spec_id in normalize_spec_ids(source, (session or {}).get("spec_id")):
+        try:
+            resolved = canonical_spec_identity(spec_id)
+        except SpecInputsUnavailable:
+            raise
+        except Exception:
+            continue
+        identity = str(resolved or "").strip()
+        if identity:
+            identities.add(identity)
+    return identities
+
+
+def _qa_attestation_validation_conn(
+    conn: sqlite3.Connection,
+    *,
+    reporting_stream_id: str,
+    completion_kind: object,
+    attestation: object,
+    mode: str,
+    canonical_spec_identity: Callable[[str | None], str | None] | None = None,
+) -> dict[str, Any] | None:
+    """Derive READY authority only from the serialized v2 durable ledger."""
+    if completion_kind != "implementation_ready" or mode == "off":
+        return None
+
+    qa_stream_id = attestation.get("stream_id") if isinstance(attestation, dict) else None
+    qa_report_id = attestation.get("report_id") if isinstance(attestation, dict) else None
+    reasons: list[str] = []
+    matched_spec_ids: list[str] = []
+    if attestation is None:
+        reasons.append("missing_attestation")
+    else:
+        if qa_stream_id == reporting_stream_id:
+            reasons.append("self_reference")
+        reporter = _session_for_stream_conn(conn, reporting_stream_id)
+        qa_session = _session_for_stream_conn(conn, str(qa_stream_id or ""))
+        if qa_session is None:
+            reasons.append("unknown_qa_stream")
+        reporter_specs = _attestation_spec_identities(reporter, canonical_spec_identity)
+        qa_specs = _attestation_spec_identities(qa_session, canonical_spec_identity)
+        matched_spec_ids = sorted(reporter_specs & qa_specs)
+        if not matched_spec_ids:
+            reasons.append("spec_binding_mismatch")
+        qa_report = _report_row(conn.execute(
+            "SELECT * FROM v2_reports WHERE report_id=?", (qa_report_id,)
+        ).fetchone()) if qa_report_id else None
+        if qa_report is None:
+            reasons.append("unknown_qa_report")
+        else:
+            if qa_report.get("from_stream_id") != qa_stream_id:
+                reasons.append("qa_report_stream_mismatch")
+            if qa_report.get("status") != "done":
+                reasons.append("qa_report_not_done")
+            if qa_report.get("qa_verdict") != "accept":
+                reasons.append("qa_verdict_not_accept")
+
+    ordered_reasons = [reason for reason in QA_ATTESTATION_REASON_ORDER if reason in reasons]
+    return {
+        "state": "verified" if not ordered_reasons else "unverified",
+        "reasons": ordered_reasons,
+        "matched_spec_ids": matched_spec_ids,
+        "qa_stream_id": qa_stream_id,
+        "qa_report_id": qa_report_id,
+    }
+
+
+def _awaiter_target_msg_id(msg_id: int | None) -> int:
+    """Use a non-NULL key for the stream-only await form."""
+    return -1 if msg_id is None else int(msg_id)
+
+
+def _awaiter_session_state_conn(
+    conn: sqlite3.Connection, stream_id: str,
+) -> tuple[str, bool]:
+    """Return `(current_generation, terminal)` for one target stream."""
+    host, separator, session_name = str(stream_id or "").partition(":")
+    if not separator or not host or not session_name:
+        return "", False
+    row = conn.execute(
+        "SELECT s.status, COALESCE(g.generation, '') AS generation "
+        "FROM sessions s LEFT JOIN v2_session_generations g "
+        "ON g.host=s.host AND g.session_name=s.session_name "
+        "WHERE s.host=? AND s.session_name=?",
+        (host, session_name),
+    ).fetchone()
+    if row is not None:
+        return str(row["generation"] or ""), str(row["status"] or "") != "open"
+    reap = conn.execute(
+        "SELECT reap_status FROM session_reap WHERE stream_id=?",
+        (stream_id,),
+    ).fetchone()
+    return "", reap is not None and str(reap["reap_status"] or "") == "reaped"
+
+
+def _report_for_awaiter_conn(
+    conn: sqlite3.Connection, stream_id: str, target_msg_id: int,
+) -> dict[str, Any] | None:
+    sql = "SELECT * FROM v2_reports WHERE from_stream_id=? "
+    args: list[Any] = [stream_id]
+    if target_msg_id >= 0:
+        sql += "AND msg_id=? "
+        args.append(target_msg_id)
+    sql += "AND status IN ('done','error','aborted') "
+    sql += "ORDER BY ledger_row_id DESC LIMIT 1"
+    return _report_row(conn.execute(sql, args).fetchone())
+
+
+def _write_awaiter_report_conn(
+    conn: sqlite3.Connection,
+    stream_id: str,
+    session_generation: str,
+    target_msg_id: int,
+    report: dict[str, Any],
+    resolved_at: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO v2_awaiters "
+        "(stream_id,session_generation,target_msg_id,outcome,report_id,ledger_row_id,reason,requested_at,resolved_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(stream_id,session_generation,target_msg_id) DO UPDATE SET "
+        "outcome='report',report_id=excluded.report_id,ledger_row_id=excluded.ledger_row_id, "
+        "reason='report_ingested',resolved_at=excluded.resolved_at",
+        (
+            stream_id, session_generation, target_msg_id, "report",
+            report["report_id"], report["ledger_row_id"], "report_ingested",
+            resolved_at, resolved_at,
+        ),
+    )
+
+
+def _resolve_awaiters_for_report_conn(
+    conn: sqlite3.Connection, report: dict[str, Any],
+) -> None:
+    """Promote pending or lower-trust close outcomes to one real report."""
+    conn.execute(
+        "UPDATE v2_awaiters SET outcome='report', report_id=?, ledger_row_id=?, "
+        "reason='report_ingested', resolved_at=? "
+        "WHERE stream_id=? AND outcome IN ('pending','closed_without_report') "
+        "AND (target_msg_id=? OR target_msg_id=-1)",
+        (
+            report["report_id"], report["ledger_row_id"], iso_now(),
+            report["from_stream_id"], report["msg_id"],
+        ),
+    )
+
+
+def _awaiter_row(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    out = dict(row)
+    target_msg_id = int(out.get("target_msg_id", -1))
+    out["msg_id"] = None if target_msg_id < 0 else target_msg_id
+    out["result_kind"] = out.get("outcome")
+    out["report"] = None
+    if out.get("report_id"):
+        out["report"] = _report_row(conn.execute(
+            "SELECT * FROM v2_reports WHERE report_id=?", (out["report_id"],)
+        ).fetchone())
+    return out
+
+
+def _session_reap_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    out = dict(row)
+    raw = out.get("survivors")
+    if isinstance(raw, str):
+        try:
+            out["survivors"] = json.loads(raw)
+        except (TypeError, ValueError):
+            out["survivors"] = []
+    out["survivors"] = _sanitize_session_reap_survivors(out.get("survivors"))
+    return out
+
+
+def _sanitize_session_reap_survivors(value: object) -> list[dict[str, Any]]:
+    """Keep close/reconcile readback a bounded array of safe records."""
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    overflow = False
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        if item.get("pid") is None:
+            continue
+        try:
+            pid = int(item.get("pid"))
+        except (TypeError, ValueError):
+            pid = -1
+        if pid == 0 or pid < -1:
+            continue
+        proof = item.get("ownership_proof_v2")
+        clean_proof: dict[str, Any] | None = None
+        if isinstance(proof, dict):
+            # Preserve the complete proof needed for generation-safe reaping,
+            # while bounding every field that came from a process command or
+            # remote inventory.
+            clean_proof = {
+                "version": proof.get("version"),
+                "host": str(proof.get("host") or "")[:128],
+                "uid": proof.get("uid"),
+                "boot_id": str(proof.get("boot_id") or "")[:256],
+                "pid": proof.get("pid"),
+                "start_id": str(proof.get("start_id") or "")[:128],
+                "ppid": proof.get("ppid"),
+                "pgid": proof.get("pgid"),
+                "sid": proof.get("sid"),
+                "tmux_socket": str(proof.get("tmux_socket") or "")[:512],
+                "tmux_session": str(proof.get("tmux_session") or "")[:256],
+                "tmux_pane": str(proof.get("tmux_pane") or "")[:128],
+                "tty": str(proof.get("tty") or "")[:256],
+                "captured_at": str(proof.get("captured_at") or "")[:64],
+                "command_fingerprint": str(proof.get("command_fingerprint") or "")[:128],
+            }
+        clean_item: dict[str, Any] = {
+            "pid": pid,
+            "command": str(item.get("command") or "")[:512],
+            "first_seen": str(item.get("first_seen") or "")[:64],
+        }
+        if item.get("reap_reason") is not None:
+            clean_item["reap_reason"] = str(item.get("reap_reason") or "signal_unconfirmed")[:64]
+        if clean_proof is not None:
+            clean_item["ownership_proof_v2"] = clean_proof
+        if len(result) >= MAX_SESSION_REAP_SURVIVORS - 1:
+            overflow = True
+            continue
+        result.append(clean_item)
+    if overflow:
+        result.append({
+            "pid": -1,
+            "command": "",
+            "first_seen": "",
+            "reap_reason": "survivor_limit_exceeded",
+        })
+    return result
+
+
+def _set_result(fut: asyncio.Future, value: Any) -> None:
+    if not fut.done():
+        fut.set_result(value)
+
+
+def _set_exception(fut: asyncio.Future, exc: BaseException) -> None:
+    if not fut.done():
+        fut.set_exception(exc)

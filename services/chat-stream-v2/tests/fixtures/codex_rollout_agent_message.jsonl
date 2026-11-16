@@ -1,0 +1,3 @@
+{"timestamp":"2025-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"session-public-1","session_id":"session-public-1","cwd":"/workspace/example"},"ordinal":0}
+{"timestamp":"2025-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"agent_message","id":"message-out","author":"agent/primary","recipient":"agent/primary/worker","content":[{"type":"input_text","text":"A synthetic outbound event."}]},"ordinal":1}
+{"timestamp":"2025-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"agent_message","id":"message-in","author":"agent/primary/worker","recipient":"agent/primary","content":[{"type":"input_text","text":"A synthetic inbound event."}]},"ordinal":2}

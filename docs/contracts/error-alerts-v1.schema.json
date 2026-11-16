@@ -1,0 +1,393 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "error-alerts-v1",
+  "title": "Error Alerts v1 wire contract",
+  "$defs": {
+    "voice_operation": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "origin_stream_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "origin_generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operation_kind": {
+          "enum": [
+            "voice_chat",
+            "voice_answer",
+            "message"
+          ]
+        },
+        "client_build": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "version",
+        "operation_id",
+        "origin_stream_id",
+        "origin_generation",
+        "operation_kind",
+        "client_build"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "error_code": {
+          "enum": [
+            "operator_required",
+            "credential_revoked",
+            "invalid_request",
+            "event_conflict",
+            "stale_sequence",
+            "origin_mismatch",
+            "operation_forbidden",
+            "blob_forbidden",
+            "rate_limited",
+            "persistence_failed",
+            "unavailable"
+          ]
+        },
+        "retry_after": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "error_code"
+      ],
+      "additionalProperties": false
+    },
+    "send_mandate": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "optimistic_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "msg_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "original_request": {
+          "type": "object"
+        },
+        "text": {
+          "type": "string"
+        },
+        "text_prefix": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "mime": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "key",
+              "mime"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "audio": {
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "mime": {
+              "enum": [
+                "audio/mp4",
+                "audio/wav"
+              ]
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16777216
+            }
+          },
+          "required": [
+            "sha256",
+            "mime",
+            "bytes"
+          ],
+          "additionalProperties": false
+        },
+        "reply_to_message_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "reply_to_question_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "meta": {
+          "type": "object"
+        },
+        "client_build": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "version",
+        "request_id",
+        "optimistic_id",
+        "sequence",
+        "meta",
+        "client_build"
+      ],
+      "not": {
+        "required": [
+          "text",
+          "text_prefix"
+        ]
+      },
+      "additionalProperties": false
+    }
+  },
+  "requests": {
+    "error.report": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "error.report"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "version": {
+          "const": 1
+        },
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "stage": {
+          "enum": [
+            "upload",
+            "transcribe",
+            "send"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "failed",
+            "recovered",
+            "cancelled",
+            "unconfirmed"
+          ]
+        },
+        "code": {
+          "enum": [
+            "upload_read_failed",
+            "upload_transport_failed",
+            "upload_milestone_missing",
+            "transcribe_transport_failed",
+            "transcribe_failed",
+            "transcribe_milestone_missing",
+            "send_transport_failed",
+            "send_unconfirmed",
+            "operation_cancelled",
+            "recovered",
+            "report_gap",
+            "no_speech",
+            "too_long",
+            "unsupported",
+            "permission_declined"
+          ]
+        },
+        "retry_state": {
+          "enum": [
+            "exhausted",
+            "pending",
+            "none"
+          ]
+        },
+        "send_request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "client_build": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "voice_operation": {
+          "$ref": "#/$defs/voice_operation"
+        },
+        "dropped_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "version",
+        "event_id",
+        "operation_id",
+        "sequence",
+        "stage",
+        "outcome",
+        "code",
+        "retry_state",
+        "client_build"
+      ],
+      "additionalProperties": false
+    },
+    "outbound.commit": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "outbound.commit"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "voice_operation": {
+          "$ref": "#/$defs/voice_operation"
+        },
+        "send_mandate": {
+          "$ref": "#/$defs/send_mandate"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "voice_operation",
+        "send_mandate"
+      ],
+      "additionalProperties": false
+    },
+    "outbound.cancel": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "outbound.cancel"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "outbound.get": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "outbound.get"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "operation_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
