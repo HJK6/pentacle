@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from work_lane_progress import lane_state, lane_progress, seat_live, seat_working, working_spec_ids
+from work_lane_progress import lane_state, lane_progress, seat_live, seat_working, working_spec_ids, member_status_behind
 from store_work_lane_episodes import LaneEpisodeSink
 from _shared.lane_icons import resolve_icon
 from _shared.lane_hues import resolve_hue
@@ -31,7 +31,7 @@ def detail_member_keys():
     return detail_field_keys() | {"blocked_line", "checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
         "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
         "goal_text", "goal_text_truncated", "goal_source",
-        "progress_at", "summary_line", "estimate_first", "unblocks", "recent"}
+        "progress_at", "summary_line", "estimate_first", "unblocks", "recent", "latest_event", "status_behind"}
 
 def _line(member, field_id, raw_key):
     """Whole valid label or null; a duplicate label is never valid, though raw text keeps the first."""
@@ -146,6 +146,28 @@ def attribute_members(members: list[dict[str, Any]], sessions_by_stream: dict[st
     return out
 
 
+def _external_projection(lane):
+    from datetime import datetime, timezone
+    context = lane.get("_external_packets") or {}
+    members = {m["spec_id"] for m in lane.get("_members", [])}
+    rows = [r for r in context.get("packets", []) if r["spec_id"] in members]
+    def iso(at):
+        return datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    summary = None
+    if rows:
+        summary = {"label": context["label"], **{state: sum(r["state"] == state for r in rows)
+                   for state in ("working", "queued", "review")},
+                   "verified_at": iso(max(r["evidence_at"] for r in rows))}
+    details = {}
+    order = {"working": 0, "review": 1, "queued": 2}
+    for row in sorted(rows, key=lambda r: (order[r["state"]], r["tag"])):
+        items = details.setdefault(row["spec_id"], [])
+        if len(items) < 4:
+            items.append({"label": context["label"], "ref": row["tag"], "state": row["state"],
+                          "verified_at": iso(row["evidence_at"])})
+    return summary, details
+
+
 def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str,
                  *, index_available: bool | None = None, all_members: bool = False,
                  sessions_by_stream: dict[str, dict[str, Any]] | None = None,
@@ -162,6 +184,22 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
     lane["_working_specs"] = working_spec_ids(lane, list((sessions_by_stream or {}).values()))
     lane["_members_working"] = bool(lane["_working_specs"])
     state, reason = lane_state(lane)
+    external_summary, external_details = _external_projection(lane)
+    activity = None
+    if sessions_by_stream is not None and questions_by_spec is not None:
+        members = lane.get("_members") or []
+        member_ids = {m["spec_id"] for m in members}
+        packets = (lane.get("_external_packets") or {}).get("packets", [])
+        if lane["_working_specs"]:
+            activity = "working"
+        elif any(p["spec_id"] in member_ids and p["state"] == "queued" for p in packets):
+            activity = "waiting_on_dot"
+        elif any((questions_by_spec.get(identity) or {}).get("count") for identity in member_ids):
+            activity = "waiting_on_you"
+        elif lane.get("work_state") == "blocked" or (not lane.get("_has_work_seat") and any(m.get("status") == "blocked" for m in members)):
+            activity = "blocked"
+        else:
+            activity = "idle"
     progress = lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members)
     detail_keys = detail_member_keys()
     if sessions_by_stream is not None:
@@ -182,17 +220,23 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                              "next_line": _line(member, "next_action", "next_action_text"),
                              **({"blocked_line": _line(member, "blockers", "blockers_text"),
                                  "progress_at": member.get("_progress_at"),
+                                 "latest_event": member.get("_latest_event"),
+                                 "status_behind": member_status_behind(member, now_iso, bool(lane.get("_work_index_available"))),
                                  "criteria": member.get("criteria", []),
                                  "transitions": member.get("transitions", [])} if all_members else {})}
                             for member in progress["members"]]
     if all_members:
         for member in progress["members"]:
+            if member["spec_id"] in external_details:
+                member["external"] = external_details[member["spec_id"]]
             for key in detail_keys:
                 member.setdefault(key, [] if key in {"checkpoint_deficiencies", "unblocks", "recent"} else None)
             if not lane.get("_work_index_available") or member.get("observation", {}).get("quality") != "fresh":
                 member["checkpoint_state"] = "unverifiable"
             member["checkpoint_policy_revision"] = member.get("checkpoint_policy_revision") or policy_revision()
     return {
+        **({"activity": activity} if state != "done" and not lane.get("parked_at") else {}),
+        **({"external": external_summary} if external_summary else {}),
         "lane_id": lane["lane_id"], "title": lane.get("title"), "summary": lane.get("summary") or "",
         "icon": resolve_icon(lane.get("icon"), lane.get("title")),
         "hue": resolve_hue(lane.get("hue")),
@@ -212,18 +256,20 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
         "state_at": lane.get("_state_at"),
         **progress, **project_goals(lane, all_goals=all_members),
         **({"visibility_counts": visibility_counts(lane.get("_members") or [], sessions_by_stream, questions_by_spec,
-                                                  source_available=lane.get("_work_index_available", False))}
+                                                  source_available=lane.get("_work_index_available", False),
+                                                  packets=(lane.get("_external_packets") or {}).get("packets", []))}
            if all_members else {}),
     }
 
 
-def visibility_counts(members, sessions, questions, *, source_available):
+def visibility_counts(members, sessions, questions, *, source_available, packets=()):
     """Distinct item counts over the complete snapshot; unknowns are explicit."""
     from store_specs import effective_assignment
     ids = {member["spec_id"] for member in members}
     complete = bool(source_available and all(member.get("observation", {}).get("quality") == "fresh"
                                             for member in members))
     working = {effective_assignment(row) for row in (sessions or {}).values() if seat_working(row, descendants=False)} & ids
+    working |= {r["spec_id"] for r in packets if r["state"] == "working"} & ids
     return {"unfinished": sum(m.get("terminal") not in {"completed", "deprecated"} for m in members) if complete else None,
             "working": len(working) if sessions is not None else None,
             "blocked": sum(m.get("status") == "blocked" for m in members) if complete else None,
@@ -267,7 +313,8 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
         members = [member for member in projected["members"] if member.get("goal_id") == goal_filter]
         # Full activity is captured before seat caps in project_lane.
         goal_counts = visibility_counts(members, sessions_by_stream, questions_by_spec,
-                                       source_available=shown.get("_work_index", {}).get("available", False))
+                                       source_available=shown.get("_work_index", {}).get("available", False),
+                                       packets=(shown.get("_projection_row", {}).get("_external_packets") or {}).get("packets", []))
         selected = next(goal for goal in projected["goals"] if goal["goal_id"] == goal_filter)
         from _shared.work_goals import goal_id
         record = next((r for identity, r in (shown.get("_projection_row", {}).get("_goals") or {}).items()

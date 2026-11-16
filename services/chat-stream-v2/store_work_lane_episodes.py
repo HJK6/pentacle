@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Literal, Protocol
 
-from work_lane_progress import lane_progress, lane_estimate_missing, lane_lead_lost
+from work_lane_progress import lane_progress, lane_estimate_missing, lane_lead_lost, lane_status_behind, member_status_behind
 
 log = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ DDL = """
 CREATE TABLE IF NOT EXISTS v2_work_lane_episodes (
     episode_id TEXT PRIMARY KEY,
     lane_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('completed','stale','estimate_missing','lead_lost')),
+    kind TEXT NOT NULL CHECK(kind IN ('completed','stale','estimate_missing','lead_lost','status_behind')),
     sequence INTEGER NOT NULL CHECK(sequence >= 1),
     opened_at TEXT NOT NULL,
     cleared_at TEXT,
@@ -33,7 +33,7 @@ def ensure_work_lane_episodes_schema(conn) -> None:
         table = "v2_work_lane_episodes"
         existing = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
                                 (table,)).fetchone()
-        if existing and "'lead_lost'" not in existing[0]:
+        if existing and any("'" + kind + "'" not in existing[0] for kind in ("completed", "stale", "estimate_missing", "lead_lost", "status_behind")):
             indexes = [r[0] for r in conn.execute(
                 "SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",
                 (table,))]
@@ -59,9 +59,10 @@ def ensure_work_lane_episodes_schema(conn) -> None:
 @dataclass(frozen=True)
 class LaneEpisodeFact:
     lane_id: str
-    kind: Literal["completed", "stale", "estimate_missing", "lead_lost"]
+    kind: Literal["completed", "stale", "estimate_missing", "lead_lost", "status_behind"]
     episode_id: str
     opened_at: str
+    items: list[str] | None = None
     family: str = "work_lane.v1"
     principal: str = "daemon:work-lanes"
     condition: str = "active"
@@ -162,7 +163,7 @@ class WorkLaneEpisodesStoreMixin:
                 # write and the pending drain below stay unconditional.
                 open_episode_lanes = {r[0] for r in conn.execute(
                     "SELECT DISTINCT lane_id FROM v2_work_lane_episodes WHERE cleared_at IS NULL")}
-                for lane in work_lane_rows_conn(conn, include_done=True):
+                for lane in work_lane_rows_conn(conn, include_done=True, external_config=getattr(self, "external_work_config", None)):
                     conn.execute("UPDATE v2_assistant_composite_lanes SET lead_reported_done=? WHERE lane_id=?",
                                  (lane["_lead_reported_done"], lane["lane_id"]))
                     if lane["work_state"] == "done" and lane["lane_id"] not in open_episode_lanes:
@@ -170,7 +171,8 @@ class WorkLaneEpisodesStoreMixin:
                     facts = lane_progress(lane, now_iso=stamp)
                     for kind, condition in (("completed", facts["completion_pending"]), ("stale", facts["stale"]),
                                             ("estimate_missing", lane_estimate_missing(lane)),
-                                            ("lead_lost", lane_lead_lost(lane))):
+                                            ("lead_lost", lane_lead_lost(lane)),
+                                            ("status_behind", lane_status_behind(lane, stamp))):
                         current = conn.execute("SELECT * FROM v2_work_lane_episodes "
                                                "WHERE lane_id=? AND kind=? AND cleared_at IS NULL",
                                                (lane["lane_id"], kind)).fetchone()
@@ -181,12 +183,18 @@ class WorkLaneEpisodesStoreMixin:
                             sequence = conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM v2_work_lane_episodes "
                                                     "WHERE lane_id=? AND kind=?", (lane["lane_id"], kind)).fetchone()[0]
                             episode_id = f"{lane['lane_id']}:{kind}:{sequence}"
-                            fact = LaneEpisodeFact(lane["lane_id"], kind, episode_id, stamp)
+                            items = sorted((m for m in lane.get("_members", []) if member_status_behind(m, stamp, True)),
+                                           key=lambda m: (m["_latest_event"]["at"], m["spec_id"]))[:3] if kind == "status_behind" else None
+                            fact = LaneEpisodeFact(lane["lane_id"], kind, episode_id, stamp,
+                                                   items=[m["spec_id"] for m in items] if items is not None else None)
+                            fact_data = asdict(fact)
+                            if kind != "status_behind":
+                                fact_data.pop("items")
                             conn.execute("INSERT INTO v2_work_lane_episodes "
                                          "(episode_id,lane_id,kind,sequence,opened_at,emitted_ref,fact_json) "
                                          "VALUES (?,?,?,?,?,NULL,?)",
                                          (episode_id, lane["lane_id"], kind, sequence, stamp,
-                                          json.dumps(asdict(fact), sort_keys=True, separators=(",", ":"))))
+                                          json.dumps(fact_data, sort_keys=True, separators=(",", ":"))))
                 # A clear is silent but does not discard an unhanded opening.
                 pending = [dict(r) for r in conn.execute("SELECT episode_id,fact_json FROM v2_work_lane_episodes "
                            "WHERE emitted_ref IS NULL ORDER BY lane_id,kind,sequence")]

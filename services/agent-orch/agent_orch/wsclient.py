@@ -60,7 +60,7 @@ RPC_RETRY_ELIGIBLE_TYPES = frozenset(
         "await_report",
         "await_spawn",
         # Read-only, and daemon-deduped on (watch_id, request_id).
-        "external_work.show", "external_work.record", "screen.lease.status",
+        "external_work.show", "external_work.record", "external_work.packet", "screen.lease.status",
         "fetch_blob",
         "inspect_stream",
         "thread.read",
@@ -1786,7 +1786,7 @@ async def screen_lease_once(config: Config, payload: dict[str, Any], *, timeout:
 
 async def external_work_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     """Call `external_work.show|record` as this seat; the daemon admits only the current front desk."""
-    if payload.get("type") not in {"external_work.show", "external_work.record"}:
+    if payload.get("type") not in {"external_work.show", "external_work.record", "external_work.packet"}:
         raise ValueError("external_work_verb_invalid")
     from_stream_id = _resolved_rpc_from_stream_id()
     payload = defer_stream_token(payload, enabled=bool(from_stream_id), keep=False,

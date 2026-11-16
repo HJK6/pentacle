@@ -24,7 +24,8 @@ DESK = f"{HOST}:desk"
 
 
 class Rig:
-    def __init__(self, store, config=CONFIG, comms=True, outbox=None):
+    def __init__(self, store, config=CONFIG, comms=True, outbox=None, packet_mode=False):
+        self.packet_mode = packet_mode
         self.store, self.h, self.now, self.binding, self.tokens = store, Harness(store), T0, {}, {}
         self.outbound = OutboundNoticeQueue(store, self.h.comms if comms else None, config=outbox)
         self.attach(config)
@@ -32,6 +33,7 @@ class Rig:
     def attach(self, config):
         self.runtime = ExternalWork(self.store, self.h.sessions, self.outbound, config=config,
                                     env_binding=lambda: self.binding, clock=lambda: self.now)
+        self.runtime.specs = PacketSpecs()
 
     async def seat(self, name="desk", *, bind=True, pane="pane_alive"):
         await self.h.open(name, visibility="default", user_event_count=0, pane_status=pane)
@@ -57,6 +59,11 @@ class Rig:
         return row[0] if row else 0
 
     async def observation(self, request_id, state="working", **fields):
+        # Legacy record tests exercise reminders, CAS and receipts, not packet
+        # admission. Give those working observations a real synthetic packet.
+        if state == "working" and not self.packet_mode and self.runtime.config.enabled and self.binding:
+            await packet_index(self)
+            await packet(self, tag='legacy-record-fixture')
         known = state != "unknown"
         return {"watch_id": WATCH, "request_id": request_id, "expected_version": await self.version(),
                 "observed_at": self.now, "state": state,
@@ -673,3 +680,366 @@ def test_real_cli_round_trip_over_a_loopback_socket(tmp_path, monkeypatch, capsy
         finally:
             await server.close()
     exercise(check, tmp_path / "store.db")
+
+
+class PacketSpecs:
+    """Synthetic snapshot with canonical and alternate names; never reads memory."""
+    def __init__(self):
+        self.captures = 0
+        self.resolves = 0
+        self.available = True
+        self.before_return = None
+
+    def spec_resolution_snapshot(self):
+        self.captures += 1
+        if not self.available:
+            raise RuntimeError('synthetic resolver unavailable')
+        if self.before_return:
+            self.before_return()
+        return self
+
+    def resolve_for_spawn(self, identity):
+        self.resolves += 1
+        if identity in ('missing', 'ambiguous'):
+            return {'resolution': 'missing' if identity == 'missing' else 'ambiguous'}
+        return {'resolution': 'resolved', 'canonical_spec_id':
+                'spec_fixture' if identity == 'alternate-fixture' else identity}
+
+
+async def packet_index(rig, *, members=('spec_fixture',), available=True, terminal=None, lane_state='active'):
+    def write(conn):
+        from store_work_index import ensure_work_index_schema
+        ensure_work_index_schema(conn)
+        conn.execute("INSERT OR REPLACE INTO v2_work_index_state(singleton,state_json) VALUES(1,?)",
+                     (json.dumps({'available': available, 'goal_observations': {}}),))
+        conn.execute("INSERT OR REPLACE INTO v2_assistant_composite_lanes "
+                     "(lane_id,stream_id,phase,created_at,updated_at,work_state,members_json) "
+                     "VALUES ('wl-fixture',?,'execution','fixture','fixture',?,?)",
+                     (f'{HOST}:assistant', lane_state, json.dumps(list(members))))
+        if terminal:
+            conn.execute('INSERT OR REPLACE INTO v2_work_item_observations(spec_id,record_json) VALUES(?,?)',
+                         ('spec_fixture', json.dumps({'member': {'terminal': terminal,
+                             'observation': {'quality': 'fresh'}}, 'last_good': {}})))
+        conn.commit()
+    await rig.store.submit(write)
+
+
+async def packet(rig, op='open', tag='fixture', **fields):
+    if op == 'open':
+        fields.setdefault('spec_id', 'spec_fixture')
+    return await rig.call('packet', op=op, tag=tag, **fields)
+
+
+async def mail(rig, tag='fixture', *, auth=None, **fields):
+    handler = rig.runtime.wire_handlers().get('external_work.mail')
+    assert handler is not None, 'mail has its own wire handler before seat admission'
+    return await handler({'type': 'external_work.mail', 'request_id': 'fixture-mail',
+                          'tag': tag, 'mail_id': 'mail-1', 'at': int(rig.now),
+                          '_auth_context': {'operator_authenticated': True,
+                                            'operator_principal': 'operator:fixture'} if auth is None else auth,
+                          **fields})
+
+
+async def packets(rig):
+    return sorted(await rig.rows('v2_external_work_packets'), key=lambda row: row['tag'])
+
+
+def test_packet_open_lifecycle_idempotency_and_canonical_identity():
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig, lane_state='done')
+        result = await packet(rig, tag='  FiXTure  ', spec_id='alternate-fixture', state='queued')
+        assert result['type'] == 'external_work.packet.ok', result
+        row = result['packet']
+        assert (row['tag'], row['spec_id'], row['state']) == ('fixture', 'spec_fixture', 'queued')
+        assert rig.runtime.specs.captures == rig.runtime.specs.resolves == 1
+        version = await rig.version()
+        before = await packets(rig)
+        rig.now += 10
+        assert (await packet(rig, tag='fixture', state='queued'))['ok']
+        assert await packets(rig) == before and await rig.version() == version
+        for state in ('working', 'review', 'queued'):
+            rig.now += 1
+            assert (await packet(rig, 'set', state=state))['packet']['state'] == state
+        assert (await packet(rig, spec_id='spec_other'))['error_code'] == 'packet_conflict'
+        assert (await packet(rig, 'ignore'))['error_code'] == 'packet_conflict'
+        assert (await packet(rig, 'close'))['packet']['state'] == 'closed'
+        before = await packets(rig)
+        rig.now += 10
+        assert (await packet(rig, 'close'))['ok'] and await packets(rig) == before
+        for prior in ('closed', 'ignored', 'unlinked'):
+            if prior == 'ignored':
+                assert (await packet(rig, 'ignore'))['ok']
+            elif prior == 'unlinked':
+                await mail(rig, 'new-mail')
+            tag = 'new-mail' if prior == 'unlinked' else 'fixture'
+            assert (await packet(rig, tag=tag))['packet']['state'] == 'working'
+            await packet(rig, 'close', tag=tag)
+        assert await rig.version() == version
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('state', ['missing', 'closed', 'ignored', 'unlinked'])
+def test_packet_nonopen_set_close_ignore_matrix(state):
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        if state == 'closed':
+            await packet(rig)
+            await packet(rig, 'close')
+        elif state == 'ignored':
+            await packet(rig, 'ignore')
+        elif state == 'unlinked':
+            await mail(rig)
+        for desired in ('working', 'queued', 'review'):
+            assert (await packet(rig, 'set', state=desired))['error_code'] == 'packet_unknown'
+        close = await packet(rig, 'close')
+        assert close.get('error_code') == 'packet_unknown' if state in ('missing', 'ignored') else close['ok']
+        ignored = await packet(rig, 'ignore')
+        assert ignored['packet']['state'] == 'ignored' and ignored['packet']['spec_id'] is None
+        before = await packets(rig)
+        rig.now += 1
+        assert (await packet(rig, 'ignore'))['ok'] and await packets(rig) == before
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('tag', ['x'*65, 'bad]', 'bad\ninside', '', '  ', '\x7f'])
+def test_packet_invalid_tag_is_atomic(tag):
+    async def check(rig):
+        await rig.seat()
+        before = await rig.rows('v2_external_work_state')
+        assert (await packet(rig, tag=tag))['error_code'] == 'invalid_request'
+        assert await packets(rig) == [] and await rig.rows('v2_external_work_state') == before
+    exercise(check, packet_mode=True)
+
+
+def test_packet_resolution_membership_limit_and_auth():
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig, members=())
+        for identity in ('missing', 'ambiguous', 'spec_fixture'):
+            assert (await packet(rig, spec_id=identity))['error_code'] == 'packet_spec_unplaced'
+        rig.runtime.specs.available = False
+        assert (await packet(rig))['error_code'] == 'unavailable' and await packets(rig) == []
+        rig.runtime.specs.available = True
+        await packet_index(rig, members=(), available=False)
+        for i in range(32):
+            assert (await packet(rig, tag=f'packet-{i:02}'))['ok']
+        assert (await packet(rig, tag='overflow'))['error_code'] == 'packet_limit'
+        before = await packets(rig)
+        actor, _ = await rig.seat('other', bind=False)
+        assert (await packet(rig, 'close', tag='packet-00', actor=actor))['error_code'] == 'fd_not_current'
+        assert await packets(rig) == before
+    exercise(check, packet_mode=True)
+
+
+def test_packet_membership_is_rechecked_after_resolution():
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        loop = asyncio.get_running_loop()
+        rig.runtime.specs.before_return = lambda: asyncio.run_coroutine_threadsafe(
+            packet_index(rig, members=()), loop).result(timeout=5)
+        assert (await packet(rig))['error_code'] == 'packet_spec_unplaced'
+        assert await packets(rig) == []
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('initial', ['working', 'queued', 'review', 'closed', 'ignored'])
+def test_packet_mail_preserves_state_and_monotonic_evidence(initial):
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        if initial == 'ignored':
+            await packet(rig, 'ignore')
+        else:
+            await packet(rig)
+            if initial == 'closed':
+                await packet(rig, 'close')
+            else:
+                await packet(rig, 'set', state=initial)
+        before = (await packets(rig))[0]
+        result = await mail(rig, at=int(T0 + 200), mail_id='future-mail')
+        assert result['stored'] is True and result['linked'] == (initial in ('working','queued','review'))
+        row = (await packets(rig))[0]
+        assert row['evidence_at'] == T0 + 200 and row['mail_id'] == 'future-mail'
+        assert (row['state'], row['spec_id']) == (before['state'], before['spec_id'])
+        await mail(rig, at=int(T0 + 200), mail_id='future-mail')
+        await mail(rig, at=int(T0), mail_id='older')
+        assert (await packets(rig))[0] == row
+        if initial in ('working','queued','review'):
+            rig.now += 10
+            await packet(rig, 'set', state='review')
+            assert (await packets(rig))[0]['evidence_at'] == T0 + 200
+    exercise(check, packet_mode=True)
+
+
+def test_mail_unknown_cap_and_record_refusals_atomic_and_replay():
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        raw = await rig.observation('no-packets')
+        state_before = await rig.rows('v2_external_work_state')
+        assert (await rig.call('record', record=raw))['error_code'] == 'packets_required'
+        assert await rig.rows('v2_external_work_state') == state_before
+        assert await rig.rows('v2_external_work_records') == []
+        await packet(rig)
+        accepted = await rig.observation('accepted')
+        assert (await rig.call('record', record=accepted))['ok']
+        for i in range(32):
+            result = await mail(rig, f'unlinked-{i:02}')
+            assert result['stored'] and not result['linked']
+        assert (await mail(rig, 'overflow'))['stored'] is False
+        before = await packets(rig)
+        await mail(rig, 'unlinked-00')
+        assert await packets(rig) == before
+        state_before = await rig.rows('v2_external_work_state')
+        receipts = await rig.rows('v2_external_work_records')
+        denied = await rig.call('record', record=await rig.observation('unlinked', 'idle'))
+        assert denied['error_code'] == 'packets_unlinked'
+        assert denied['tags'] == [f'unlinked-{i:02}' for i in range(32)]
+        assert await rig.rows('v2_external_work_state') == state_before
+        assert await rig.rows('v2_external_work_records') == receipts
+        replay = await rig.call('record', record=accepted)
+        assert replay['duplicate'] is True
+        assert (await rig.call('record', record=await rig.observation('unknown', 'unknown')))['ok']
+        invalid = await rig.observation('extra', 'unknown', packets=[])
+        assert (await rig.call('record', record=invalid))['error_code'] == 'invalid_request'
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('auth', [{}, {'token_verified': True, 'stream_id': DESK},
+    {'operator_authenticated': True, 'operator_principal': 'agent:'+DESK}])
+def test_mail_refuses_seat_and_internal_operator(auth):
+    async def check(rig):
+        assert (await mail(rig, auth=auth))['error_code'] == 'operator_required'
+        assert await packets(rig) == []
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('fields', [{'at': int(T0+301)}, {'at': True}, {'at': T0+0.5},
+    {'mail_id': ''}, {'mail_id': 'x'*129}, {'mail_id': '  '}, {'tag':'bad]'}])
+def test_mail_validation_and_disabled(fields):
+    async def check(rig):
+        assert (await mail(rig, **fields))['error_code'] == 'invalid_request'
+        assert await packets(rig) == []
+        rig.attach(ExternalWorkConfig('disabled'))
+        assert (await mail(rig))['error_code'] == 'disabled'
+    exercise(check, packet_mode=True)
+
+
+def test_mail_operator_no_stream_token_through_server_dispatch():
+    from _shared.operator_auth import ConnectionTrust
+    from test_remote_rpc_admission import Peer
+    async def check(rig):
+        server = Server(store=rig.store, sessions=rig.h.sessions)
+        server.handlers.update(rig.runtime.wire_handlers())
+        peer = Peer()
+        server._connection_trust[peer] = ConnectionTrust('v2', 'fixture-mail-credential', 'pentacle-mobile')
+        frames = await server._dispatch(json.dumps({'type':'external_work.mail', 'request_id':'mail-dispatch',
+            'tag':'dispatch', 'mail_id':'fixture-id', 'at':int(T0)}), websocket=peer)
+        assert frames[0]['type'] == 'external_work.mail.ok', frames
+        assert frames[0]['stored'] and not frames[0]['linked']
+        assert (await packets(rig))[0]['state'] == 'unlinked'
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('available', [True, False])
+def test_packet_finished_item_closure_show_and_rollback_shape(available):
+    from external_work import validate_record
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        await packet(rig)
+        await packet(rig, 'ignore', tag='health')
+        await mail(rig, 'stray')
+        await packet(rig, 'close', tag='stray')
+        await packet_index(rig, available=available, terminal='completed')
+        record = await rig.observation('idle', 'idle')
+        assert (await rig.call('record', record=record))['ok']
+        shown = await rig.call('show')
+        assert [row['tag'] for row in shown['packets']] == (['health'] if available else ['fixture','health'])
+        state = json.loads((await rig.rows('v2_external_work_state'))[0]['data'])
+        old_state_keys = {'v','created_at','last_verified_at','observation','blocked_since','episode',
+            'active_reasons','notice_sequence','last_notice_at','active_notice_id','active_recipient','clock_high_water'}
+        old_record_keys = {'watch_id','request_id','expected_version','observed_at','state','current_packet_ref',
+            'evidence_refs','queue_sha256','next_packet_ref','supply_gap','blocker'}
+        assert set(state) == old_state_keys and set(record) == old_record_keys
+        assert validate_record(record) == record
+        receipt = json.loads((await rig.rows('v2_external_work_records'))[0]['result'])
+        assert 'packets' not in receipt
+    exercise(check, packet_mode=True)
+
+
+def test_packet_fd_binding_rechecked_in_writer():
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        successor, generation = await rig.seat('successor', bind=False)
+        original = rig.store.external_work_packet
+        async def replaced(**kwargs):
+            # Auth had passed in the handler. Replace that seat's generation
+            # before the store transaction, so the captured caller is stale.
+            await rig.store.update_session(HOST, 'desk', status='closed')
+            return await original(**kwargs)
+        rig.store.external_work_packet = replaced
+        assert (await packet(rig))['error_code'] == 'fd_not_current'
+        assert await packets(rig) == []
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('terminal', ['completed', 'deprecated'])
+def test_packet_op_closes_finished_items_atomically(terminal):
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        await packet(rig)
+        await packet_index(rig, terminal=terminal)
+        assert (await packet(rig, 'ignore', tag='health'))['ok']
+        rows = {r['tag']:r for r in await packets(rig)}
+        assert rows['fixture']['state'] == 'closed'
+        assert rows['fixture']['spec_id'] == 'spec_fixture'
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('operator_authority', [False, True])
+def test_mail_seat_dispatch_cannot_impersonate_operator(operator_authority):
+    from test_remote_rpc_admission import Peer
+    async def check(rig):
+        await rig.seat()
+        server = Server(store=rig.store, sessions=rig.h.sessions,
+                        seat_operator_authority=operator_authority)
+        server.handlers.update(rig.runtime.wire_handlers())
+        peer = Peer('127.0.0.1')
+        result = await server._dispatch(json.dumps({'type':'external_work.mail',
+            'request_id':'seat-mail', 'tag':'seat', 'mail_id':'id', 'at':int(T0),
+            'from_stream_id':DESK, 'stream_token':rig.tokens[DESK],
+            '_auth_context':{'operator_authenticated':True,'operator_principal':'operator:forged'}}), websocket=peer)
+        assert result[0]['error_code'] == 'operator_required', result
+        assert await packets(rig) == []
+    exercise(check, packet_mode=True)
+
+
+@pytest.mark.parametrize('initial', ['missing','unlinked','closed','ignored','working','queued','review'])
+def test_packet_ignore_each_state(initial):
+    async def check(rig):
+        await rig.seat()
+        await packet_index(rig)
+        if initial == 'unlinked':
+            await mail(rig)
+        elif initial == 'ignored':
+            await packet(rig, 'ignore')
+        elif initial != 'missing':
+            await packet(rig)
+            if initial == 'closed':
+                await packet(rig, 'close')
+            elif initial != 'working':
+                await packet(rig, 'set', state=initial)
+        before = await packets(rig)
+        reply = await packet(rig, 'ignore')
+        if initial in ('working','queued','review'):
+            assert reply['error_code'] == 'packet_conflict'
+            assert await packets(rig) == before
+        else:
+            assert reply['packet']['state'] == 'ignored' and reply['packet']['spec_id'] is None
+    exercise(check, packet_mode=True)

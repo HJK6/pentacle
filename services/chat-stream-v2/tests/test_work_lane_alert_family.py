@@ -14,13 +14,13 @@ from test_error_alerts import subject  # noqa: F401
 
 
 def test_lane_family_registered():
-    assert error_adapters.FAMILY_CODES.get("work_lane.v1") == frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost"})
+    assert error_adapters.FAMILY_CODES.get("work_lane.v1") == frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost", "lane_status_behind"})
 
 
 @pytest.fixture
 def lane_registry(monkeypatch):
     # Isolate downstream RED predicates from the missing registration.
-    monkeypatch.setitem(error_adapters.FAMILY_CODES, "work_lane.v1", frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost"}))
+    monkeypatch.setitem(error_adapters.FAMILY_CODES, "work_lane.v1", frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost", "lane_status_behind"}))
 
 
 async def open_lane(s, code="lane_stale", episode="lane:stale:1"):
@@ -157,3 +157,24 @@ async def test_lane_rebind_retains_one_digest_and_ref(subject, lane_registry, mo
     assert pending[0]["body"].startswith("Work update digest.")
     assert json.loads(pending[0]["metadata"])["members"] == [nid]
     assert (await s.notify._db.call("error_get", nid))["firing_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_status_behind_uses_historical_opening_after_restart(subject):
+    s = subject
+    fact = {'lane_id': 'lane', 'kind': 'status_behind', 'episode_id': 'lane:status_behind:1',
+            'opened_at': '2026-01-01T00:00:00Z', 'items': ['spec_a', 'spec_b', 'spec_c']}
+    def seed(conn):
+        with conn:
+            conn.execute("INSERT INTO v2_work_lane_episodes VALUES (?,?,?,?,?,?,?,?)",
+                         (fact['episode_id'], 'lane', 'status_behind', 1, fact['opened_at'], None, None, json.dumps(fact)))
+    await s.store.submit(seed)
+    await open_lane(s, 'lane_status_behind', fact['episode_id'])
+    await s.store.submit(lambda conn: conn.execute("UPDATE v2_work_lane_episodes SET cleared_at='2026-01-01T01:00:00Z' WHERE episode_id=?", (fact['episode_id'],)))
+    s.service = ErrorAlerts(s.server, s.queue)
+    await s.service.start()
+    await s.service.reconcile()
+    (row,) = await s.service.notice_rows()
+    assert 'historical opening; condition cleared' in row['body']
+    assert 'spec_a, spec_b, spec_c' in row['body']
+    assert '2026-01-01T00:00:00Z' in row['body']

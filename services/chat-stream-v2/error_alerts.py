@@ -1038,6 +1038,18 @@ class ErrorAlerts:
                                         f"episode={ctx['episode_id']} {state}: remaining estimate missing at opening. "
                                         f"Current members/state: agent-orch work-lane show {opening['lane_id']} --members. "
                                         "Awareness only; FLAG, no admission block.")
+                if ctx["family"] == WORK_LANE and ctx["code"] == "lane_status_behind":
+                    opening = conn.execute("SELECT lane_id,opened_at,cleared_at,fact_json FROM v2_work_lane_episodes "
+                                           "WHERE episode_id=? AND kind='status_behind'", (ctx["episode_id"],)).fetchone()
+                    if opening is not None:
+                        state = "historical opening; condition cleared" if opening["cleared_at"] else "recorded opening"
+                        lane_id = opening["lane_id"]
+                        items = ", ".join(json.loads(opening["fact_json"]).get("items", [])[:3])
+                        spec["body"] = (f"Work update lane_status_behind lane={lane_id} episode={ctx['episode_id']} "
+                                        f"{state} at {opening['opened_at']}: a review had passed or a lead had reported done "
+                                        f"over 30 minutes earlier and the Status line had not changed on: {items}. "
+                                        f"Current flags: agent-orch work-lane show {lane_id} --members. "
+                                        "Ask the lead of each item still flagged for a one-line Status update, or write it if the lead is gone.")
                 if ctx["family"] == WORK_LANE and ctx["code"] == "lane_lead_lost":
                     # Name the lost owner and the repair from the stored lane, never producer text.
                     opening = conn.execute(

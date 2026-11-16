@@ -1065,7 +1065,10 @@ def _oracle_enrich_goals_conn(conn, lane, snapshot=None):
         observation = member_.get("observation") or {}
         members.append((identity, (record.get("last_good") or {}).get("_epic"), member_.get("goal_id"),
                         record.get("source_hash"), observation.get("quality"), observation.get("error"),
-                        member_.get("checkpoint_revision"), member_.get("checkpoint_policy_revision")))
+                        member_.get("checkpoint_revision"), member_.get("checkpoint_policy_revision"),
+                        next(((m.get("_latest_event") or {}).get("kind"),
+                              (m.get("_latest_event") or {}).get("at"), m.get("_latest_report_id"))
+                             for m in lane.get("_members", []) if m["spec_id"] == identity)))
     goal_inputs = [(identity, record.get("source_hash"), record["quality"], record.get("error"))
                    for identity, record in goals.items()]
     lane["_goals"] = goals

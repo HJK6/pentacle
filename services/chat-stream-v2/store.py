@@ -5378,6 +5378,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             if stored is not None and not inserted and not _report_replay_matches(stored, fields):
                 raise ReportReplayConflict(str(fields["report_id"]))
             if inserted and stored is not None:
+                from store_work_lanes import record_latest_report_conn
+                stored["_latest_report_changed"] = record_latest_report_conn(conn, stored)
                 binding = store_exchange.direct_pair(conn, stream_id, stored.get("to_stream_id"))
                 text = "\n".join(str(part) for part in (stored.get("summary"), *(finding.get(key) for finding in stored.get("findings") or [] for key in ("where", "issue", "suggested_fix"))) if part)
                 observation = store_exchange.source(binding, "report", stored["report_id"], text, stored["ingested_at"])

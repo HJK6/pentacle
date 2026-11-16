@@ -238,3 +238,52 @@ test('park record is additive and malformed values never drop a lane', () => {
   assert.deepEqual(normalizeWorkLanesInventory(cell.inventory_frame)!.lanes[0].parked,
     cell.inventory_frame.lanes[0].parked);
 });
+
+test('latest report and behind fields survive normalization when present and remain optional', () => {
+  const cell = fixture.spec_details_v1;
+  const raw = structuredClone(cell.show_projection);
+  raw.members[0].latest_event = { kind: 'review_passed', at: '2026-01-01T00:00:00Z' };
+  raw.members[0].status_behind = true;
+  const member = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0].progress!.members[0];
+  assert.deepEqual(member.latest_event, raw.members[0].latest_event);
+  assert.equal(member.status_behind, true);
+  delete raw.members[0].latest_event;
+  delete raw.members[0].status_behind;
+  const old = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0].progress!.members[0];
+  assert.equal('latest_event' in old, false);
+  assert.equal('status_behind' in old, false);
+});
+
+test('external lane and member facts survive while older frames omit them', () => {
+  const cell = fixture.spec_details_v1;
+  const raw = structuredClone(cell.show_projection);
+  const verified_at = '2026-11-15T17:08:01Z';
+  raw.external = { label: 'Dot', working: 1, queued: 1, review: 1, verified_at };
+  raw.members[0].external = [
+    { label: 'Dot', ref: 'working-packet', state: 'working', verified_at },
+    { label: 'Dot', ref: 'review-packet', state: 'review', verified_at },
+    { label: 'Dot', ref: 'queued-packet', state: 'queued', verified_at },
+  ];
+  const lane = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0];
+  assert.deepEqual(lane.progress!.members[0].external, raw.members[0].external);
+  assert.deepEqual(lane.external, raw.external);
+  delete raw.external;
+  delete raw.members[0].external;
+  const old = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0];
+  assert.equal('external' in old, false);
+  assert.equal('external' in old.progress!.members[0], false);
+});
+
+test('lane activity words and unknown future values survive normalization', () => {
+  const cell = fixture.spec_details_v1;
+  for (const activity of ['working', 'waiting_on_dot', 'waiting_on_you', 'blocked', 'idle', 'future', null]) {
+    const raw = structuredClone(cell.show_projection);
+    raw.activity = activity;
+    const lane = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0];
+    assert.equal(lane.activity, activity);
+  }
+  const olderFrame = structuredClone(cell.inventory_frame);
+  delete olderFrame.lanes[0].activity;
+  const lane = normalizeWorkLanesInventory(olderFrame)!.lanes[0];
+  assert.equal('activity' in lane, false);
+});

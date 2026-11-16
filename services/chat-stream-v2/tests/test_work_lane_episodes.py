@@ -487,3 +487,34 @@ def test_parking_clears_estimate_episode_and_plain_pause_reopens():
         assert len(await episodes(env.store)) == 2
         assert (await episodes(env.store))[1]["cleared_at"] is None
     run(body)
+
+
+def test_status_behind_episode_order_uncertain_index_and_clear():
+    async def body(env):
+        ids = ['spec_demo__a', 'spec_demo__b', 'spec_demo__c', 'spec_demo__d']
+        lane = (await env.adopt(state='paused', lead=False, owner='operator', members=ids))['lane']
+        items = [dict(obs('in_progress'), spec_id=identity, _progress_at='2025-12-31T00:00:00Z') for identity in ids]
+        await seed_observations(env.store, items)
+        def reports(conn):
+            with conn:
+                for identity, at in zip(ids, ['2026-01-01T02:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T03:00:00Z']):
+                    conn.execute('INSERT INTO v2_work_item_latest_report VALUES (?,?,?,?)', (identity, 'review_passed', at, identity))
+        await env.store.submit(reports)
+        sink = RecordingSink()
+        await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
+        matching = [r for r in await episodes(env.store) if r['kind'] == 'status_behind']
+        assert len(matching) == 1
+        assert json.loads(matching[0]['fact_json'])['items'] == ['spec_demo__b', 'spec_demo__c', 'spec_demo__a']
+        assert [c['kind'] for c in sink.calls].count('status_behind') == 1
+        await seed_observations(env.store, items, available=False)
+        await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
+        assert [r for r in await episodes(env.store) if r['kind'] == 'status_behind'][0]['cleared_at'] is None
+        await seed_observations(env.store, items)
+        def mark_progress(conn):
+            with conn:
+                conn.execute("UPDATE v2_work_item_observations SET record_json=json_set(record_json, '$.progress_at', ?)", (NOW,))
+        await env.store.submit(mark_progress)
+        await env.store.reconcile_work_lane_episodes(sink, now_iso=NOW)
+        matching = [r for r in await episodes(env.store) if r['kind'] == 'status_behind']
+        assert len(matching) == 1 and matching[0]['cleared_at'] is not None
+    run(body)

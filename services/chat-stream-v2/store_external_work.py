@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from external_work import (
     OBSERVATION_MAX_AGE_S, REMINDER_INTERVAL_S, STATE_KEYS, apply_observation, canonical, derive_reasons,
-    due_at, new_state, notice_id, record_digest,
+    due_at, new_state, notice_id, record_digest, PacketError, OPEN_PACKET_STATES, validate_tag,
 )
 from message_envelopes import build_external_work_due_body
 from outbound_notices import NOTICE_KIND_EXTERNAL_WORK_DUE
@@ -39,7 +39,49 @@ CREATE TABLE IF NOT EXISTS v2_external_work_records (
     PRIMARY KEY (watch_id, request_id)
 )
 """,
+    """
+CREATE TABLE IF NOT EXISTS v2_external_work_packets (
+    watch_id TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    spec_id TEXT,
+    state TEXT NOT NULL,
+    opened_at REAL NOT NULL,
+    state_at REAL NOT NULL,
+    evidence_at REAL NOT NULL,
+    mail_id TEXT,
+    PRIMARY KEY (watch_id, tag)
 )
+""",
+)
+
+
+def _packet_rows(conn, watch_id):
+    return [dict(row) for row in conn.execute(
+        "SELECT * FROM v2_external_work_packets WHERE watch_id=? ORDER BY tag", (watch_id,))]
+
+
+def current_packets_conn(conn, *, config):
+    """One read-only snapshot, reusable inside lane lifecycle transactions."""
+    if config is None or not config.enabled:
+        return {"label": "", "packets": []}
+    rows = [row for row in _packet_rows(conn, config.watch_id) if row["state"] in OPEN_PACKET_STATES]
+    from store_work_index import effective_membership_conn
+    snapshot = effective_membership_conn(conn, spec_ids=[row["spec_id"] for row in rows])
+    if snapshot["state"]["available"]:
+        rows = [row for row in rows if snapshot["members"].get(row["spec_id"], {}).get("terminal")
+                not in {"completed", "deprecated"}]
+    return {"label": config.label, "packets": rows}
+
+
+def _close_finished_conn(conn, config, now):
+    from store_work_index import effective_membership_conn
+    rows = [row for row in _packet_rows(conn, config.watch_id) if row["state"] in OPEN_PACKET_STATES]
+    snapshot = effective_membership_conn(conn, spec_ids=[row["spec_id"] for row in rows])
+    if snapshot["state"]["available"]:
+        for row in rows:
+            if snapshot["members"].get(row["spec_id"], {}).get("terminal") in {"completed", "deprecated"}:
+                conn.execute("UPDATE v2_external_work_packets SET state='closed',state_at=?,evidence_at=? "
+                             "WHERE watch_id=? AND tag=?", (now, max(now, row["evidence_at"]), config.watch_id, row["tag"]))
 
 
 def _load_conn(conn, watch_id, now=None):
@@ -201,7 +243,10 @@ class _ExternalWorkStoreMixin:
             version, state = _load_conn(conn, config.watch_id, now)
             effective = _refresh_conn(conn, config.watch_id, state, now)
             _save_conn(conn, config.watch_id, version, state)
-            return _view_conn(conn, config, version, state, effective)
+            result = _view_conn(conn, config, version, state, effective)
+            result["packets"] = [{key: row[key] for key in ("tag", "spec_id", "state", "state_at", "evidence_at")}
+                                 for row in _packet_rows(conn, config.watch_id) if row["state"] != "closed"]
+            return result
         return await self._external_work_txn(body)
 
     async def external_work_record(self, *, config, env_binding, actor, generation, now, record) -> dict[str, Any]:
@@ -226,6 +271,13 @@ class _ExternalWorkStoreMixin:
                 raise ValueError("invalid_request")
             if now - observed_at > OBSERVATION_MAX_AGE_S or (latest and observed_at < latest["observed_at"]):
                 raise ValueError("observation_stale")
+            _close_finished_conn(conn, config, now)
+            packets = _packet_rows(conn, config.watch_id)
+            if record["state"] == "working" and not any(row["state"] == "working" for row in packets):
+                raise PacketError("packets_required")
+            unlinked = [row["tag"] for row in packets if row["state"] == "unlinked"]
+            if record["state"] != "unknown" and unlinked:
+                raise PacketError("packets_unlinked", tags=unlinked[:32])
             apply_observation(state, record)
             effective = _refresh_conn(conn, config.watch_id, state, now)
             version += 1
@@ -238,6 +290,76 @@ class _ExternalWorkStoreMixin:
                 "actor_generation,recorded_at,result) VALUES (?,?,?,?,?,?,?)",
                 (config.watch_id, record["request_id"], digest, actor, generation, now, canonical(result)))
             return {**result, "duplicate": False}
+        return await self._external_work_txn(body)
+
+    async def external_work_current_packets(self, *, config=None):
+        config = config if config is not None else getattr(self, "external_work_config", None)
+        return await self.submit(lambda conn: current_packets_conn(conn, config=config))
+
+    async def external_work_packet(self, *, config, env_binding, actor, generation, now,
+                                   op, tag, spec_id=None, state=None):
+        tag = validate_tag(tag)
+        def body(conn):
+            _authorize_conn(conn, config, env_binding, actor, generation)
+            row = conn.execute("SELECT * FROM v2_external_work_packets WHERE watch_id=? AND tag=?",
+                               (config.watch_id, tag)).fetchone()
+            old = dict(row) if row else None
+            opened = old is not None and old["state"] in OPEN_PACKET_STATES
+            if op == "open":
+                if opened and old["spec_id"] != spec_id:
+                    raise PacketError("packet_conflict")
+                from store_work_index import effective_membership_conn
+                snapshot = effective_membership_conn(conn, spec_ids=[spec_id])
+                if snapshot["state"]["available"] and not any(spec_id in ids for ids in snapshot["membership"].values()):
+                    raise PacketError("packet_spec_unplaced")
+                if not opened and sum(r["state"] in OPEN_PACKET_STATES for r in _packet_rows(conn, config.watch_id)) >= 32:
+                    raise PacketError("packet_limit")
+                target, identity = state or "working", spec_id
+            elif op == "set":
+                if not opened:
+                    raise PacketError("packet_unknown")
+                target, identity = state, old["spec_id"]
+            elif op == "close":
+                if old is None or old["state"] == "ignored":
+                    raise PacketError("packet_unknown")
+                target, identity = "closed", old["spec_id"]
+            elif op == "ignore":
+                if opened:
+                    raise PacketError("packet_conflict")
+                target, identity = "ignored", None
+            else:
+                raise PacketError("invalid_request")
+            if op == "open" and target not in {"working", "queued"} or op == "set" and target not in OPEN_PACKET_STATES:
+                raise PacketError("invalid_request")
+            if old is None:
+                conn.execute("INSERT INTO v2_external_work_packets VALUES (?,?,?,?,?,?,?,NULL)",
+                             (config.watch_id, tag, identity, target, now, now, now))
+            elif old["state"] != target or old["spec_id"] != identity:
+                conn.execute("UPDATE v2_external_work_packets SET spec_id=?,state=?,state_at=?,evidence_at=? "
+                             "WHERE watch_id=? AND tag=?", (identity, target, now, max(now, old["evidence_at"]), config.watch_id, tag))
+            _close_finished_conn(conn, config, now)
+            return {"packet": dict(conn.execute("SELECT * FROM v2_external_work_packets WHERE watch_id=? AND tag=?",
+                                                (config.watch_id, tag)).fetchone())}
+        return await self._external_work_txn(body)
+
+    async def external_work_mail(self, *, config, tag, mail_id, at, now):
+        def body(conn):
+            if not config.enabled:
+                raise PacketError(config.status)
+            row = conn.execute("SELECT * FROM v2_external_work_packets WHERE watch_id=? AND tag=?",
+                               (config.watch_id, tag)).fetchone()
+            if row is not None:
+                if at >= row["evidence_at"]:
+                    conn.execute("UPDATE v2_external_work_packets SET evidence_at=?,mail_id=? WHERE watch_id=? AND tag=?",
+                                 (at, mail_id, config.watch_id, tag))
+                return {"linked": row["state"] in OPEN_PACKET_STATES, "stored": True}
+            count = conn.execute("SELECT COUNT(*) FROM v2_external_work_packets WHERE watch_id=? AND state='unlinked'",
+                                 (config.watch_id,)).fetchone()[0]
+            if count >= 32:
+                return {"linked": False, "stored": False}
+            conn.execute("INSERT INTO v2_external_work_packets VALUES (?,?,NULL,'unlinked',?,?,?,?)",
+                         (config.watch_id, tag, at, at, at, mail_id))
+            return {"linked": False, "stored": True}
         return await self._external_work_txn(body)
 
     async def external_work_notice_verdict(self, notice_id, *, config, env_binding) -> dict[str, Any]:

@@ -16,7 +16,7 @@ Clients send `capabilities.work_lanes_v1: true` in `hello`. Only such non-scoped
 - `lanes[]` is in server order: `blocked`, then `active`, then `paused`; within a group by `updated_at` desc, then `lane_id`. Clients must not reorder it.
 - `lanes[]` never contains `done` lanes. It holds at most 64 lanes and sets `truncated:true` when more exist.
 - The header count is `counts.open` (active + paused + blocked). Never derive it from sessions.
-- `state` is the presented state. Unexpected owner loss is a fault, not a pause. A stored `active` lane whose bound lead no longer qualifies presents `state:"active"` with `state_reason:"lead_lost"` and `lead.qualifies:false`. So does a legacy row the former reconciler stored as `paused`/`lead_lost` while its lead still does not qualify. Both count as active. See [Owner loss](#owner-loss-lead_lost-fault).
+- `state` is the presented state. Unexpected owner loss is a fault, not a pause. A stored `active` lane whose bound lead no longer qualifies and has neither a work seat nor external work presents `state:"active"` with `state_reason:"lead_lost"` and `lead.qualifies:false`. So does a legacy row the former reconciler stored as `paused`/`lead_lost` while its lead still does not qualify and no work is in hand. Both count as active. See [Owner loss](#owner-loss-lead_lost-fault).
 - `lead` is null or `{stream_id, generation, qualifies, status, visibility, presence{online,working,capture_liveness,last_activity}, status_card{goal,active_step,update,eta_at,eta_set_at,updated_at}, eta_stale}`. When `eta_stale` is true, render "ETA stale" instead of `late Xm`.
 - `visible_chat` is `{stream_id, generation|null, kind: composite|session, available: open|history|unavailable}`.
 - `last_update` is `{update_id, kind, event_id, ts}` or null.
@@ -52,10 +52,10 @@ Updates arrive both live (as a `chat.event` broadcast) and through history (`req
 - Lanes are rows of `v2_assistant_composite_lanes` with `work_state` set. All product columns are nullable, so routing-only lanes are unchanged. Product and routing operations share `version`.
 - `v2_work_lane_events` is the audit and update linkage. `event_id` is the request id and `UNIQUE(lane_id, source_id)` deduplicates updates. The partial UNIQUE index on `consumed_question_id` makes each operator confirmation single-use.
 - Each `assistant.operation` with `operation: work_lane.<adopt|set_state|set_lead|set_chat|set_text|set_owner|update>` and `dispatch_id: "none"` writes the lane row, the event row and the `lane_update` publication in one `BEGIN IMMEDIATE` transaction. Only the current direct-primary binding (stream + generation) may submit one; other actors get `work_lane_actor_unverified`.
-- An ACTIVE lane requires an exact generation-bound live dedicated `lead` or `nexus`. Hidden leads qualify for either management owner kind. Closed, offline/presumed-dead, stale-generation, protected, composite and current authenticated assistant backends do not qualify. `owner_kind: fd` grants management, never execution ownership. Visible-chat eligibility remains separate and unchanged.
-- Error codes keep their wire names. `work_lane_visible_lead_required` means `set_state active` (or an `active` adopt) found no qualifying lead. `work_lane_lead_ineligible` means that seat cannot lead this lane.
+- An active lane requires an exact generation-bound live dedicated `lead` or `nexus`, a work seat, or current external work. Adopting an active lane still requires a qualifying lead. Hidden leads qualify for either management owner kind. Closed, offline/presumed-dead, stale-generation, protected, composite and current authenticated assistant backends do not qualify. `owner_kind: fd` grants management, never execution ownership. Visible-chat eligibility remains separate and unchanged.
+- Error codes keep their wire names. `work_lane_visible_lead_required` means `set_state active` (or an `active` adopt) found no qualifying lead, work seat or external work; active adoption still requires a qualifying lead. `work_lane_lead_ineligible` means that seat cannot lead this lane.
 
-Lane state is explicit: member attendance/activity never resumes a paused lane or hides ownership loss. The existing display-only `lead.presence.working` ORs actual working/background activity across every effectively assigned member seat, before member/seat/page caps, plus the bound lead's existing busy descendants. Lead identity, generation, qualification, status, online and card still describe the bound lead. Historical bindings remain available for fault display. Terminal/unresolved residual execution remains observable and grants no new execution. Existing client paused/blocked/done/needs-you motion gates remain; when all question-bearing members are beyond the eight-row preview, its final row is replaced with one such member.
+A paused, unparked lane with a live assigned work seat or current external packet resumes on refresh with reason `work_started`; either also suppresses lead-lost and permits explicit activation. A parked lane stays parked. A manual pause lasts until the next refresh if work continues. The existing display-only `lead.presence.working` ORs actual working/background activity across every effectively assigned member seat, before member/seat/page caps, plus the bound lead's existing busy descendants. Lead identity, generation, qualification, status, online and card still describe the bound lead. Historical bindings remain available for fault display. Terminal/unresolved residual execution remains observable and grants no new execution. Existing client paused/blocked/done/needs-you motion gates remain; when all question-bearing members are beyond the eight-row preview, its final row is replaced with one such member.
 
 Lanes are display and grouping state, not execution admission. Spawn, send,
 close and assignment changes do not depend on lane state or lead presence.
@@ -69,7 +69,7 @@ still requires a qualifying lead for the display binding. Departing a seat does
 not rewrite that historical binding. Member replacement retains its explicit
 in-use reason and source-epic checks, but does not stop work.
 
-- Lead loss: a coalesced refresh runs on every session-inventory recompute and every 60 s. Passes start at least `WORK_LANES_REFRESH_MIN_S` apart (default 2 seconds; `0` disables the spacing). The first refresh after a quiet interval runs at once; a request during the wait is served by the next pass, which reads current state. A pushed `work_lanes.inventory` frame therefore lags a change by at most the interval plus one pass while a pass is shorter than the interval (in general, the larger of the two plus one pass). Direct reads are not delayed. It never changes lane state or version, and lead loss never posts an update; it opens the `lead_lost` episode below. A handoff moves the lead (and a visible chat that pointed at the predecessor) to the successor before the predecessor closes, with one `lead_handoff` event and no state change.
+- Lead loss: a coalesced refresh runs on every session-inventory recompute and every 60 s. Passes start at least `WORK_LANES_REFRESH_MIN_S` apart (default 2 seconds; `0` disables the spacing). The first refresh after a quiet interval runs at once; a request during the wait is served by the next pass, which reads current state. A pushed `work_lanes.inventory` frame therefore lags a change by at most the interval plus one pass while a pass is shorter than the interval (in general, the larger of the two plus one pass). Direct reads are not delayed. A refresh resumes an unparked paused lane when work is in hand, incrementing its version; lead loss never posts an update; it opens the `lead_lost` episode below. A handoff moves the lead (and a visible chat that pointed at the predecessor) to the successor before the predecessor closes, with one `lead_handoff` event and no state change.
 - Recovery of a lost binding is explicit; see [Owner loss](#owner-loss-lead_lost-fault). No migration silently rewrites legacy ownership/state.
 - The verified, generation-bound FD may change an operator-owned lane’s state (including `done`) or re-own it to `fd` without a confirmation, using a non-empty `reason` (up to 280 characters). The existing mutation event carries `payload.override = {schema: WorkLaneOverrideV1, actor_stream_id, actor_generation, action, from, to, reason}`; no confirmation is consumed. This grants no authority to another actor and leaves adoption/lead eligibility unchanged.
 - Routing `lane.close` and routing `lane.decision` with `transition=cancel` on operator lanes still need a confirmation. A supplied confirmation on a product mutation also retains all checks. The confirmation is the id of a question that:
@@ -573,16 +573,16 @@ DB. Review the concrete rollback artifact before activation.
 
 ## Owner loss (`lead_lost` fault)
 
-- The existing episode drain opens one `lead_lost` episode (`<lane_id>:lead_lost:<n>`) for a non-done lane in either of two states: stored `active` without a qualifying lead, or stored `paused` with reason `lead_lost` (legacy rows) while its lead does not qualify. Member attendance or activity never suppresses the fault.
+- The existing episode drain opens one `lead_lost` episode (`<lane_id>:lead_lost:<n>`) for a non-done lane in either of two states: stored `active` without a qualifying lead, or stored `paused` with reason `lead_lost` (legacy rows) while its lead does not qualify. An eligible live work seat or current external packet suppresses the fault.
 - It is delivered through the same `work_lane.v1` sink with code `lane_lead_lost` as a direct FD alert, not in the Work update digest, because a lost lead needs repair before the lane looks idle. It also wakes the front desk past its routine-ingress hold: the notice queue marks it with an in-process wake token that no wire input can carry. The other work-lane kinds stay on the digest. The existing storm guard can still hold a repeat or a burst for the digest. Detection takes ≤ the 60 s pass plus one pass. The alert names the lost lead and generation and the repair commands.
 - The same episode and notification survive a restart and an FD rebind. Delivery or acknowledgement never clears it.
 - It clears only when one of these holds:
-  - a qualifying dedicated non-FD lead is bound again (`set-lead` or handoff);
+  - a qualifying dedicated non-FD lead is bound again (`set-lead` or handoff), or a work seat or current packet is present;
   - the lane is deliberately set `paused` after drain with non-empty `--reason` and `--next-action`;
   - the lane is set `blocked` after drain with reason, next action and blocker;
   - the lane is set `done` after drain with its outcome and existing closure checks.
 - A faulted legacy stored `paused`/`lead_lost` lane may be restated `paused` with a reason; its stored reason becomes `fd`. Every other same-state request is still `work_lane_state_unchanged`.
-- Lane code restarts nothing and never rewrites stored FD/operator `paused`/`blocked` lanes or holds. Restart goes through existing spawn idempotency after the FD verifies the prior execution is gone.
+- Lane code restarts nothing; it resumes an unparked paused lane with work on refresh and leaves blocked and parked lanes unchanged. Restart goes through existing spawn idempotency after the FD verifies the prior execution is gone.
 - `work-lane list/show` human text shows `LEAD LOST — repair: …`.
 - Startup widens the episode kind CHECK in place, keyed on `'lead_lost'`, preserving every row. A rollback keeps the widened CHECK, episode rows and the `lane_lead_lost` adapter vocabulary. The supported rollback artifact removes only `lead_lost` from the reconciliation tuple: no new episode opens, pending ones still deliver, and nothing stores a pause. Do not run an older binary, which would retry pending `lead_lost` deliveries it cannot map.
 
@@ -862,3 +862,43 @@ sets an explicit icon; `--clear-icon` sends null and restores title fallback.
 These flags are mutually exclusive and may accompany `--title` or `--summary`.
 At least one text/icon flag is required. The daemon validates unknown keys as
 `work_lane_icon_invalid`; expected-version and request-id semantics are unchanged.
+
+
+A detail member's `latest_event` is its latest attributed done report (`review_passed`,
+`review_failed`, or `reported_done`), or null. `status_behind` is true when a fresh,
+unfinished item has a passing review or done report at least 30 minutes old and newer
+than its last observed progress. An unavailable index cannot establish this flag. The
+`lane_status_behind` episode reports up to three items captured at its opening.
+
+Before rolling back to a release without this episode kind, run against the daemon
+SQLite database before starting the older release:
+
+```sql
+UPDATE v2_work_lane_episodes SET cleared_at=COALESCE(cleared_at, datetime('now')),
+  emitted_ref=COALESCE(emitted_ref, 'rollback') WHERE kind='status_behind';
+```
+
+## External packet work
+
+Inventory, list and show add optional lane `external`:
+
+```json
+{"label":"Dot","working":1,"queued":0,"review":1,"verified_at":"2026-11-15T17:08:01Z"}
+```
+
+Counts cover current packets on effective lane members, not distinct items.
+`verified_at` is their latest evidence timestamp, UTC to the second. No current
+packets means no key. A done lane receives the key when the call projects that
+lane; inventory still excludes done lanes.
+
+Show with members adds optional member `external`, a list of at most four
+`{label, ref, state, verified_at}` records, ordered working, review, queued.
+`ref` is the packet tag. Inventory member previews omit it.
+
+Current means enabled-watch open packets excluding indexed completed/deprecated
+items, with no age expiry. Working packets contribute to the same distinct-item
+working set as seats, including goal classes, lead working presence and
+lane/selected-goal working counts. A seat and packet on one item count once.
+Queued/review packets do not make an item working. Any current packet can resume an unparked paused lane and suppress lead-lost. Older clients may ignore these optional facts.
+
+Open, unparked lanes carry `activity`: `working`, `waiting_on_dot`, `waiting_on_you`, `blocked`, or `idle`, in that precedence order. It is null when session or question inputs are unavailable; done and parked lanes omit it.
