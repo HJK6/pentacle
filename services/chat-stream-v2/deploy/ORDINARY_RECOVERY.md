@@ -1,100 +1,177 @@
-# Ordinary ancestry bootstrap: recovery gap packet
+# Durable ordinary recovery, version 1
 
-Status: **BLOCKED for bootstrap/recovery GO**, source-only proposal. Owner: FD
-for sequencing/authorization; fleet for exact-head gate, independent final QA,
-reviewed recovery repair and rehearsal. No command below authorizes a live action.
-All host paths, process identities and account values remain placeholders.
+This is an operation-scoped, opt-in recovery path for an ordinary deployment with
+unchanged code identity and dependencies. It does not authorize deployment or
+recovery. Fleet must separately review the exact candidate, run its exact-head
+gate, independently rehearse the actual entry and issue each bootstrap/recovery
+GO. All examples below are placeholders, not instructions to act on a live host.
 
-## Supported entries and why neither closes the gap
+## Entries and scope
 
-The pinned reviewed controller's `deploy.py chat-streamd-v2 --rollback` uses the
-current stamp's `prior_sha` and retained `prior_qualification`, ordinary identity
-and ancestry guards, and zero-input restoration. It is not an original operation's
-durable source/file preimage replay entry. A historical ambiguous stamp cannot
-become qualified by rollback.
+Enroll **before the first mutation**, from a clean separate pinned controller:
 
-The controller's `--rollback --coordinated-receipt <exact-receipt>` is supported
-only for that coordinated operation, with applicable existing replacement-
-controller recovery authorization. Its journal, preimages, accounts, source and
-postimage checks remain mandatory. A committed inherited receipt cannot recover
-a subsequent ordinary operation: source/file postimage drift refuses, and an
-ordinary stamp does not satisfy the direct receipt-seal exception. Do not bypass
-that refusal or fill in a manual seal.
+```sh
+python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
+  --release-checkout <runtime> --ref <exact-target-sha> \
+  --gate-evidence <exact-target-gate> --read-timing-receipt <receipt> \
+  --deployer-stream-id <owner> --ordinary-recovery-bundle <new-private-directory>
+```
 
-`_PreActivationTransaction` stores bytes/modes and rollback callbacks only in
-memory and is committed before restart. `_apply_post_activation` leaves a proven
-serving target active if smoke or final publication fails. `_restore_prior` is
-invoked only when target serving is not proven and the original controller still
-exists. It proves stop before source/file restoration, then boot/SHA; this is not
-a full binding qualification. After controller loss those memory preimages cannot
-be reconstructed from the current target files. Neither existing entry is a safe
-generic recovery route for the two missing branches.
+Normal forward guards and account selection still apply. Enrollment adds no
+coordinated acceptance and never qualifies ambiguous history. It requires a
+pre-provisioned daemon interpreter, identical prior/target requirements and code
+identity, immutable managed helper releases, a proven prior daemon identity and
+an unloaded retired fleet-smoke schedule. It refuses unsupported dependency
+changes or helper migration rather than pretend file restoration reverses pip or
+remote installation. Unenrolled legacy ordinary invocations are unchanged; they
+are **not crash-recovery-capable and are not the approved bootstrap route**.
 
-## Smallest separately scoped repair proposal (not implemented here)
+Read the exact current state without changing source/runtime:
 
-Preserve serving policy. Extend the ordinary transaction with an operation-specific
-durable bundle and journal, fsynced before first mutation, plus one narrowly scoped
-recovery entry in the pinned controller. Do not reuse the ancestor's coordinated
-receipt, add a privileged service, or implement generic unguarded restore.
+```sh
+python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
+  --release-checkout <runtime> --ordinary-recovery-status <bundle-directory> \
+  --deployer-stream-id <owner>
+```
 
-The future reviewed bundle must contain:
+After a separate FD decision, invoke the actual recovery entry:
 
-- Controller, candidate target and prior full source SHAs; clean checkout/origin
-  identity and exact code identities; retained immutable source objects/archives.
-- Durable original bytes, full hashes, path, existence/absence and modes for stamp,
-  policy, daemon plist, collector/usage-probe plist, applicable schedules and
-  test-settings/profile artifacts. Record original immutable helper release paths,
-  manifests/proofs, ownership and installed references; do not copy secrets into
-  public evidence. Each applicable mutable file must be inventoried explicitly.
-- Exact ancestry receipt path/seal and retained stamp bytes, selected bindings,
-  exclusions, CLI hashes/versions/account generations, and relevant helper proofs.
-- Original process PID/birth/source identity, admitted postimages and atomically
-  durable phase transitions sufficient to recover at each mutation boundary.
-- Separate FD recovery authorization bound to operation, bundle digest, controller,
-  intended prior/target and expected current state; stale approval must refuse.
+```sh
+python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
+  --release-checkout <runtime> --recover-ordinary <bundle-directory> \
+  --ordinary-recovery-authorization <private-authorization.json> \
+  --recovery-go-tell-id <exact-go-id> --deployer-stream-id <owner>
+```
 
-Required recovery order, tested through the actual future entry:
+These modes cannot combine with coordinated plans/receipts, ordinary `--rollback`,
+prepare-only, another service or skip-kickstart. Existing ordinary and coordinated
+rollback routes are not substitutes for a failed enrolled ordinary operation.
+The inherited coordinated receipt never authorizes this recovery.
 
-1. Validate bundle integrity/modes, controller identity, available source objects,
-   receipt, operation/journal state and separate FD recovery grant. Compare current
-   source, all files/helper references, accounts/pins and owned process identity to
-   explicitly admitted pre/postimages. Check quiescence and release exclusions.
-   Unknown drift, missing bundle or absent authority means no mutation and GATE.
-2. Stop only the operation-owned daemon/helpers through supported mechanisms and
-   prove their exit before changing source. Unproven stop means no checkout/file
-   restoration, preserve evidence and GATE.
-3. Restore exact prior source first, then complete original files/modes, helper
-   references and schedule state. Verify every hash, mode and source readback.
-   Never start a partially restored tree. Partial restoration stays stopped/GATE.
-4. Start from the exact restored definition. Prove fresh boot, PID/birth and SHA,
-   then selected exact binding/dispatch/owned-close zero-input restoration. Do not
-   run model smoke or claim a new forward acceptance. Original stamp bytes remain
-   original; ambiguous history remains unqualified. A proven prior serving with a
-   late optional proof failure remains active, recorded unqualified and GATE.
-5. Persist final outcome and reconcile owned cleanup. Repeat entry must be
-   idempotent from recorded phase, never infer success from a marker alone.
+## Immutable bundle, authority and mutable journal
 
-## Offline rehearsal delivered in this milestone
+Schema `pentacle.ordinary-recovery.v1` has a unique operation identifier and a
+private canonical directory (0700). `bundle.json`, `journal.json`, preimages and
+`source.bundle` are private regular files (0600). Destinations must be canonical,
+owned regular files or recorded absence; symlinks and overlapping paths refuse.
+The bundle binds the release checkout, exact controller/origin, prior and target
+SHAs, source objects, requirement/code identities, actual prior PID/birth/SHA,
+collector loaded state, exact accounts/generations/CLI pins, scope and ancestry
+receipt/seal. The source archive is a Git bundle containing prior/target reachable
+objects, created through an isolated bare staging repository, not modified runtime
+refs. Validation reads its objects in an isolated bare clone.
 
-`tests/test_deploy_ordinary_provenance.py` uses synthetic identities, temporary
-files and actual writer/ordinary controller code with external runtime probes
-replaced. It proves:
+Every captured destination records bytes or absence, full hash and mode:
 
-- Same/different-target eight-cell ordinary forward writer/verifier round trips;
-  exact provenance retention and tampered ordinary restoration refusal.
-- Failed target-serving smoke and final stamp publication leave the target source
-  active, do not invoke automatic restore, and leave no accepted durable new stamp.
-- Real child `os._exit` during partial temporary write, before replacement and
-  after replacement: earlier bytes survive before replace, complete provenance
-  revalidates after replace; orphan temporary files are not success evidence.
-- Real child controller loss after transaction commit leaves only mutated files,
-  no durable ordinary preimages: the recovery prerequisite is **not satisfied**.
+- Deployment stamp and sibling test-profile snapshot
+- Daemon and collector plists
+- Retired fleet-smoke schedule plist and its unloaded state
+- Account policy, machine catalog and local spawn settings
 
-Existing no-input/coordinated suites exercise their existing recovery entries,
-stop/source ordering, retained witness validation and drift refusal. These tests
-are not a rehearsal of the proposed new ordinary recovery entry, which does not
-yet exist. Before bootstrap GO, FD must commission that bounded repair, independent
-review and a separate true-crash/partial-write rehearsal through its exact entry,
-covering all listed source/stamp/policy/plist/helper/schedule preimages and modes.
-No live restore route, host validation, runtime proof or bootstrap readiness is
-claimed by this packet.
+Original immutable helpers retain exact manifest/archive bytes, hashes and modes,
+plus existing installer source verification, module/dependency and CLI artifact
+proofs. Their references are restored with the original policy; helpers themselves
+are never migrated or rewritten. Missing/altered immutable helpers refuse rather
+than silently rebuilding them. The daemon interpreter and dependency closure are
+pinned separately from helper interpreters and revalidated before restoration.
+Private bundle data is not printed in the return. No credentials are introduced.
+
+Both JSON records carry canonical SHA-256 consistency digests. The immutable
+bundle digest is bound by the journal and authorization; each journal replacement
+increments a sequence number. These checks are **not authentication against an
+arbitrary same-uid editor**. Authority remains an independently issued FD decision,
+not a digest, file name or copied coordinated seal.
+
+The authorization JSON must have exactly these fields:
+
+- `schema`: `pentacle.ordinary-recovery.v1`
+- `operation`, `bundle_sha256`, `controller_sha`, `prior_sha`, `target_sha`
+- `expected_state`: the complete status result's `ordinary_recovery_status` value,
+  including exact source, file hashes/modes, process/collector identities and current
+  journal digest
+- `go_tell_id`: equal to the separately supplied CLI GO id
+- `fd_gate_reference`: nonempty reference to the separate FD decision
+
+After any interrupted attempt or journal transition, **fresh exact-current-state
+FD authorization is required for reentry**. The earlier approval is not widened.
+A completed recovery can be read back idempotently only under fresh matching state
+and authority. A successful qualified forward operation is not eligible for this
+failure-recovery entry.
+
+## Publication and admitted states
+
+An active ordinary-operation pointer is written only after complete durable
+bundle/journal capture and readback. The common deployment lock fences unfinished
+ordinary operations against both new ordinary and coordinated transactions.
+
+Enrolled file mutations use write-ahead exact bytes/hash/mode intent, file fsync,
+atomic rename and directory fsync. The journal admits only the current image and
+its immediate intended replacement, then collapses to the verified new image.
+It never accumulates an allowlist of historical images or adopts arbitrary bytes
+observed after a crash. Enrolled plist environment/stderr edits use deterministic
+whole-plist rendering instead of unjournaled external `plutil` writes. Unlink and
+mode restoration are journaled too. Source admission is restricted to the recorded
+prior/target transition; restoration never selects an arbitrary ref.
+
+Phases are `forward`, `serving_unqualified`, `recovering`, `restoring`, `starting`,
+`recovery_required`, `qualified` and `restored_unqualified`. Initial partial bundle
+creation has no active pointer and no source/runtime mutation. Missing, partial,
+unsupported or corrupt evidence refuses. A partial temporary write is not a
+published image. Rename-before-checkpoint loss accepts only its already-journaled
+next image, not an inferred success.
+
+Fresh process identities are recorded only after runtime proof. **Loss after a
+restart but before its new PID/birth/SHA is durably recorded is an unsupported,
+ambiguous window and refuses recovery**, even if a process appears to serve the
+target SHA. Likewise, loss after stop but before the stopped identity is journaled
+refuses instead of assuming the observed absence belongs to this operation.
+Loss after the recorded identity or during journaled file publication
+is recoverable under fresh exact-state authority. The implementation does not
+claim all possible controller-loss windows are automatically recoverable.
+
+## Recovery order and outcomes
+
+1. Validate all bundle/preimage/source integrity, exact controller and current
+   source/images, receipt linkage, immutable helpers, daemon dependencies,
+   accounts/CLI pins, schedule state and ordinary quiescence. Validate separate
+   authority against the exact current journal/state. Unknown drift or absent
+   authority means no source/file/process mutation.
+2. Recheck daemon and collector identities immediately before stopping. Bind the
+   daemon stop to the admitted PID/birth, unload it and prove daemon/descendant and
+   relevant local old-tree helper exit. Stop and prove collector exit. Remote
+   immutable helper releases are not changed; their integrity is revalidated.
+   Unproven exit means no source/file restoration.
+3. Recheck source/files/accounts/helpers after stop. Journal restoration before
+   fetching the preserved source objects and checking out the exact prior. Restore
+   every captured file/absence/mode with write-ahead intents and verify all hashes,
+   modes and source. Partial restoration stays stopped and `recovery_required`.
+4. Only after the complete tree passes readback, bootstrap the prior daemon, prove
+   fresh boot/PID/birth/SHA, and restore the collector's prior loaded/unloaded state.
+   Use the existing authenticated zero-input restoration/owned-close and exact
+   helper dispatch/binding proof. Recheck the exact boot-proven identity after
+   proof before declaring restoration; a replacement is not adopted as success.
+5. Keep the original stamp byte-exact. Result `restored_unqualified` (exit 4) reports
+   restoration, **not a new full-fleet forward acceptance**. Ambiguous legacy stamps
+   remain unqualified. Late proof failure leaves a proven prior serving but reports
+   failed checks/recovery required. Unproven or partial outcomes remain fenced.
+   A serving forward target with failed smoke/final publication remains active and
+   unqualified until separately authorized recovery; no automatic rollback policy
+   was added. Lost bookkeeping cannot relabel a known serving target as inactive.
+
+## Offline evidence and limits
+
+`tests/test_deploy_ordinary_recovery.py` exercises the actual new CLI/dispatch and
+bundle/journal controller with real temporary Git repositories, source bundles,
+files, modes, atomic replacement and child-process exits. It covers actual enrolled
+ordinary smoke/final-publication failure followed by the recovery entry, controller
+loss, before/after rename and partial publication, bad/stale authority, bundle and
+preimage corruption, drift, stop-before-source ordering, byte/mode/absence restore,
+reentry and no legacy qualification. OS/process/boot/account probes in those entry
+fixtures are explicitly synthetic, not runtime proof.
+
+A concrete-adapter fixture separately uses the existing real synthetic account
+SQLite/helper subprocess environment and provisioned interpreters (including
+websockets) to exercise capture and revalidation. No live account or kv data is
+read by this milestone. Fleet must resolve every live-data authorization and run
+its independent actual-environment rehearsal before GO. Source tests, hosted CI
+and this packet do not grant bootstrap, recovery, merge, deployment or restart.

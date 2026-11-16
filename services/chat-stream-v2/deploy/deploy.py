@@ -195,8 +195,14 @@ def _read_stamp(repo: Path, service: ServiceConfig) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+from deploy.ordinary_recovery import ACTIVE as _ORDINARY_RECOVERY
+
 def _write_stamp(repo: Path, service: ServiceConfig, stamp: dict[str, object]) -> None:
     path = _stamp_path(repo, service)
+    durable = _ORDINARY_RECOVERY.get()
+    if durable is not None:
+        durable.publish(path, (json.dumps(stamp, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(), 0o600)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -802,6 +808,10 @@ def _usage_collector_plist_path() -> Path:
 
 
 def _write_bytes(path: Path, contents: bytes) -> None:
+    durable = _ORDINARY_RECOVERY.get()
+    if durable is not None:
+        durable.publish(path, contents)
+        return
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_bytes(contents)
@@ -905,6 +915,16 @@ def _ensure_launchd_environment(
     *,
     launchd_environment: Sequence[tuple[str, str]] | None = None,
 ) -> bool:
+    if _ORDINARY_RECOVERY.get() is not None:
+        path = _launchd_plist_path(service.launchd_label)
+        value = plistlib.loads(path.read_bytes())
+        current = value.setdefault("EnvironmentVariables", {})
+        changes = dict(launchd_environment or service.launchd_environment)
+        changed = any(current.get(k) != v for k, v in changes.items())
+        if changed:
+            current.update(changes)
+            _write_plist(path, value)
+        return changed
     current = _launchd_environment(service.launchd_label)
     plist_path = _launchd_plist_path(service.launchd_label)
     changed = False
@@ -934,6 +954,11 @@ def _ensure_launchd_standard_error_path(service: ServiceConfig, runner: Runner) 
     emergency = str(Path(current).expanduser().parent / LAUNCHD_EMERGENCY_STDERR_NAME)
     if current == emergency:
         return False
+    if _ORDINARY_RECOVERY.get() is not None:
+        path = _launchd_plist_path(service.launchd_label)
+        value = plistlib.loads(path.read_bytes()); value["StandardErrorPath"] = emergency
+        _write_plist(path, value)
+        return True
     _checked(
         ("plutil", "-replace", "StandardErrorPath", "-string", emergency, str(_launchd_plist_path(service.launchd_label))),
         REPO_ROOT,
@@ -1927,6 +1952,8 @@ def _apply_post_activation(
             stamp["daemon_runtime_readback"] = {"target_sha": sha,
                 "outcome": RUNTIME_SHA_OBSERVED if confirmed else RUNTIME_SHA_NOT_CONFIRMED, **observed}
             stamp["serving"] = confirmed
+            if confirmed and _ORDINARY_RECOVERY.get() is not None:
+                _ORDINARY_RECOVERY.get().observed_process()
             if confirmed:
                 if activated_plist_digest is not None:
                     stamp["launchd_plist_digest"] = activated_plist_digest
@@ -2192,8 +2219,21 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
            coordinated_plan: Path | None = None, coordinated_receipt: Path | None = None,
            prepare_only: bool = False, smoke_accounts: Sequence[str] | None = None,
            recovery_authorization: Path | None = None, recovery_go_tell_id: str | None = None,
-           read_timing_receipt: Path | None = None, runner: Runner) -> dict[str, object]:
-    if (recovery_authorization is not None or recovery_go_tell_id is not None) and (
+           read_timing_receipt: Path | None = None,
+           ordinary_recovery_bundle: Path | None = None, recover_ordinary: Path | None = None,
+           ordinary_recovery_authorization: Path | None = None, ordinary_recovery_status: Path | None = None,
+           runner: Runner) -> dict[str, object]:
+    ordinary_read = ordinary_recovery_status is not None
+    ordinary_recover = recover_ordinary is not None
+    if sum(v is not None for v in (ordinary_recovery_bundle, recover_ordinary, ordinary_recovery_status)) > 1:
+        raise DeployError("ordinary recovery modes are mutually exclusive")
+    if any(v is not None for v in (ordinary_recovery_bundle, recover_ordinary, ordinary_recovery_status)):
+        if (service.name != 'chat-streamd-v2' or skip_kickstart or rollback or coordinated_plan is not None
+                or coordinated_receipt is not None or prepare_only or recovery_authorization is not None):
+            raise DeployError("ordinary recovery cannot combine with another deployment mode")
+    if (ordinary_recovery_authorization is not None) != ordinary_recover or (ordinary_recover and not recovery_go_tell_id):
+        raise DeployError("ordinary recovery requires its separate authorization and GO id")
+    if not ordinary_recover and (recovery_authorization is not None or recovery_go_tell_id is not None) and (
             not rollback or coordinated_receipt is None or coordinated_plan is not None or prepare_only
             or recovery_authorization is None or not recovery_go_tell_id):
         raise DeployError("recovery controller authorization requires --rollback --coordinated-receipt and --recovery-go-tell-id")
@@ -2208,6 +2248,17 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
     repo = release_checkout.expanduser().resolve()
     try:
         with coordinated.transaction_lock(repo) as root:
+            from deploy.ordinary_recovery import Bundle, OrdinaryRuntime, fence
+            fence(repo, recovering=recover_ordinary or ordinary_recovery_status)
+            if ordinary_recover or ordinary_read:
+                adapter = OrdinaryRuntime(sys.modules[__name__], service, repo, runner,
+                    stream=deployer_stream_id or "", boot_wait_seconds=boot_wait_seconds)
+                bundle = Bundle(adapter, recover_ordinary or ordinary_recovery_status)
+                if ordinary_read:
+                    bundle.load()
+                    return {"ordinary_recovery_status": bundle.state(), "bundle_sha256": bundle.bundle['sha256'],
+                            "operation": bundle.bundle['operation'], "prepared_only": True}
+                return bundle.recover(ordinary_recovery_authorization, recovery_go_tell_id)
             if coordinated_mode:
                 from deploy.coordinated_runtime import Runtime
                 adapter = Runtime(sys.modules[__name__], service, repo, runner,
@@ -2225,7 +2276,7 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
                 gate_evidence=gate_evidence, deployer_stream_id=deployer_stream_id,
                 skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
                 boot_wait_seconds=boot_wait_seconds, smoke_accounts=smoke_accounts,
-                read_timing_receipt=read_timing_receipt, runner=runner)
+                read_timing_receipt=read_timing_receipt, ordinary_recovery_bundle=ordinary_recovery_bundle, runner=runner)
     except (coordinated.Invalid, OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as exc:
         raise DeployError(str(exc)) from exc
 
@@ -2255,7 +2306,11 @@ def _write_test_profile(repo, service, profile):
     from _shared.spawn_profiles import validate_test_profile
     path = _stamp_path(repo, service).with_name(service.name + ".test-profile.json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    coordinated.atomic_json(path, validate_test_profile(profile))
+    durable = _ORDINARY_RECOVERY.get()
+    if durable is not None:
+        durable.publish(path, coordinated.canonical(validate_test_profile(profile)) + b"\n", 0o600)
+    else:
+        coordinated.atomic_json(path, validate_test_profile(profile))
     return path
 
 
@@ -2272,6 +2327,7 @@ def _deploy_ordinary(
     boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
     smoke_accounts: Sequence[str] | None = None,
     read_timing_receipt: Path | None = None,
+    ordinary_recovery_bundle: Path | None = None,
     runner: Runner,
 ) -> dict[str, object]:
     repo = release_checkout.expanduser().resolve()
@@ -2336,182 +2392,217 @@ def _deploy_ordinary(
     if service.name == "chat-streamd-v2" and not rollback:
         _load_read_timing_receipt(read_timing_receipt, sha)
     declarations = release_exclusions(service, repo) if service.name == "chat-streamd-v2" else []
-    with _PreActivationTransaction(repo, prior_sha, stamp_path, prior_stamp_bytes, runner) as transaction:
-        if not skip_kickstart:
-            transaction.remember_file(_launchd_plist_path(service.launchd_label))
-            policy_path = _launchd_environment(service.launchd_label).get("PENTACLE_PROVIDER_ACCOUNT_POLICY")
-            if policy_path:
-                transaction.remember_file(Path(policy_path).expanduser())
-        _checked(("git", "checkout", "--detach", sha), repo, runner)
-        requirements_hash = verify_venv(repo, service, prior_stamp, runner)
-        gates = {
-            "gate": evidence.get("gate"),
-            "tiers": list(evidence.get("tiers") or []),
-            "generated_at": evidence.get("generated_at"),
-            "evidence_source": evidence_source,
-        }
-        profile = None
-        if service.name == "chat-streamd-v2" and not rollback:
-            profile = _release_test_profile(repo, service, runner)
-        log_paths = _daemon_log_paths(service)
-        log_path = log_paths[0] if log_paths else None
-        if log_path is None and not skip_kickstart:
-            # Refuse now rather than from inside the readback: exit 2 promises "nothing was
-            # kickstarted", and raising this after the restart would make that promise false.
-            raise DeployError("daemon log path is not configured in launchd")
-        prior_log_size = _capture_log_offsets(log_paths) if log_paths else None
-        stamp = {
-            "service": service.name,
-            "ref": deploy_ref,
-            "sha": sha,
-            "prior_sha": prior_sha,
-            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "deployer_stream_id": deployer_stream_id or os.environ.get("AGENT_ORCH_STREAM_ID") or "",
-            "requirements_hash": requirements_hash,
-            "asset_store": _asset_store_identity(service),
-            "gates": gates,
-            "release_exclusions": declarations,
-        }
-        if profile is not None:
-            stamp.update(test_profile=profile)
-        if rollback and service.name == "chat-streamd-v2":
-            stamp["verification_kind"] = "restoration"
-        if ancestry:
-            stamp["coordinated_receipt"] = ancestry
-        if service.name == 'chat-streamd-v2':
-            configured = _launchd_environment(service.launchd_label)
-            entries = (list(smoke_accounts) if smoke_accounts is not None else
-                prior_stamp.get('smoke_accounts', []) if rollback else
-                [v for v in configured.get('PENTACLE_SMOKE_ACCOUNTS', '').split(',') if v])
-            if entries:
-                from tools.spawn_fleet_smoke import account_map
-                try:
-                    if not all(isinstance(v, str) for v in entries):
-                        raise ValueError('accounts must be declarations')
-                    hosts, _, _ = _fleet_smoke_hosts(configured.get('PENTACLE_MACHINES_FILE', ''))
-                    hosts = [host for host in hosts if host not in {row['host'] for row in declarations}]
-                    account_map(entries, tuple((h, p, m) for h in hosts
-                        for p in ('claude', 'codex') for m in ('prompted', 'promptless')))
-                except (ValueError, OSError) as exc:
-                    raise DeployError('invalid deployment account mapping: ' + str(exc)) from exc
-                stamp['smoke_accounts'] = entries
-        if service.name == "chat-streamd-v2":
-            if rollback:
-                qualification = prior_stamp.get("prior_qualification")
-                if isinstance(qualification, dict) and qualification.get("sha") == sha:
-                    stamp["restored_qualification"] = qualification
-            else:
-                stamp["prior_qualification"] = {"sha": prior_sha, "stamp": qualification_stamp(prior_stamp)}
-        activation_runtime_manifest = runtime_manifest(repo, service, runner)
-        stamp["activation_runtime_manifest"] = activation_runtime_manifest
-        if not skip_kickstart:
-            stamp["restart_guard"] = verify_deploy_guard(
-                service, str(stamp["deployer_stream_id"]), runner, repo=repo, sha=sha,
-                rollback=rollback, rollback_from_sha=prior_sha,
-            )
-        activation_launchd_environment = service.launchd_environment
-        if not skip_kickstart:
-            activation_launchd_environment = _launchd_environment_for_release(repo, service)
-        launchd_environment_changed = False
-        usage_probe_launchd_changed = False
-        plist_digest_diverged = False
-        activated_plist_digest: str | None = None
-        if not skip_kickstart:
+    durable = None
+    token = None
+    if ordinary_recovery_bundle is not None:
+        from deploy.ordinary_recovery import Bundle, OrdinaryRuntime
+        configured = _launchd_environment(service.launchd_label)
+        entries = list(smoke_accounts) if smoke_accounts is not None else [v for v in configured.get('PENTACLE_SMOKE_ACCOUNTS', '').split(',') if v]
+        adapter = OrdinaryRuntime(sys.modules[__name__], service, repo, runner,
+            stream=deployer_stream_id or "", boot_wait_seconds=boot_wait_seconds)
+        durable = Bundle.prepare(adapter, ordinary_recovery_bundle, prior_sha, sha, ancestry, entries)
+        token = _ORDINARY_RECOVERY.set(durable)
+    try:
+        with _PreActivationTransaction(repo, prior_sha, stamp_path, prior_stamp_bytes, runner) as transaction:
+            if durable is not None:
+                transaction.commit()  # Durable recovery owns failures; no in-memory callbacks.
+            if not skip_kickstart:
+                transaction.remember_file(_launchd_plist_path(service.launchd_label))
+                policy_path = _launchd_environment(service.launchd_label).get("PENTACLE_PROVIDER_ACCOUNT_POLICY")
+                if policy_path:
+                    transaction.remember_file(Path(policy_path).expanduser())
+            if durable is not None:
+                durable.persist(allowed_source=list({prior_sha, sha}))
+            _checked(("git", "checkout", "--detach", sha), repo, runner)
+            requirements_hash = verify_venv(repo, service, prior_stamp, runner)
+            gates = {
+                "gate": evidence.get("gate"),
+                "tiers": list(evidence.get("tiers") or []),
+                "generated_at": evidence.get("generated_at"),
+                "evidence_source": evidence_source,
+            }
+            profile = None
+            if service.name == "chat-streamd-v2" and not rollback:
+                profile = _release_test_profile(repo, service, runner)
+            log_paths = _daemon_log_paths(service)
+            log_path = log_paths[0] if log_paths else None
+            if log_path is None and not skip_kickstart:
+                # Refuse now rather than from inside the readback: exit 2 promises "nothing was
+                # kickstarted", and raising this after the restart would make that promise false.
+                raise DeployError("daemon log path is not configured in launchd")
+            prior_log_size = _capture_log_offsets(log_paths) if log_paths else None
+            stamp = {
+                "service": service.name,
+                "ref": deploy_ref,
+                "sha": sha,
+                "prior_sha": prior_sha,
+                "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                "deployer_stream_id": deployer_stream_id or os.environ.get("AGENT_ORCH_STREAM_ID") or "",
+                "requirements_hash": requirements_hash,
+                "asset_store": _asset_store_identity(service),
+                "gates": gates,
+                "release_exclusions": declarations,
+            }
+            if profile is not None:
+                stamp.update(test_profile=profile)
+            if rollback and service.name == "chat-streamd-v2":
+                stamp["verification_kind"] = "restoration"
+            if ancestry:
+                stamp["coordinated_receipt"] = ancestry
+            if service.name == 'chat-streamd-v2':
+                configured = _launchd_environment(service.launchd_label)
+                entries = (list(smoke_accounts) if smoke_accounts is not None else
+                    prior_stamp.get('smoke_accounts', []) if rollback else
+                    [v for v in configured.get('PENTACLE_SMOKE_ACCOUNTS', '').split(',') if v])
+                if entries:
+                    from tools.spawn_fleet_smoke import account_map
+                    try:
+                        if not all(isinstance(v, str) for v in entries):
+                            raise ValueError('accounts must be declarations')
+                        hosts, _, _ = _fleet_smoke_hosts(configured.get('PENTACLE_MACHINES_FILE', ''))
+                        hosts = [host for host in hosts if host not in {row['host'] for row in declarations}]
+                        account_map(entries, tuple((h, p, m) for h in hosts
+                            for p in ('claude', 'codex') for m in ('prompted', 'promptless')))
+                    except (ValueError, OSError) as exc:
+                        raise DeployError('invalid deployment account mapping: ' + str(exc)) from exc
+                    stamp['smoke_accounts'] = entries
             if service.name == "chat-streamd-v2":
-                daemon_arguments = _launchd_plist(service.launchd_label).get("ProgramArguments")
-                if not isinstance(daemon_arguments, list) or not all(
-                    isinstance(value, str) for value in daemon_arguments
-                ):
-                    raise DeployError("v2 daemon plist has invalid ProgramArguments")
-                _validate_v2_launchd_program(repo, daemon_arguments)
-            base_environment_changed = _ensure_launchd_environment(service, runner)
-            stamp_environment_changed = _ensure_launchd_environment(
+                if rollback:
+                    qualification = prior_stamp.get("prior_qualification")
+                    if isinstance(qualification, dict) and qualification.get("sha") == sha:
+                        stamp["restored_qualification"] = qualification
+                else:
+                    stamp["prior_qualification"] = {"sha": prior_sha, "stamp": qualification_stamp(prior_stamp)}
+            activation_runtime_manifest = runtime_manifest(repo, service, runner)
+            stamp["activation_runtime_manifest"] = activation_runtime_manifest
+            if not skip_kickstart:
+                stamp["restart_guard"] = verify_deploy_guard(
+                    service, str(stamp["deployer_stream_id"]), runner, repo=repo, sha=sha,
+                    rollback=rollback, rollback_from_sha=prior_sha,
+                )
+            activation_launchd_environment = service.launchd_environment
+            if not skip_kickstart:
+                activation_launchd_environment = _launchd_environment_for_release(repo, service)
+            launchd_environment_changed = False
+            usage_probe_launchd_changed = False
+            plist_digest_diverged = False
+            activated_plist_digest: str | None = None
+            if not skip_kickstart:
+                if service.name == "chat-streamd-v2":
+                    daemon_arguments = _launchd_plist(service.launchd_label).get("ProgramArguments")
+                    if not isinstance(daemon_arguments, list) or not all(
+                        isinstance(value, str) for value in daemon_arguments
+                    ):
+                        raise DeployError("v2 daemon plist has invalid ProgramArguments")
+                    _validate_v2_launchd_program(repo, daemon_arguments)
+                base_environment_changed = _ensure_launchd_environment(service, runner)
+                stamp_environment_changed = _ensure_launchd_environment(
+                    service,
+                    runner,
+                    launchd_environment=activation_launchd_environment,
+                )
+                launchd_environment_changed = base_environment_changed or stamp_environment_changed
+                if service.name == "chat-streamd-v2":
+                    if durable is None:
+                        transaction.add_rollback(_v2_usage_probe_rollback(repo, runner))
+                    usage_probe_launchd_changed = _ensure_v2_usage_probe_launchd(repo, runner)
+                    if durable is not None:
+                        durable.observed_process()
+                    # Repoint StandardErrorPath off the retained legacy launchd.err to a fresh
+                    # emergency file. Runs after the usage-probe plist rewrite so it is not clobbered,
+                    # and after the rollback above so the daemon-plist preimage covers this edit.
+                    _ensure_launchd_standard_error_path(service, runner)
+                # Compute divergence AFTER every deploy-side plist edit, so the digest reflects the
+                # definition that will actually be bootstrapped. Reload when the on-disk managed
+                # definition is not what the last successful deploy bootstrapped (additive: only ever
+                # adds a reload, never removes one the prior triggers would have performed).
+                plist_digest_diverged, activated_plist_digest = _launchd_definition_out_of_sync(
+                    prior_stamp, service.launchd_label
+                )
+            stamp["launchd_environment"] = dict(activation_launchd_environment)
+            stamp["launchd_environment_changed"] = launchd_environment_changed
+            stamp["usage_probe_launchd_changed"] = usage_probe_launchd_changed
+            # Carry the last successfully bootstrapped digest forward unchanged; `_apply_post_activation`
+            # advances it to `activated_plist_digest` only on BOOT_OBSERVED.
+            stamp["launchd_plist_digest"] = (
+                prior_stamp.get("launchd_plist_digest") if isinstance(prior_stamp, dict) else None
+            )
+            if not skip_kickstart:
+                _assert_deploy_stamp_path(stamp_path, activation_launchd_environment)
+                restart_guard = stamp.get("restart_guard")
+                if not isinstance(restart_guard, dict):
+                    raise DeployError("restart activation requires verified sole-deployer guard evidence")
+                deployer_stream_id = stamp.get("deployer_stream_id")
+                if not (isinstance(deployer_stream_id, str) and deployer_stream_id):
+                    raise DeployError("restart activation requires a non-empty deployer stream id")
+                if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                    raise DeployError("restart activation requires a full lowercase target SHA")
+                pre_restart_state = _launchd_state(service.launchd_label, runner)
+                prior_pid = pre_restart_state.pid
+                down = rollback and restart_guard.get("daemon_state") == "down"
+                if not (down and prior_pid is None) and (type(prior_pid) is not int or prior_pid <= 0):
+                    raise DeployError("restart activation requires a positive launchd PID")
+                requested_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                stamp["restart_activation"] = _new_restart_activation(
+                    requested_at=requested_at,
+                    pre_restart_pid=prior_pid,
+                    target_sha=sha,
+                    deployer_stream_id=deployer_stream_id,
+                )
+                if down:
+                    stamp["restart_activation"]["daemon_state"] = "down"
+                    stamp["restart_activation"]["pre_restart_launchd_answered"] = pre_restart_state.answered
+            if profile is not None:
+                if _release_test_profile(repo, service, runner) != profile:
+                    raise DeployError("test profile/settings drift before activation")
+                _write_test_profile(repo, service, profile)
+            _write_stamp(repo, service, stamp)
+            transaction.commit()
+        if not skip_kickstart:
+            # `_apply_post_activation` restarts the daemon, classifies the result onto the stamp, and
+            # persists it — all inside one never-raising boundary. Once the kickstart fires the bounce
+            # is applied, and EXIT_REFUSED (2) must keep meaning "nothing was kickstarted". NOTHING
+            # here re-raises, so a post-activation failure (restart, readback, smoke, schedule, or the
+            # stamp write itself) can never both mislabel a live daemon as refused AND lose the record
+            # — the 2026-09-05 laneM/laneN bounces did exactly that on a workstation fleet-smoke miss whose
+            # _checked() raised before the stamp write.
+            _apply_post_activation(
                 service,
-                runner,
-                launchd_environment=activation_launchd_environment,
+                repo,
+                sha,
+                stamp,
+                prior_log_size=prior_log_size,
+                prior_pid=prior_pid,
+                reload_launchd=launchd_environment_changed or usage_probe_launchd_changed or plist_digest_diverged,
+                boot_wait_seconds=boot_wait_seconds,
+                runner=runner,
+                activated_plist_digest=activated_plist_digest,
+                inherited_receipt_sha256=inherited_seal,
+                **({"restoration_runtime":restoration_runtime} if restoration_runtime is not None else {}),
             )
-            launchd_environment_changed = base_environment_changed or stamp_environment_changed
-            if service.name == "chat-streamd-v2":
-                transaction.add_rollback(_v2_usage_probe_rollback(repo, runner))
-                usage_probe_launchd_changed = _ensure_v2_usage_probe_launchd(repo, runner)
-                # Repoint StandardErrorPath off the retained legacy launchd.err to a fresh
-                # emergency file. Runs after the usage-probe plist rewrite so it is not clobbered,
-                # and after the rollback above so the daemon-plist preimage covers this edit.
-                _ensure_launchd_standard_error_path(service, runner)
-            # Compute divergence AFTER every deploy-side plist edit, so the digest reflects the
-            # definition that will actually be bootstrapped. Reload when the on-disk managed
-            # definition is not what the last successful deploy bootstrapped (additive: only ever
-            # adds a reload, never removes one the prior triggers would have performed).
-            plist_digest_diverged, activated_plist_digest = _launchd_definition_out_of_sync(
-                prior_stamp, service.launchd_label
-            )
-        stamp["launchd_environment"] = dict(activation_launchd_environment)
-        stamp["launchd_environment_changed"] = launchd_environment_changed
-        stamp["usage_probe_launchd_changed"] = usage_probe_launchd_changed
-        # Carry the last successfully bootstrapped digest forward unchanged; `_apply_post_activation`
-        # advances it to `activated_plist_digest` only on BOOT_OBSERVED.
-        stamp["launchd_plist_digest"] = (
-            prior_stamp.get("launchd_plist_digest") if isinstance(prior_stamp, dict) else None
-        )
-        if not skip_kickstart:
-            _assert_deploy_stamp_path(stamp_path, activation_launchd_environment)
-            restart_guard = stamp.get("restart_guard")
-            if not isinstance(restart_guard, dict):
-                raise DeployError("restart activation requires verified sole-deployer guard evidence")
-            deployer_stream_id = stamp.get("deployer_stream_id")
-            if not (isinstance(deployer_stream_id, str) and deployer_stream_id):
-                raise DeployError("restart activation requires a non-empty deployer stream id")
-            if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
-                raise DeployError("restart activation requires a full lowercase target SHA")
-            pre_restart_state = _launchd_state(service.launchd_label, runner)
-            prior_pid = pre_restart_state.pid
-            down = rollback and restart_guard.get("daemon_state") == "down"
-            if not (down and prior_pid is None) and (type(prior_pid) is not int or prior_pid <= 0):
-                raise DeployError("restart activation requires a positive launchd PID")
-            requested_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            stamp["restart_activation"] = _new_restart_activation(
-                requested_at=requested_at,
-                pre_restart_pid=prior_pid,
-                target_sha=sha,
-                deployer_stream_id=deployer_stream_id,
-            )
-            if down:
-                stamp["restart_activation"]["daemon_state"] = "down"
-                stamp["restart_activation"]["pre_restart_launchd_answered"] = pre_restart_state.answered
-        if profile is not None:
-            if _release_test_profile(repo, service, runner) != profile:
-                raise DeployError("test profile/settings drift before activation")
-            _write_test_profile(repo, service, profile)
-        _write_stamp(repo, service, stamp)
-        transaction.commit()
-    if not skip_kickstart:
-        # `_apply_post_activation` restarts the daemon, classifies the result onto the stamp, and
-        # persists it — all inside one never-raising boundary. Once the kickstart fires the bounce
-        # is applied, and EXIT_REFUSED (2) must keep meaning "nothing was kickstarted". NOTHING
-        # here re-raises, so a post-activation failure (restart, readback, smoke, schedule, or the
-        # stamp write itself) can never both mislabel a live daemon as refused AND lose the record
-        # — the 2026-09-05 laneM/laneN bounces did exactly that on a workstation fleet-smoke miss whose
-        # _checked() raised before the stamp write.
-        _apply_post_activation(
-            service,
-            repo,
-            sha,
-            stamp,
-            prior_log_size=prior_log_size,
-            prior_pid=prior_pid,
-            reload_launchd=launchd_environment_changed or usage_probe_launchd_changed or plist_digest_diverged,
-            boot_wait_seconds=boot_wait_seconds,
-            runner=runner,
-            activated_plist_digest=activated_plist_digest,
-            inherited_receipt_sha256=inherited_seal,
-            **({"restoration_runtime":restoration_runtime} if restoration_runtime is not None else {}),
-        )
-        if not stamp.get("serving"):
-            _restore_prior(service, repo, stamp, transaction, restoration_runtime,
-                runner=runner, boot_wait_seconds=boot_wait_seconds)
-    else:
-        stamp["prepared_only"] = True
-    return stamp
+            if not stamp.get("serving") and durable is None:
+                _restore_prior(service, repo, stamp, transaction, restoration_runtime,
+                    runner=runner, boot_wait_seconds=boot_wait_seconds)
+        else:
+            stamp["prepared_only"] = True
+        if durable is not None:
+            durable.finish(stamp)
+            stamp['ordinary_recovery_bundle'] = str(durable.folder)
+            stamp['ordinary_recovery_digest'] = durable.bundle['sha256']
+        return stamp
+    except Exception as exc:
+        if durable is None:
+            raise
+        # Do not promise "refused before change" after a durable operation began.
+        try: durable.persist(phase='recovery_required', result={'outcome':'recovery_required', 'error':type(exc).__name__})
+        except OSError: pass
+        known_serving = bool(locals().get('stamp', {}).get('serving'))
+        return {'sha':sha, 'serving':known_serving,
+                'disposition':'active with failed checks' if known_serving else 'target not active, restore unproven',
+                'ordinary_recovery_bundle':str(durable.folder), 'full_fleet_acceptance':False,
+                'recovery_required':True, 'error':type(exc).__name__}
+    finally:
+        if token is not None: _ORDINARY_RECOVERY.reset(token)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2520,6 +2611,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-checkout", type=Path, default=DEFAULT_RELEASE_CHECKOUT)
     parser.add_argument("--ref", default=DEFAULT_REF)
     parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--ordinary-recovery-bundle", type=Path, help="New private durable bundle for this ordinary forward operation.")
+    parser.add_argument("--recover-ordinary", type=Path, help="Recover one durable ordinary operation under separate FD authority.")
+    parser.add_argument("--ordinary-recovery-authorization", type=Path)
+    parser.add_argument("--ordinary-recovery-status", type=Path, help="Read exact current ordinary recovery state without mutation.")
     parser.add_argument("--gate-evidence", type=Path)
     parser.add_argument("--read-timing-receipt", type=Path,
                         help="Passing tools/read_timing.py receipt for the exact forward daemon SHA.")
@@ -2577,12 +2672,18 @@ def main(argv: list[str] | None = None) -> int:
             recovery_authorization=args.recovery_controller_authorization,
             recovery_go_tell_id=args.recovery_go_tell_id,
             read_timing_receipt=args.read_timing_receipt,
+            ordinary_recovery_bundle=args.ordinary_recovery_bundle,
+            recover_ordinary=args.recover_ordinary,
+            ordinary_recovery_authorization=args.ordinary_recovery_authorization,
+            ordinary_recovery_status=args.ordinary_recovery_status,
             runner=_run,
         )
     except DeployError as exc:
         print(f"deploy refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     print(json.dumps(stamp, sort_keys=True))
+    if stamp.get('outcome') == 'restored_unqualified':
+        return EXIT_PRIOR_RESTORED
     if stamp.get("prepared_only") or stamp.get("phase") == "discarded":
         return EXIT_OK
     disposition = stamp.get("disposition")

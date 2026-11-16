@@ -496,8 +496,8 @@ consistency protection, not proof against storage hardware failure.
 Only separately authorized fleet work may bootstrap from ambiguous history. The
 supported ordinary entry is the pinned reviewed controller's
 `deploy.py chat-streamd-v2 --release-checkout <runtime> --ref <exact-candidate>
---gate-evidence <exact-candidate-gate> --deployer-stream-id <owner>` with applicable
-read-timing evidence. Before that entry, fleet must prove exact candidate versus
+--gate-evidence <exact-candidate-gate> --deployer-stream-id <owner>
+--ordinary-recovery-bundle <new-private-directory>` with applicable read-timing evidence. Before that entry, fleet must prove exact candidate versus
 active ancestry equality using the actual `code_identity_at` algorithm, validate
 receipt/state/bindings and preserve durable preimages. Any drift or missing proof
 stops for FD. This offline change supplies no runtime proof or bootstrap GO.
@@ -511,7 +511,8 @@ does not claim fresh full-fleet forward acceptance. Coordinated rollback validat
 the same receipt and original saved qualification before restoring its byte-exact
 stamp; an inherited receipt is not a new ordinary operation's recovery receipt.
 
-**Bootstrap remains held:** serving-but-unqualified and ordinary controller-loss
-recovery still lack a durable ordinary replay entry. See the bounded
-[recovery gap packet and offline rehearsal](../ORDINARY_RECOVERY.md). Source tests
-cover this limitation rather than presenting in-memory preimages as crash-safe.
+**Bootstrap remains held pending fleet gate, independent review/rehearsal and GO.**
+The enrolled ordinary path now has an explicit durable recovery entry; see the
+[recovery design, exact entry and offline rehearsal](../ORDINARY_RECOVERY.md).
+Unenrolled legacy invocations still have only in-memory preimages. Recovery refuses
+ambiguous process-loss windows rather than inferring ownership or qualification.
