@@ -365,6 +365,7 @@ def _gate_environment(repo: Path, service: ServiceConfig | None = None) -> dict[
         "PATH": path,
         "PYTHON": str(python),
         "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
         **_gate_tier_timeouts(),
     }
 
