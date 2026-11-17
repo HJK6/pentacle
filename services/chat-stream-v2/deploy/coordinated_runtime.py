@@ -749,7 +749,7 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             raise Invalid("daemon PID absent from process census")
         return {"launchd_answered": True, "pid": state.pid, "processes": processes}
 
-    def stop(self, receipt, provenance=None):
+    def stop(self, receipt, provenance=None, expected_identity=None):
         state = self.d._launchd_state(self.service.launchd_label, self.runner)
         if not state.answered:
             raise Invalid("launchd state is unproven")
@@ -757,6 +757,8 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         start = self.d._process_start(pid, self.runner) if pid else None
         if pid and not start:
             raise Invalid("old daemon process provenance is unproven")
+        if expected_identity is not None and (pid != expected_identity.get('pid') or start != expected_identity.get('birth')):
+            raise Invalid("admitted daemon identity changed before stop")
         rows = self.process_rows()
         owned = {pid} if pid else set()
         for _ in rows:
@@ -773,6 +775,11 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             tracked[row["pid"]] = row["start"]
         self.old_pid, self.old_start = pid, start
         self.log_offsets = self.d._capture_log_offsets(self.d._daemon_log_paths(self.service))
+        if expected_identity is not None:
+            fresh = self.d._launchd_state(self.service.launchd_label, self.runner)
+            if (not fresh.answered or fresh.pid != pid or fresh.loaded != state.loaded
+                    or (pid and self.d._process_start(pid, self.runner) != start)):
+                raise Invalid("admitted daemon identity changed before bootout")
         if state.loaded:
             self.checked(("launchctl", "bootout", self.d._launchctl_target(self.service.launchd_label)))
         final = self.d._wait_launchd_unloaded(self.service.launchd_label, self.runner, timeout_s=self.d.RELOAD_UNLOAD_WAIT_S)
