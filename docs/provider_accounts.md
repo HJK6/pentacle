@@ -83,8 +83,7 @@ percentage reservation ledger or automatic quota/auth migration.
 ## Pool ceilings and exact-seat exceptions
 
 `account status` is the source for current pool controls and eligibility.
-`cap` is the revisioned runtime control or null; `legacy_cap` is historical
-private-policy metadata and is never enforced. Deployment does not import old caps.
+`cap` is the revisioned runtime control or null. Deployment does not import old caps.
 
 The current authenticated primary assistant or an operator credential can replace
 a pool control through the existing account RPC. Use the verified pool ID and
