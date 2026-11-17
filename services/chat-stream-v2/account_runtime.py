@@ -26,6 +26,7 @@ def load_policy(path=None):
         raise AccountError("account_policy_insecure")
     value=json.loads(path.read_text())
     validate_policy_scope(value)
+    value.pop("account_caps",None)
     return value
 
 
@@ -269,6 +270,7 @@ class AccountRuntime:
     async def _pool_launch(self,binding,message):
         from account_pool_control import assert_eligible
         if message.get('_account_admitted_replay') is True: return
+        if await self._advisor_restore_launch(message): return
         override=None
         if "pool_override_reason" in message or "pool_authority_ref" in message:
             if any(not isinstance(message.get(k),str) or not message[k].strip()
@@ -284,6 +286,33 @@ class AccountRuntime:
             override=await self.run(make)
             message["_pool_spawn_override"]=override
         await self.run(lambda a:assert_eligible(a,binding,now=self.clock(),override=override))
+
+    async def _advisor_restore_launch(self,message):
+        return await self.store.submit(lambda conn:self._advisor_restore_launch_conn(conn,message))
+
+    @staticmethod
+    def _advisor_restore_launch_conn(conn,message):
+        """Recheck the frozen restore at selection and final admission."""
+        from assistant_authority_restore import SERVICE_ACTOR
+        auth=message.get("_auth_context") or {}
+        key=message.get("idempotency_key")
+        if (auth.get("service_authenticated") is not True or auth.get("service_actor")!=SERVICE_ACTOR
+                or not isinstance(key,str) or not key.startswith("authority-restore:")):
+            return False
+        # The optional restore subsystem may not have initialized its tables.
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='v2_authority_restore_episode'").fetchone(): return False
+        row=conn.execute("SELECT payload,attempt_generation FROM v2_authority_restore_episode "
+                         "WHERE spawn_key=? AND state IN ('spawning','unresolved')",(key,)).fetchone()
+        if not row or row['attempt_generation']!=message.get('_session_generation'): return False
+        payload=json.loads(row['payload'])
+        # Spawn adds only these launch-staging fields before account selection.
+        actual={k:v for k,v in message.items() if k not in {
+            '_native_initial_prompt_path','_defer_launch_token_stage','objective_source'}}
+        if payload.get('visibility') is None:
+            actual.pop('visibility',None)
+            payload.pop('visibility',None)
+        return actual==payload
 
     async def bind_launch(self,row):
         if row.get("account_binding"): await self.run(lambda accounts:accounts.bind_session(row))
@@ -324,7 +353,8 @@ class AccountRuntime:
                     override=(message or {}).get("_pool_spawn_override")
                     if not admitted:
                         if override: self._control_authorizer((message or {}).get("_auth_context") or {})(a.conn)
-                        assert_eligible(a,binding,now=self.clock(),override=override)
+                        if not self._advisor_restore_launch_conn(a.conn,message or {}):
+                            assert_eligible(a,binding,now=self.clock(),override=override)
                     a._bind_session(row)
                     key="provider_cli.admission:"+row["stream_id"]+":"+row["session_generation"]
                     data=({"revision":pin["revision"],"digest":digest(pin),"artifact":proof,
@@ -475,7 +505,7 @@ class AccountRuntime:
         auth=message.get("_auth_context") or {}
         if message.get("_pool_notice_token") is NOTICE_TOKEN:
             notice={"kind":message['_pool_notice_kind'],"metadata":message['_pool_notice_metadata'],
-                    "recipient_stream_id":stream}
+                    "recipient_stream_id":stream,"tell_id":message.get("tell_id")}
             decision=await self.cap_monitor.guard(notice)
             if decision:
                 raise AccountError("pool_notice_stale" if decision.action=='terminal' else "pool_notice_deferred")
@@ -490,7 +520,8 @@ class AccountRuntime:
             if not target or target.get("status")!="open" or target.get("session_generation")!=generation:
                 raise AccountError("account_seat_generation_stale")
             exemptions=self._cap_exemptions_conn(a.conn)
-            if message.get('_pool_notice_token') is NOTICE_TOKEN:
+            if (message.get('_pool_notice_token') is NOTICE_TOKEN
+                    and message.get('_pool_notice_kind') in {'account_cap_reminder','account_cap_blocker'}):
                 metadata=message['_pool_notice_metadata']
                 source_row=_seat_conn(a.conn,metadata['stream'])
                 state=read(a,f"account.cap-seat:{metadata['stream']}:{metadata['generation']}") or {}
