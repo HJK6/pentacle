@@ -641,7 +641,7 @@ UNKNOWN = ga.UNKNOWN
 
 def harness_identity() -> str:
     h = hashlib.sha256()
-    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", HERE / "lib" / "instruction_snapshot.py", HERE / "lib" / "sqlite_gate.py", CONFIG_PATH):
+    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", HERE / "lib" / "instruction_snapshot.py", HERE / "lib" / "sqlite_gate.py", HERE / "lib" / "sandbox_gate.py", CONFIG_PATH):
         h.update(p.read_bytes())
     return h.hexdigest()
 
@@ -717,6 +717,17 @@ def group_alive(pgid: int) -> bool:
 
 class Cancelled(BaseException):
     pass
+
+
+from lib.sandbox_gate import Incomplete as SandboxIncomplete
+
+
+def prepare_sandbox(checkout, venv, toolchain, root, evidence, env):
+    from lib import sandbox_gate
+    context = sandbox_gate.prepare(checkout=checkout, venv=venv, toolchain=toolchain,
+                                   root=root, evidence=evidence, env=env)
+    sandbox_gate.run_probes(context)
+    return context
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -808,6 +819,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     resolved_selection: Optional[List[str]] = None
     instruction_input = None
     sqlite_site = sqlite_config = prepared_lock = None
+    sandbox = None
     try:
         if args.history_complete and (missing_identity or args.prior_attempt):
             raise SetupFailure([fail("identity_args", "--history-complete requires full identity and no prior attempt")])
@@ -910,36 +922,41 @@ def main(argv: Optional[List[str]] = None) -> int:
             failures += f
             if venv is not None and not f:
                 sqlite_site = sqlite_gate.prepare(venv, checkout / "services/chat-stream-v2/tools/sqlite_guard.py")
-                if target.get("gate") == "merge" and args.command == "run":
-                    # HOME is part of the same attempt root as TMPDIR/fixtures.
-                    home = tmp / "home"
-                    home.mkdir(parents=True, exist_ok=True)
-                    sqlite_config = sqlite_gate.activate(sqlite_site, venv, tmp,
-                        checkout / "services/chat-stream-v2/tools/sqlite_guard.py")
         npm_info: Dict[str, Any] = {}
         if target.get("npm_ci") and not failures:
             npm_info, f = ensure_npm_env(subprocess.run, checkout, prepared_dir, env, profile, args.rebuild, log)
             failures += f
         if failures:
             raise SetupFailure(failures)
+        env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=venv, home=home, tmp=tmp, locale_name=locale_name,
+                        evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
+        child_run = subprocess.run
+        if args.command == "run" and target["kind"] != "prepare":
+            home = tmp / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            env["HOME"] = str(home)
+            sandbox = prepare_sandbox(checkout, venv, toolchain, tmp, evidence / "gate", env)
+            env["TMUX_TMPDIR"] = str(sandbox.socket_dir)
+            child_run = lambda argv, **kwargs: subprocess.run(sandbox.wrap(argv), **kwargs)
+            if target.get("gate") == "merge" and sqlite_site is not None:
+                sqlite_config = sqlite_gate.activate(sqlite_site, venv, tmp,
+                    checkout / "services/chat-stream-v2/tools/sqlite_guard.py", sandbox_proof=sandbox.proof())
         for build in target.get("npm_build", []):
-            out = subprocess.run(["npm", "run", build], cwd=str(checkout), env=env, capture_output=True, text=True, timeout=300)
+            out = child_run(["npm", "run", build], cwd=str(checkout), env=env, capture_output=True, text=True, timeout=300)
             build_log = evidence / ("build-%s.log" % build.replace(":", "-"))
             build_log.write_text(out.stdout + out.stderr)
             if out.returncode:
                 raise SetupFailure([fail("dependencies", "npm run %s failed; see %s" % (build, build_log.name))])
 
-        env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=venv, home=home, tmp=tmp, locale_name=locale_name,
-                        evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
         service_dir = checkout / profile["service_dir"]
         # Preflight from the child's own context; every independent fault in one pass.
         failures += check_scratch(evidence, home, tmp, config["min_free_mb"], timeout_s, config["reserve_s"])
-        failures += check_node_npm(subprocess.run, toolchain, env)
+        failures += check_node_npm(child_run, toolchain, env)
         if venv is not None:
-            failures += check_dependencies(subprocess.run, venv / "bin" / "python", env, [checkout / r for r in profile["python_requirements"]])
+            failures += check_dependencies(child_run, venv / "bin" / "python", env, [checkout / r for r in profile["python_requirements"]])
             caps = config["capability_sets"].get(target.get("capabilities") or "", [])
             if caps and not failures:
-                unavailable = check_capabilities(subprocess.run, venv / "bin" / "python", env, service_dir / "tests", caps)
+                unavailable = check_capabilities(child_run, venv / "bin" / "python", env, service_dir / "tests", caps)
                 if target.get("strict_capabilities", True):
                     failures += unavailable
                 else:
@@ -947,13 +964,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                         log("capability unavailable: " + item["detail"])
         if target.get("process_listing"):
             # Node's runner currently needs process listing to reap its owned groups.
-            failures += check_process_listing(subprocess.run, env)
+            failures += check_process_listing(child_run, env)
         if args.command == "run" and (args.target == "web-gate" or web_selected):
             # Optional npm dependencies can be silently dropped by a successful install.
             # Probe from the exact checkout on both fresh and reused preparations.
             terminal_failure = None
             try:
-                probe = subprocess.run(["node", "-e", "require('node-pty')"],
+                probe = child_run(["node", "-e", "require('node-pty')"],
                                        cwd=str(checkout), env=env, capture_output=True, text=True, timeout=10)
                 if probe.returncode:
                     terminal_failure = "node-pty is unavailable: " + probe.stderr[-400:]
@@ -967,12 +984,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     state["extra"]["npm"] = {"ci_output_tail": npm_info["ci_output_tail"]}
                 failures.append(fail("dependencies", terminal_failure))
         if args.command == "run" and web_selected:
-            probe = subprocess.run(["node", "-e", "require('./test/e2e/web_gate').resolveChrome()"],
+            probe = child_run(["node", "-e", "require('./test/e2e/web_gate').resolveChrome()"],
                                    cwd=str(checkout), env=env, capture_output=True, text=True, timeout=30)
             if probe.returncode or not (checkout / "renderer/dist/web/web.html").is_file():
                 failures.append(fail("dependencies", "selected web integration needs Chrome and the web build: " + probe.stderr[-400:]))
         if target.get("preflight_script") and not failures:
-            failures += run_preflight_script(subprocess.run, checkout / target["preflight_script"], env)
+            failures += run_preflight_script(child_run, checkout / target["preflight_script"], env)
         if failures:
             raise SetupFailure(failures)
         writer.emit("prepared", toolchain={k: {"version": v["version"], "sha256": v["sha256"], "realpath": v["realpath"]} for k, v in toolchain.items()},
@@ -991,6 +1008,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if target["kind"] == "pytest_files":  # establish ownership before claiming a subject start
                 owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
                 env[OwnedProcesses.ENV] = str(owner.path)
+            command = sandbox.wrap(command)
             writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
             t_start = time.monotonic()
             proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
@@ -1012,6 +1030,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             state["extra"] = {"subject_elapsed_s": round(time.monotonic() - t_start, 3), "returncode": proc.returncode}
             if outcome == "pass" and state["secondary"].get("cleanup") == "failed":
                 state["outcome"] = "cleanup_failure"
+        state["evidence"] = evidence_refs(evidence / "gate")
+    except SandboxIncomplete as exc:
+        state.update(outcome="incomplete", first_failure={"stage": "setup", "code": "sandbox_incomplete"},
+                     extra=dict(state["extra"], sandbox_error=str(exc)))
         state["evidence"] = evidence_refs(evidence / "gate")
     except SetupFailure as exc:
         state.update(outcome="setup_failure", first_failure={"stage": "setup", "code": exc.failures[0]["code"]},

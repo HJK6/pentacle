@@ -51,6 +51,15 @@ class Tmp(unittest.TestCase):
         self._t = tempfile.TemporaryDirectory(prefix="ge-t-")
         self.tmp = Path(os.path.realpath(self._t.name))
         self.addCleanup(self._t.cleanup)
+        # Existing entrypoint tests isolate orchestration from OS-specific probes.
+        # Dedicated sandbox tests exercise real preparation/failure control flow.
+        def sandbox_stub(checkout, venv, toolchain, root, evidence, env):
+            root = Path(root)
+            return SimpleNamespace(socket_dir=root / "tmux", wrap=lambda argv: argv,
+                                   proof=lambda: None)
+        patcher = mock.patch.object(ge, "prepare_sandbox", side_effect=sandbox_stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class AttemptReceipts(Tmp):
@@ -656,9 +665,7 @@ class EntrypointReceipts(Tmp):
     """End-to-end through main(): the started receipt precedes everything."""
 
     def setUp(self):
-        self._t = tempfile.TemporaryDirectory(prefix="ge-t-", dir="/tmp")
-        self.tmp = Path(os.path.realpath(self._t.name))
-        self.addCleanup(self._t.cleanup)
+        super().setUp()
 
     def run_main(self, *extra, patch_load=None):
         argv = ["run", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev"), "--checkout", str(self.tmp / "co"),
@@ -710,6 +717,23 @@ class EntrypointReceipts(Tmp):
             code = self.run_main('--target', 'npm-test', '--spec', 's', '--series', 'npm-python', '--purpose', 'negative_control')
         events = [json.loads(p.read_text()) for p in sorted((self.tmp / 'ev/attempts').glob('*/*.json'))]
         return code, observed, events, venv
+
+    def test_sandbox_incomplete_prevents_any_test_subject(self):
+        for reason in ("sandbox-exec missing", "forbidden sentinel readable", "owned control failed"):
+            with self.subTest(reason=reason):
+                # Separate roots because every attempt writes immutable receipts.
+                with tempfile.TemporaryDirectory(prefix="sandbox-entry-") as folder:
+                    old = self.tmp
+                    self.tmp = Path(folder)
+                    try:
+                        with mock.patch.object(ge, "prepare_sandbox", side_effect=ge.SandboxIncomplete(reason)):
+                            code, observed, events, _ = self.npm_python_case("3.13.1")
+                        self.assertNotEqual(code, 0)
+                        self.assertEqual(observed, [])
+                        self.assertEqual([e['state'] for e in events], ['started', 'terminal'])
+                        self.assertEqual(events[-1]['outcome'], 'incomplete')
+                    finally:
+                        self.tmp = old
 
     def test_npm_declared_python_missing_stops_before_subject(self):
         code, observed, events, _ = self.npm_python_case(None)

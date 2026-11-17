@@ -1,5 +1,11 @@
 # Attempt-owned SQLite gate guard
 
+The launch envelope below describes the conservative pre-proof policy. The
+[exact-profile Seatbelt gate](sandbox-gate.md) now surrounds every test-starting
+target. Only a successful native self-probe for the current attempt/profile
+permits non-Python children. Direct alternate Python, guarded `-S`, and
+`os.system` remain refused. The registry and SQLite rules below are unchanged.
+
 The merge gate activates an owned-venv `.pth` hook before Python preflight or
 subject execution. `-I -B`, `-c`, `-m`, plain `sys.executable`, changed cwd and
 cleared environment all load the hook. The hook reads its configuration beside

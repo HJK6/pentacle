@@ -51,11 +51,15 @@ def prepare(venv, guard):
     return site
 
 
-def activate(site, venv, root, guard):
+def activate(site, venv, root, guard, *, sandbox_proof=None):
     root = Path(root).resolve(strict=True)
     config = {'active': True, 'root': str(root), 'guard': str(Path(guard).resolve()),
               'guard_sha256': digest(guard), 'venv': str(Path(venv).resolve()),
               'hook_path': str(Path(site) / HOOK)}
+    if sandbox_proof is not None:
+        if not sandbox_proof_valid(sandbox_proof, root):
+            raise RuntimeError('sandbox proof does not match this attempt')
+        config['sandbox_proof'] = sandbox_proof
     (Path(site) / CONFIG).write_text(json.dumps(config, sort_keys=True))
     return config
 
@@ -67,7 +71,8 @@ def deactivate(site):
 def receipt(config, evidence):
     root = Path(config['root'])
     registry, refused = root / '.sqlite-created.jsonl', root / '.sqlite-refusals.jsonl'
-    report = dict(config, registry_sha256=digest(registry) if registry.exists() else hashlib.sha256(b'').hexdigest(),
+    # Preserve the SQLite receipt surface; OS proof has its own receipt.
+    report = dict({k: v for k, v in config.items() if k != "sandbox_proof"}, registry_sha256=digest(registry) if registry.exists() else hashlib.sha256(b'').hexdigest(),
                   refusal_count=len(refused.read_text().splitlines()) if refused.exists() else 0)
     evidence = Path(evidence)
     evidence.mkdir(parents=True, exist_ok=True)
@@ -76,6 +81,23 @@ def receipt(config, evidence):
             shutil.copyfile(source, evidence / source.name.lstrip('.'))
     (evidence / 'sqlite-guard.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
     return report
+
+
+def sandbox_proof_valid(proof, root):
+    """A same-attempt, exact-profile successful probe, never an ambient flag."""
+    try:
+        if not isinstance(proof, dict) or proof.get('passed') is not True or proof.get('execution_mode') != 'native':
+            return False
+        if Path(proof['root']).resolve() != Path(root).resolve():
+            return False
+        if digest(proof['profile_path']) != proof['profile_sha256']:
+            return False
+        if digest(proof['receipt_path']) != proof['receipt_sha256']:
+            return False
+        receipt = json.loads(Path(proof['receipt_path']).read_text())
+        return all(receipt.get(key) == proof[key] for key in ('passed', 'root', 'profile_path', 'profile_sha256', 'execution_mode'))
+    except (OSError, KeyError, ValueError, TypeError):
+        return False
 
 
 def boot():
@@ -156,6 +178,13 @@ def install_launch_guard(config):
         if p.name == 'git' and str(p) in ('/bin/git', '/usr/bin/git'):
             args = [os.fsdecode(a) for a in argv[1:]]
             if args and args[0] in ('rev-parse',):
+                return
+        # Only native launches change policy. Direct unguarded Python stays
+        # refused even after an OS proof, as do guarded -S and os.system.
+        python_name = any(name.lower().startswith(('python', 'pypy'))
+                          for name in (p.name, Path(os.path.realpath(p)).name))
+        if not python_name and os.path.realpath(p) != python_real:
+            if sandbox_proof_valid(config.get('sandbox_proof'), root):
                 return
         refuse('uncovered runtime: ' + str(p))
 

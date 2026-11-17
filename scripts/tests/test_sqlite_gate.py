@@ -107,3 +107,43 @@ def test_stale_active_configuration_refuses_before_reuse(context):
         gate.assert_inactive(venv)
     gate.deactivate(site)
     gate.assert_inactive(venv)
+
+
+def test_native_relaxation_requires_current_profile_proof(tmp_path):
+    # RED: c21a has no proof-bounded native-launch permission API.
+    profile = tmp_path / 'profile.sb'; profile.write_text('(version 1)\n(deny default)\n')
+    receipt = tmp_path / 'sandbox-profile.json'
+    proof = {'profile_path': str(profile), 'profile_sha256': gate.digest(profile),
+             'root': str(tmp_path), 'passed': True, 'execution_mode': 'native'}
+    receipt.write_text(json.dumps(proof))
+    proof['receipt_path'] = str(receipt)
+    proof['receipt_sha256'] = gate.digest(receipt)
+    assert gate.sandbox_proof_valid(proof, tmp_path)
+    assert not gate.sandbox_proof_valid(dict(proof, execution_mode="injected-test-runner"), tmp_path)
+    profile.write_text('(version 1)\n(allow default)\n')
+    assert not gate.sandbox_proof_valid(proof, tmp_path)
+    assert not gate.sandbox_proof_valid(None, tmp_path)
+
+
+@pytest.mark.parametrize('operation,allowed', [('native', True), ('no_site', False), ('other_python', False), ('system', False), ('drift', False), ('aliased_python', False)])
+def test_proven_native_permission_does_not_relax_python_policy(context, tmp_path, operation, allowed):
+    venv, root, site, config = context
+    profile=tmp_path/'profile.sb'; profile.write_text('(version 1)\n(deny default)\n')
+    receipt=tmp_path/'sandbox-profile.json'
+    proof={'root': str(root), 'profile_path': str(profile), 'profile_sha256': gate.digest(profile), 'passed': True, 'execution_mode': 'native'}
+    receipt.write_text(json.dumps(proof))
+    proof.update(receipt_path=str(receipt), receipt_sha256=gate.digest(receipt))
+    active = gate.activate(site, venv, root, REPO/'services/chat-stream-v2/tools/sqlite_guard.py', sandbox_proof=proof)
+    assert 'sandbox_proof' not in gate.receipt(active, tmp_path/'sqlite-evidence')
+    if operation == 'drift': profile.write_text('changed')
+    (root/'alternate-helper').symlink_to('/usr/bin/python3')
+    code='''import subprocess,sys,os
+op=sys.argv[1]
+if op in ('native','drift'): subprocess.run(['/bin/sh','-c','true'],check=True)
+elif op == 'no_site': subprocess.run([sys.executable,'-S','-c','pass'],check=True)
+elif op == 'other_python': subprocess.run(['/usr/bin/python3','-c','pass'],check=True)
+elif op == 'aliased_python': subprocess.run([sys.argv[2],'-c','pass'],check=True)
+else: os.system('true')
+'''
+    out=subprocess.run([str(venv/'bin/python'),'-I','-c',code,operation,str(root/'alternate-helper')],capture_output=True,text=True)
+    assert (out.returncode == 0) is allowed, out.stderr
