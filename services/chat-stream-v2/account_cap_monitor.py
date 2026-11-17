@@ -203,10 +203,12 @@ class CapMonitor:
                 else:
                     window=actionable_reading(a,pool,control,now=runtime.clock())
                     label=f"{pool['provider']}/{pool['pool_id']}"
+                    stamp=(pool.get('latest_observation') or {}).get('observed_at')
+                    age=runtime.clock()-stamp if isinstance(stamp,(int,float)) else None
                     if window is None:
                         pending.pop(RECOVERED,None)
                         if not state.get('unavailable'):
-                            notice(PROBLEM,f"Pool {label} reading unavailable; last reading age {pool.get('age_seconds')} seconds; "
+                            notice(PROBLEM,f"Pool {label} reading unavailable; last reading age {age} seconds; "
                                    f"collection error {pool.get('error_codes') or 'no healthy current reading'}")
                             state['unavailable']=True
                     else:

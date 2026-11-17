@@ -50,7 +50,7 @@ def eligibility(accounts, provider, pool, *, now, measured=None):
         if measured is None:
             measured=next((p for p in accounts.readback(now=now)["quota_pools"]
                            if (p["provider"],p["pool_id"])==(provider,pool)),{})
-        obs=measured.get("observation") or {}
+        obs=measured.get("latest_observation") or {}
         windows=obs.get('windows')
         window=windows.get(control["window"]) if isinstance(windows,dict) else None
         details=window if isinstance(window,dict) else {}
@@ -70,7 +70,7 @@ USAGE_CAP_WARNING_MARGIN = 2
 
 def actionable_reading(accounts, measured, control, *, now):
     """Return the last healthy capped window, never extending its reset boundary."""
-    observation=measured.get("observation") or {}
+    observation=measured.get("latest_observation") or {}
     windows=observation.get("windows")
     window=windows.get(control.get("window")) if isinstance(windows,dict) else None
     stamp=observation.get("observed_at")
