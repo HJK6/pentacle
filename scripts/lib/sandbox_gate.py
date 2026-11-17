@@ -59,7 +59,7 @@ def refuse_broad(paths):
         if home_root or path in ('/', '/Users', '/home', '/tmp', '/private/tmp', '/opt/homebrew', '/usr/local', str(Path.home())) or Path(path).name in ('.local', 'agent-workspace', '.cache', 'Caches', 'cache', 'caches'):
             raise ValueError('broad sandbox allowance refused: ' + path)
 
-def bwrap_argv(read_paths, write_paths, forbidden):
+def bwrap_argv(read_paths, write_paths, forbidden, links=()):
     """The proven unprivileged bubblewrap boundary: new user, pid, ipc, uts and net namespaces, a private /dev
     (own devpts, so tmux works without a separate account), no capabilities, read-only system trees and only the
     listed owned paths bound at their own paths. Nothing else of the host, including the home, is visible."""
@@ -76,6 +76,8 @@ def bwrap_argv(read_paths, write_paths, forbidden):
         argv += ['--bind', path, path]
     for path in forbidden:
         argv += ['--ro-bind', '/dev/null', path]
+    for value, path in links:
+        argv += ['--symlink', value, path]
     return argv
 
 def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None, socket_root=None, pty=False):
@@ -285,6 +287,29 @@ def alternate_interpreters(candidates, root):
     return [real_interpreter_files(candidate, root)[0] for candidate in candidates]
 
 
+def symlink_components(path, bound):
+    """(stored value, path) for each symlink on the way to an interpreter's real file that is not inside a bound tree.
+
+    A venv python often points through an alias such as cpython-3.13 to cpython-3.13.15; the jail binds only the real
+    tree, so the alias must exist inside it as the same symlink."""
+    links, current = [], Path(path)
+    for _ in range(16):
+        found = None
+        for index in range(1, len(current.parts)):
+            part = Path(*current.parts[:index + 1])
+            if part.is_symlink():
+                found = part
+                break
+        if found is None:
+            return links
+        value = os.readlink(found)
+        target = Path(os.path.normpath(value if os.path.isabs(value) else found.parent / value))
+        if not any(found == root or root in found.parents for root in bound):
+            links.append((value, str(found)))
+        current = target.joinpath(*current.parts[len(found.parts):])
+    raise deps.DependencyError('symlink chain too long: ' + str(path))
+
+
 def linux_runtime_roots(venv, tools, root):
     """Trees the venv interpreter and the toolchain binaries live in, when they are not under /usr."""
     code = 'import os,sys;print(os.path.realpath(sys.base_prefix))'
@@ -363,7 +388,8 @@ def prepare_linux(checkout, venv, tools, root, evidence, env, socket_dir):
     read_paths = sorted(set(map(resolved, [checkout, venv, *linux_runtime_roots(venv, tools, root), *LINUX_SYSTEM_READ])))
     write_paths = sorted(set(map(resolved, [root, evidence, socket_dir])))
     profile_path = evidence / 'bwrap-profile.json'
-    profile_path.write_text(json.dumps({'schema': 'pentacle.bwrap-profile.v1', 'argv': bwrap_argv(read_paths, write_paths, forbidden)},
+    links = symlink_components(venv / 'bin/python', [checkout, venv, *read_paths])
+    profile_path.write_text(json.dumps({'schema': 'pentacle.bwrap-profile.v1', 'argv': bwrap_argv(read_paths, write_paths, forbidden, links)},
                                        sort_keys=True, indent=2) + '\n')
     child_env = dict(env)
     child_env.pop('TMUX', None)

@@ -462,3 +462,15 @@ def test_bwrap_jail_hides_the_outside_and_keeps_owned_writes(tmp_path):
         pytest.skip('unprivileged user namespaces unavailable here')
     assert 'SECRET' not in probe.stdout and 'No such file' in probe.stdout
     assert 'wrote' in probe.stdout and (owned / 'x').read_text() == 'w\n'
+
+
+def test_symlink_components_recreates_only_aliases_outside_bound_trees(tmp_path):
+    m = module()
+    real = tmp_path / 'py' / 'cpython-3.13.15'; (real / 'bin').mkdir(parents=True)
+    (real / 'bin/python3.13').write_text('')
+    (tmp_path / 'py' / 'cpython-3.13').symlink_to('cpython-3.13.15')
+    venv = tmp_path / 'venv'; (venv / 'bin').mkdir(parents=True)
+    (venv / 'bin/python').symlink_to(tmp_path / 'py/cpython-3.13/bin/python3.13')
+    links = m.symlink_components(venv / 'bin/python', [venv, real])
+    assert links == [('cpython-3.13.15', str(tmp_path / 'py/cpython-3.13'))]
+    assert m.symlink_components(venv / 'bin/python', [venv, real, tmp_path / 'py']) == []
