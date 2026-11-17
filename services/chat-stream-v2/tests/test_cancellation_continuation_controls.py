@@ -117,7 +117,7 @@ def test_spawn_open_commit_survives_actual_request_disconnect_and_restart(tmp_pa
             pane = RecordingPane()
             spec = "spec_example__cancel_continuation"
             await link_specs(store, spec)
-            ctl = SpawnCtl(store, sessions, tmux=pane, specs=RouteProbeSpecs())
+            ctl = SpawnCtl(store, sessions, tmux=pane, specs=RouteProbeSpecs.rooted(tmp_path, spec))
             server.spawnctl = ctl
             original = store.open_session
             async def commit_then_pause(host, name, **fields):

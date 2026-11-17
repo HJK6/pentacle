@@ -107,6 +107,17 @@ closed assigned sessions, and retained intent-bearing spawn reservations even
 past expiry, consume the one seat. Remove the small tag and fill the full spec
 to add seats. Handoffs, resumes and admitted replays keep continuity.
 
+The tag is read once per commission, from the target spec file only, bound to
+the same identity snapshot the commission's binding resolved from; no second
+board scan runs and nothing is read under the graph lock. A change to the file
+after that read (a Syncthing delivery) applies from the next commission, so
+staleness is bounded by one commission's admission-to-intent interval; the seat
+claim itself stays atomic in the store. A registry with no memory root refuses
+with `spec_unavailable`; it never reads the process-wide memory root. A
+scheduled seat commission is checked at insert with the spec ids the request
+named, which count as explicit; an assignment inherited from the owner's seat
+does not.
+
 Explicit assignment and membership are checked when requested, not again when
 an approved held request releases. The small-item seat claim commits atomically
 with the first spawn intent, so racing callers or two approved held requests

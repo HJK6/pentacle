@@ -276,6 +276,9 @@ FD_SPEC = "spec_example__fd_recovery"
 
 
 class _FdCatalog:
+    def __init__(self, memory_root=None):
+        self.memory_root = memory_root
+
     @staticmethod
     def resolution_for(spec_id):
         return "resolved" if str(spec_id or "").removeprefix("spec_") == FD_SPEC.removeprefix("spec_") else "zero_matches"

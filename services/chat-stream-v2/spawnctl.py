@@ -291,8 +291,14 @@ def front_desk_exemption(msg: dict[str, Any], composite) -> str | None:
 
 
 class _SpecBinding(dict):
-    """Local checked-source evidence; never serialized into public bindings."""
+    """Local checked-source evidence; never serialized into public bindings.
+
+    ``spec_view`` is the sealed identity snapshot the binding resolved from and
+    ``small_read`` the one small-item read made from it for this commission.
+    """
     source_checks = ()
+    spec_view = None
+    small_read = None
 
 
 class SpawnCtl:
@@ -657,23 +663,44 @@ class SpawnCtl:
         })
         if source_row:
             binding.source_checks = ((source_id, spec_binding_source(source_row)),)
+        binding.spec_view = view
         return binding
 
     async def _small_assigned_item(self, msg: dict[str, Any], binding: dict[str, Any]) -> str | None:
-        """Read the actual spec, including a distinct QA target, before launch."""
+        """Read the actual spec, including a distinct QA target, before launch.
+
+        A resolved binding reads only its target file(s) from the identity
+        snapshot it already captured (no second board scan), and answers a
+        repeat call for the same commission from that one read. A bare binding
+        (the schedule insert's) reads through a fresh resolver on the registry's
+        own root; a registry with no root is refused, never read from the
+        process-wide memory root.
+        """
         from _shared.spec_reader import SpecReader
         from yaml import YAMLError
         from work_item_admission import small_tag, small_item_message
         spec_id = binding.get("assigned_spec_id") or None
         qa = qa_dispatch.classified(msg, {"role": msg.get("role"), "phase": msg.get("phase")})
-        ids = list(dict.fromkeys(value for value in (spec_id, msg.get("qa_spec_id") if qa else None) if value))
-        def read():
-            try:
-                reader = SpecReader(getattr(self.specs, "memory_root", None), identity_only=True)
-                return {identity: small_tag(reader.read(identity)[3]) for identity in ids}
-            except (ValueError, OSError, UnicodeError, YAMLError):
-                raise VerbError("spec_unavailable", "Restore readable canonical spec content before resubmitting.") from None
-        small = await asyncio.to_thread(read) if ids else {}
+        ids = tuple(dict.fromkeys(value for value in (spec_id, msg.get("qa_spec_id") if qa else None) if value))
+        memo = getattr(binding, "small_read", None)
+        if memo is not None and memo[0] == ids:
+            small = memo[1]
+        else:
+            view = getattr(binding, "spec_view", None)
+            root = getattr(self.specs, "memory_root", None)
+            def read():
+                try:
+                    if callable(getattr(view, "read_spec_text", None)):
+                        return {identity: small_tag(view.read_spec_text(identity)) for identity in ids}
+                    if root is None:
+                        raise ValueError("spec_root_unavailable")
+                    reader = SpecReader(root, identity_only=True)
+                    return {identity: small_tag(reader.read(identity)[3]) for identity in ids}
+                except (ValueError, OSError, UnicodeError, YAMLError):
+                    raise VerbError("spec_unavailable", "Restore readable canonical spec content before resubmitting.") from None
+            small = await asyncio.to_thread(read) if ids else {}
+            if isinstance(binding, _SpecBinding):
+                binding.small_read = (ids, small)
         if qa and any(small.values()):
             identity = next(identity for identity, value in small.items() if value)
             raise VerbError("work_small_item_limit", small_item_message(identity))
@@ -2411,6 +2438,12 @@ class SpawnCtl:
                 delivery_receipt["spawn_daemon_instance_id"] = self.instance_id
             # Graph admission ends before boot. A winning parent close makes
             # this request refuse before a pane; a winning intent blocks close.
+            # The tag read stays out of the graph lock; the claim itself is the
+            # store transaction in record_spawn_intent.
+            small_claim = None
+            claim_context = {**msg, "_auth_context": {**(msg.get("_auth_context") or {}), "ruled_release": False}}
+            if new_work_commission(claim_context, resume=resume_session_id is not None):
+                small_claim = await self._small_assigned_item({**msg, "role": work_role}, spec_binding)
             async with self.sessions._graph_lock:
                 lane_provisioning = await self._lane_admission(msg, execution_binding, work_role)
                 parent_normalization = None
@@ -2427,10 +2460,6 @@ class SpawnCtl:
                             "new_generation": spawn_generation, "actor": assistant_restore.SERVICE_ACTOR,
                         }
                         open_flds["parent_stream_id"] = None
-                small_claim = None
-                claim_context = {**msg, "_auth_context": {**(msg.get("_auth_context") or {}), "ruled_release": False}}
-                if new_work_commission(claim_context, resume=resume_session_id is not None):
-                    small_claim = await self._small_assigned_item({**msg, "role": work_role}, spec_binding)
                 recorded = await self.store.record_spawn_intent(
                     host, name,
                     {

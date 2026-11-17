@@ -31,7 +31,7 @@ async def daemon(tmp_path):
     store.start()
     tmux = Tmux()
     sessions = Sessions(store, tmux=tmux, local_host=HOST)
-    ctl = SpawnCtl(store, sessions, tmux=tmux, specs=RouteProbeSpecs())
+    ctl = SpawnCtl(store, sessions, tmux=tmux, specs=RouteProbeSpecs.rooted(tmp_path, SPEC))
     notify = Notify(str(tmp_path / "notifications.db"), sessions=sessions)
     ctl.consent_notify = notify
     server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions,

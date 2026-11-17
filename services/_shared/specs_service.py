@@ -199,6 +199,23 @@ class SpecResolutionSnapshot:
     def canonical_spec_identity(self, spec_id: str | None) -> str | None:
         return self._service._canonical_from_resolution(self.resolve_for_spawn(spec_id))
 
+    def read_spec_text(self, spec_id: str) -> str:
+        """One resolved spec's text, bound to the scan that captured this view.
+
+        Reads only the target file; a byte that changed since the scan sealed
+        it raises ``spec_changed`` rather than answering from newer content.
+        """
+        matches = self._service._matches_from_index(self._tree, spec_id)
+        if len(matches) != 1:
+            raise ValueError("spec_unresolved")
+        path = matches[0][1] / "spec.md"
+        before, content, _read_error = self._service._read_identity_input(path)
+        scanned = self._service._identity_cache.get(path)
+        if (before is None or scanned is None or scanned[0] != before
+                or scanned[3] != _content_digest(content)):
+            raise ValueError("spec_changed")
+        return content.decode("utf-8")
+
     def resolution_for(self, spec_id: str | None) -> str | None:
         if not spec_id:
             return None

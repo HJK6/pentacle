@@ -10,6 +10,7 @@ from server import Server
 from sessions import Sessions
 from spawnctl import SpawnCtl
 from store import Store
+from test_window_schedule_contract import spec_tree
 from test_assistant_role import _FdCatalog, FD_SPEC, OPERATOR, _front_desk_composite, _spy_operator_facing
 from test_spawn_resume import _machine
 from test_spawn_starting_durable_handle import StartingPaneTmux
@@ -195,7 +196,8 @@ async def scheduled_fixture(monkeypatch, tmp_path, *, recovery_spec=FD_SPEC, spe
                                  for sid in (UI_SPEC, recovery_spec)], assigned_spec_id=UI_SPEC)
     await link_specs(store, recovery_spec, UI_SPEC)
     await sessions.refresh()
-    ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path), specs=specs or LineageCatalog())
+    ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path), specs=specs or LineageCatalog(
+        spec_tree(tmp_path, FD_SPEC, UI_SPEC, recovery_spec)))
     ctl.visibility_launches = _spy_operator_facing(monkeypatch)
     ctl.visibility_opens = []
     real_open = sessions.open

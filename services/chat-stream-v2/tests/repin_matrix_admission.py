@@ -110,7 +110,7 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
             from test_window_schedule_contract import FakeSessions,FakeComms,RouteProbeSpecs,SPEC,link_specs,future_time,message
             fake_sessions=FakeSessions()
             fixture_host=next(iter(fake_sessions.rows)).split(":")[0];fake_sessions.rows={key.replace(fixture_host,old.host):dict(value,stream_id=key.replace(fixture_host,old.host)) for key,value in fake_sessions.rows.items()}
-            ctl.specs=RouteProbeSpecs()
+            ctl.specs=RouteProbeSpecs.rooted(tmp_path,SPEC)
             surface=WindowSchedule(store,fake_sessions,FakeComms(),ctl,local_host=old.host);surface.mark_store_ready()
             await link_specs(store,SPEC)
             inserted=await surface.schedule_insert(message("schedule.insert",old.host+":requester",objective="Exercise scheduled repin admission",

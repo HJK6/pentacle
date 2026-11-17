@@ -625,12 +625,14 @@ async def test_small_qa_target_refused_even_when_assigned_item_is_ordinary(env):
 @pytest.mark.asyncio
 async def test_index_unavailable_does_not_waive_spec_readability(env):
     from _shared.spec_reader import SpecReader
+    from _shared.specs_service import SpecResolutionSnapshot
     ctl, _, tmux, caller, _, target, _ = await front_desk(env, linked=False)
     await env.store.submit(lambda conn: conn.execute(
         "UPDATE v2_work_index_state SET state_json=?", (json.dumps({"available": False}),)))
     def unavailable(*args):
         raise ValueError("spec_changed")
     env.monkeypatch.setattr(SpecReader, "read", unavailable)
+    env.monkeypatch.setattr(SpecResolutionSnapshot, "read_spec_text", unavailable)
     assert (await refused(ctl, agent(caller, spec=target))).code == "spec_unavailable"
     assert tmux.created == 0
 
@@ -695,3 +697,77 @@ async def test_fd_resume_of_small_seat_preserves_identity_without_new_claim(env)
     row = await env.store.fetch_session("localhost", "v2-original-fable")
     assert row["assigned_spec_id"] == target and row["claude_session_id"] == RESUME_ID
     assert len(commands) == 1 and "--resume" in commands[0]
+
+
+@pytest.mark.asyncio
+async def test_small_item_read_never_falls_back_to_the_live_memory_root(env):
+    """F1: a registry with no memory_root is a defined refusal, never a read of PENTACLE_MEMORY_ROOT."""
+    from types import SimpleNamespace
+    ctl, _, _, _, _, target, _ = await front_desk(env, small=True)  # sets PENTACLE_MEMORY_ROOT to a small-tagged tree
+    ctl.specs = SimpleNamespace(resolution_for=lambda _spec_id: "resolved")
+    error = await refused_small(ctl, target)
+    assert error.code == "spec_unavailable"
+
+
+async def refused_small(ctl, target):
+    with pytest.raises(VerbError) as exc:
+        await ctl._small_assigned_item({"role": "worker"}, {"assigned_spec_id": target})
+    return exc.value
+
+
+@pytest.mark.asyncio
+async def test_small_item_is_read_once_from_the_binding_snapshot_outside_the_graph_lock(env):
+    """F2: the tag read adds no board scan, happens once per commission, and never under the graph lock."""
+    import work_item_admission
+    from _shared.specs_service import SpecsSubsystem
+    ctl, sessions, tmux, caller, _, target, _ = await front_desk(env)
+    scans, reads, during = [], [], []
+    scan = SpecsSubsystem._scan_folders_by_id
+    tag = work_item_admission.small_tag
+    env.monkeypatch.setattr(SpecsSubsystem, "_scan_folders_by_id",
+                            lambda self, *a, **k: scans.append(1) or scan(self, *a, **k))
+    env.monkeypatch.setattr(work_item_admission, "small_tag",
+                            lambda text: reads.append(sessions._graph_lock.locked()) or tag(text))
+    small = ctl._small_assigned_item
+
+    async def counted(msg, binding):
+        before = len(scans)
+        try:
+            return await small(msg, binding)
+        finally:
+            during.append(len(scans) - before)
+    env.monkeypatch.setattr(ctl, "_small_assigned_item", counted)
+    await ctl.spawn(agent(caller, spec=target), HOST)
+    assert tmux.created == 1
+    assert during and set(during) == {0}
+    assert reads == [False]
+
+
+@pytest.mark.asyncio
+async def test_fd_scheduled_seat_commission_with_explicit_spec_is_admitted(env):
+    """F3: schedule insert vouches for an explicit --spec-id; an inherited assignment is still refused."""
+    import uuid
+    from window_schedule import WindowSchedule
+    from test_window_schedule_contract import FakeComms, future_time
+    import launch
+    ctl, sessions, _, caller, home, target, _ = await front_desk(env)
+    ctl.machine = launch.local_machine(HOST, cwd=str(env.root), claude_bin="/test/claude",
+                                       projects_root=str(env.root), agent_orch_bin_dir="/test/bin")
+    await env.store.update_session(HOST, "front-desk", spec_ids=[home, target], spec_binding_provenance=[
+        {"spec_id": s, "provenance": "spawn_explicit", "granting_principal": "operator",
+         "granted_at": "2026-10-09T00:00:00Z"} for s in (home, target)])
+    schedule = WindowSchedule(env.store, sessions, FakeComms("delivered"), ctl, local_host=HOST)
+    schedule.mark_store_ready()
+
+    def insert(**extra):
+        return {"type": "schedule.insert", "request_id": str(uuid.uuid4()), "from_stream_id": caller[0],
+                "_auth_context": {"token_verified": True, "stream_id": caller[0], "session_generation": caller[1]},
+                "objective": "Scheduled front desk work", "fires_at_utc": future_time(), "target_host": HOST,
+                "provider": "claude", "model": "claude-opus-4-8", "effort": "high", "role": "worker",
+                "initial_prompt": "Do the work.", **extra}
+
+    inserted = await schedule.schedule_insert(insert(spec_ids=[target]))
+    assert inserted["schedule"]["schedule_id"]
+    with pytest.raises(VerbError) as exc:
+        await schedule.schedule_insert(insert())
+    assert exc.value.code == "work_assignment_required"
