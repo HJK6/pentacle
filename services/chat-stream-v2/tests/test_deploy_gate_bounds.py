@@ -143,3 +143,11 @@ def test_failing_gate_still_refuses_deploy(tmp_path: Path) -> None:
     repo = _fake_release(tmp_path)
     with pytest.raises(deploy_mod.DeployError, match="v2 merge gate failed rc=1"):
         deploy_mod.run_gate_and_write_evidence(repo, V2_SERVICE, ("merge",), tmp_path / "gate.json", SHA, runner)
+
+
+def test_inline_gate_environment_writes_no_bytecode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # gate_env.py runs the same suite with PYTHONDONTWRITEBYTECODE=1. Without it the deploy tests
+    # that build a release checkout see `?? services/_shared/__pycache__/` and fail "release checkout is dirty".
+    monkeypatch.setattr(deploy_mod, "GATE_REQUIRED_EXECUTABLES", ())
+    repo = _fake_release(tmp_path)
+    assert deploy_mod._gate_environment(repo, V2_SERVICE)["PYTHONDONTWRITEBYTECODE"] == "1"
