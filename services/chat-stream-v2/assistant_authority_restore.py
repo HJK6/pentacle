@@ -120,6 +120,9 @@ class AuthorityRestore:
 
     async def status(self) -> dict:
         binding = await self.server.lane_rulings.binding()
+        if binding['state'] == 'sessions':
+            return {'state': 'sessions', 'episode_id': None, 'attempt_seq': 0,
+                    'budget_epoch': 0, 'next_attempt_at': None, 'last_error': None, 'updated_at': None}
         shape = await self.shape()
         stream = binding.get('stream_id', '')
         host, sep, name = stream.partition(':')

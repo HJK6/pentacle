@@ -2,6 +2,11 @@
 
 Direct CLI for orchestrating agent sessions through `chat_streamd`. Lets one agent spawn, drive, and observe other agents without the leader's LLM context having to read raw tmux scrollback.
 
+Advisor reviews can use [short per-request sessions](../../docs/advisor_sessions.md).
+`assistant advise` submits a work-scoped request, `assistant answer` answers it,
+and `assistant authority --session-kinds` controls the gradual rollout. The
+default empty list preserves the bound-advisor behavior.
+
 ## Supporting spawn admission
 
 An immediate parented worker, evaluator, planner, advisory reviewer (`reviewer-advisory`),
@@ -324,7 +329,7 @@ On success the CLI prints a JSON receipt:
 
 ### Ad hoc images in the assistant chat
 
-A hidden seat has no operator-facing chat, and the assistant composite does not mirror an own-stream `send-image`. To show an image in the assistant chat (for example `home:assistant`) without waiting for a dispatch reply, the current direct-primary binding publishes it proactively:
+A hidden seat has no operator-facing chat, and the assistant composite does not mirror an own-stream `send-image`. The bound front desk's `send-image` therefore publishes to the assistant chat itself: `agent-orch send-image ./chart.png --caption "..." --note-type result --ref report:<id>` (the composite comes from the daemon's binding; `--to` or `PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID` override it; if this seat is the bound front desk and the composite cannot be resolved or published to, the call exits nonzero and never posts to its own chat; `--why` goes with `--note-type other`). Strict publication requires the note type and ref, so a front desk call without them exits `2` naming the flags instead of posting to its own chat. Any other seat that cannot publish there (not the bound publisher, composite not reachable) gets a stderr notice naming the reason and keeps the own-conversation behaviour above; only daemon answers that prove the seat is the bound publisher (note-field, ref, repeat or duplicate refusals) end as a failure. To publish a file or an already-uploaded ID yourself, use `send-file`:
 
 ```bash
 agent-orch send-file ./chart.png --to home:assistant --proactive --caption "Q3 conversions"

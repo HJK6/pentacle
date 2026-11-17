@@ -1037,6 +1037,7 @@ class Server:
             "compact": self._on_compact,
             "transcribe_blob": self._on_transcribe_blob,
             "assistant.publish": self._on_assistant_publish,
+            **{"assistant.owed." + action: self._on_assistant_owed for action in ("open", "close", "list", "show")},
             "assistant.operation": self._on_assistant_operation,
             "work.unattended": self._on_work_unattended,
             "work.report.get": self._on_work_report_get,
@@ -1049,6 +1050,8 @@ class Server:
             "assistant.restore": self._on_assistant_restore,
             "assistant.rebind": self._on_assistant_rebind,
             "assistant.authority": self._on_assistant_authority,
+            "assistant.advise": self._on_assistant_advice,
+            "assistant.answer": self._on_assistant_advice,
             "assistant.ruling": self._on_assistant_ruling,
             "send_image": self._on_send_image,
             "send.receipt.get": self._on_send_receipt_get,
@@ -5049,6 +5052,18 @@ class Server:
         )
         return {"type": "transcribe_blob.ok", **result}
 
+    async def _on_assistant_owed(self, msg: dict[str, Any]) -> dict[str, Any]:
+        composite = self._composite_for_message(msg)
+        if composite is None or (msg.get("composite_stream_id") and not composite.is_stream(msg["composite_stream_id"])):
+            raise VerbError("assistant_owed_unauthorized", "assistant composite unavailable")
+        composite.owed.server = self
+        try:
+            action = msg["type"].rsplit(".", 1)[1]
+            result = await composite.owed.request(action, msg, msg.get("_auth_context") or {})
+            return {"type": msg["type"] + ".ok", **result}
+        except ValueError as exc:
+            raise VerbError(str(exc).split(":", 1)[0], str(exc)) from exc
+
     async def _on_assistant_publish(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
@@ -5377,6 +5392,7 @@ class Server:
         try:
             if action == "read":
                 return {"type": "assistant.authority.ok", **await self.lane_rulings.binding(),
+                        **await self.lane_rulings.advisor_sessions.status(),
                         "shape": await self.authority_restore.shape() if self.authority_restore else None,
                         "restore": await self.authority_restore.status() if self.authority_restore else None}
             if action in {"restore", "retry"}:
@@ -5386,6 +5402,9 @@ class Server:
                     (composite.config.direct_primary_stream_id, composite.config.direct_primary_generation)):
                     raise ValueError("assistant_authority_unauthorized")
                 return {"type": "assistant.authority.ok", "restore": await self.authority_restore.manual(action, brief_file=msg.get("brief_file"))}
+            if action == "session_kinds" and auth.get("token_verified"):
+                return await self.lane_rulings.configure_sessions(msg.get("session_kinds"),
+                    actor_stream_id=auth["stream_id"], actor_generation=auth["session_generation"], account=msg.get("account"))
             if action != "set" or not auth.get("token_verified"):
                 raise ValueError("assistant_authority_unauthorized")
             return await self.lane_rulings.configure(
@@ -5405,6 +5424,17 @@ class Server:
                 msg, actor_stream_id=str(auth.get("stream_id") or ""),
                 actor_generation=str(auth.get("session_generation") or ""),
             )
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
+
+    async def _on_assistant_advice(self, msg: dict[str, Any]) -> dict[str, Any]:
+        auth = msg.get("_auth_context") or {}
+        if self.lane_rulings is None or not auth.get("token_verified"):
+            raise VerbError("assistant_ruling_unauthorized", "A verified stream token is required")
+        method = self.lane_rulings.answer if msg["type"] == "assistant.answer" else self.lane_rulings.advise
+        try:
+            return await method(msg, actor_stream_id=auth["stream_id"],
+                                actor_generation=auth["session_generation"])
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
 

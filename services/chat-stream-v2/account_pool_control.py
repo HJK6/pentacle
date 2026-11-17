@@ -50,21 +50,38 @@ def eligibility(accounts, provider, pool, *, now, measured=None):
         if measured is None:
             measured=next((p for p in accounts.readback(now=now)["quota_pools"]
                            if (p["provider"],p["pool_id"])==(provider,pool)),{})
-        obs=measured.get("observation") or {}
+        obs=measured.get("latest_observation") or {}
         windows=obs.get('windows')
         window=windows.get(control["window"]) if isinstance(windows,dict) else None
         details=window if isinstance(window,dict) else {}
-        max_age=accounts.policy.get("observation_max_age",600)
         result.update(observed_at=obs.get("observed_at") if number(obs.get('observed_at')) else None,window=control["window"],
                       reset_at=details.get("reset_at") if number(details.get('reset_at')) else None,
                       reset_id=details.get("reset_id") if isinstance(details.get('reset_id'),str) else None)
-        if (not measured.get("fresh") or not number(max_age) or max_age<=0
-                or not isinstance(window,dict) or not number(window.get("pct"))
-                or not 0<=window["pct"]<=100 or not number(window.get("reset_at"))
-                or window["reset_at"]<=now or not isinstance(window.get("reset_id"),str)
-                or not window["reset_id"]): code="account_pool_meter_unavailable"
+        window=actionable_reading(accounts,measured,control,now=now)
+        if window is None: code="account_pool_meter_unavailable"
         elif window["pct"]>=control["stop_pct"]: code="account_pool_cap_reached"
     return dict(result,eligible=code is None,code=code)
+
+
+# These policy settings are daemon-only; collection cadence remains independent.
+USAGE_READING_GRACE_SECONDS = 7200
+USAGE_CAP_WARNING_MARGIN = 2
+
+
+def actionable_reading(accounts, measured, control, *, now):
+    """Return the last healthy capped window, never extending its reset boundary."""
+    observation=measured.get("latest_observation") or {}
+    windows=observation.get("windows")
+    window=windows.get(control.get("window")) if isinstance(windows,dict) else None
+    stamp=observation.get("observed_at")
+    grace=accounts.policy.get("usage_reading_grace_seconds",USAGE_READING_GRACE_SECONDS)
+    if (measured.get("identity_conflict") or observation.get("collection") not in {"ok","failed"}
+            or not number(stamp) or not number(grace) or grace<0 or not 0<=now-stamp<=grace
+            or not isinstance(window,dict) or not number(window.get("pct")) or not 0<=window["pct"]<=100
+            or not number(window.get("reset_at")) or window["reset_at"]<=now
+            or not isinstance(window.get("reset_id"),str) or not window["reset_id"]):
+        return None
+    return window
 
 
 def assert_eligible(accounts, binding, *, now, override=None):

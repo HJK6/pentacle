@@ -71,3 +71,22 @@ def test_named_wrapper_preserves_nonsecret_context_and_pins_native_binary(tmp_pa
     data=json.loads(output.read_text())
     assert data['PENTACLE_AUTH_SSM_PARAMETER']=='/fixture/nonsecret-reference'
     assert data['PENTACLE_AUTH_CLAUDE_BIN']==str(native) and data['CLAUDE_CONFIG_DIR']==account.home
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("resume", [False, True])
+def test_managed_claude_launch_turns_own_memory_off(tmp_path, provider, resume):
+    home = tmp_path / "home"; home.mkdir()
+    account = Binding(provider, "primary", "host-a", str(home), "login-a", "browser-a", "/bin/echo", "fixture", "macos")
+    machine = launch.local_machine("host-a", cwd=str(tmp_path), codex_bin="/bin/echo", claude_bin="/bin/echo")
+    if resume and provider == "codex":
+        pytest.skip("codex resume transcripts live elsewhere; the claude switch is the subject")
+    extra = dict(resume_session_id="fixture-id", resume_jsonl_path=str(home / "projects" / "x.jsonl")) if resume else {}
+    command = launch.build_launch(machine, provider=provider, tmux_session="mem-off", launch_model="fixture-model",
+        launch_effort="high", account_binding=account, **extra).command
+    env_line = command.split(" /bin/sh -c ", 1)[0]
+    if provider == "claude":
+        assert " CLAUDE_CODE_DISABLE_AUTO_MEMORY=1" in env_line and env_line.startswith("env -i ")
+        assert '"autoMemoryEnabled":false' in command
+    else:
+        assert "AUTO_MEMORY" not in command and "autoMemoryEnabled" not in command

@@ -1829,8 +1829,8 @@ NOTE_TYPES = ("result", "problem", "reminder", "relay", "started", "change", "ot
 
 
 def _publication_ref(value: str) -> str:
-    if not re.fullmatch(r"(?:message|lane|report|wake|tell):\S+", value):
-        raise argparse.ArgumentTypeError("expected <message|lane|report|wake|tell>:<id>")
+    if not re.fullmatch(r"(?:message|lane|report|wake|tell|owed):\S+", value):
+        raise argparse.ArgumentTypeError("expected <message|lane|report|wake|tell|owed>:<id>")
     return value
 
 
@@ -1884,7 +1884,17 @@ def assistant_publish(args: argparse.Namespace) -> int:
             payload[field] = getattr(args, field)
     if getattr(args, "why", None) is not None:
         payload["note_reason"] = args.why
+    payload.update({k: getattr(args,k) for k in ("owes", "owes_due", "owes_spec", "owes_lane", "closes") if getattr(args,k,None) is not None})
     return _assistant_call(args, payload)
+
+
+def assistant_owed(args):
+    payload = {"type": "assistant.owed." + args.owed_action}
+    if args.composite_stream_id: payload["composite_stream_id"] = args.composite_stream_id
+    for key in ("owed_id", "label", "message_id", "publication_key", "due", "spec_id", "lane_id", "delivered_by", "withdrawn_by", "superseded_by", "void", "reason", "closed", "since"):
+        value = getattr(args,key,None)
+        if value is not None: payload[key] = value
+    return _assistant_call(args,payload)
 
 
 def assistant_operation(args: argparse.Namespace) -> int:
@@ -2014,12 +2024,18 @@ def assistant_authority(args: argparse.Namespace) -> int:
     value = "disabled" if args.disable else args.set
     payload: dict[str, object] = {
         "type": "assistant.authority", "request_id": args.request_id or f"assistant-authority-{uuid.uuid4()}",
-        "action": "restore" if args.restore else "retry" if args.retry else "set" if value is not None else "read",
+        "action": "restore" if args.restore else "retry" if args.retry else "set" if value is not None else "session_kinds" if args.session_kinds is not None else "read",
     }
     if value is not None:
         payload["value"] = value
     if args.brief_file:
         payload["brief_file"] = args.brief_file
+    if args.session_kinds is not None:
+        payload["session_kinds"] = args.session_kinds
+    if args.account is not None:
+        if args.session_kinds is None:
+            raise ValueError("--account requires --session-kinds")
+        payload["account"] = args.account
     return _assistant_call(args, payload)
 
 
@@ -2029,6 +2045,17 @@ def assistant_ruling(args: argparse.Namespace) -> int:
         "ruling_request_id": args.ruling_request_id, "ruling": args.ruling,
         "reason": args.reason or "", "conditions": args.conditions or "",
     }
+    return _assistant_call(args, payload)
+
+
+def assistant_advice(args: argparse.Namespace) -> int:
+    payload = {"type": "assistant." + args.advice_action,
+               "request_id": args.request_id or str(uuid.uuid4()),
+               "body": Path(args.body_file).read_text(encoding="utf-8")}
+    if args.advice_action == "advise":
+        payload["work_item"] = args.work_item
+    else:
+        payload["ruling_request_id"] = args.ruling_request_id
     return _assistant_call(args, payload)
 
 
@@ -4477,6 +4504,95 @@ def send_file(args: argparse.Namespace) -> int:
                assistant_once=assistant_once)
 
 
+# Daemon answers that only the composite's bound publisher can receive: the seat
+# is the front desk, so a failure must stay a failure, never an own-chat post.
+_SEND_IMAGE_BOUND_PUBLISHER_CODES = frozenset({
+    "assistant_publish_note_type_required", "assistant_publish_ref_required",
+    "assistant_publish_reason_required", "assistant_publish_ref_not_found",
+    "assistant_publish_ref_kind_not_allowed", "assistant_publish_duplicate_text",
+    "assistant_publish_repeat", "publish_replay_conflict",
+})
+
+
+def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str, timeout: float,
+                             caller: str = "") -> int | None:
+    """Publish the image to the assistant composite the operator reads.
+
+    The bound front desk's own conversation is not what the operator sees, so
+    its image must go out as a proactive publication, and a failure there stays
+    a failure. The daemon's binding says which seat that is and which composite
+    it serves; ``--to`` and PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID override the
+    composite. Returns the exit code, or None when this seat is not a bound
+    publisher (the caller then keeps the seat's own-conversation behaviour)."""
+    import contextlib
+    import io
+    from .file_delivery import run
+    explicit = (getattr(args, "to", None) or os.environ.get("PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID", "")).strip()
+    bound = False
+    bound_composite = ""
+    try:
+        binding = asyncio.run(assistant_once(
+            load_config(), {"type": "assistant.binding", "request_id": f"assistant-binding-{uuid.uuid4()}"},
+            timeout=timeout))
+    except ServiceCredentialUnavailable:
+        raise
+    except Exception:  # noqa: BLE001 - never echo transport text
+        print("agent-orch send-image: cannot read the assistant binding; nothing was sent", file=sys.stderr)
+        return 1
+    if isinstance(binding, dict) and binding.get("type") == "assistant.binding.ok":
+        bound = bool(caller) and binding.get("stream_id") == caller
+        bound_composite = str(binding.get("composite_stream_id") or "").strip()
+    target = explicit or (bound_composite if bound else "")
+    if bound and not target:
+        print("agent-orch send-image: this seat is the bound front desk but no assistant composite "
+              "could be resolved; nothing was sent", file=sys.stderr)
+        return 1
+    if not target:
+        return None
+    publish_args = argparse.Namespace(
+        path=str(path), upload_id=None, from_receipt=None,
+        to=target, proactive=True,
+        note_type=getattr(args, "note_type", None), ref=getattr(args, "ref", None),
+        why=getattr(args, "why", None), caption=caption, timeout=timeout,
+        dispatch_id=None, reply_to_message_id=None, reply_to_question_id=None,
+        evidence_refs_json=None, publish_kind=None, request_id=None,
+        upload_request_id=None, response_state=None,
+    )
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        rc = run(publish_args, load_config=load_config, upload_blob_once=upload_blob_once,
+                 assistant_once=assistant_once)
+    lines = [line for line in captured.getvalue().splitlines() if line.strip()]
+    try:
+        result = json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        result = {}
+    if rc == 0 and result.get("type") == "assistant.publish.ok":
+        print(json.dumps({**result, "ok": True, "source_path": str(path), "destination": publish_args.to}, indent=2))
+        return 0
+    code = result.get("error_code")
+    if not bound and code not in _SEND_IMAGE_BOUND_PUBLISHER_CODES:
+        # Not the bound publisher (or the composite is not reachable from this
+        # seat): keep the pre-existing own-conversation behaviour, but say so.
+        print(
+            f"agent-orch send-image: could not publish to {publish_args.to} "
+            f"({code or 'publish_failed'}); posting to this seat's own conversation only",
+            file=sys.stderr,
+        )
+        return None
+    print(json.dumps({"ok": False, **result}, indent=2), file=sys.stderr)
+    if code in {"assistant_publish_note_type_required", "assistant_publish_ref_required",
+                "assistant_publish_reason_required"}:
+        print(
+            "agent-orch send-image: the front desk publishes to the operator chat and needs "
+            "--note-type {result,problem,reminder,relay,started,change,other} and --ref "
+            "{message|lane|report|wake|tell|owed}:<id> (--why with other)",
+            file=sys.stderr,
+        )
+        return 2
+    return rc or 1
+
+
 def send_image(args: argparse.Namespace) -> int:
     """Attach a local PNG/JPEG to your OWN conversation so the operator sees the
     real image in Pentacle chat (mobile + desktop), openable in the viewer.
@@ -4520,6 +4636,9 @@ def send_image(args: argparse.Namespace) -> int:
     caption = (getattr(args, "caption", "") or "").strip()
     timeout = float(args.timeout)
     config = load_config()
+    published = _send_image_to_composite(args, path, caption, timeout, from_stream_id)
+    if published is not None:
+        return published
     try:
         upload = asyncio.run(upload_blob_once(config, data, timeout=timeout))
     except ServiceCredentialUnavailable:
@@ -5789,13 +5908,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Attach a local PNG/JPEG to your OWN conversation so the operator sees "
             "the real image in Pentacle chat (mobile + desktop) and can open it in "
             "the image viewer. Authenticated by your seat's stream token; the image "
-            "posts as your (the agent's) own message. Prints the receipt "
-            "(event id, blob sha, source sha256)."
+            "posts as your (the agent's) own message. The bound front desk instead "
+            "publishes to the operator chat (the composite comes from the daemon binding; --to or "
+            "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID override) and needs --note-type "
+            "and --ref. Prints the receipt (event id, blob sha, source sha256)."
         ),
     )
     send_image_parser.add_argument("path", help="Path to a local PNG or JPEG image (<=25 MiB).")
     send_image_parser.add_argument("--caption", default="", help="Optional short caption shown with the image.")
     send_image_parser.add_argument("--from-stream-id", dest="from_stream_id", help="Override the caller stream id (defaults to your seat env).")
+    send_image_parser.add_argument("--to", help="Assistant composite the front desk publishes to (default: the daemon binding; override: PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID).")
+    send_image_parser.add_argument("--note-type", choices=NOTE_TYPES, help="Front desk: note type for the operator chat.")
+    send_image_parser.add_argument("--ref", type=_publication_ref, help="Front desk: message|lane|report|wake|tell|owed:<id> the note refers to.")
+    send_image_parser.add_argument("--why", help="With --note-type other: the one-line reason.")
     send_image_parser.add_argument("--timeout", type=float, default=30.0)
     send_image_parser.set_defaults(func=send_image)
 
@@ -5867,6 +5992,37 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_publish_parser.add_argument("--evidence-refs-json")
     assistant_publish_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_publish_parser.add_argument("--message", required=True)
+    for owed_flags_parser in (assistant_publish_parser, send_file_parser):
+        owed_flags_parser.add_argument("--owes")
+        owed_flags_parser.add_argument("--owes-due")
+        target = owed_flags_parser.add_mutually_exclusive_group()
+        target.add_argument("--owes-spec")
+        target.add_argument("--owes-lane")
+        owed_flags_parser.add_argument("--closes", action="append")
+    owed_parser = assistant_sub.add_parser("owed", help="read and manage follow-up items")
+    owed_sub = owed_parser.add_subparsers(dest="owed_action", required=True)
+    for action in ("open", "close", "list", "show"):
+        owed_flags_parser = owed_sub.add_parser(action)
+        owed_flags_parser.add_argument("--composite-stream-id", help="Defaults to the primary assistant")
+        owed_flags_parser.add_argument("--timeout", type=float, default=30)
+        owed_flags_parser.set_defaults(func=assistant_owed)
+        if action in {"show", "close"}: owed_flags_parser.add_argument("owed_id")
+        if action == "open":
+            owed_flags_parser.add_argument("--label", required=True)
+            source = owed_flags_parser.add_mutually_exclusive_group(required=True)
+            source.add_argument("--message-id"); source.add_argument("--publication-key")
+            owed_flags_parser.add_argument("--due")
+            target = owed_flags_parser.add_mutually_exclusive_group()
+            target.add_argument("--spec-id"); target.add_argument("--lane-id")
+        if action == "close":
+            evidence = owed_flags_parser.add_mutually_exclusive_group(required=True)
+            for option in ("delivered-by", "withdrawn-by", "superseded-by"): evidence.add_argument("--"+option)
+            evidence.add_argument("--void", action="store_true")
+            owed_flags_parser.add_argument("--reason")
+        if action == "list":
+            state = owed_flags_parser.add_mutually_exclusive_group()
+            state.add_argument("--closed", action="store_true"); state.add_argument("--void", action="store_true")
+            owed_flags_parser.add_argument("--since")
     assistant_publish_parser.set_defaults(func=assistant_publish)
     assistant_operation_parser = assistant_sub.add_parser(
         "operation", help="submit one fixed typed assistant authority operation",
@@ -5930,6 +6086,8 @@ def build_parser() -> argparse.ArgumentParser:
     authority_change.add_argument("--disable", action="store_true")
     authority_change.add_argument("--restore", action="store_true")
     authority_change.add_argument("--retry", action="store_true")
+    authority_change.add_argument("--session-kinds", metavar="KINDS_OR_NONE")
+    assistant_authority_parser.add_argument("--account")
     assistant_authority_parser.add_argument("--brief-file")
     assistant_authority_parser.add_argument("--request-id")
     assistant_authority_parser.add_argument("--timeout", type=float, default=30.0)
@@ -5944,6 +6102,17 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_ruling_parser.add_argument("--conditions")
     assistant_ruling_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_ruling_parser.set_defaults(func=assistant_ruling)
+
+    for action in ("advise", "answer"):
+        advice_parser = assistant_sub.add_parser(action, help="request or answer one advisor review")
+        advice_parser.add_argument("--body-file", required=True)
+        advice_parser.add_argument("--request-id", required=action == "answer")
+        advice_parser.add_argument("--timeout", type=float, default=30.0)
+        if action == "advise":
+            advice_parser.add_argument("--work-item", required=True)
+        else:
+            advice_parser.add_argument("--ruling-request-id", required=True)
+        advice_parser.set_defaults(func=assistant_advice, advice_action=action)
 
     from . import account_cli
     account_cli.register(subparsers)

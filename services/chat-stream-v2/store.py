@@ -1863,8 +1863,15 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     conn.execute(f"ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN {column} TEXT")
             conn.execute(SCOPED_OWNERSHIP_DDL)
             conn.execute(RULING_REQUESTS_DDL)
+            from advisor_sessions import DDL as ADVISOR_SESSIONS_DDL
+            conn.execute(ADVISOR_SESSIONS_DDL)
             if "covered" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_lane_rulings)")}:
                 conn.execute("ALTER TABLE v2_assistant_lane_rulings ADD COLUMN covered INTEGER NOT NULL DEFAULT 0")
+            ruling_columns = {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_lane_rulings)")}
+            for column, definition in (("work_item", "TEXT NOT NULL DEFAULT ''"), ("answer", "TEXT")):
+                if column not in ruling_columns:
+                    conn.execute(f"ALTER TABLE v2_assistant_lane_rulings ADD COLUMN {column} {definition}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_ruling_work_item ON v2_assistant_lane_rulings(work_item,created_at)")
             conn.execute(ASSISTANT_LANE_OWNERSHIP_DDL)
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
@@ -2007,6 +2014,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             for table in ("sessions", "v2_schedules"):
                 if "objective" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
+            import assistant_owed
+            assistant_owed.initialize(conn)
             store_qa.initialize(conn)
             store_ingest_checkpoint.initialize(conn)
             lifecycle_authority.initialize(conn)
@@ -2547,7 +2556,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ack = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id + ':ack')} "
                    f"{args}--publish-kind status --response-state acknowledged --message 'I received your message.'")
             final = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id)} "
-                     f"{args}--publish-kind prose --response-state final --message '<final answer>'")
+                     f"{args}--publish-kind prose --response-state final --owes '<none or label>' --message '<final answer>'")
             body = (f"No reply was published for dispatch {dispatch_id}.\n"
                     f"Message: {str(route['body'] or '')[:80]}\nAcknowledgment: {ack}\nFinal: {final}")
             _insert_outbound_notice_conn(conn, notice_id=notice_id, kind="dispatch_no_reply",

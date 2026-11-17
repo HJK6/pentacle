@@ -195,6 +195,9 @@ class AssistantGuidelines:
     async def advisor_for_target(self, target):
         if not self.enabled:
             return None
+        if await self.store.submit(lambda c: c.execute(
+                "SELECT 1 FROM v2_advisor_sessions WHERE stream_id=? AND ended_at IS NULL", (target,)).fetchone()):
+            return None
         binding = await self.rulings.binding()
         if binding.get('state') != 'ready' or target != binding.get('stream_id') or not binding.get('generation'):
             return None

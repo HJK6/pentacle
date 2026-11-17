@@ -210,6 +210,9 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
                 payload[field] = getattr(args, field)
         if getattr(args, 'why', None) is not None:
             payload['note_reason'] = args.why
+        for field in ('owes', 'owes_due', 'owes_spec', 'owes_lane', 'closes'):
+            if getattr(args, field, None) is not None:
+                payload[field] = getattr(args, field)
         for field in ('reply_to_question_id', 'response_state'):
             if getattr(args, field, None):
                 payload[field] = getattr(args, field)
@@ -225,6 +228,14 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
                 result['event_id'] = response['event_id']
             if type(response.get('duplicate')) is bool:
                 result['duplicate'] = response['duplicate']
+            owed_id = response.get('owed_id')
+            if owed_id is None and 'owed_id' in response:
+                result['owed_id'] = None
+            elif isinstance(owed_id, str) and re.fullmatch(r'owed-[0-9a-f]{12}', owed_id):
+                result['owed_id'] = owed_id
+            closed = response.get('closed_owed_ids')
+            if isinstance(closed, list) and all(isinstance(i, str) and re.fullmatch(r'owed-[0-9a-f]{12}', i) for i in closed):
+                result['closed_owed_ids'] = closed
             _print(result)
             return 0
         code = response.get('error_code') if isinstance(response, dict) else None

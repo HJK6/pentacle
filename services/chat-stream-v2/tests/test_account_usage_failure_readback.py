@@ -87,6 +87,35 @@ def test_no_good_observation_stays_unknown_with_actual_failure_code():
     assert pool.get("error_codes") == {account.key: "provider_timeout"}
 
 
+def test_grace_reading_may_use_a_newer_kept_reading_while_status_keeps_the_ok_source():
+    from account_pool_control import actionable_reading
+    accounts = inventory()
+    first = binding()
+    second = replace(first, host="host-b", home="/private-fixture/host-b/original")
+    accounts.register(second)
+    accounts.observe(first.key, observation(first), now=NOW)
+    newer = observation(second, NOW + 1)
+    newer["windows"]["weekly"]["pct"] = 77
+    accounts.observe(second.key, newer, now=NOW + 1)
+    accounts.observe(second.key, dict(observation(second), collection="failed", observed_at=None,
+                                     windows={}, error_code="provider_cache_stale"), now=NOW + 2)
+    pool = next(row for row in accounts.readback(now=NOW + 2)["quota_pools"] if row["pool_id"] == first.pool_id)
+    assert pool["fresh"] and pool["source_binding"] == first.key and pool["observation"]["windows"]["weekly"]["pct"] == 21
+    assert actionable_reading(accounts, pool, {"window": "weekly"}, now=NOW + 2)["pct"] == 77
+    assert actionable_reading(accounts, pool, {"window": "weekly"}, now=NOW + 1 + 7201) is None
+
+
+def test_grace_reading_never_comes_from_an_unhealthy_source():
+    from account_pool_control import actionable_reading
+    accounts = inventory()
+    only = binding()
+    accounts.observe(only.key, observation(only), now=NOW)
+    accounts.conn.execute("UPDATE v2_account_bindings SET health='auth_unhealthy'")
+    pool = next(row for row in accounts.readback(now=NOW + 500)["quota_pools"] if row["pool_id"] == only.pool_id)
+    assert pool["observation"] is not None and pool["latest_observation"] is None
+    assert actionable_reading(accounts, pool, {"window": "weekly"}, now=NOW + 500) is None
+
+
 def test_failed_host_never_hides_a_fresh_same_pool_source_or_changes_identity():
     accounts = inventory()
     first = binding()
