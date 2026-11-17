@@ -117,6 +117,31 @@ async def authority(store, value):
         "INSERT OR REPLACE INTO kv(k,v) VALUES ('assistant.authority.stream_id',?)", (value,)))
 
 
+@pytest.mark.parametrize("age,action,allowed", [(0, "advice", True), (3601, "advice", False), (0, "spawn", False)])
+def test_session_advisor_hold_is_request_scoped(tmp_path, monkeypatch, age, action, allowed):
+    async def run():
+        async with delegated_daemon(tmp_path, monkeypatch) as (daemon, store, runtime, selected, request):
+            row = await daemon.lane_rulings.advise({"work_item": "none", "request_id": "hold-advice", "body": "GATE hold"},
+                actor_stream_id=ACTOR, actor_generation=GENERATION)
+            rid = row["ruling_request_id"]
+            def seed(c):
+                c.execute("UPDATE v2_assistant_lane_rulings SET action=?,created_at=? WHERE ruling_request_id=?",
+                          (action, runtime.clock() - age, rid))
+                c.execute("INSERT INTO v2_advisor_sessions(ruling_request_id,attempt,stream_id,generation,guidelines_identity,started_at,payload) VALUES(?,1,?,?,'fixture',?,'{}')",
+                          (rid, ADVISOR, ADVISOR_GENERATION, runtime.clock()))
+            await mutate(store, seed)
+            await authority(store, "sessions")
+            current = await daemon.lane_rulings._fetch(rid)
+            assert (current["authority_stream_id"], current["authority_generation"]) == (ADVISOR, ADVISOR_GENERATION)
+            result = await rpc(daemon, "spawn_freeze", **request)
+            if allowed:
+                assert result["type"] == "spawn_freeze.ok", result
+                assert result["receipt"]["owner"]["delegation"]["advisor_binding"]["source"] == "session"
+            else:
+                assert result.get("error_code") == "maintenance_delegation_invalid", result
+    asyncio.run(run())
+
+
 async def rotate_advisor(store):
     await store.open_session("fixture-advisor", "replacement", session_generation="replacement-generation",
                              provider="codex", pane_status="pane_alive")

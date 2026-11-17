@@ -2014,12 +2014,18 @@ def assistant_authority(args: argparse.Namespace) -> int:
     value = "disabled" if args.disable else args.set
     payload: dict[str, object] = {
         "type": "assistant.authority", "request_id": args.request_id or f"assistant-authority-{uuid.uuid4()}",
-        "action": "restore" if args.restore else "retry" if args.retry else "set" if value is not None else "read",
+        "action": "restore" if args.restore else "retry" if args.retry else "set" if value is not None else "session_kinds" if args.session_kinds is not None else "read",
     }
     if value is not None:
         payload["value"] = value
     if args.brief_file:
         payload["brief_file"] = args.brief_file
+    if args.session_kinds is not None:
+        payload["session_kinds"] = args.session_kinds
+    if args.account is not None:
+        if args.session_kinds is None:
+            raise ValueError("--account requires --session-kinds")
+        payload["account"] = args.account
     return _assistant_call(args, payload)
 
 
@@ -2029,6 +2035,17 @@ def assistant_ruling(args: argparse.Namespace) -> int:
         "ruling_request_id": args.ruling_request_id, "ruling": args.ruling,
         "reason": args.reason or "", "conditions": args.conditions or "",
     }
+    return _assistant_call(args, payload)
+
+
+def assistant_advice(args: argparse.Namespace) -> int:
+    payload = {"type": "assistant." + args.advice_action,
+               "request_id": args.request_id or str(uuid.uuid4()),
+               "body": Path(args.body_file).read_text(encoding="utf-8")}
+    if args.advice_action == "advise":
+        payload["work_item"] = args.work_item
+    else:
+        payload["ruling_request_id"] = args.ruling_request_id
     return _assistant_call(args, payload)
 
 
@@ -5930,6 +5947,8 @@ def build_parser() -> argparse.ArgumentParser:
     authority_change.add_argument("--disable", action="store_true")
     authority_change.add_argument("--restore", action="store_true")
     authority_change.add_argument("--retry", action="store_true")
+    authority_change.add_argument("--session-kinds", metavar="KINDS_OR_NONE")
+    assistant_authority_parser.add_argument("--account")
     assistant_authority_parser.add_argument("--brief-file")
     assistant_authority_parser.add_argument("--request-id")
     assistant_authority_parser.add_argument("--timeout", type=float, default=30.0)
@@ -5944,6 +5963,17 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_ruling_parser.add_argument("--conditions")
     assistant_ruling_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_ruling_parser.set_defaults(func=assistant_ruling)
+
+    for action in ("advise", "answer"):
+        advice_parser = assistant_sub.add_parser(action, help="request or answer one advisor review")
+        advice_parser.add_argument("--body-file", required=True)
+        advice_parser.add_argument("--request-id", required=action == "answer")
+        advice_parser.add_argument("--timeout", type=float, default=30.0)
+        if action == "advise":
+            advice_parser.add_argument("--work-item", required=True)
+        else:
+            advice_parser.add_argument("--ruling-request-id", required=True)
+        advice_parser.set_defaults(func=assistant_advice, advice_action=action)
 
     from . import account_cli
     account_cli.register(subparsers)
