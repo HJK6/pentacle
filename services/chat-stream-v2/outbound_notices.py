@@ -56,6 +56,7 @@ _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_TREE_IDLE,
     NOTICE_KIND_LANE_DIGEST,
     NOTICE_KIND_EXTERNAL_WORK_DUE,
+    "owed_due",
     NOTICE_KIND_NOTIFICATION_ANSWER,
     NOTICE_KIND_STATUS_CARD,
     NOTICE_KIND_STATUS_CARD_COMBINED,
@@ -177,6 +178,7 @@ class OutboundNoticeQueue:
         self.owner = owner or f"outbound:{os.getpid()}:{uuid.uuid4().hex}"
         self.front_desk_digest = None
         self.external_work = None
+        self.owed = []
         self.error_alerts = None
         self._guards: dict[str, Guard] = {}
         self._terminal_callbacks: dict[str, TerminalCallback] = {}
@@ -282,6 +284,11 @@ class OutboundNoticeQueue:
                 await self.external_work.tick()
             except Exception:  # noqa: BLE001 - a failed check must not skip other notices
                 log.exception("subsystem=external_work action=tick_failed")
+        for owed in self.owed:
+            try:
+                await owed.tick()
+            except Exception:
+                log.exception("subsystem=assistant_owed action=tick_failed")
         cap = max(1, int(limit or NOTICE_MAX_PER_PASS))
         kind_set = set(kinds) if kinds is not None else None
         notice_ids = await self.store.list_outbound_notice_ids(
@@ -377,6 +384,8 @@ class OutboundNoticeQueue:
                 if metadata.get("family") == "work_lane.v1" and metadata.get("policy_mode") == "immediate":
                     from front_desk_digest import WAKE_TOKEN
                     message["_front_desk_wake_token"] = WAKE_TOKEN
+            if kind == "owed_due":
+                message["_notification_answer_generation"] = metadata["generation"]
             if kind == NOTICE_KIND_NOTIFICATION_ANSWER:
                 import json
                 metadata = row.get("metadata") or "{}"

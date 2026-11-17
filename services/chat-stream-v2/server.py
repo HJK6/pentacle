@@ -1037,6 +1037,7 @@ class Server:
             "compact": self._on_compact,
             "transcribe_blob": self._on_transcribe_blob,
             "assistant.publish": self._on_assistant_publish,
+            **{"assistant.owed." + action: self._on_assistant_owed for action in ("open", "close", "list", "show")},
             "assistant.operation": self._on_assistant_operation,
             "work.unattended": self._on_work_unattended,
             "work.report.get": self._on_work_report_get,
@@ -5050,6 +5051,18 @@ class Server:
             mime=str(msg.get("mime") or ""),
         )
         return {"type": "transcribe_blob.ok", **result}
+
+    async def _on_assistant_owed(self, msg: dict[str, Any]) -> dict[str, Any]:
+        composite = self._composite_for_message(msg)
+        if composite is None or (msg.get("composite_stream_id") and not composite.is_stream(msg["composite_stream_id"])):
+            raise VerbError("assistant_owed_unauthorized", "assistant composite unavailable")
+        composite.owed.server = self
+        try:
+            action = msg["type"].rsplit(".", 1)[1]
+            result = await composite.owed.request(action, msg, msg.get("_auth_context") or {})
+            return {"type": msg["type"] + ".ok", **result}
+        except ValueError as exc:
+            raise VerbError(str(exc).split(":", 1)[0], str(exc)) from exc
 
     async def _on_assistant_publish(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)

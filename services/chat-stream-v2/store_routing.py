@@ -1619,6 +1619,8 @@ class _RoutingStoreMixin:
         proactive_binding_name: str | None = None,
         proactive_env_binding: dict[str, str] | None = None,
         reply_to_message_ids: list[str] | None = None,
+        owed_flags: dict | None = None,
+        owed_authorize=None,
     ) -> dict[str, Any]:
         """Append one assistant event and its idempotency receipt together."""
         if not publication_key or (not dispatch_id and proactive_binding_name is None):
@@ -1657,6 +1659,11 @@ class _RoutingStoreMixin:
                     strict_publication=strict,
                     reply_to_message_ids=reply_to_message_ids,
                 )
+                from assistant_owed import publication_effects
+                if owed_authorize is not None and (owed_flags or {}).keys() & {"owes", "closes"}:
+                    owed_authorize(conn)
+                stored.update(publication_effects(conn,stream_id,publication_key,canonical_payload,
+                    owed_flags or {},actor_stream_id,actor_generation,duplicate=stored.get("duplicate",False)))
                 conn.commit()
                 return stored
             except BaseException:

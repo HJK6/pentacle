@@ -43,12 +43,14 @@ def validate(conn, stream_id, payload):
             not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 200):
         raise ValueError("assistant_publish_reason_required")
     ref = payload.get("ref")
-    if not isinstance(ref, str) or not re.fullmatch(r"(?:message|lane|report|wake|tell):\S+", ref):
+    if not isinstance(ref, str) or not re.fullmatch(r"(?:message|lane|report|wake|tell|owed):\S+", ref):
         raise ValueError("assistant_publish_ref_required")
     kind, record_id = ref.split(":", 1)
-    if (note_type == "reminder" and kind not in {"wake", "message"}
+    if (note_type == "reminder" and kind not in {"wake", "message", "owed"}
             or note_type == "relay" and kind not in {"tell", "message"}
             or note_type == "started" and kind not in {"tell", "message", "lane"}):
+        raise ValueError("assistant_publish_ref_kind_not_allowed")
+    if kind == "owed" and note_type not in {"result", "problem", "reminder", "other"}:
         raise ValueError("assistant_publish_ref_kind_not_allowed")
     if kind == "message":
         from retention import history_query
@@ -58,6 +60,7 @@ def validate(conn, stream_id, payload):
     else:
         found = None
     queries = {
+        "owed": (("SELECT 1 FROM v2_assistant_owed WHERE owed_id=? AND stream_id=?", (record_id, stream_id)),),
         "lane": (("SELECT 1 FROM v2_assistant_composite_lanes WHERE lane_id=? AND work_state IS NOT NULL", (record_id,)),),
         "report": (("SELECT 1 FROM v2_reports WHERE report_id=?", (record_id,)),
                    ("SELECT 1 FROM v2_assistant_composite_terminal_reports WHERE report_id=?", (record_id,))),
