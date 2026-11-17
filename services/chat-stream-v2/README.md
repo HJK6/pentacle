@@ -189,6 +189,8 @@ An SSH tunnel can retain a loopback daemon listener; forwarded connections
 inherit the tunnel endpoint's trust boundary. Restrict tunnel access to the
 operator.
 
+React Native's native WebSocket adds a default `Origin` derived from the URL when the app passes none (Android `WebSocketModule.kt`), so the mobile client always sends `Origin`; authenticate Origin-bearing handshakes rather than denying them.
+
 ## Desk credential labels
 
 `PENTACLE_DESK_STAMP_CONFIG` names a private (mode 600, daemon-user) JSON file

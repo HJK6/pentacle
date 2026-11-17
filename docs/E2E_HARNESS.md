@@ -277,6 +277,8 @@ Each tier's evidence keeps the original subject outcome (`reason`, also `primary
 
 For a websocket smoke check, start a daemon on an ephemeral loopback port with temporary session and notification stores, then exercise `welcome`, `hello`, `list_sessions`, `spawn`, `send`, and `close`. The test should use a fake provider executable that writes deterministic output to a disposable tmux session.
 
+`test/e2e/scenarios/assistant_direct.js` (`startDaemon`) is a fake WebSocket daemon for web-client gates and proves no daemon behaviour; put real-daemon journeys in `services/chat-stream-v2/tests/smoke/*_socket.py`.
+
 ## Recorded ingress probe rehearsal
 
 `services/chat-stream-v2/tools/provider_wrapper_probe.py` retains the existing

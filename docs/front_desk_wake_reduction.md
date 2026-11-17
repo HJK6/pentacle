@@ -81,6 +81,8 @@ when the seat remains over threshold, idle and has a proven-empty composer.
 Late proof prevents a repaste; a real draft still defers. A successful compact
 whose proof was missed can be repeated after the cooldown on an old high reading.
 
+To see what a seat actually received, read `v2_outbound_notices` in `sessions.db` (`sqlite3 -readonly`) by `recipient_stream_id`: kind `front_desk_held` with `delivered_at` NULL is still held; `terminal_reason='folded_into_digest'` means it arrived in a `lane_digest`.
+
 ## Advisor admission of new work
 
 A token-verified direct-primary front desk needs an advisor approval for a new

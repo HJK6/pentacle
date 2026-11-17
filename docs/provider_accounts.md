@@ -425,6 +425,8 @@ duplicate configuration and reassignment of a registered home are refused, inclu
 after a host executor restart. The same cell may adopt a new generation in place.
 The minimal turn must return exactly `OK` after surrounding whitespace is stripped.
 
+Each managed Claude home's own `settings.json` carries `"feedbackDrafts": "off"` (a feedback-draft card can capture an unattended seat's input). The bootstrap manifest allowlist refuses the key, so add it to the home's `settings.json` by hand after provisioning.
+
 ## Usage, availability and re-login
 
 Usage reads the bound home, joins native identity coherently and reports every
