@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
+import grp
 import importlib.util
 import json
 import os
@@ -46,7 +47,7 @@ def quote(path):
 def available(path):
     return Path(path).is_file() and os.access(path, os.X_OK)
 
-def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None):
+def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None, socket_root=None, pty=False):
     reads, writes = sorted(set(map(resolved, read_paths))), sorted(set(map(resolved, write_paths)))
     for path in reads + writes:
         parts = Path(path).parts
@@ -59,17 +60,21 @@ def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None):
              '(allow file-read* ' + ' '.join('(subpath %s)' % quote(p) for p in reads + writes) + ')',
              '(allow file-write* ' + ' '.join('(subpath %s)' % quote(p) for p in writes) + ')',
              '(allow file-read* (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))',
-             # tmux needs a pseudo-terminal; these exact device nodes are the whole grant.
-             '(allow file-read* file-write* file-ioctl (literal "/dev/ptmx") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))',
-             '(allow sysctl-read)', '(allow signal (target self))',
+             '(allow sysctl-read)',
+             # Signals only to processes inside this same sandbox, which are exactly this tree's own descendants.
+             '(allow signal (target same-sandbox))',
              '(allow system-socket (socket-domain AF_UNIX) (socket-domain AF_INET) (socket-domain AF_INET6))',
              # Network policy remains unchanged for IP, not ambient Unix IPC.
              '(allow network-bind (local ip "*:*"))',
              '(allow network-inbound (local ip "*:*"))',
              '(allow network-outbound (remote ip "*:*"))',
-             '(allow network-bind (local unix-socket (subpath %s)))' % quote(resolved(socket_dir)),
-             '(allow network-inbound (local unix-socket (subpath %s)))' % quote(resolved(socket_dir)),
-             '(allow network-outbound (remote unix-socket (subpath %s)))' % quote(resolved(socket_dir))]
+             # Unix sockets only below the owned short-path TMPDIR (the attempt root, which contains the tmux socket dir).
+             '(allow network-bind (local unix-socket (subpath %s)))' % quote(resolved(socket_root or socket_dir)),
+             '(allow network-inbound (local unix-socket (subpath %s)))' % quote(resolved(socket_root or socket_dir)),
+             '(allow network-outbound (remote unix-socket (subpath %s)))' % quote(resolved(socket_root or socket_dir))]
+    if pty:
+        # Only for a separate unprivileged gate identity: its own terminals are the only ones it can open.
+        rules += ['(allow file-read* file-write* file-ioctl (literal "/dev/ptmx") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))']
     dependencies = dependencies or {'files': [], 'metadata_paths': []}
     if dependencies['files']:
         exact = ' '.join('(literal %s)' % quote(resolved(p)) for p in dependencies['files'])
@@ -80,6 +85,10 @@ def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None):
             rules += ['(allow process-exec ' + ' '.join('(literal %s)' % quote(resolved(p)) for p in executables) + ')']
     if dependencies['metadata_paths']:
         rules += ['(allow file-read-metadata ' + ' '.join('(literal %s)' % quote(p) for p in dependencies['metadata_paths']) + ')']
+    # /bin/ps is setuid root; a sandboxed exec of it is refused. This exact literal runs unsandboxed so the
+    # process-listing capabilities work; it takes no file arguments and only prints process information.
+    # It must come after the exact dependency exec grants: the last matching rule wins.
+    rules += ['(allow process-exec (with no-sandbox) (literal "/bin/ps"))']
     # Keep explicit execution denials final, after imported and exact allow rules.
     rules += ['(deny process-exec ' + ' '.join('(literal %s)' % quote(resolved(p)) for p in FORBIDDEN_EXEC) + ')']
     return '\n'.join(rules) + '\n'
@@ -199,6 +208,28 @@ def addon_files(checkout, directories=NATIVE_ADDON_DIRS):
     return sorted(set(found))
 
 
+def separate_gate_identity(uid=None, groups=None, console_uid=None, admin_gid=None):
+    """True only for an unprivileged identity that is not root, not the console owner and not in the admin group."""
+    try:
+        admin_gid = grp.getgrnam('admin').gr_gid if admin_gid is None else admin_gid
+        console_uid = os.stat('/dev/console').st_uid if console_uid is None else console_uid
+    except (KeyError, OSError):
+        return False
+    uid = os.getuid() if uid is None else uid
+    groups = os.getgroups() if groups is None else groups
+    return uid not in (0, console_uid) and admin_gid not in groups
+
+
+def real_tool_file(name):
+    """The real developer-tool file behind an xcrun shim such as /usr/bin/git, derived before the profile exists."""
+    out = subprocess.run(['/usr/bin/xcrun', '-f', name], env={'PATH': '/usr/bin:/bin'}, cwd='/', close_fds=True, pass_fds=(),
+                         capture_output=True, text=True, timeout=20, check=True)
+    path = Path(out.stdout.strip()).resolve()
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise deps.DependencyError('real tool not found for ' + name)
+    return str(path)
+
+
 def real_interpreter_files(executable, root):
     """Exact real interpreter files behind a launcher stub or shim, derived by running it before the profile exists.
 
@@ -230,8 +261,9 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         imports = deps.import_closure([BASE_PROFILE])
         runtime_reads, extensions = python_runtime_paths(venv, root)
         alternates = alternate_interpreters(ALTERNATE_PYTHONS, root)
+        git = real_tool_file('git')
         interpreter_files = [f for e in (str(venv/'bin/python'), *ALTERNATE_PYTHONS) for f in real_interpreter_files(e, root)]
-        executables = [str(venv/'bin/python'), *[tools[k] for k in ('python','node','tmux') if k in tools], *alternates, *interpreter_files,
+        executables = [str(venv/'bin/python'), *[tools[k] for k in ('python','node','tmux') if k in tools], *alternates, *interpreter_files, git,
                        '/usr/bin/sqlite3', '/bin/sh', LAUNCHER, *EXTRA_BINARIES]  # FORBIDDEN_EXEC is denied, so it gets no dependency grants
         extra = [{'path':p, 'executable':str(venv/'bin/python')} for p in extensions]
         for alternate in alternates:
@@ -242,7 +274,7 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         closure = deps.dependency_closure(executables, extra_roots=extra)
         read_paths = sorted(set(map(resolved, [checkout, venv, *runtime_reads, *SYSTEM_READ])))
         write_paths = sorted(set(map(resolved, [root, evidence, socket_dir])))
-        profile = profile_text(read_paths, write_paths, socket_dir, dependencies=closure)
+        profile = profile_text(read_paths, write_paths, socket_dir, dependencies=closure, socket_root=root, pty=separate_gate_identity())
         profile_path = evidence / 'sandbox-profile.sb'
         profile_path.write_text(profile)
         child_env = dict(env)
@@ -251,6 +283,16 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         # node reads an OpenSSL config at startup; an empty owned file avoids granting the system one.
         (root / 'empty-openssl.cnf').write_text('')
         child_env['OPENSSL_CONF'] = str(root / 'empty-openssl.cnf')
+        # Real binaries first on PATH: exact symlinks, not xcrun shims (which load an unreadable developer directory).
+        bin_dir = root / 'bin'; bin_dir.mkdir(exist_ok=True)
+        for name, target in (('git', git), ('python3', str(venv / 'bin/python'))):
+            link = bin_dir / name
+            if link.is_symlink() or link.exists(): link.unlink()
+            link.symlink_to(target)
+        child_env['PATH'] = os.pathsep.join([str(bin_dir), child_env.get('PATH', '/usr/bin:/bin')])
+        # git must not read a user or system config outside the allowed roots (that access is denied, and git treats it as fatal).
+        child_env['GIT_CONFIG_GLOBAL'] = os.devnull
+        child_env['GIT_CONFIG_NOSYSTEM'] = '1'
         context = Context(checkout, venv, root, evidence, child_env, tools, profile_path,
                           digest(profile_path), read_paths, write_paths, socket_dir,
                           imports=imports, dependencies=closure)

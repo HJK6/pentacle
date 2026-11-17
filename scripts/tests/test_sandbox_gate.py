@@ -26,6 +26,9 @@ def context(tmp_path, monkeypatch):
     monkeypatch.setattr(m.deps, 'import_closure', lambda paths: [])
     monkeypatch.setattr(m.deps, 'dependency_closure', lambda paths, **kw: {'files':[], 'metadata_paths':[], 'binaries':[], 'roots':[]})
     monkeypatch.setattr(m, 'python_runtime_paths', lambda venv,root,**kw: ([], []))
+    monkeypatch.setattr(m, 'real_tool_file', lambda name: '/real/' + name)
+    m.real_separate_gate_identity = m.separate_gate_identity
+    monkeypatch.setattr(m, 'separate_gate_identity', lambda: False)
     monkeypatch.setattr(m, 'real_interpreter_files', lambda e,root: ['/real/'+Path(str(e)).name, '/real/app/'+Path(str(e)).name])
     home = tmp_path/'real-home'; home.mkdir()
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: home))
@@ -155,7 +158,7 @@ def test_exact_network_and_forbidden_exec_rules(context):
     assert '(allow network*)' not in p
     for executable in m.FORBIDDEN_EXEC:
         assert '(literal '+m.quote(m.resolved(executable))+')' in p
-    assert '(remote unix-socket (subpath '+m.quote(ctx.socket_dir)+'))' in p
+    assert '(remote unix-socket (subpath '+m.quote(m.resolved(ctx.root))+'))' in p
     assert '(allow mach-lookup)' not in p
 
 @pytest.mark.parametrize('path',['/opt/homebrew',REAL_HOME_PARENT + '/someone/.local',REAL_HOME_PARENT + '/someone/agent-workspace','/private/tmp',REAL_HOME,REAL_HOME_PARENT + '/other','/Library/Caches',REAL_HOME_PARENT + '/other/.cache'])
@@ -352,12 +355,59 @@ def test_node_uses_empty_owned_openssl_config_without_a_grant(context):
     assert 'openssl' not in ctx.profile_path.read_text().lower()
 
 
-def test_pty_grant_is_exactly_the_three_device_forms(context):
+def test_same_user_profile_has_no_terminal_device_grant(context):
     m, ctx = context
     text = ctx.profile_path.read_text()
+    assert '/dev/ptmx' not in text and '/dev/tty' not in text and 'ttys' not in text
+
+
+def test_pty_grant_only_for_a_separate_gate_identity(context, monkeypatch):
+    m, ctx = context
+    plain = m.profile_text(ctx.read_paths, ctx.write_paths, ctx.socket_dir)
+    assert '/dev/ptmx' not in plain
+    text = m.profile_text(ctx.read_paths, ctx.write_paths, ctx.socket_dir, pty=True)
     line = [l for l in text.splitlines() if '/dev/ptmx' in l]
     assert line == ['(allow file-read* file-write* file-ioctl (literal "/dev/ptmx") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))']
-    assert '(subpath "/dev' not in text and '(regex #"^/dev/' + '.*' not in text
+    assert '(subpath "/dev' not in text
+    assert m.real_separate_gate_identity(uid=0, groups=[20], console_uid=501, admin_gid=80) is False
+    assert m.real_separate_gate_identity(uid=501, groups=[20], console_uid=501, admin_gid=80) is False
+    assert m.real_separate_gate_identity(uid=551, groups=[20, 80], console_uid=501, admin_gid=80) is False
+    assert m.real_separate_gate_identity(uid=551, groups=[20], console_uid=501, admin_gid=80) is True
+
+
+def test_signal_process_info_ps_and_socket_rules_are_exact(context):
+    m, ctx = context
+    text = m.profile_text(ctx.read_paths, ctx.write_paths, ctx.socket_dir, socket_root=ctx.root)
+    assert '(allow signal (target same-sandbox))' in text.splitlines()
+    assert '(allow signal (target self))' not in text and 'process-info' not in text
+    assert text.count('no-sandbox') == 1 and '(allow process-exec (with no-sandbox) (literal "/bin/ps"))' in text.splitlines()
+    lines = text.splitlines()
+    ps_rule = lines.index('(allow process-exec (with no-sandbox) (literal "/bin/ps"))')
+    exact = [i for i, l in enumerate(lines) if l.startswith('(allow process-exec ') and 'with no-sandbox' not in l]
+    assert all(i < ps_rule for i in exact)  # last matching rule wins, so the unsandboxed ps rule must follow every other exec allow
+    root = str(ctx.root.resolve())
+    for op in ('network-bind (local', 'network-inbound (local', 'network-outbound (remote'):
+        assert '(allow %s unix-socket (subpath "%s")))' % (op, root) in text.splitlines()
+    assert str(ctx.socket_dir.resolve()) not in ''.join(l for l in text.splitlines() if 'unix-socket' in l)
+
+
+def test_owned_bin_dir_holds_exact_git_and_python3_links_first_on_path(context):
+    m, ctx = context
+    bin_dir = ctx.root / 'bin'
+    assert (bin_dir / 'git').is_symlink() and os.readlink(bin_dir / 'git') == '/real/git'
+    assert os.readlink(bin_dir / 'python3') == str(ctx.venv / 'bin/python')
+    assert ctx.env['PATH'].split(os.pathsep)[0] == str(bin_dir)
+    assert ctx.env['GIT_CONFIG_GLOBAL'] == os.devnull and ctx.env['GIT_CONFIG_NOSYSTEM'] == '1'
+
+
+def test_real_tool_file_resolves_through_xcrun_and_fails_closed(tmp_path, monkeypatch):
+    m = module()
+    tool = tmp_path / 'git'; tool.write_text('x'); tool.chmod(0o755)
+    monkeypatch.setattr(m.subprocess, 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=str(tool) + '\n', stderr=''))
+    assert m.real_tool_file('git') == str(tool.resolve())
+    monkeypatch.setattr(m.subprocess, 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=str(tmp_path / 'gone') + '\n', stderr=''))
+    with pytest.raises(m.deps.DependencyError): m.real_tool_file('git')
+
 
 
 @pytest.mark.parametrize('rc,error,passed', [(0, '', True), (1, 'no server running on /x/probe.sock', True), (1, 'permission denied', False)])

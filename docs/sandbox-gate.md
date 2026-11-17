@@ -15,25 +15,29 @@ and the owned tmux socket directory. No whole home, `.local`, `agent-workspace`,
 shared cache, `/opt/homebrew` or whole temporary-directory allowance is generated.
 The generator rejects broad home roots independently of the operating user.
 IP networking is left enabled. AF_UNIX socket creation is permitted, but Unix
-socket binding/connect is restricted to the owned socket directory. The profile
-explicitly denies execution of sudo, su, launchctl, open and osascript.
-No broad Mach service lookup allowance is granted.
+socket binding/connect is restricted to the owned attempt root, which is also the
+short-path TMPDIR and contains the tmux socket directory. The profile explicitly
+denies execution of sudo, su, launchctl, open and osascript. No broad Mach service
+lookup allowance is added by the harness; the imported bsd.sb/system.sb policy does
+allow a small fixed set of Mach services (cfprefsd, trustd, opendirectoryd libinfo and
+an xpc-service prefix) and an outbound connection to the system log socket
+(`/private/var/run/syslog`).
 
 The syscall/filter shape for Unix sockets follows the Seatbelt use in the
 [Codex sandbox implementation](https://github.com/openai/codex/blob/main/codex-rs/sandboxing/src/seatbelt.rs).
-This reference establishes syntax intent, **not validation of this profile**.
-The generated profile has not been parsed or exercised on macOS in the author's
-Linux workspace. Resolved Homebrew package roots may not include every required
-dylib dependency. Tmux may require separately reviewed terminal-device access.
-The strict profile does not silently grant those dependencies. Fleet must run
-the exact generated profile; a dependency denial or parser failure is incomplete
-and requires an explicit reviewed source correction before another proof.
+This reference establishes syntax intent, **not validation of this profile**. The
+profile has since been generated and exercised natively on macOS by the fleet; those
+receipts, not the reference, are the proof. A dependency denial or parser failure is
+incomplete and requires an explicit reviewed source correction before another proof.
+Terminal devices are granted only when the gate runs as a separate unprivileged
+identity (see Separate gate identity); the same-user profile has no terminal grant.
 
 ## Pre-test proof
 
 Only harmless databases created by the harness are used: an owned control and
-two forbidden sibling temporary directories representing home data and unowned
-temporary data. All databases are explicitly closed and the forbidden temporary
+four forbidden sentinels: a home-equivalent and an unowned-temp one in sibling temporary
+directories, and a credential-named and a database-named one in a fresh directory
+inside the real home tree. All databases are explicitly closed and the forbidden temporary
 directories are removed after probing.
 
 For each sentinel, the exact launcher tests direct venv Python, isolated venv
@@ -152,11 +156,39 @@ Each is an exact, reviewed source edit with a unit test; none comes from a denia
   (the framework `Resources/Python.app/Contents/MacOS/Python`). At prepare time the
   interpreter is run unsandboxed with `-I -S -B` to print its real file and that app
   binary; both go through the same dependency closure and exact exec/read grant.
-- **No xcrun shim.** `/usr/bin/python3` is a shim that loads the developer directory at
-  run time. The alternate-interpreter probes use the real interpreter behind it instead
-  (exact file plus closure); the shim itself is not probed or granted. The receipt lists
+- **No xcrun shim.** `/usr/bin/python3` and `/usr/bin/git` are shims that load the
+  developer directory at run time and fail closed under the profile (their libxcrun load
+  is denied). They are still allowed to execute as part of the system directories, but they
+  are never relied on: the alternate-interpreter probes use the real interpreter behind
+  `/usr/bin/python3`, and the owned `bin` directory placed first on the child PATH holds
+  exact symlinks to the real git (from `xcrun -f git`, run unsandboxed at prepare) and to
+  the venv python as `python3`. Git helper programs under the developer directory
+  (`git-core`) are not granted, so git subcommands that exec them fail closed. The receipt lists
   `alternate_interpreters`.
 - **node.** Child environments set `OPENSSL_CONF` to an empty file in the owned attempt
   root, so node needs no grant on the system OpenSSL configuration.
 - **tmux pseudo-terminals.** The only device grant is read/write/ioctl on `/dev/ptmx`,
   `/dev/tty` and `^/dev/ttys[0-9]+$`. No `/dev` subpath is granted.
+
+## Process, signal, socket and ps grants
+
+- `(allow signal (target same-sandbox))`: signals only to processes inside this same
+  sandbox, which are exactly the gate tree's own descendants (this replaces self-only
+  signals so test teardown can terminate children and grandchildren). No process-info
+  operation is granted; ps and lsof probes pass without one.
+- Unix sockets bind, accept and connect only under the owned attempt root (the short-path
+  TMPDIR), not under the system temporary directory or any other path.
+- `(allow process-exec (with no-sandbox) (literal "/bin/ps"))`: `/bin/ps` is setuid root
+  and a sandboxed exec of it is refused. This one literal runs outside the profile; it
+  prints process information and takes no file arguments. It is the only unsandboxed exec.
+
+## Separate gate identity
+
+A pseudo-terminal is required: `tmux new-session -d` allocates one for the detached pane,
+so the strict `tmux usable` capability and the tmux tests cannot run without it, and the
+tmux probes must never be skipped or downgraded. The terminal-device rule
+(`/dev/ptmx`, `/dev/tty`, `^/dev/ttys[0-9]+$`) covers every terminal owned by the
+user running the gate, so it is emitted only when `separate_gate_identity()` holds: not
+root, not the console owner and not in the admin group. For the operator's own admin
+user the rule is absent and the tmux probes make the gate INCOMPLETE. Run the gate as a
+dedicated unprivileged account that cannot open the operator's terminals.
