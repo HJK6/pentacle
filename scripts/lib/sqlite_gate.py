@@ -95,6 +95,8 @@ def sandbox_proof_valid(proof, root):
         if digest(proof['receipt_path']) != proof['receipt_sha256']:
             return False
         receipt = json.loads(Path(proof['receipt_path']).read_text())
+        if not all(digest(item['path']) == item['sha256'] for item in receipt.get('imported_profiles', [])):
+            return False
         return all(receipt.get(key) == proof[key] for key in ('passed', 'root', 'profile_path', 'profile_sha256', 'execution_mode'))
     except (OSError, KeyError, ValueError, TypeError):
         return False

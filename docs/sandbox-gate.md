@@ -79,3 +79,54 @@ outside the launcher. Native filesystem access inside the allowed roots is
 controlled by Seatbelt, while Python SQLite continues to require attempt-owned
 registered database identities. Fleet owns native proofs and the full merge
 gate; neither was run in the author's workspace.
+
+
+## Native bootstrap amendment (lanes-sandbox-gate-2)
+
+The generated profile now places `(import "/System/Library/Sandbox/Profiles/bsd.sb")`
+immediately after `(deny default)`, followed by the narrow harness rules. Every
+literal transitive imported SBPL file, including system.sb, is read and hashed;
+unresolved, unreadable or nonliteral imports are INCOMPLETE. Imported policy
+hashes are checked again before launching and when validating native permission.
+
+This is **not** a policy of no home-path access: bsd.sb/system.sb grant global
+file metadata, a `.CFUserTextEncoding` suffix exception, selected system data
+and `/dev/fd`. Ordinary home file contents, protected database and credential
+contents, and unowned temporary content remain denied. The preflight adds
+harness-created credential-named and database-named sentinel files in a fresh
+directory within the real home tree. Every opener must be denied their contents;
+unsandboxed controls must read them. Only these owned files/directories are
+created and removed; no real credential or database is opened.
+
+The read-only dependency inventory uses `otool -L` and load-command inspection
+recursively for probe/preflight executables, each real interpreter, Python
+extension modules (including dynamically loaded `_sqlite3`), and discovered
+node addons. `@rpath`, `@loader_path` and `@executable_path` must resolve to exact
+files; symlink lookup metadata is retained separately. No formula/Cellar parent
+or Homebrew-wide rule is inferred. Dylibs get exact file read/map grants, not
+write or directory-wide grants. Python stdlib code directories are explicit
+narrow runtime read roots discovered from the selected interpreter. Cycles
+terminate; excessive depth, drift or an unresolved/unreadable dependency makes
+the attempt INCOMPLETE. This includes system dylibs available only through a
+dyld shared cache when no readable exact file exists; no implicit shared-cache
+exception is added.
+
+Every launched probe/preflight/test has a realpath cwd within declared allowed
+roots and `close_fds=True`, `pass_fds=()`. Only standard descriptors 0/1/2 are
+inherited/remapped; subprocess-owned capture pipes are intentional. A portable
+real-child test proves an explicitly inheritable parent sentinel descriptor is
+closed, and rejects an outside cwd. The harness closes other descriptors before
+running sandbox-exec, not after child code starts.
+
+Native Seatbelt, imported system policy and dyld behavior remain fleet proofs.
+Linux injected-runner green is not evidence that macOS can start the generated
+profile or that every runtime dependency has been observed. A missing input or
+failed native control stops before tests; no runtime denial expands the rules.
+
+The explicit preflight executable inventory includes `/bin/cat`, bash, git, ps,
+lsof, uname, env, true, dirname, ifconfig, awk and sleep, in addition to the
+probe interpreters, node, tmux, sqlite3, sandbox-exec and forbidden-exec controls.
+Known Python dlopen extensions and node addons are dependency roots, not merely
+the main executables. Future/generated executables cannot be certified from a
+source-only inventory; runtime denial is not proof of their dependency closure
+and must not be presented as full gate readiness.

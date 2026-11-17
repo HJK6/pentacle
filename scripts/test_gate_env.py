@@ -56,7 +56,8 @@ class Tmp(unittest.TestCase):
         def sandbox_stub(checkout, venv, toolchain, root, evidence, env):
             root = Path(root)
             return SimpleNamespace(socket_dir=root / "tmux", wrap=lambda argv: argv,
-                                   proof=lambda: None)
+                                   proof=lambda: None, validate_cwd=lambda cwd: cwd,
+                                   launch_kwargs=lambda cwd: {"cwd":str(cwd),"close_fds":True,"pass_fds":()})
         patcher = mock.patch.object(ge, "prepare_sandbox", side_effect=sandbox_stub)
         patcher.start()
         self.addCleanup(patcher.stop)

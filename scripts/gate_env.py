@@ -641,7 +641,7 @@ UNKNOWN = ga.UNKNOWN
 
 def harness_identity() -> str:
     h = hashlib.sha256()
-    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", HERE / "lib" / "instruction_snapshot.py", HERE / "lib" / "sqlite_gate.py", HERE / "lib" / "sandbox_gate.py", CONFIG_PATH):
+    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", HERE / "lib" / "instruction_snapshot.py", HERE / "lib" / "sqlite_gate.py", HERE / "lib" / "sandbox_gate.py", HERE / "lib" / "sandbox_dependencies.py", CONFIG_PATH):
         h.update(p.read_bytes())
     return h.hexdigest()
 
@@ -937,7 +937,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             env["HOME"] = str(home)
             sandbox = prepare_sandbox(checkout, venv, toolchain, tmp, evidence / "gate", env)
             env["TMUX_TMPDIR"] = str(sandbox.socket_dir)
-            child_run = lambda argv, **kwargs: subprocess.run(sandbox.wrap(argv), **kwargs)
+            def child_run(argv, **kwargs):
+                child = sandbox.wrap(argv)
+                kwargs.update(sandbox.launch_kwargs(kwargs.get("cwd", checkout)))
+                return subprocess.run(child, **kwargs)
             if target.get("gate") == "merge" and sqlite_site is not None:
                 sqlite_config = sqlite_gate.activate(sqlite_site, venv, tmp,
                     checkout / "services/chat-stream-v2/tools/sqlite_guard.py", sandbox_proof=sandbox.proof())
@@ -1009,9 +1012,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
                 env[OwnedProcesses.ENV] = str(owner.path)
             command = sandbox.wrap(command)
+            launch_kwargs = sandbox.launch_kwargs(results["cwd"])
             writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
             t_start = time.monotonic()
-            proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
+            proc = subprocess.Popen(command, env=env, start_new_session=True, **launch_kwargs)
             timed_out = False
             try:
                 proc.wait(timeout=results.get("wall_s", timeout_s + config["reserve_s"]))

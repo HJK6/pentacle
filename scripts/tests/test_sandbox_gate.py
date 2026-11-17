@@ -15,11 +15,16 @@ def module():
     return m
 
 @pytest.fixture
-def context(tmp_path):
+def context(tmp_path, monkeypatch):
     m = module()
     checkout, venv, root, evidence = [tmp_path / name for name in ('checkout','venv','attempt','evidence')]
     for path in (checkout, venv, root, evidence): path.mkdir()
     tools = {name: {'path': str(tmp_path/'tools'/name/'bin'/name)} for name in ('python','node','tmux')}
+    monkeypatch.setattr(m.deps, 'import_closure', lambda paths: [])
+    monkeypatch.setattr(m.deps, 'dependency_closure', lambda paths, **kw: {'files':[], 'metadata_paths':[], 'binaries':[], 'roots':[]})
+    monkeypatch.setattr(m, 'python_runtime_paths', lambda venv,root,**kw: ([], []))
+    home = tmp_path/'real-home'; home.mkdir()
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: home))
     ctx = m.prepare(checkout, venv, tools, root, evidence, {})
     return m, ctx
 
@@ -64,7 +69,7 @@ def stub_runner(ctx, mode=None):
             text = 'BROKEN' if mode == 'owned_failure' else 'CONTROL_OK'
         else:
             # Each opener embeds the sentinel name in one positional argument.
-            target = next((Path(arg) for arg in cmd[1:] if str(arg).endswith('SENTINEL.sqlite')), None)
+            target = next((Path(arg) for arg in cmd[1:] if Path(str(arg)).name in ('SENTINEL.sqlite','credentials.json','sessions.db')), None)
             forbidden = target is not None and target.parent != ctx.root
             denied = sandboxed and forbidden and mode != 'readable_sentinel'
             if executable == 'sqlite3' and denied: rc, error = 1, 'unable to open database file'
@@ -92,7 +97,7 @@ def test_successful_stub_receipt_shape_not_native_proof(context, monkeypatch):
     receipt = json.loads(ctx.receipt_path.read_text())
     names = {row['name'] for row in receipt['probes']}
     for opener in ('venv-python','venv-isolated','alternate-0','alternate-0-no-site','alternate-1','alternate-1-no-site','node','sqlite3','shell','tmux-pane'):
-        for sentinel in ('home-equivalent','unowned-temp'):
+        for sentinel in ('home-equivalent','unowned-temp','protected-credential','protected-database'):
             assert opener+'-'+sentinel in names
     assert all(row['passed'] for row in receipt['probes'] + receipt['controls'])
     assert proof['receipt_sha256'] == m.digest(ctx.receipt_path)
@@ -189,3 +194,65 @@ def test_cleanup_failure_cannot_leave_pass_receipt(context,monkeypatch):
     receipt=json.loads(ctx.receipt_path.read_text())
     assert receipt['status']=='INCOMPLETE' and receipt['passed'] is False
     assert any(r['name']=='sentinel-cleanup' and not r['passed'] for r in receipt['controls'])
+
+
+def test_gate2_import_order_and_exact_dependency_rules(context):
+    m,ctx=context
+    text=m.profile_text(ctx.read_paths,ctx.write_paths,ctx.socket_dir,
+        dependencies={'files':['/opt/homebrew/Cellar/sqlite/1/lib/libsqlite3.dylib'],
+                      'metadata_paths':['/opt/homebrew/opt/sqlite']})
+    assert text.index('(deny default)') < text.index('(import "/System/Library/Sandbox/Profiles/bsd.sb")') < text.index('(allow process-fork)')
+    assert '(literal "/opt/homebrew/Cellar/sqlite/1/lib/libsqlite3.dylib")' in text
+    assert '(subpath "/opt/homebrew/Cellar/sqlite' not in text
+
+
+def test_descriptor_closure_real_child_and_cwd(context,tmp_path):
+    import os
+    m,ctx=context
+    sentinel=tmp_path/'descriptor-sentinel'; sentinel.write_text('owned test data')
+    with sentinel.open() as handle:
+        os.set_inheritable(handle.fileno(),True)
+        code='''import os,sys
+try: os.fstat(int(sys.argv[1]))
+except OSError: print('CLOSED')
+else: raise AssertionError('forbidden parent handle leaked')
+assert os.getcwd()==sys.argv[2]
+'''
+        options=ctx.launch_kwargs(ctx.root)
+        out=subprocess.run([sys.executable,'-c',code,str(handle.fileno()),str(ctx.root)],capture_output=True,text=True,**options)
+        assert out.returncode==0 and out.stdout.strip()=='CLOSED',out.stderr
+    with pytest.raises(m.Incomplete,match='cwd'): ctx.launch_kwargs(tmp_path)
+
+
+def test_probe_launch_descriptor_and_home_sentinel_wiring(context,monkeypatch):
+    m,ctx=context
+    monkeypatch.setattr(m,'available',lambda path: True)
+    fake=stub_runner(ctx)
+    def check(argv,**kwargs):
+        assert kwargs['close_fds'] is True and kwargs['pass_fds']==()
+        assert Path(kwargs['cwd'])==ctx.root
+        return fake(argv,**kwargs)
+    m.run_probes(ctx,run=check)
+    receipt=json.loads(ctx.receipt_path.read_text())
+    for name in ('protected-credential','protected-database'):
+        assert any(r['name']=='unsandboxed-'+name and r['passed'] for r in receipt['controls'])
+        rows=[r for r in receipt['probes'] if r['name'].endswith('-'+name)]
+        assert len(rows)==10 and all(r['passed'] for r in rows)
+
+
+def test_import_hash_receipt_and_drift(context,monkeypatch,tmp_path):
+    m,ctx=context
+    imported=tmp_path/'system.sb'; imported.write_text('(version 1)')
+    monkeypatch.setattr(m.deps,'import_closure',lambda roots:[{'path':str(imported),'sha256':m.digest(imported)}])
+    again=m.prepare(ctx.checkout,ctx.venv,{k:{'path':v} for k,v in ctx.tools.items()},ctx.root,ctx.evidence,ctx.env)
+    assert json.loads(again.receipt_path.read_text())['imported_profiles'][0]['path']==str(imported)
+    imported.write_text('changed policy')
+    with pytest.raises(m.Incomplete): again._probe_wrap(['/bin/true'])
+
+
+def test_dependency_discovery_failure_incomplete(context,monkeypatch):
+    m,ctx=context
+    def broken(*a,**kw): raise m.deps.DependencyError('synthetic unresolved dependency')
+    monkeypatch.setattr(m.deps,'dependency_closure',broken)
+    with pytest.raises(m.Incomplete): m.prepare(ctx.checkout,ctx.venv,{},ctx.root,ctx.evidence,{})
+    assert json.loads(ctx.receipt_path.read_text())['status']=='INCOMPLETE'

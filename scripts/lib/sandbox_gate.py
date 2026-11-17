@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,14 @@ import subprocess
 import sys
 import tempfile
 import time
+
+_deps_spec = importlib.util.spec_from_file_location("_gate_sandbox_dependencies", Path(__file__).with_name("sandbox_dependencies.py"))
+deps = importlib.util.module_from_spec(_deps_spec)
+sys.modules[_deps_spec.name] = deps
+_deps_spec.loader.exec_module(deps)
+
+BASE_PROFILE = '/System/Library/Sandbox/Profiles/bsd.sb'
+EXTRA_BINARIES = ('/bin/cat', '/bin/bash', '/usr/bin/git', '/bin/ps', '/usr/sbin/lsof', '/usr/bin/uname', '/usr/bin/env', '/usr/bin/true', '/usr/bin/dirname', '/sbin/ifconfig', '/usr/bin/awk', '/bin/sleep')
 
 LAUNCHER = '/usr/bin/sandbox-exec'
 ALTERNATE_PYTHONS = ('/opt/homebrew/opt/python@3.13/bin/python3.13', '/usr/bin/python3')
@@ -37,14 +46,14 @@ def quote(path):
 def available(path):
     return Path(path).is_file() and os.access(path, os.X_OK)
 
-def profile_text(read_paths, write_paths, socket_dir):
+def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None):
     reads, writes = sorted(set(map(resolved, read_paths))), sorted(set(map(resolved, write_paths)))
     for path in reads + writes:
         parts = Path(path).parts
         home_root = len(parts) == 3 and parts[1] in ('Users', 'home')
         if home_root or path in ('/', '/Users', '/home', '/tmp', '/private/tmp', '/opt/homebrew', '/usr/local', str(Path.home())) or Path(path).name in ('.local', 'agent-workspace', '.cache', 'Caches', 'cache', 'caches'):
             raise ValueError('broad sandbox allowance refused: ' + path)
-    rules = ['(version 1)', '(deny default)',
+    rules = ['(version 1)', '(deny default)', '(import ' + quote(BASE_PROFILE) + ')',
              '(allow process-fork)', '(allow process-exec ' + ' '.join('(subpath %s)' % quote(p) for p in reads) + ')',
              '(deny process-exec ' + ' '.join('(literal %s)' % quote(resolved(p)) for p in FORBIDDEN_EXEC) + ')',
              '(allow file-read* ' + ' '.join('(subpath %s)' % quote(p) for p in reads + writes) + ')',
@@ -59,6 +68,18 @@ def profile_text(read_paths, write_paths, socket_dir):
              '(allow network-bind (local unix-socket (subpath %s)))' % quote(resolved(socket_dir)),
              '(allow network-inbound (local unix-socket (subpath %s)))' % quote(resolved(socket_dir)),
              '(allow network-outbound (remote unix-socket (subpath %s)))' % quote(resolved(socket_dir))]
+    dependencies = dependencies or {'files': [], 'metadata_paths': []}
+    if dependencies['files']:
+        exact = ' '.join('(literal %s)' % quote(resolved(p)) for p in dependencies['files'])
+        rules += ['(allow file-read-data file-map-executable ' + exact + ')']
+        forbidden = {resolved(p) for p in FORBIDDEN_EXEC}
+        executables = sorted({item['executable'] for item in dependencies.get('roots', [])} - forbidden)
+        if executables:
+            rules += ['(allow process-exec ' + ' '.join('(literal %s)' % quote(resolved(p)) for p in executables) + ')']
+    if dependencies['metadata_paths']:
+        rules += ['(allow file-read-metadata ' + ' '.join('(literal %s)' % quote(p) for p in dependencies['metadata_paths']) + ')']
+    # Keep explicit execution denials final, after imported and exact allow rules.
+    rules += ['(deny process-exec ' + ' '.join('(literal %s)' % quote(resolved(p)) for p in FORBIDDEN_EXEC) + ')']
     return '\n'.join(rules) + '\n'
 
 @dataclass
@@ -78,6 +99,8 @@ class Context:
     controls: list = field(default_factory=list)
     passed: bool = False
     execution_mode: str = 'not-run'
+    imports: list = field(default_factory=list)
+    dependencies: dict = field(default_factory=dict)
     @property
     def receipt_path(self):
         return self.evidence / 'sandbox-profile.json'
@@ -86,12 +109,15 @@ class Context:
                 'profile_path': str(self.profile_path), 'profile_sha256': self.profile_sha256,
                 'attempt_root': str(self.root), 'root': str(self.root), 'passed': status == 'PASS', 'resolved_allow_paths': {'read_exec': self.read_paths, 'write': self.write_paths},
                 'socket_dir': str(self.socket_dir), 'launcher_argv': [LAUNCHER, '-f', str(self.profile_path)],
-                'probes': self.probes, 'controls': self.controls, 'execution_mode': self.execution_mode}
+                'probes': self.probes, 'controls': self.controls, 'execution_mode': self.execution_mode, 'imported_profiles': self.imports,
+                'dependencies': self.dependencies, 'descriptor_policy': {'close_fds': True, 'pass_fds': []},
+                'cwd': str(self.root)}
         self.receipt_path.write_text(json.dumps(body, sort_keys=True, indent=2) + '\n')
         return body
     def _probe_wrap(self, argv):
         try:
-            valid = digest(self.profile_path) == self.profile_sha256
+            valid = (digest(self.profile_path) == self.profile_sha256
+                     and all(digest(item['path']) == item['sha256'] for item in self.imports))
         except OSError:
             valid = False
         if not valid:
@@ -99,6 +125,18 @@ class Context:
             self.write_receipt('INCOMPLETE', 'profile_changed_or_unreadable')
             raise Incomplete('sandbox profile changed or is unreadable')
         return [LAUNCHER, '-f', str(self.profile_path), *map(str, argv)]
+    def validate_cwd(self, cwd):
+        path = Path(cwd).resolve()
+        allowed = [Path(p) for p in self.read_paths + self.write_paths]
+        if not path.is_dir() or not any(path == base or base in path.parents for base in allowed):
+            self.passed = False
+            self.write_receipt('INCOMPLETE', 'cwd_outside_allowed_roots')
+            raise Incomplete('sandbox child cwd is outside allowed roots')
+        return path
+
+    def launch_kwargs(self, cwd):
+        return {'cwd': str(self.validate_cwd(cwd)), 'close_fds': True, 'pass_fds': ()}
+
     def wrap(self, argv):
         if not self.passed:
             self.write_receipt('INCOMPLETE', 'self_probe_not_passed')
@@ -127,6 +165,22 @@ class Context:
                 'receipt_sha256': digest(self.receipt_path), 'verified': True, 'root': str(self.root),
                 'passed': True, 'execution_mode': self.execution_mode}
 
+def python_runtime_paths(venv, root, *, executable=None):
+    """Discover stdlib and dlopen extensions from the exact interpreter, not logs."""
+    code = "import json,sysconfig; print(json.dumps({k:sysconfig.get_path(k) for k in ('stdlib','platstdlib')}))"
+    out = subprocess.run([str(executable or (Path(venv)/'bin/python')), '-I', '-S', '-B', '-c', code],
+                         cwd=str(root), env={'PATH':'/usr/bin:/bin'}, close_fds=True, pass_fds=(),
+                         capture_output=True, text=True, timeout=20, check=True)
+    directories = sorted({resolved(p) for p in json.loads(out.stdout).values() if p})
+    if not directories or any(not Path(p).is_dir() for p in directories):
+        raise deps.DependencyError('unreadable Python runtime directory')
+    extensions = set()
+    for directory in [*directories, *([str(venv)] if venv is not None else [])]:
+        for pattern in ('*.so', '*.dylib'):
+            extensions.update(str(p.resolve()) for p in Path(directory).rglob(pattern) if p.is_file())
+    return directories, sorted(extensions)
+
+
 def prepare(checkout, venv, toolchain, root, evidence, env):
     """Generate once. No denial log is read, and no path is learned from probes."""
     evidence = Path(evidence).resolve(); evidence.mkdir(parents=True, exist_ok=True)
@@ -135,26 +189,31 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         root.mkdir(parents=True, exist_ok=True)
         socket_dir = root / 'tmux-sockets'; socket_dir.mkdir(exist_ok=True)
         tools = {name: resolved(value['path']) for name, value in toolchain.items()}
-        # Exact package roots for resolved Homebrew/venv tools, never /opt/homebrew.
-        packages = []
-        for path in tools.values():
-            p = Path(path)
-            package = p.parent.parent if p.parent.name in ('bin', 'sbin') else p.parent
-            if str(package) not in ('/', '/usr'):
-                packages.append(str(package))
-        read_paths = sorted(set(map(resolved, [checkout, venv, *packages, *SYSTEM_READ])))
+        imports = deps.import_closure([BASE_PROFILE])
+        runtime_reads, extensions = python_runtime_paths(venv, root)
+        executables = [str(venv/'bin/python'), *[tools[k] for k in ('python','node','tmux') if k in tools], *ALTERNATE_PYTHONS,
+                       '/usr/bin/sqlite3', '/bin/sh', LAUNCHER, *FORBIDDEN_EXEC, *EXTRA_BINARIES]
+        extra = [{'path':p, 'executable':str(venv/'bin/python')} for p in extensions]
+        for alternate in ALTERNATE_PYTHONS:
+            alternate_reads, alternate_extensions = python_runtime_paths(None, root, executable=alternate)
+            runtime_reads += alternate_reads
+            extra += [{'path':p, 'executable':alternate} for p in alternate_extensions]
+        extra += [{'path':str(p), 'executable':tools['node']} for p in checkout.rglob('*.node') if p.is_file() and 'node' in tools]
+        closure = deps.dependency_closure(executables, extra_roots=extra)
+        read_paths = sorted(set(map(resolved, [checkout, venv, *runtime_reads, *SYSTEM_READ])))
         write_paths = sorted(set(map(resolved, [root, evidence, socket_dir])))
-        profile = profile_text(read_paths, write_paths, socket_dir)
+        profile = profile_text(read_paths, write_paths, socket_dir, dependencies=closure)
         profile_path = evidence / 'sandbox-profile.sb'
         profile_path.write_text(profile)
         child_env = dict(env)
         child_env.pop('TMUX', None)
         child_env['TMUX_TMPDIR'] = str(socket_dir)
         context = Context(checkout, venv, root, evidence, child_env, tools, profile_path,
-                          digest(profile_path), read_paths, write_paths, socket_dir)
+                          digest(profile_path), read_paths, write_paths, socket_dir,
+                          imports=imports, dependencies=closure)
         context.write_receipt('INCOMPLETE', 'self_probe_not_run')
         return context
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, deps.DependencyError) as exc:
         (evidence / 'sandbox-profile.json').write_text(json.dumps({'schema': 'pentacle.sandbox-profile.v1',
             'status': 'INCOMPLETE', 'reason': 'profile_generation_failed', 'error': type(exc).__name__,
             'probes': [], 'controls': [], 'launcher_argv': [LAUNCHER]}, sort_keys=True) + '\n')
@@ -202,8 +261,9 @@ def run_probes(context, run=subprocess.run):
         dest = c.controls if control else c.probes
         dest.append(entry)
         try:
+            if sandboxed: c.validate_cwd(c.root)
             command = c._probe_wrap(argv) if sandboxed else list(map(str, argv))
-            out = run(command, env=c.env, cwd=str(c.root), capture_output=True, text=True, timeout=20)
+            out = run(command, env=c.env, capture_output=True, text=True, timeout=20, **c.launch_kwargs(c.root))
             stdout, stderr = out.stdout or '', out.stderr or ''
             entry.update(returncode=out.returncode, stdout=stdout[-2048:], stderr=stderr[-2048:])
             if expected == 'DENIED_SQLITE':
@@ -240,12 +300,14 @@ def run_probes(context, run=subprocess.run):
         import sqlite3
         from contextlib import closing
         sentinels = []
-        for name in ('home-equivalent', 'unowned-temp'):
-            folder = Path(tempfile.mkdtemp(prefix='sandbox-' + name + '-', dir=str(c.root.parent))).resolve()
+        for name in ('home-equivalent', 'unowned-temp', 'protected-credential', 'protected-database'):
+            parent = Path.home() if name.startswith('protected-') else c.root.parent
+            folder = Path(tempfile.mkdtemp(prefix='sandbox-' + name + '-', dir=str(parent))).resolve()
             sentinel_folders.append(folder)
             if any(Path(allowed) == folder or Path(allowed) in folder.parents for allowed in c.read_paths + c.write_paths):
                 raise Incomplete('forbidden sentinel would fall inside an allow rule')
-            path = folder / 'SENTINEL.sqlite'
+            filename = {'protected-credential':'credentials.json', 'protected-database':'sessions.db'}.get(name, 'SENTINEL.sqlite')
+            path = folder / filename
             with closing(sqlite3.connect(path)) as db:
                 db.execute('create table sentinel(value)'); db.execute("insert into sentinel values('READABLE')"); db.commit()
             sentinels.append((name, path))
