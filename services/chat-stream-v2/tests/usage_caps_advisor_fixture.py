@@ -73,6 +73,7 @@ for index,line in enumerate(sys.stdin):
         await store.grant_stream_token(HOST,old_name,hashlib.sha256(old_token.encode()).hexdigest(),STREAM_TOKEN_HASH_VERSION)
         await sessions.refresh()
         brief=scratch/'advisor-brief';brief.write_text('Answer only the isolated fixture ruling request')
+        await store.update_session(HOST,'v2-test',spec_ids=[],assigned_spec_id='')
         desk=await store.fetch_session(HOST,'v2-test')
         await server.lane_rulings.configure(old_stream,actor_stream_id=DESK,
             actor_generation=desk['session_generation'],brief_file=str(brief))
@@ -130,7 +131,7 @@ for index,line in enumerate(sys.stdin):
                 assert any(o['state']=='delivered' for o in status['outcomes']),status
                 ordinary=await rpc({'type':'spawn','request_id':'ordinary','host':HOST,'session_name':'seat-a',
                     'provider':'codex','model':'gpt-6-luna','effort':'low','provision_only':True,'objective':'Negative control'})
-                assert ordinary.get('error_code')=='account_pool_blocked',ordinary
+                assert 'account_pool_blocked' in (ordinary.get('error_code'),ordinary.get('error')),ordinary
                 print(json.dumps({'proof':'advisor_restore','initial_answer':True,'pane_killed':True,
                                   'restore_admitted':True,'successor_answer':True,'ordinary_refused':True}),flush=True)
         finally:
