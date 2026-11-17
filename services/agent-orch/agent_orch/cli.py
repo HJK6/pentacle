@@ -4494,6 +4494,95 @@ def send_file(args: argparse.Namespace) -> int:
                assistant_once=assistant_once)
 
 
+# Daemon answers that only the composite's bound publisher can receive: the seat
+# is the front desk, so a failure must stay a failure, never an own-chat post.
+_SEND_IMAGE_BOUND_PUBLISHER_CODES = frozenset({
+    "assistant_publish_note_type_required", "assistant_publish_ref_required",
+    "assistant_publish_reason_required", "assistant_publish_ref_not_found",
+    "assistant_publish_ref_kind_not_allowed", "assistant_publish_duplicate_text",
+    "assistant_publish_repeat", "publish_replay_conflict",
+})
+
+
+def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str, timeout: float,
+                             caller: str = "") -> int | None:
+    """Publish the image to the assistant composite the operator reads.
+
+    The bound front desk's own conversation is not what the operator sees, so
+    its image must go out as a proactive publication, and a failure there stays
+    a failure. The daemon's binding says which seat that is and which composite
+    it serves; ``--to`` and PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID override the
+    composite. Returns the exit code, or None when this seat is not a bound
+    publisher (the caller then keeps the seat's own-conversation behaviour)."""
+    import contextlib
+    import io
+    from .file_delivery import run
+    explicit = (getattr(args, "to", None) or os.environ.get("PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID", "")).strip()
+    bound = False
+    bound_composite = ""
+    try:
+        binding = asyncio.run(assistant_once(
+            load_config(), {"type": "assistant.binding", "request_id": f"assistant-binding-{uuid.uuid4()}"},
+            timeout=timeout))
+    except ServiceCredentialUnavailable:
+        raise
+    except Exception:  # noqa: BLE001 - never echo transport text
+        print("agent-orch send-image: cannot read the assistant binding; nothing was sent", file=sys.stderr)
+        return 1
+    if isinstance(binding, dict) and binding.get("type") == "assistant.binding.ok":
+        bound = bool(caller) and binding.get("stream_id") == caller
+        bound_composite = str(binding.get("composite_stream_id") or "").strip()
+    target = explicit or (bound_composite if bound else "")
+    if bound and not target:
+        print("agent-orch send-image: this seat is the bound front desk but no assistant composite "
+              "could be resolved; nothing was sent", file=sys.stderr)
+        return 1
+    if not target:
+        return None
+    publish_args = argparse.Namespace(
+        path=str(path), upload_id=None, from_receipt=None,
+        to=target, proactive=True,
+        note_type=getattr(args, "note_type", None), ref=getattr(args, "ref", None),
+        why=getattr(args, "why", None), caption=caption, timeout=timeout,
+        dispatch_id=None, reply_to_message_id=None, reply_to_question_id=None,
+        evidence_refs_json=None, publish_kind=None, request_id=None,
+        upload_request_id=None, response_state=None,
+    )
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        rc = run(publish_args, load_config=load_config, upload_blob_once=upload_blob_once,
+                 assistant_once=assistant_once)
+    lines = [line for line in captured.getvalue().splitlines() if line.strip()]
+    try:
+        result = json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        result = {}
+    if rc == 0 and result.get("type") == "assistant.publish.ok":
+        print(json.dumps({**result, "ok": True, "source_path": str(path), "destination": publish_args.to}, indent=2))
+        return 0
+    code = result.get("error_code")
+    if not bound and code not in _SEND_IMAGE_BOUND_PUBLISHER_CODES:
+        # Not the bound publisher (or the composite is not reachable from this
+        # seat): keep the pre-existing own-conversation behaviour, but say so.
+        print(
+            f"agent-orch send-image: could not publish to {publish_args.to} "
+            f"({code or 'publish_failed'}); posting to this seat's own conversation only",
+            file=sys.stderr,
+        )
+        return None
+    print(json.dumps({"ok": False, **result}, indent=2), file=sys.stderr)
+    if code in {"assistant_publish_note_type_required", "assistant_publish_ref_required",
+                "assistant_publish_reason_required"}:
+        print(
+            "agent-orch send-image: the front desk publishes to the operator chat and needs "
+            "--note-type {result,problem,reminder,relay,started,change,other} and --ref "
+            "{message|lane|report|wake|tell}:<id> (--why with other)",
+            file=sys.stderr,
+        )
+        return 2
+    return rc or 1
+
+
 def send_image(args: argparse.Namespace) -> int:
     """Attach a local PNG/JPEG to your OWN conversation so the operator sees the
     real image in Pentacle chat (mobile + desktop), openable in the viewer.
@@ -4537,6 +4626,9 @@ def send_image(args: argparse.Namespace) -> int:
     caption = (getattr(args, "caption", "") or "").strip()
     timeout = float(args.timeout)
     config = load_config()
+    published = _send_image_to_composite(args, path, caption, timeout, from_stream_id)
+    if published is not None:
+        return published
     try:
         upload = asyncio.run(upload_blob_once(config, data, timeout=timeout))
     except ServiceCredentialUnavailable:
@@ -5806,13 +5898,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Attach a local PNG/JPEG to your OWN conversation so the operator sees "
             "the real image in Pentacle chat (mobile + desktop) and can open it in "
             "the image viewer. Authenticated by your seat's stream token; the image "
-            "posts as your (the agent's) own message. Prints the receipt "
-            "(event id, blob sha, source sha256)."
+            "posts as your (the agent's) own message. The bound front desk instead "
+            "publishes to the operator chat (the composite comes from the daemon binding; --to or "
+            "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID override) and needs --note-type "
+            "and --ref. Prints the receipt (event id, blob sha, source sha256)."
         ),
     )
     send_image_parser.add_argument("path", help="Path to a local PNG or JPEG image (<=25 MiB).")
     send_image_parser.add_argument("--caption", default="", help="Optional short caption shown with the image.")
     send_image_parser.add_argument("--from-stream-id", dest="from_stream_id", help="Override the caller stream id (defaults to your seat env).")
+    send_image_parser.add_argument("--to", help="Assistant composite the front desk publishes to (default: the daemon binding; override: PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID).")
+    send_image_parser.add_argument("--note-type", choices=NOTE_TYPES, help="Front desk: note type for the operator chat.")
+    send_image_parser.add_argument("--ref", type=_publication_ref, help="Front desk: message|lane|report|wake|tell:<id> the note refers to.")
+    send_image_parser.add_argument("--why", help="With --note-type other: the one-line reason.")
     send_image_parser.add_argument("--timeout", type=float, default=30.0)
     send_image_parser.set_defaults(func=send_image)
 
