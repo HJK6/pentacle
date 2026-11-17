@@ -468,7 +468,7 @@ class AssistantLaneRulings:
         return {"type": "assistant.authority.ok", **result}
 
     async def configure_sessions(self, kinds, *, actor_stream_id, actor_generation, account=None):
-        from advisor_sessions import KINDS_KEY, SHAPE_KEY, json_record
+        from advisor_sessions import KINDS_KEY, SHAPE_KEY, json_record, owns_conn
         if not isinstance(kinds, str):
             raise ValueError("assistant_session_kinds_invalid")
         selected = set() if kinds == "none" else set(kinds.split(","))
@@ -504,7 +504,8 @@ class AssistantLaneRulings:
                 return removed, binding, shape
             removed, binding, shape = await self.store.submit(plan)
             rows = await self.store.submit(lambda c: [dict(r) for r in c.execute(
-                "SELECT * FROM v2_assistant_lane_rulings WHERE state='pending'") if r["action"] in removed])
+                "SELECT * FROM v2_assistant_lane_rulings WHERE state='pending'")
+                if r["action"] in removed and (not r["authority_stream_id"] or owns_conn(c, r))])
             for row in rows:
                 if not await self.advisor_sessions.close_request(row["ruling_request_id"], "reissued"):
                     raise ValueError("assistant_session_cleanup_pending")
@@ -1919,7 +1920,10 @@ class AssistantLaneRulings:
                 await self.server.broadcast({"type": "chat.event", "event": event})
 
     async def tick(self) -> None:
-        await self.advisor_sessions.tick()
+        try:
+            await self.advisor_sessions.tick()
+        except Exception:
+            log.exception("assistant advisor-session check failed; will retry")
         try:
             await self._mark_unanswered()
         except Exception:

@@ -38,7 +38,8 @@ settings and running/waiting counts.
 
 Adding an action leaves requests already at the bound seat there. Removing an
 action requires a ready bound seat, closes its pending sessions, and reissues
-both covered and non-covered pending rows once to that seat's generation.
+both covered and non-covered session requests once to that seat's generation.
+Requests already waiting at the bound seat retain their original packet.
 After enabling every action, `--set sessions` unbinds the long-lived advisor and
 returns its pending requests to the session queue. This binding bypasses no
 request, emits no authority-loss notice and starts no replacement long-lived
@@ -64,7 +65,8 @@ request or overdue notice reaches that advisor. The thread has at most eight
 terminal requests for the same nonempty work item, oldest first, totaling at most
 12,000 UTF-8 bytes; each packet and advice answer is cut to 1,500 bytes.
 
-Requests for one work item run in order. Different work items can run in parallel,
+Requests for one work item run in order, including earlier bound-seat requests
+and approved actions still releasing. Different work items can run in parallel,
 at most four sessions total. Waiting non-covered requests (close and composite
 actions) take a free slot before covered requests.
 
@@ -79,7 +81,8 @@ while queued or running.
 Account controls protect owning sessions. A recent advice session can supply a
 `DELEGATED-HOLD` for its requester or front desk under existing dispatch/tell
 checks. Host transfer omits the `sessions` sentinel from the roster, closes
-sessions after claim, and restarts queued reviews after publication and cleanup.
+sessions after claim, and restarts queued reviews after commit publication.
+Cleanup of predecessor seats may finish later without blocking new reviews.
 
 ## Measurement
 

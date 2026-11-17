@@ -239,7 +239,9 @@ class AdvisorSessions:
         outcomes = [o for o in status.get("outcomes", []) if key in (o.get("request_id"), o.get("idempotency_key"))]
         reservations = status.get("reservations", [])
         delivered = any(o.get("state") == "delivered" and o.get("stream_id") == record["stream_id"] for o in outcomes)
-        if delivered and seat and seat.get("pane_status") == "pane_alive" and seat.get("bootstrap_state") in {"ready", "started"}:
+        # The spawn journal's delivered outcome is the boot/delivery proof used
+        # by await_spawn; the session's bootstrap projection can lag it.
+        if delivered and seat and seat.get("pane_status") == "pane_alive":
             def ready(c):
                 with c:
                     c.execute("UPDATE v2_advisor_sessions SET ready_at=? "
@@ -276,14 +278,15 @@ class AdvisorSessions:
                 "SELECT * FROM v2_advisor_sessions WHERE ended_at IS NULL")])
             for record in records:
                 await self._reconcile(record, now)
-            async with self.rulings._authority_lock:
+            async with self.server.sessions.assistant.authority_lock, self.rulings._authority_lock:
                 binding = await self.rulings.binding()
                 if binding["state"] == "disabled":
                     return
-                # The existing transfer journal is also the restart-safe pause.
+                # Commit holds this authority lock through binding publication.
+                # Cleanup may retry later; it must not keep new requests paused.
                 if await self.store.submit(lambda c: bool(c.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_host_transfers'").fetchone()) and
-                        bool(c.execute("SELECT 1 FROM v2_host_transfers WHERE state IN ('preparing','committed') LIMIT 1").fetchone())):
+                        bool(c.execute("SELECT 1 FROM v2_host_transfers WHERE state='preparing' LIMIT 1").fetchone())):
                     return
                 kinds = await self.store.submit(lambda c: json_record(c, KINDS_KEY, []))
                 active = await self.store.submit(lambda c: [dict(r) for r in c.execute(

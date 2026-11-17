@@ -409,10 +409,63 @@ def test_transfer_pause_retains_waiting_work_until_published(monkeypatch):
             assert await h.r.advisor_sessions.close_request(row["ruling_request_id"], "host_transfer")
             await h.tick()
             assert len(h.calls) == 1
-            await h.store.submit(lambda c: c.execute("UPDATE v2_host_transfers SET state='committed'"))
+            async with h.server.sessions.assistant.authority_lock:
+                await h.store.submit(lambda c: c.execute("UPDATE v2_host_transfers SET state='committed'"))
+                pending = asyncio.create_task(h.tick())
+                await asyncio.sleep(0)
+                assert not pending.done() and len(h.calls) == 1
+            await pending
+            assert len(h.calls) == 2
+    asyncio.run(go())
+
+
+def test_session_tick_failure_does_not_stop_existing_deadline(monkeypatch):
+    async def go():
+        async with session_rig(monkeypatch, ()) as h:
+            row = await h.request("deadline-isolated", action="session_close", covered=False)
+            def overdue(c):
+                with c:
+                    c.execute("UPDATE v2_assistant_lane_rulings SET deadline=0 WHERE ruling_request_id=?", (row["ruling_request_id"],))
+            await h.store.submit(overdue)
+            async def broken():
+                raise ValueError("session service unavailable")
+            monkeypatch.setattr(h.r.advisor_sessions, "tick", broken)
             await h.tick()
-            assert len(h.calls) == 1
-            await h.store.submit(lambda c: c.execute("UPDATE v2_host_transfers SET state='complete'"))
+            current = await h.r._fetch(row["ruling_request_id"])
+            assert current["state"] != "pending" and current["reason"] == "deadline"
+    asyncio.run(go())
+
+
+def test_removing_kind_does_not_repeat_packet_already_at_bound_seat(monkeypatch):
+    async def go():
+        async with session_rig(monkeypatch, ()) as h:
+            row = await h.request("already-bound", action="session_close", covered=False)
+            await h.r._enqueue_notice(row)
+            actor = dict(actor_stream_id=ROOT, actor_generation=h.root["session_generation"])
+            await h.r.configure_sessions("session_close", **actor)
+            await h.r.configure_sessions("none", **actor)
+            notices = await h.store.submit(lambda c: [dict(r) for r in c.execute(
+                "SELECT * FROM v2_outbound_notices WHERE kind='assistant_lane_ruling_request' AND json_extract(metadata,'$.ruling_request_id')=?",
+                (row["ruling_request_id"],))])
+            assert len(notices) == 1
+            assert notices[0]["recipient_stream_id"] == ADVISOR
+    asyncio.run(go())
+
+
+def test_delivered_spawn_starts_answer_timer_with_delayed_bootstrap_projection(monkeypatch):
+    async def go():
+        async with session_rig(monkeypatch) as h:
+            row = await h.request("delivered-before-projection")
+            await h.tick()
+            current = await h.r._fetch(row["ruling_request_id"])
+            await h.store.update_session(*current["authority_stream_id"].split(":", 1), bootstrap_state="starting")
+            await h.tick()
+            record = await h.store.submit(lambda c: dict(c.execute("SELECT * FROM v2_advisor_sessions").fetchone()))
+            assert record["ready_at"] is not None
+            def overdue(c):
+                with c:
+                    c.execute("UPDATE v2_advisor_sessions SET ready_at=0")
+            await h.store.submit(overdue)
             await h.tick()
             assert len(h.calls) == 2
     asyncio.run(go())
