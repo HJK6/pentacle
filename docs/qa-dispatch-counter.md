@@ -146,3 +146,5 @@ valid rejects and nonempty diagnosis/pivot, records the historical ids, and
 atomically advances the cycle. Identical diagnosis-id retries replay; changed
 payloads conflict. Late adjudication in an old cycle never affects the new cycle.
 `spec-issue show` exposes history; legacy `list`/`clear` do not clear this ledger.
+
+`spec-issue adjudicate` takes only REJECT reports; an ACCEPT is refused with `qa_report_invalid` ("a durable done reject report is required"). Consume an ACCEPT directly and bind it in the done report with `--qa-attestation-stream-id` and `--qa-attestation-report-id`.
