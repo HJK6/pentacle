@@ -40,6 +40,13 @@ def fake_exe(folder: Path, name: str, version_line: str, rc: int = 0) -> Path:
 
 
 class Tmp(unittest.TestCase):
+    def fake_python_env(self, *args):
+        if len(args) > 5:
+            Path(args[5]).mkdir(parents=True, exist_ok=True)
+        venv = self.tmp / "venv"
+        (venv / "lib/python3.13/site-packages").mkdir(parents=True, exist_ok=True)
+        return venv, {"reused": True}, []
+
     def setUp(self):
         self._t = tempfile.TemporaryDirectory(prefix="ge-t-")
         self.tmp = Path(os.path.realpath(self._t.name))
@@ -692,7 +699,7 @@ class EntrypointReceipts(Tmp):
             return SimpleNamespace(pid=123456789, returncode=rc, wait=lambda **k: rc, poll=lambda: rc)
         with mock.patch.multiple(ge, load_config=lambda *a: cfg,
                 resolve_toolchain=lambda *a: resolved, pick_locale=lambda *a: ('C.UTF-8', None),
-                check_layout=lambda *a: [], prepared_key=lambda *a: 'fixture', ensure_python_env=lambda *a: (venv, {'reused': True}, []),
+                check_layout=lambda *a: [], prepared_key=lambda *a: 'fixture', ensure_python_env=lambda *a: self.fake_python_env(*a),
                 ensure_npm_env=lambda *a: ({'reused': True}, []), check_scratch=lambda *a: [],
                 check_node_npm=lambda *a: [], check_dependencies=lambda *a: [],
                 check_process_listing=lambda *a: [], group_alive=lambda *a: False,
@@ -809,7 +816,7 @@ class EntrypointReceipts(Tmp):
         def boom(*a, **k):
             raise AssertionError("prepare launched a subject")
         with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
-                                 ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
+                                 ensure_python_env=lambda *a, **k: self.fake_python_env(*a), check_scratch=lambda *a, **k: [],
                                  check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
                                  build_command=boom, source_identity=lambda *a, **k: {"sha": "x", "dirty": False}), mock.patch.object(ge.subprocess, "Popen", boom):
             code = ge.main(["prepare", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev"), "--checkout", str(self.tmp / "co"),
@@ -853,7 +860,7 @@ class EntrypointReceipts(Tmp):
         # The parent formerly recorded UTC for TZ="", while the hermetic child
         # (TZ unset) observed local time and rejected the same live owner.
         with mock.patch.dict(os.environ, {"TZ": ""}), mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
-                                 ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
+                                 ensure_python_env=lambda *a, **k: self.fake_python_env(*a), check_scratch=lambda *a, **k: [],
                                  check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
                                  build_command=lambda *a, **k: (argv, {"cwd": self.tmp, "wall_s": 120, "classify": lambda rc, to: ("pass", None, {})}),
                                  source_identity=lambda *a, **k: {"sha": "x", "dirty": False}):
@@ -1076,7 +1083,7 @@ class ScratchRetention(Tmp):
             return ["synthetic-subject"], {"cwd": service, "classify": lambda rc, timed_out: (outcome, ff, {})}
         patches = dict(resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []),
             pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
-            ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []),
+            ensure_python_env=lambda *a, **k: self.fake_python_env(*a),
             check_scratch=lambda *a, **k: [], check_node_npm=lambda *a, **k: [],
             check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
             run_preflight_script=lambda *a, **k: [],

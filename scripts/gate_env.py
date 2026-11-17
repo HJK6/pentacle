@@ -641,7 +641,7 @@ UNKNOWN = ga.UNKNOWN
 
 def harness_identity() -> str:
     h = hashlib.sha256()
-    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", HERE / "lib" / "instruction_snapshot.py", CONFIG_PATH):
+    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", HERE / "lib" / "instruction_snapshot.py", HERE / "lib" / "sqlite_gate.py", CONFIG_PATH):
         h.update(p.read_bytes())
     return h.hexdigest()
 
@@ -807,6 +807,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     target: Optional[Dict[str, Any]] = None
     resolved_selection: Optional[List[str]] = None
     instruction_input = None
+    sqlite_site = sqlite_config = prepared_lock = None
     try:
         if args.history_complete and (missing_identity or args.prior_attempt):
             raise SetupFailure([fail("identity_args", "--history-complete requires full identity and no prior attempt")])
@@ -885,6 +886,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise SetupFailure(failures)  # nothing below is safe without a toolchain/layout
 
         prepared_dir = workspace / "prepared" / prepared_key(config, args.profile, profile, toolchain, checkout, bool(target.get("npm_ci")))
+        # All consumers serialize cache access: the venv hook configuration
+        # belongs to one attempt, including when a different target reuses it.
+        import fcntl
+        prepared_dir.parent.mkdir(parents=True, exist_ok=True)
+        prepared_lock = open(str(prepared_dir) + ".lock", "a+")
+        fcntl.flock(prepared_lock, fcntl.LOCK_EX)
+        from lib import sqlite_gate
+        if (prepared_dir / "sqlite-guard-unreaped").exists():
+            raise SetupFailure([fail("cache", "guarded descendants remain from a previous attempt", "resolve owned-process cleanup before reusing this workspace")])
+        try:
+            sqlite_gate.assert_inactive(prepared_dir / "venv")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise SetupFailure([fail("cache", str(exc), "resolve the prior guarded attempt before reuse")])
         env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=None, home=home, tmp=tmp, locale_name=locale_name,
                         evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
         log = lambda m: print("[gate-env] " + m, flush=True)  # noqa: E731
@@ -894,6 +908,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if "python" in target.get("needs", []):
             venv, dep_info, f = ensure_python_env(subprocess.run, config, profile, toolchain, checkout, prepared_dir, env, args.rebuild, log)
             failures += f
+            if venv is not None and not f:
+                sqlite_site = sqlite_gate.prepare(venv, checkout / "services/chat-stream-v2/tools/sqlite_guard.py")
+                if target.get("gate") == "merge" and args.command == "run":
+                    # HOME is part of the same attempt root as TMPDIR/fixtures.
+                    home = tmp / "home"
+                    home.mkdir(parents=True, exist_ok=True)
+                    sqlite_config = sqlite_gate.activate(sqlite_site, venv, tmp,
+                        checkout / "services/chat-stream-v2/tools/sqlite_guard.py")
         npm_info: Dict[str, Any] = {}
         if target.get("npm_ci") and not failures:
             npm_info, f = ensure_npm_env(subprocess.run, checkout, prepared_dir, env, profile, args.rebuild, log)
@@ -1029,6 +1051,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                             unresolved_paths.append(str(tier_root))
         except OSError as exc:
             retention_reasons.append("scratch_observation_failed:" + type(exc).__name__)
+        # Capture before cleanup removes the owned attempt root. A refusal
+        # cannot be hidden by a test catching PermissionError and passing.
+        if sqlite_config is not None:
+            try:
+                report = sqlite_gate.receipt(sqlite_config, evidence / "gate")
+                state["extra"]["sqlite_guard"] = report
+                state["evidence"] = evidence_refs(evidence / "gate")
+                if report["refusal_count"]:
+                    state.update(outcome="incomplete", first_failure={"stage": "subject", "code": "sqlite_guard_refusal"})
+            except BaseException as exc:
+                state.update(outcome="harness_failure", first_failure={"stage": "cleanup", "code": "sqlite_guard_evidence"})
         if retention_reasons:
             state["secondary"]["cleanup"] = "failed"
             state["secondary"]["retained_scratch"] = {
@@ -1054,6 +1087,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             except ValueError as exc:
                 state.update(outcome="harness_failure", first_failure={"stage": "cleanup", "code": "instruction_input_drift"})
                 state["secondary"]["instruction_input_error"] = str(exc)
+        if sqlite_site is not None:
+            try:
+                if state["secondary"].get("cleanup") == "failed":
+                    (prepared_dir / "sqlite-guard-unreaped").write_text("Unreaped guarded children; do not reuse this cache\n")
+                else:
+                    sqlite_gate.deactivate(sqlite_site)
+            except OSError:
+                state.update(outcome="harness_failure", first_failure={"stage": "cleanup", "code": "sqlite_guard_deactivate"})
+        if prepared_lock is not None:
+            prepared_lock.close()
         if not writer.terminal:
             try:
                 writer.emit("terminal", outcome=state["outcome"], first_failure=state["first_failure"], secondary=state["secondary"],
