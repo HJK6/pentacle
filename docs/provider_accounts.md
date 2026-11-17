@@ -83,8 +83,7 @@ percentage reservation ledger or automatic quota/auth migration.
 ## Pool ceilings and exact-seat exceptions
 
 `account status` is the source for current pool controls and eligibility.
-`cap` is the revisioned runtime control or null; `legacy_cap` is historical
-private-policy metadata and is never enforced. Deployment does not import old caps.
+`cap` is the revisioned runtime control or null. Deployment does not import old caps.
 
 The current authenticated primary assistant or an operator credential can replace
 a pool control through the existing account RPC. Use the verified pool ID and
@@ -233,8 +232,7 @@ JSON file. With no file, the feature is off. A minimal disabled policy is:
   ],
   "bindings": [],
   "executors": {},
-  "watchers": {},
-  "account_caps": {}
+  "watchers": {}
 }
 ```
 
@@ -465,11 +463,27 @@ a throttled second enrollment readback can still refuse safely. Existing falsely
 marked health rows require a separately authorized disposition, not automatic
 healing from a successful usage probe.
 
-`account_caps[provider][verified_pool_id]` carries the existing operational cap
-value verbatim for that account across hosts. It does not introduce new units,
-percentages, margins or enforcement semantics. Do not infer an account allocation
-from an old host-named record or invent headroom; the front desk resolves the
-mapping through its existing policy source before relying on it.
+Pool ceilings live only in revisioned daemon pool controls. Account status exposes
+`cap` and effective `eligibility`; it does not expose an informational legacy cap.
+The daemon ignores the obsolete policy cap key. Operators may remove that key
+from their private policy files as a separately authorized configuration cleanup.
+
+`usage_reading_grace_seconds` is the daemon policy setting for last-healthy
+reading validity (default 7200 seconds). A failed collection does not refresh
+that timestamp. A passed capped-window reset or an identity conflict invalidates
+the reading immediately. Uncapped pools do not require a quota reading.
+
+`usage_cap_warning_margin` defaults to 2 percentage points. The bound front desk
+receives one warning at the cap minus this margin, rearmed by a reading below
+the line or a control revision change, not by source reset identifiers. Blocked
+and uncapped pools never warn. A capped pool with no actionable reading sends
+one problem tell with its reading age and collection error, then one recovery
+tell when the reading becomes actionable again.
+
+The automatic blocked-pool exemption admits only its service-authenticated,
+retained advisor restore spawn, not ordinary advisor-shaped requests. Explicit
+authority overrides retain their existing behavior. Blocking does not automatically
+clear at reset; existing authority supersession rules remain unchanged.
 
 Transcript-derived usage retains the original per-stream generation binding and
 native identity separately. Reopening a stream or changing a default cannot

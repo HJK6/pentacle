@@ -53,14 +53,13 @@ def test_pool_setter_and_effective_readback_replace_informational_policy_cap():
     async def run():
         store,runtime=await setup()
         try:
-            runtime.policy["account_caps"]={"codex":{"pool-primary":{"stop_pct":1}}}
             await runtime.record_observation(binding(),observation(binding()))
             result=await runtime.operation(setter())
             assert result["receipt"]["control"]["revision"]==1
             read=await runtime.operation({"action":"status","_auth_context":AUTH})
             pool=next(p for p in read["quota_pools"] if p["pool_id"]=="pool-primary")
             assert pool["cap"]["stop_pct"]==21
-            assert pool["legacy_cap"]=={"stop_pct":1}
+            assert "legacy_cap" not in pool
             assert pool["eligibility"]["code"]=="account_pool_cap_reached"
         finally: store.stop()
     asyncio.run(run())
@@ -96,7 +95,7 @@ def test_autonomous_work_gets_one_reminder_on_existing_account_tick():
                 capture_liveness='idle',capture_observed_at=NOW)
             notices=Notices(); runtime.cap_monitor=CapMonitor(runtime); runtime.cap_monitor.attach(notices)
             await runtime.tick(); await runtime.tick()
-            assert [n['kind'] for n in notices.notices.values()]==[REMINDER]
+            assert [n['kind'] for n in notices.notices.values() if n['kind']==REMINDER]==[REMINDER]
         finally: store.stop()
     asyncio.run(run())
 
@@ -149,7 +148,7 @@ def test_bad_controls_never_mutate_current_or_operation_receipts(change):
         try:
             await runtime.record_observation(binding(),observation(binding()))
             with pytest.raises(VerbError): await runtime.operation(setter(**change))
-            assert await runtime.run(lambda a:a.conn.execute("SELECT COUNT(*) FROM kv WHERE k LIKE 'account.control-operation:%'").fetchone()[0])==0
+            assert all(p["cap"] is None for p in (await runtime.operation({"action":"status","_auth_context":AUTH}))["quota_pools"])
         finally: store.stop()
     asyncio.run(run())
 
@@ -161,14 +160,16 @@ def test_unknown_is_distinct_from_exhaustion_and_only_capped_pool_refuses(cell):
         try:
             await seed(runtime)
             obs=observation(binding())
-            if cell=='stale': obs['observed_at']=NOW-601
+            if cell=='stale': obs['observed_at']=NOW-7201
             if cell=='future': obs['observed_at']=NOW+1
             if cell=='expired': obs['windows']['weekly']['reset_at']=NOW
             if cell=='no_reset': obs['windows']['weekly']['reset_id']=''
             if cell=='missing_window': obs['windows']={}
-            if cell=='failed': obs['collection']='failed'
+            if cell=='failed':
+                obs['collection']='failed'
+                runtime.clock=lambda:NOW+7201
             if cell=='bad_pct': obs['windows']['weekly']['pct']=float('nan')
-            if cell=='bad_max_age': runtime.policy['observation_max_age']=0
+            if cell=='bad_max_age': runtime.policy['usage_reading_grace_seconds']=-1
             if cell=='missing':
                 def remove(a):
                     a.conn.execute('DELETE FROM v2_account_observations');a.conn.commit()

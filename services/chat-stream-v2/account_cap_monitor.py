@@ -5,12 +5,16 @@ import hashlib
 import json
 import uuid
 
-from account_pool_control import read,write,seat_key,pool_key
+from account_pool_control import read,write,seat_key,pool_key,actionable_reading,USAGE_CAP_WARNING_MARGIN
 from account_store import number,transaction
 from outbound_notices import NoticeDecision,_epoch_from_iso
 
 REMINDER="account_cap_reminder"
 FLAG="account_cap_blocker"
+WARNING="account_pool_cap_warning"
+PROBLEM="account_pool_meter_problem"
+RECOVERED="account_pool_meter_recovered"
+POOL_NOTICES=(WARNING,PROBLEM,RECOVERED)
 
 
 class CapMonitor:
@@ -21,7 +25,7 @@ class CapMonitor:
 
     def attach(self,outbound):
         self.outbound=outbound
-        for kind in (REMINDER,FLAG): outbound.register_kind(kind,guard=self.guard)
+        for kind in (REMINDER,FLAG,*POOL_NOTICES): outbound.register_kind(kind,guard=self.guard)
 
     @staticmethod
     def key(stream,generation):
@@ -119,6 +123,8 @@ class CapMonitor:
     async def guard(self,notice):
         metadata=notice.get('metadata') or {}
         if isinstance(metadata,str): metadata=json.loads(metadata)
+        if notice['kind'] in POOL_NOTICES:
+            return await self.pool_notice_guard(notice,metadata)
         def current(a):
             from store_assistant_binding import _seat_conn
             source=_seat_conn(a.conn,metadata['stream'])
@@ -135,11 +141,107 @@ class CapMonitor:
             return NoticeDecision.defer('cap_notice_not_current','wait for fresh autonomous working evidence')
         return None
 
+    async def pool_notice_guard(self,notice,metadata):
+        pair=await self.runtime.primary_pair()
+        if pair!=(notice['recipient_stream_id'],metadata['recipient_generation']):
+            return NoticeDecision.terminal('primary_generation_changed','retain historical notice')
+        def current(a):
+            state=read(a,f"account.cap-pool:{metadata['provider']}:{metadata['pool_id']}") or {}
+            if state.get('pending',{}).get(notice['kind'],{}).get('tell_id')!=notice['tell_id']:
+                return 'pool_notice_episode_ended'
+            pool=next((p for p in a.readback(now=self.runtime.clock())['quota_pools']
+                if (p['provider'],p['pool_id'])==(metadata['provider'],metadata['pool_id'])),None)
+            control=(pool or {}).get('cap')
+            if (not control or control['blocked'] or control['stop_pct'] is None
+                    or control['revision']!=metadata['control_revision']):
+                return 'pool_control_changed'
+            window=actionable_reading(a,pool,control,now=self.runtime.clock())
+            if notice['kind']==WARNING:
+                if window is None: return 'pool_reading_unavailable'
+                margin=a.policy.get('usage_cap_warning_margin',USAGE_CAP_WARNING_MARGIN)
+                if not number(margin) or margin<0 or window['pct']<control['stop_pct']-margin:
+                    return 'pool_warning_below_margin'
+            elif notice['kind']==PROBLEM and window is not None:
+                return 'pool_reading_recovered'
+            elif notice['kind']==RECOVERED and window is None:
+                return 'pool_reading_unavailable'
+            return None
+        reason=await self.runtime.run(current)
+        if reason in {'pool_reading_unavailable','pool_warning_below_margin'}:
+            return NoticeDecision.defer(reason,'wait for an actionable reading')
+        if reason:
+            return NoticeDecision.terminal(reason,'retain historical notice')
+        return None
+
+    async def pool_notices(self,pool):
+        runtime=self.runtime
+        primary=await runtime.primary_pair()
+        if not primary: return
+        delivered=set()
+        prior=await runtime.run(lambda a:read(a,f"account.cap-pool:{pool['provider']}:{pool['pool_id']}") or {})
+        for item in prior.get('pending',{}).values():
+            receipt=await runtime.store.get_tell_delivery(item['tell_id'])
+            if ((receipt or {}).get('reply') or {}).get('submission_confirmed') is True:
+                delivered.add(item['tell_id'])
+        def update(a):
+            with transaction(a.conn):
+                key=f"account.cap-pool:{pool['provider']}:{pool['pool_id']}"
+                state=read(a,key) or {}
+                control=pool['cap']
+                revision=(control or {}).get('revision')
+                if state.get('revision')!=revision:
+                    state={'revision':revision}
+                pending=state.setdefault('pending',{})
+                def notice(kind,body):
+                    tell_id='cap-pool-'+uuid.uuid4().hex
+                    pending[kind]={'kind':kind,'dedupe_key':tell_id,'tell_id':tell_id,
+                        'recipient_stream_id':primary[0], 'body':body,
+                        'metadata':{'provider':pool['provider'],'pool_id':pool['pool_id'],
+                                    'control_revision':revision,'recipient_generation':primary[1]}}
+                if not control or control['blocked'] or control['stop_pct'] is None:
+                    state={'revision':revision,'pending':{}}
+                else:
+                    window=actionable_reading(a,pool,control,now=runtime.clock())
+                    label=f"{pool['provider']}/{pool['pool_id']}"
+                    stamp=(pool.get('latest_observation') or {}).get('observed_at')
+                    age=runtime.clock()-stamp if isinstance(stamp,(int,float)) else None
+                    if window is None:
+                        pending.pop(RECOVERED,None)
+                        if not state.get('unavailable'):
+                            notice(PROBLEM,f"Pool {label} reading unavailable; last reading age {age} seconds; "
+                                   f"collection error {pool.get('error_codes') or 'no healthy current reading'}")
+                            state['unavailable']=True
+                    else:
+                        if state.get('unavailable'):
+                            pending.pop(PROBLEM,None)
+                            notice(RECOVERED,f"Pool {label} healthy reading returned at {window['pct']} percent")
+                            state['unavailable']=False
+                        margin=a.policy.get('usage_cap_warning_margin',USAGE_CAP_WARNING_MARGIN)
+                        if number(margin) and margin>=0:
+                            if window['pct']<control['stop_pct']-margin:
+                                state['warned']=False
+                                pending.pop(WARNING,None)
+                            elif not state.get('warned'):
+                                notice(WARNING,f"Pool {label} reading {window['pct']} percent; cap {control['stop_pct']} percent; "
+                                       f"reset at {window['reset_at']}")
+                                state['warned']=True
+                for item in state['pending'].values():
+                    if (item['tell_id'] not in delivered and
+                            (item['recipient_stream_id'],item['metadata']['recipient_generation'])!=primary):
+                        tell_id='cap-pool-'+uuid.uuid4().hex
+                        item.update(tell_id=tell_id,dedupe_key=tell_id,recipient_stream_id=primary[0])
+                        item['metadata']['recipient_generation']=primary[1]
+                write(a,key,state)
+                return list(state['pending'].values())
+        for notice in await runtime.run(update,settle_on_cancel=True):
+            await self.outbound.enqueue(**notice)
+
     async def tick(self):
         if self.outbound is None: return
         runtime=self.runtime
         pools=(await runtime.run(lambda a:a.readback(now=runtime.clock())))['quota_pools']
         for pool in pools:
+            await self.pool_notices(pool)
             control=pool['cap']
             episode_key=f"account.cap-episode:{pool['provider']}:{pool['pool_id']}"
             def episode(a):
@@ -147,8 +249,8 @@ class CapMonitor:
                     value=read(a,episode_key) or {}
                     if not control or control['stop_pct'] is None:
                         value['active']=False
-                    elif pool['fresh']:
-                        window=((pool.get('observation') or {}).get('windows') or {}).get(control['window'])
+                    else:
+                        window=actionable_reading(a,pool,control,now=runtime.clock())
                         if isinstance(window,dict) and number(window.get('pct')):
                             hit=window['pct']>=control['stop_pct']
                             if hit and not value.get('active'): value={'active':True,'id':uuid.uuid4().hex}
