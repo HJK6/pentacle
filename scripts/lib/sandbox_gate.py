@@ -1,4 +1,4 @@
-"""Exact-profile Seatbelt preflight. Stub tests never constitute OS proof."""
+"""Exact-profile Seatbelt (macOS) or bubblewrap (Linux) preflight. Stub tests never constitute OS proof."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
@@ -22,10 +22,15 @@ _deps_spec.loader.exec_module(deps)
 BASE_PROFILE = '/System/Library/Sandbox/Profiles/bsd.sb'
 EXTRA_BINARIES = ('/bin/cat', '/bin/bash', '/usr/bin/git', '/bin/ps', '/usr/sbin/lsof', '/usr/bin/uname', '/usr/bin/env', '/usr/bin/true', '/usr/bin/dirname', '/sbin/ifconfig', '/usr/bin/awk', '/bin/sleep')
 
-LAUNCHER = '/usr/bin/sandbox-exec'
+LINUX = sys.platform.startswith('linux')
+BWRAP = '/usr/bin/bwrap'
+LAUNCHER = BWRAP if LINUX else '/usr/bin/sandbox-exec'
 ALTERNATE_PYTHONS = ('/opt/homebrew/opt/python@3.13/bin/python3.13', '/usr/bin/python3')
 FORBIDDEN_EXEC = ('/usr/bin/sudo', '/usr/bin/su', '/bin/launchctl', '/usr/bin/open', '/usr/bin/osascript')
 SYSTEM_READ = ('/System', '/usr/lib', '/usr/bin', '/usr/sbin', '/usr/share', '/bin', '/sbin', '/Library/Apple/System/Library')
+# Linux: the jail sees only these system trees read-only; the executables below are replaced by an empty file.
+LINUX_SYSTEM_READ = ('/usr', '/etc')
+LINUX_FORBIDDEN_EXEC = ('/usr/bin/sudo', '/usr/bin/su', '/usr/bin/xdg-open')
 
 class Incomplete(RuntimeError):
     pass
@@ -47,13 +52,35 @@ def quote(path):
 def available(path):
     return Path(path).is_file() and os.access(path, os.X_OK)
 
-def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None, socket_root=None, pty=False):
-    reads, writes = sorted(set(map(resolved, read_paths))), sorted(set(map(resolved, write_paths)))
-    for path in reads + writes:
+def refuse_broad(paths):
+    for path in paths:
         parts = Path(path).parts
         home_root = len(parts) == 3 and parts[1] in ('Users', 'home')
         if home_root or path in ('/', '/Users', '/home', '/tmp', '/private/tmp', '/opt/homebrew', '/usr/local', str(Path.home())) or Path(path).name in ('.local', 'agent-workspace', '.cache', 'Caches', 'cache', 'caches'):
             raise ValueError('broad sandbox allowance refused: ' + path)
+
+def bwrap_argv(read_paths, write_paths, forbidden):
+    """The proven unprivileged bubblewrap boundary: new user, pid, ipc, uts and net namespaces, a private /dev
+    (own devpts, so tmux works without a separate account), no capabilities, read-only system trees and only the
+    listed owned paths bound at their own paths. Nothing else of the host, including the home, is visible."""
+    reads, writes = sorted(set(map(resolved, read_paths))), sorted(set(map(resolved, write_paths)))
+    refuse_broad(reads + writes)
+    argv = [BWRAP, '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-net',
+            '--new-session', '--cap-drop', 'ALL', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp']
+    for top in ('/bin', '/sbin', '/lib', '/lib64'):
+        if os.path.islink(top):
+            argv += ['--symlink', os.readlink(top), top]
+    for path in reads:
+        argv += ['--ro-bind', path, path]
+    for path in writes:
+        argv += ['--bind', path, path]
+    for path in forbidden:
+        argv += ['--ro-bind', '/dev/null', path]
+    return argv
+
+def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None, socket_root=None, pty=False):
+    reads, writes = sorted(set(map(resolved, read_paths))), sorted(set(map(resolved, write_paths)))
+    refuse_broad(reads + writes)
     rules = ['(version 1)', '(deny default)', '(import ' + quote(BASE_PROFILE) + ')',
              '(allow process-fork)', '(allow process-exec ' + ' '.join('(subpath %s)' % quote(p) for p in reads) + ')',
              '(deny process-exec ' + ' '.join('(literal %s)' % quote(resolved(p)) for p in FORBIDDEN_EXEC) + ')',
@@ -113,6 +140,7 @@ class Context:
     imports: list = field(default_factory=list)
     dependencies: dict = field(default_factory=dict)
     alternates: list = field(default_factory=list)
+    forbidden: list = field(default_factory=lambda: list(FORBIDDEN_EXEC))
     @property
     def receipt_path(self):
         return self.evidence / 'sandbox-profile.json'
@@ -120,13 +148,20 @@ class Context:
         body = {'schema': 'pentacle.sandbox-profile.v1', 'status': status, 'reason': reason,
                 'profile_path': str(self.profile_path), 'profile_sha256': self.profile_sha256,
                 'attempt_root': str(self.root), 'root': str(self.root), 'passed': status == 'PASS', 'resolved_allow_paths': {'read_exec': self.read_paths, 'write': self.write_paths},
-                'socket_dir': str(self.socket_dir), 'launcher_argv': [LAUNCHER, '-f', str(self.profile_path)],
+                'socket_dir': str(self.socket_dir), 'launcher_argv': self.launcher_prefix(),
                 'probes': self.probes, 'controls': self.controls, 'execution_mode': self.execution_mode, 'imported_profiles': self.imports,
                 'shared_cache_provided': self.dependencies.get('shared_cache_provided', []),
                 'alternate_interpreters': getattr(self, 'alternates', []), 'dependencies': self.dependencies, 'descriptor_policy': {'close_fds': True, 'pass_fds': []},
                 'cwd': str(self.root)}
         self.receipt_path.write_text(json.dumps(body, sort_keys=True, indent=2) + '\n')
         return body
+    def launcher_prefix(self):
+        if not LINUX:
+            return [LAUNCHER, '-f', str(self.profile_path)]
+        try:
+            return json.loads(self.profile_path.read_text())['argv'] + ['--']
+        except (OSError, ValueError, KeyError):
+            return [LAUNCHER]
     def _probe_wrap(self, argv):
         try:
             valid = (digest(self.profile_path) == self.profile_sha256
@@ -137,7 +172,7 @@ class Context:
             self.passed = False
             self.write_receipt('INCOMPLETE', 'profile_changed_or_unreadable')
             raise Incomplete('sandbox profile changed or is unreadable')
-        return [LAUNCHER, '-f', str(self.profile_path), *map(str, argv)]
+        return [*self.launcher_prefix(), *map(str, argv)]
     def validate_cwd(self, cwd):
         path = Path(cwd).resolve()
         allowed = [Path(p) for p in self.read_paths + self.write_paths]
@@ -250,6 +285,18 @@ def alternate_interpreters(candidates, root):
     return [real_interpreter_files(candidate, root)[0] for candidate in candidates]
 
 
+def linux_runtime_roots(venv, tools, root):
+    """Trees the venv interpreter and the toolchain binaries live in, when they are not under /usr."""
+    code = 'import os,sys;print(os.path.realpath(sys.base_prefix))'
+    out = subprocess.run([str(venv / 'bin/python'), '-I', '-S', '-B', '-c', code], cwd=str(root), env={'PATH': '/usr/bin:/bin'},
+                         close_fds=True, pass_fds=(), capture_output=True, text=True, timeout=20, check=True)
+    roots = {out.stdout.strip()}
+    for name in ('node', 'tmux'):
+        if name in tools:
+            roots.add(str(Path(tools[name]).parent.parent))
+    return sorted(p for p in roots if p and not p.startswith(LINUX_SYSTEM_READ))
+
+
 def prepare(checkout, venv, toolchain, root, evidence, env):
     """Generate once. No denial log is read, and no path is learned from probes."""
     evidence = Path(evidence).resolve(); evidence.mkdir(parents=True, exist_ok=True)
@@ -258,6 +305,8 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         root.mkdir(parents=True, exist_ok=True)
         socket_dir = root / 'tmux-sockets'; socket_dir.mkdir(exist_ok=True)
         tools = {name: resolved(value['path']) for name, value in toolchain.items()}
+        if LINUX:
+            return prepare_linux(checkout, venv, tools, root, evidence, env, socket_dir)
         imports = deps.import_closure([BASE_PROFILE])
         runtime_reads, extensions = python_runtime_paths(venv, root)
         alternates = alternate_interpreters(ALTERNATE_PYTHONS, root)
@@ -305,16 +354,47 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
             'probes': [], 'controls': [], 'launcher_argv': [LAUNCHER]}, sort_keys=True) + '\n')
         raise Incomplete('sandbox profile generation failed: ' + str(exc)) from exc
 
+def prepare_linux(checkout, venv, tools, root, evidence, env, socket_dir):
+    """The bubblewrap counterpart of the Seatbelt profile: the same read, write and socket roots, generated once."""
+    git = shutil.which('git', path='/usr/bin:/bin')
+    if not git:
+        raise deps.DependencyError('git not found')
+    forbidden = [p for p in LINUX_FORBIDDEN_EXEC if available(p)]
+    read_paths = sorted(set(map(resolved, [checkout, venv, *linux_runtime_roots(venv, tools, root), *LINUX_SYSTEM_READ])))
+    write_paths = sorted(set(map(resolved, [root, evidence, socket_dir])))
+    profile_path = evidence / 'bwrap-profile.json'
+    profile_path.write_text(json.dumps({'schema': 'pentacle.bwrap-profile.v1', 'argv': bwrap_argv(read_paths, write_paths, forbidden)},
+                                       sort_keys=True, indent=2) + '\n')
+    child_env = dict(env)
+    child_env.pop('TMUX', None)
+    child_env['TMUX_TMPDIR'] = str(socket_dir)
+    bin_dir = root / 'bin'; bin_dir.mkdir(exist_ok=True)
+    for name, target in (('git', git), ('python3', str(venv / 'bin/python'))):
+        link = bin_dir / name
+        if link.is_symlink() or link.exists(): link.unlink()
+        link.symlink_to(target)
+    child_env['PATH'] = os.pathsep.join([str(bin_dir), child_env.get('PATH', '/usr/bin:/bin')])
+    child_env['GIT_CONFIG_GLOBAL'] = os.devnull
+    child_env['GIT_CONFIG_NOSYSTEM'] = '1'
+    context = Context(checkout, venv, root, evidence, child_env, tools, profile_path, digest(profile_path), read_paths, write_paths,
+                      socket_dir, dependencies={'files': [], 'metadata_paths': []}, forbidden=forbidden)
+    context.write_receipt('INCOMPLETE', 'self_probe_not_run')
+    return context
+
+
+# On Linux the jail hides outside paths entirely, so absence is the denial; the owned positive control proves the opener works.
+_PY_DENIED = 'PermissionError, FileNotFoundError' if LINUX else 'PermissionError'
+_NODE_DENIED = "e.code === 'EACCES' || e.code === 'EPERM'" + (" || e.code === 'ENOENT'" if LINUX else '')
 PY_OPEN = """import sys
 try:
  with open(sys.argv[1], 'rb') as f: f.read()
  print('READABLE')
-except PermissionError:
+except (%s):
  print('DENIED')
-"""
+""" % _PY_DENIED
 NODE_OPEN = """try {require('fs').readFileSync(process.argv[1]); console.log('READABLE')}
-catch(e) {if (e.code === 'EACCES' || e.code === 'EPERM') console.log('DENIED'); else throw e}
-"""
+catch(e) {if (%s) console.log('DENIED'); else throw e}
+""" % _NODE_DENIED
 SH_OPEN = 'if /bin/cat "$1" > "$2"; then printf "READABLE\\n"; else printf "DENIED\\n"; fi'
 OWNED_CONTROL = """import sqlite3,sys,subprocess
 from pathlib import Path
@@ -325,6 +405,9 @@ subprocess.run([sys.executable,'-I','-B','-c',code,str(p),str(p)+'.child'],check
 assert sqlite3.connect(str(p)+'.child').execute('select name from sqlite_master').fetchone()==('child',)
 print('CONTROL_OK')
 """
+
+LINUX_TMUX_PROBE = ('"$1" -S "$2" -f /dev/null new-session -d -s probe "$3" || exit 1; i=0; '
+                    'while [ ! -s "$4" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; "$1" -S "$2" kill-server; cat "$4"')
 
 def run_probes(context, run=subprocess.run):
     """Real launcher by default; injected unit runners are explicitly not proof.
@@ -379,7 +462,7 @@ def run_probes(context, run=subprocess.run):
                 raise Incomplete('Python guard must be inactive during sandbox self-probe')
         c._probe_wrap([])
         python = str(c.venv / 'bin/python')
-        required = [python, *c.alternates, '/usr/bin/sqlite3', '/bin/sh', c.tools.get('node', ''), c.tools.get('tmux', ''), *FORBIDDEN_EXEC]
+        required = [python, *c.alternates, '/usr/bin/sqlite3', '/bin/sh', c.tools.get('node', ''), c.tools.get('tmux', ''), *c.forbidden]
         missing = [path for path in required if not path or not available(path)]
         if missing:
             c.controls.append({'name': 'required_openers', 'passed': False, 'missing': missing})
@@ -427,9 +510,15 @@ def run_probes(context, run=subprocess.run):
                 result, error = c.root/('tmux-result-'+name), c.root/('tmux-error-'+name)
                 script = SH_OPEN + ' > "$3" 2> "$4"'
                 pane = shlex.join(['/bin/sh','-c',script,'probe',str(path),str(c.root/('tmux-copy-'+name)),str(result),str(error)])
+                if LINUX:
+                    # A jail's pid namespace ends with its command, and a tmux server would end with it: start, wait and stop in one run.
+                    invoke('tmux-pane-'+name, ['/bin/sh','-c',LINUX_TMUX_PROBE,'probe',c.tools['tmux'],str(socket),pane,str(result)],
+                           'READABLE' if name=='owned' else 'DENIED', control=name=='owned')
+                    continue
                 entry = invoke('tmux-start-'+name, [c.tools['tmux'],'-S',str(socket),'-f','/dev/null','new-session','-d','-s','probe'+str(index),pane], '', control=True)
                 deadline = time.monotonic()+10
-                while entry.get('passed') and not result.exists() and time.monotonic()<deadline:
+                # The shell creates the file before it writes the verdict; wait for the verdict, not the file.
+                while entry.get('passed') and not (result.exists() and result.read_text().strip()) and time.monotonic()<deadline:
                     time.sleep(.05)
                 value = result.read_text().strip() if result.exists() else None
                 expected = 'READABLE' if name=='owned' else 'DENIED'
@@ -441,12 +530,13 @@ def run_probes(context, run=subprocess.run):
             # address the default socket or an ambient TMUX session.
             if socket.exists():
                 invoke('owned-tmux-cleanup',[c.tools['tmux'],'-S',str(socket),'kill-server'],'CLEANED',control=True)
-        for executable in FORBIDDEN_EXEC:
+        for executable in c.forbidden:
             args = [executable]
             if executable.endswith('sudo'): args.append('-V')
             elif executable.endswith('su'): args.append('-h')
             elif executable.endswith('launchctl'): args.append('version')
             elif executable.endswith('osascript'): args.extend(['-e','return 0'])
+            # xdg-open has no harmless flag: it is replaced by an empty file, so a bare exec must be refused.
             invoke('forbidden-exec-'+Path(executable).name,args,'DENIED_EXEC')
         c._probe_wrap([])
         if failures:

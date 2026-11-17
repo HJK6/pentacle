@@ -428,3 +428,37 @@ def test_owned_tmux_cleanup_accepts_an_already_exited_server(context, monkeypatc
         with pytest.raises(m.Incomplete): m.run_probes(ctx, run=run)
     cleanup = [row for row in ctx.controls if row['name'] == 'owned-tmux-cleanup']
     assert cleanup and cleanup[0]['passed'] is passed
+
+
+def test_bwrap_argv_is_the_proven_boundary(tmp_path):
+    m = module()
+    owned = tmp_path / 'owned'; owned.mkdir()
+    argv = m.bwrap_argv(['/usr', '/etc'], [owned], ['/usr/bin/sudo'])
+    for flag in ('--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-net', '--new-session', '--die-with-parent'):
+        assert flag in argv
+    assert argv[argv.index('--cap-drop') + 1] == 'ALL'
+    assert argv[argv.index('--dev') + 1] == '/dev'  # a private devpts, so tmux needs no separate account
+    assert ['--ro-bind', '/usr', '/usr'] == argv[argv.index('/usr') - 1:argv.index('/usr') + 2]
+    assert ['--bind', str(owned.resolve()), str(owned.resolve())] == argv[argv.index('--bind'):argv.index('--bind') + 3]
+    assert ['--ro-bind', '/dev/null', '/usr/bin/sudo'] == argv[-3:]  # forbidden executables are emptied last
+    assert str(Path.home()) not in argv
+
+
+@pytest.mark.parametrize('path', ['/', '/tmp', str(Path.home()), '/x/.local', '/x/agent-workspace'])
+def test_bwrap_argv_refuses_broad_allowances(path):
+    with pytest.raises(ValueError, match='broad sandbox allowance refused'):
+        module().bwrap_argv([path], [], [])
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux') or not os.access('/usr/bin/bwrap', os.X_OK), reason='needs Linux bubblewrap')
+def test_bwrap_jail_hides_the_outside_and_keeps_owned_writes(tmp_path):
+    m = module()
+    owned, outside = tmp_path / 'owned', tmp_path / 'outside'
+    owned.mkdir(); outside.mkdir(); (outside / 's.txt').write_text('SECRET')
+    jail = m.bwrap_argv(['/usr', '/etc'], [owned], [])
+    probe = subprocess.run([*jail, '--', '/bin/sh', '-c', 'cat "$1" 2>&1; echo w > "$2/x" && echo wrote; ls /dev/pts | head -1',
+                            'probe', str(outside / 's.txt'), str(owned)], capture_output=True, text=True, timeout=30)
+    if probe.returncode and 'namespace' in probe.stderr:
+        pytest.skip('unprivileged user namespaces unavailable here')
+    assert 'SECRET' not in probe.stdout and 'No such file' in probe.stdout
+    assert 'wrote' in probe.stdout and (owned / 'x').read_text() == 'w\n'

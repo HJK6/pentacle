@@ -192,3 +192,7 @@ user running the gate, so it is emitted only when `separate_gate_identity()` hol
 root, not the console owner and not in the admin group. For the operator's own admin
 user the rule is absent and the tmux probes make the gate INCOMPLETE. Run the gate as a
 dedicated unprivileged account that cannot open the operator's terminals.
+
+## Linux: bubblewrap boundary
+
+On Linux the same gate wraps every child in an unprivileged `bwrap` jail instead of Seatbelt (`bwrap_argv` in `scripts/lib/sandbox_gate.py`): new user, pid, ipc, uts and network namespaces, no capabilities, a private `/dev` with its own devpts (tmux works with no separate account), read-only `/usr` and `/etc`, the checkout, venv and toolchain trees read-only, and only the attempt root, evidence and socket directories writable, each bound at its own path. Nothing else of the host, including the home directory, is visible; `sudo`, `su` and `xdg-open` are replaced by an empty file. The profile is `bwrap-profile.json` (digest-checked like the Seatbelt profile) and the receipt, self-probe, SQLite guard activation and INCOMPLETE handling are unchanged. Outside paths are absent rather than denied, so each opener probe treats absence as denial and its owned positive control proves the opener works. A jail's pid namespace ends with its command, so the tmux probe starts, waits for and stops its server in one run. No account, sudo or root is needed; the macOS profile and its terminal grant are not exercised on Linux.
