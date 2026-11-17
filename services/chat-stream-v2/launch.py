@@ -678,13 +678,15 @@ def build_launch(
             # authentication helpers cannot override the selected subscription.
             marker = f"exec {shlex.quote(_resolve_local_executable(account_binding.executable))} "
             plan = replace(plan, command=plan.command.replace(marker, marker +
-                "--setting-sources user --settings " + shlex.quote('{"forceLoginMethod":"claudeai","apiKeyHelper":""}') + " ", 1))
+                "--setting-sources user --settings " + shlex.quote('{"forceLoginMethod":"claudeai","apiKeyHelper":"","autoMemoryEnabled":false}') + " ", 1))
         # The target shell expands only allowlisted names, then execs a clean
         # non-login shell. API/WIF/cloud/token/endpoint overrides cannot leak in.
         passthrough = " ".join(f'{key}="${{{key}-}}"' for key in sorted(ENV_ALLOWLIST - {"PENTACLE_AUTH_CLAUDE_BIN"}))
         home_key = "CODEX_HOME" if provider == "codex" else "CLAUDE_CONFIG_DIR"
         wrapper = (" PENTACLE_AUTH_CLAUDE_BIN=" + shlex.quote(account_binding.observer_executable)
                    if provider == "claude" and getattr(account_binding, "observer_executable", "") else "")
+        # Shared memory is the only store: a Claude seat keeps no notes of its own.
+        wrapper += " CLAUDE_CODE_DISABLE_AUTO_MEMORY=1" if provider == "claude" else ""
         clean = f"env -i {passthrough} {home_key}={shlex.quote(account_binding.home)}{wrapper} /bin/sh -c {shlex.quote(plan.command)}"
         return replace(plan, command=clean)
     stream_token = mint_stream_token()
