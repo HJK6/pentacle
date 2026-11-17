@@ -143,3 +143,20 @@ Known Python dlopen extensions and node addons are dependency roots, not merely
 the main executables. Future/generated executables cannot be certified from a
 source-only inventory; runtime denial is not proof of their dependency closure
 and must not be presented as full gate readiness.
+
+## Explicit grants added after the first native runs
+
+Each is an exact, reviewed source edit with a unit test; none comes from a denial log.
+
+- **Real interpreters.** Python launchers exec a real binary that otool does not show
+  (the framework `Resources/Python.app/Contents/MacOS/Python`). At prepare time the
+  interpreter is run unsandboxed with `-I -S -B` to print its real file and that app
+  binary; both go through the same dependency closure and exact exec/read grant.
+- **No xcrun shim.** `/usr/bin/python3` is a shim that loads the developer directory at
+  run time. The alternate-interpreter probes use the real interpreter behind it instead
+  (exact file plus closure); the shim itself is not probed or granted. The receipt lists
+  `alternate_interpreters`.
+- **node.** Child environments set `OPENSSL_CONF` to an empty file in the owned attempt
+  root, so node needs no grant on the system OpenSSL configuration.
+- **tmux pseudo-terminals.** The only device grant is read/write/ioctl on `/dev/ptmx`,
+  `/dev/tty` and `^/dev/ttys[0-9]+$`. No `/dev` subpath is granted.

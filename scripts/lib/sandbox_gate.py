@@ -59,6 +59,8 @@ def profile_text(read_paths, write_paths, socket_dir, *, dependencies=None):
              '(allow file-read* ' + ' '.join('(subpath %s)' % quote(p) for p in reads + writes) + ')',
              '(allow file-write* ' + ' '.join('(subpath %s)' % quote(p) for p in writes) + ')',
              '(allow file-read* (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))',
+             # tmux needs a pseudo-terminal; these exact device nodes are the whole grant.
+             '(allow file-read* file-write* file-ioctl (literal "/dev/ptmx") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))',
              '(allow sysctl-read)', '(allow signal (target self))',
              '(allow system-socket (socket-domain AF_UNIX) (socket-domain AF_INET) (socket-domain AF_INET6))',
              # Network policy remains unchanged for IP, not ambient Unix IPC.
@@ -101,6 +103,7 @@ class Context:
     execution_mode: str = 'not-run'
     imports: list = field(default_factory=list)
     dependencies: dict = field(default_factory=dict)
+    alternates: list = field(default_factory=list)
     @property
     def receipt_path(self):
         return self.evidence / 'sandbox-profile.json'
@@ -111,7 +114,7 @@ class Context:
                 'socket_dir': str(self.socket_dir), 'launcher_argv': [LAUNCHER, '-f', str(self.profile_path)],
                 'probes': self.probes, 'controls': self.controls, 'execution_mode': self.execution_mode, 'imported_profiles': self.imports,
                 'shared_cache_provided': self.dependencies.get('shared_cache_provided', []),
-                'dependencies': self.dependencies, 'descriptor_policy': {'close_fds': True, 'pass_fds': []},
+                'alternate_interpreters': getattr(self, 'alternates', []), 'dependencies': self.dependencies, 'descriptor_policy': {'close_fds': True, 'pass_fds': []},
                 'cwd': str(self.root)}
         self.receipt_path.write_text(json.dumps(body, sort_keys=True, indent=2) + '\n')
         return body
@@ -196,6 +199,26 @@ def addon_files(checkout, directories=NATIVE_ADDON_DIRS):
     return sorted(set(found))
 
 
+def real_interpreter_files(executable, root):
+    """Exact real interpreter files behind a launcher stub or shim, derived by running it before the profile exists.
+
+    A framework python3.13 execs Resources/Python.app/Contents/MacOS/Python, and /usr/bin/python3 is an
+    xcrun shim whose real interpreter lives under the selected developer directory. Neither is visible to otool."""
+    code = ("import json,os,sys;b=os.path.join(sys.base_prefix,'Resources/Python.app/Contents/MacOS/Python');"
+            "print(json.dumps([os.path.realpath(sys.executable),os.path.realpath(b) if os.path.isfile(b) else None]))")
+    out = subprocess.run([str(executable), '-I', '-S', '-B', '-c', code], cwd=str(root), env={'PATH': '/usr/bin:/bin'},
+                         close_fds=True, pass_fds=(), capture_output=True, text=True, timeout=20, check=True)
+    files = [p for p in json.loads(out.stdout) if p]
+    if not files or any(not Path(p).is_file() for p in files):
+        raise deps.DependencyError('real interpreter not found for ' + str(executable))
+    return files
+
+
+def alternate_interpreters(candidates, root):
+    """Probe targets: the real interpreter for each candidate (the xcrun shim is never probed itself)."""
+    return [real_interpreter_files(candidate, root)[0] for candidate in candidates]
+
+
 def prepare(checkout, venv, toolchain, root, evidence, env):
     """Generate once. No denial log is read, and no path is learned from probes."""
     evidence = Path(evidence).resolve(); evidence.mkdir(parents=True, exist_ok=True)
@@ -206,10 +229,12 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         tools = {name: resolved(value['path']) for name, value in toolchain.items()}
         imports = deps.import_closure([BASE_PROFILE])
         runtime_reads, extensions = python_runtime_paths(venv, root)
-        executables = [str(venv/'bin/python'), *[tools[k] for k in ('python','node','tmux') if k in tools], *ALTERNATE_PYTHONS,
+        alternates = alternate_interpreters(ALTERNATE_PYTHONS, root)
+        interpreter_files = [f for e in (str(venv/'bin/python'), *ALTERNATE_PYTHONS) for f in real_interpreter_files(e, root)]
+        executables = [str(venv/'bin/python'), *[tools[k] for k in ('python','node','tmux') if k in tools], *alternates, *interpreter_files,
                        '/usr/bin/sqlite3', '/bin/sh', LAUNCHER, *EXTRA_BINARIES]  # FORBIDDEN_EXEC is denied, so it gets no dependency grants
         extra = [{'path':p, 'executable':str(venv/'bin/python')} for p in extensions]
-        for alternate in ALTERNATE_PYTHONS:
+        for alternate in alternates:
             alternate_reads, alternate_extensions = python_runtime_paths(None, root, executable=alternate)
             runtime_reads += alternate_reads
             extra += [{'path':p, 'executable':alternate} for p in alternate_extensions]
@@ -223,9 +248,13 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         child_env = dict(env)
         child_env.pop('TMUX', None)
         child_env['TMUX_TMPDIR'] = str(socket_dir)
+        # node reads an OpenSSL config at startup; an empty owned file avoids granting the system one.
+        (root / 'empty-openssl.cnf').write_text('')
+        child_env['OPENSSL_CONF'] = str(root / 'empty-openssl.cnf')
         context = Context(checkout, venv, root, evidence, child_env, tools, profile_path,
                           digest(profile_path), read_paths, write_paths, socket_dir,
                           imports=imports, dependencies=closure)
+        context.alternates = alternates
         context.write_receipt('INCOMPLETE', 'self_probe_not_run')
         return context
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, deps.DependencyError) as exc:
@@ -285,6 +314,9 @@ def run_probes(context, run=subprocess.run):
                 ok = out.returncode != 0 and any(word in stderr.lower() for word in ('authorization denied', 'permission denied', 'operation not permitted', 'unable to open database'))
             elif expected == 'DENIED_EXEC':
                 ok = out.returncode != 0 and any(word in stderr.lower() for word in ('operation not permitted', 'permission denied', 'authorization denied'))
+            elif expected == 'CLEANED':
+                # A probe pane that finishes ends its owned server; a stale socket then reports no server.
+                ok = out.returncode == 0 or 'no server running' in stderr.lower()
             elif expected == 'VERSION':
                 ok = out.returncode == 0 and bool((stdout + stderr).strip())
             else:
@@ -305,7 +337,7 @@ def run_probes(context, run=subprocess.run):
                 raise Incomplete('Python guard must be inactive during sandbox self-probe')
         c._probe_wrap([])
         python = str(c.venv / 'bin/python')
-        required = [python, *ALTERNATE_PYTHONS, '/usr/bin/sqlite3', '/bin/sh', c.tools.get('node', ''), c.tools.get('tmux', ''), *FORBIDDEN_EXEC]
+        required = [python, *c.alternates, '/usr/bin/sqlite3', '/bin/sh', c.tools.get('node', ''), c.tools.get('tmux', ''), *FORBIDDEN_EXEC]
         missing = [path for path in required if not path or not available(path)]
         if missing:
             c.controls.append({'name': 'required_openers', 'passed': False, 'missing': missing})
@@ -335,7 +367,7 @@ def run_probes(context, run=subprocess.run):
         for name, argv in [('python',[python,'--version']), ('node',[c.tools['node'],'--version']), ('tmux',[c.tools['tmux'],'-V'])]:
             invoke('tool-' + name, argv, 'VERSION', control=True)
         openers = [('venv-python', [python,'-c',PY_OPEN]), ('venv-isolated', [python,'-I','-B','-c',PY_OPEN])]
-        for index, alternate in enumerate(ALTERNATE_PYTHONS):
+        for index, alternate in enumerate(c.alternates):
             openers += [('alternate-%d'%index,[alternate,'-c',PY_OPEN]), ('alternate-%d-no-site'%index,[alternate,'-S','-c',PY_OPEN])]
         openers += [('node', [c.tools['node'],'-e',NODE_OPEN])]
         targets = [('owned', owned), *sentinels]
@@ -366,7 +398,7 @@ def run_probes(context, run=subprocess.run):
             # It is a NEW dedicated server on one exact owned socket. Never
             # address the default socket or an ambient TMUX session.
             if socket.exists():
-                invoke('owned-tmux-cleanup',[c.tools['tmux'],'-S',str(socket),'kill-server'],'',control=True)
+                invoke('owned-tmux-cleanup',[c.tools['tmux'],'-S',str(socket),'kill-server'],'CLEANED',control=True)
         for executable in FORBIDDEN_EXEC:
             args = [executable]
             if executable.endswith('sudo'): args.append('-V')

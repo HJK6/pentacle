@@ -26,6 +26,7 @@ def context(tmp_path, monkeypatch):
     monkeypatch.setattr(m.deps, 'import_closure', lambda paths: [])
     monkeypatch.setattr(m.deps, 'dependency_closure', lambda paths, **kw: {'files':[], 'metadata_paths':[], 'binaries':[], 'roots':[]})
     monkeypatch.setattr(m, 'python_runtime_paths', lambda venv,root,**kw: ([], []))
+    monkeypatch.setattr(m, 'real_interpreter_files', lambda e,root: ['/real/'+Path(str(e)).name, '/real/app/'+Path(str(e)).name])
     home = tmp_path/'real-home'; home.mkdir()
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: home))
     ctx = m.prepare(checkout, venv, tools, root, evidence, {})
@@ -144,9 +145,9 @@ def test_unexpected_profile_failure_incomplete(context, monkeypatch):
 
 def test_required_opener_missing_incomplete(context, monkeypatch):
     m, ctx = context
-    monkeypatch.setattr(m,'available',lambda path: path != '/usr/bin/python3')
+    monkeypatch.setattr(m,'available',lambda path: path != '/real/python3')
     with pytest.raises(m.Incomplete,match='executable unavailable'): m.run_probes(ctx,run=stub_runner(ctx))
-    assert json.loads(ctx.receipt_path.read_text())['controls'][0]['missing'] == ['/usr/bin/python3']
+    assert json.loads(ctx.receipt_path.read_text())['controls'][0]['missing'] == ['/real/python3']
 
 def test_exact_network_and_forbidden_exec_rules(context):
     m, ctx = context
@@ -315,3 +316,65 @@ def test_addon_scan_is_bounded_to_native_directories(tmp_path, monkeypatch):
     assert tops and all(any(t == a or a in t.parents for a in allowed) for t in tops)
     assert not any('src' in t.parts for t in tops)
     assert m.addon_files(tmp_path / 'does-not-exist') == []
+
+
+def test_real_interpreter_files_derived_from_running_the_interpreter(tmp_path, monkeypatch):
+    m = module()
+    real = tmp_path / 'real-python'; app = tmp_path / 'app-python'; real.write_text('x'); app.write_text('x')
+    calls = []
+    def fake(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([str(real), str(app)]), stderr='')
+    monkeypatch.setattr(m.subprocess, 'run', fake)
+    assert m.real_interpreter_files('/shim/python3', tmp_path) == [str(real), str(app)]
+    assert calls[0][1:4] == ['-I', '-S', '-B']
+    monkeypatch.setattr(m.subprocess, 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=json.dumps([str(tmp_path / 'gone'), None]), stderr=''))
+    with pytest.raises(m.deps.DependencyError): m.real_interpreter_files('/shim/python3', tmp_path)
+
+
+def test_shim_replaced_by_real_interpreter_in_probes_and_closure(context, monkeypatch):
+    m, ctx = context
+    seen = []
+    def closure(paths, **kw):
+        seen.extend(paths); return {'files': [], 'metadata_paths': [], 'binaries': [], 'roots': []}
+    monkeypatch.setattr(m.deps, 'dependency_closure', closure)
+    again = m.prepare(ctx.checkout, ctx.venv, {k: {'path': v} for k, v in ctx.tools.items()}, ctx.root, ctx.evidence, ctx.env)
+    assert '/usr/bin/python3' not in again.alternates and '/real/python3' in again.alternates
+    assert '/real/python3' in seen and '/real/app/python3' in seen and '/real/app/python' in seen
+    assert '/usr/bin/python3' not in seen
+    assert json.loads(again.receipt_path.read_text())['alternate_interpreters'] == again.alternates
+
+
+def test_node_uses_empty_owned_openssl_config_without_a_grant(context):
+    m, ctx = context
+    cfg = Path(ctx.env['OPENSSL_CONF'])
+    assert cfg.read_text() == '' and ctx.root in cfg.parents
+    assert 'openssl' not in ctx.profile_path.read_text().lower()
+
+
+def test_pty_grant_is_exactly_the_three_device_forms(context):
+    m, ctx = context
+    text = ctx.profile_path.read_text()
+    line = [l for l in text.splitlines() if '/dev/ptmx' in l]
+    assert line == ['(allow file-read* file-write* file-ioctl (literal "/dev/ptmx") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))']
+    assert '(subpath "/dev' not in text and '(regex #"^/dev/' + '.*' not in text
+
+
+@pytest.mark.parametrize('rc,error,passed', [(0, '', True), (1, 'no server running on /x/probe.sock', True), (1, 'permission denied', False)])
+def test_owned_tmux_cleanup_accepts_an_already_exited_server(context, monkeypatch, rc, error, passed):
+    m, ctx = context
+    monkeypatch.setattr(m, 'available', lambda path: True)
+    inner = stub_runner(ctx)
+    def run(argv, **kwargs):
+        cmd = argv[3:] if argv[0] == '/usr/bin/sandbox-exec' else argv
+        if 'new-session' in cmd:
+            (ctx.socket_dir / 'probe.sock').write_text('')
+        if 'kill-server' in cmd:
+            return subprocess.CompletedProcess(argv, rc, '', error)
+        return inner(argv, **kwargs)
+    if passed:
+        m.run_probes(ctx, run=run)
+    else:
+        with pytest.raises(m.Incomplete): m.run_probes(ctx, run=run)
+    cleanup = [row for row in ctx.controls if row['name'] == 'owned-tmux-cleanup']
+    assert cleanup and cleanup[0]['passed'] is passed
