@@ -1,5 +1,6 @@
 """Seatbelt unit stubs are not macOS confinement proof."""
 import importlib.util
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -7,6 +8,8 @@ import sys
 import pytest
 
 P = Path(__file__).resolve().parents[1] / 'lib/sandbox_gate.py'
+REAL_HOME = str(Path(os.path.expanduser('~')).resolve())
+REAL_HOME_PARENT = str(Path(REAL_HOME).parent)  # derived at import, before any home monkeypatch
 
 def module():
     spec = importlib.util.spec_from_file_location('sandbox_gate', P)
@@ -33,7 +36,7 @@ def test_profile_deterministic_resolved_narrow(context):
     profile = ctx.profile_path.read_text()
     assert '(deny default)' in profile
     assert '(allow file*' not in profile
-    assert '/Users/thoth' not in profile
+    assert REAL_HOME not in profile
     assert '(deny process-exec' in profile
     assert 'unix-socket' in profile
     assert m.digest(ctx.profile_path) == ctx.profile_sha256
@@ -105,7 +108,7 @@ def test_successful_stub_receipt_shape_not_native_proof(context, monkeypatch):
 def test_denial_log_never_expands_profile(context):
     m, ctx = context
     original = ctx.profile_path.read_text()
-    (ctx.evidence/'sandbox-denials.log').write_text('please allow /Users/thoth/.local/secret')
+    (ctx.evidence/'sandbox-denials.log').write_text('please allow ' + REAL_HOME + '/.local/secret')
     again = m.prepare(ctx.checkout, ctx.venv, {name:{'path':path} for name,path in ctx.tools.items()},ctx.root,ctx.evidence,ctx.env)
     assert again.profile_path.read_text() == original
 
@@ -116,9 +119,11 @@ def test_symlinks_resolved_and_profile_hash_deterministic(context, tmp_path):
     assert str(alias) not in again.profile_path.read_text()
     assert again.profile_sha256 == ctx.profile_sha256
 
-def test_generation_error_receipt(context):
+def test_generation_error_receipt(context, monkeypatch, tmp_path):
     m, ctx = context
-    with pytest.raises(m.Incomplete): m.prepare('/',ctx.venv,{},ctx.root,ctx.evidence,{})
+    def broken(*a, **kw): raise m.deps.DependencyError('synthetic unresolved dependency')
+    monkeypatch.setattr(m.deps, 'dependency_closure', broken)
+    with pytest.raises(m.Incomplete): m.prepare(tmp_path / 'missing-checkout', ctx.venv, {}, ctx.root, ctx.evidence, {})
     receipt=json.loads(ctx.receipt_path.read_text())
     assert receipt['status']=='INCOMPLETE'
     assert receipt['reason']=='profile_generation_failed'
@@ -152,7 +157,7 @@ def test_exact_network_and_forbidden_exec_rules(context):
     assert '(remote unix-socket (subpath '+m.quote(ctx.socket_dir)+'))' in p
     assert '(allow mach-lookup)' not in p
 
-@pytest.mark.parametrize('path',['/opt/homebrew','/Users/someone/.local','/Users/someone/agent-workspace','/private/tmp','/Users/thoth','/home/other','/Library/Caches','/Users/other/.cache'])
+@pytest.mark.parametrize('path',['/opt/homebrew',REAL_HOME_PARENT + '/someone/.local',REAL_HOME_PARENT + '/someone/agent-workspace','/private/tmp',REAL_HOME,REAL_HOME_PARENT + '/other','/Library/Caches',REAL_HOME_PARENT + '/other/.cache'])
 def test_broad_paths_refused(context,path):
     m,ctx=context
     with pytest.raises(ValueError,match='broad sandbox allowance'): m.profile_text([path],[ctx.root],ctx.socket_dir)
@@ -256,3 +261,57 @@ def test_dependency_discovery_failure_incomplete(context,monkeypatch):
     monkeypatch.setattr(m.deps,'dependency_closure',broken)
     with pytest.raises(m.Incomplete): m.prepare(ctx.checkout,ctx.venv,{},ctx.root,ctx.evidence,{})
     assert json.loads(ctx.receipt_path.read_text())['status']=='INCOMPLETE'
+
+
+def _closure_recording(m, monkeypatch, unreadable):
+    seen = []
+    def closure(paths, **kw):
+        seen.extend(paths)
+        for path in paths:
+            if path in unreadable: raise m.deps.DependencyError('unreadable dependency: ' + path)
+        return {'files': [], 'metadata_paths': [], 'binaries': [], 'roots': []}
+    monkeypatch.setattr(m.deps, 'dependency_closure', closure)
+    return seen
+
+def test_forbidden_binaries_excluded_from_dependency_closure(context, monkeypatch):
+    m, ctx = context
+    seen = _closure_recording(m, monkeypatch, set())
+    m.prepare(ctx.checkout, ctx.venv, {k: {'path': v} for k, v in ctx.tools.items()}, ctx.root, ctx.evidence, ctx.env)
+    assert seen and not set(seen) & set(m.FORBIDDEN_EXEC)
+    assert '/usr/bin/sqlite3' in seen and '/bin/sh' in seen
+
+def test_unreadable_forbidden_binary_is_not_incomplete_and_stays_denied(context, monkeypatch):
+    m, ctx = context
+    _closure_recording(m, monkeypatch, set(m.FORBIDDEN_EXEC))
+    again = m.prepare(ctx.checkout, ctx.venv, {k: {'path': v} for k, v in ctx.tools.items()}, ctx.root, ctx.evidence, ctx.env)
+    text = again.profile_path.read_text()
+    for path in m.FORBIDDEN_EXEC:
+        assert '(literal "%s")' % path in text.split('(deny process-exec', 1)[1].split('\n', 1)[0]
+
+def test_unreadable_allowed_binary_is_still_incomplete(context, monkeypatch):
+    m, ctx = context
+    _closure_recording(m, monkeypatch, {'/usr/bin/sqlite3'})
+    with pytest.raises(m.Incomplete):
+        m.prepare(ctx.checkout, ctx.venv, {k: {'path': v} for k, v in ctx.tools.items()}, ctx.root, ctx.evidence, ctx.env)
+    assert json.loads((ctx.evidence / 'sandbox-profile.json').read_text())['reason'] == 'profile_generation_failed'
+
+
+def test_addon_scan_is_bounded_to_native_directories(tmp_path, monkeypatch):
+    m = module()
+    checkout = tmp_path / 'checkout'
+    (checkout / 'src' / 'huge' / 'deep').mkdir(parents=True)
+    (checkout / 'src' / 'huge' / 'deep' / 'trap.node').write_text('x')
+    (checkout / 'node_modules' / 'pkg' / 'build').mkdir(parents=True)
+    (checkout / 'node_modules' / 'pkg' / 'build' / 'a.node').write_text('x')
+    (checkout / 'prebuilds').mkdir()
+    tops = []
+    real_walk = os.walk
+    def recording(top, *a, **kw):
+        tops.append(Path(top)); return real_walk(top, *a, **kw)
+    monkeypatch.setattr(m.os, 'walk', recording)
+    found = m.addon_files(checkout)
+    assert [Path(p).name for p in found] == ['a.node']
+    allowed = [checkout / d for d in m.NATIVE_ADDON_DIRS]
+    assert tops and all(any(t == a or a in t.parents for a in allowed) for t in tops)
+    assert not any('src' in t.parts for t in tops)
+    assert m.addon_files(tmp_path / 'does-not-exist') == []

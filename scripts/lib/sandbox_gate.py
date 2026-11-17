@@ -182,6 +182,20 @@ def python_runtime_paths(venv, root, *, executable=None):
     return directories, sorted(extensions)
 
 
+NATIVE_ADDON_DIRS = ('node_modules', 'build/Release', 'prebuilds')
+
+def addon_files(checkout, directories=NATIVE_ADDON_DIRS):
+    """Node addons from the checkout's native directories only; the rest of the tree is never walked."""
+    found = []
+    for name in directories:
+        top = Path(checkout) / name
+        if not top.is_dir():
+            continue
+        for current, _dirs, files in os.walk(top):
+            found += [str(Path(current, f).resolve()) for f in files if f.endswith('.node')]
+    return sorted(set(found))
+
+
 def prepare(checkout, venv, toolchain, root, evidence, env):
     """Generate once. No denial log is read, and no path is learned from probes."""
     evidence = Path(evidence).resolve(); evidence.mkdir(parents=True, exist_ok=True)
@@ -193,13 +207,13 @@ def prepare(checkout, venv, toolchain, root, evidence, env):
         imports = deps.import_closure([BASE_PROFILE])
         runtime_reads, extensions = python_runtime_paths(venv, root)
         executables = [str(venv/'bin/python'), *[tools[k] for k in ('python','node','tmux') if k in tools], *ALTERNATE_PYTHONS,
-                       '/usr/bin/sqlite3', '/bin/sh', LAUNCHER, *FORBIDDEN_EXEC, *EXTRA_BINARIES]
+                       '/usr/bin/sqlite3', '/bin/sh', LAUNCHER, *EXTRA_BINARIES]  # FORBIDDEN_EXEC is denied, so it gets no dependency grants
         extra = [{'path':p, 'executable':str(venv/'bin/python')} for p in extensions]
         for alternate in ALTERNATE_PYTHONS:
             alternate_reads, alternate_extensions = python_runtime_paths(None, root, executable=alternate)
             runtime_reads += alternate_reads
             extra += [{'path':p, 'executable':alternate} for p in alternate_extensions]
-        extra += [{'path':str(p), 'executable':tools['node']} for p in checkout.rglob('*.node') if p.is_file() and 'node' in tools]
+        extra += [{'path':p, 'executable':tools['node']} for p in addon_files(checkout) if 'node' in tools]
         closure = deps.dependency_closure(executables, extra_roots=extra)
         read_paths = sorted(set(map(resolved, [checkout, venv, *runtime_reads, *SYSTEM_READ])))
         write_paths = sorted(set(map(resolved, [root, evidence, socket_dir])))

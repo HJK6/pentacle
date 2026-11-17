@@ -1,4 +1,5 @@
 """Synthetic Mach-O and SBPL fixtures only; no native otool proof."""
+import os
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -163,7 +164,7 @@ def test_shared_cache_all_system_prefixes(tmp_path,name):
     m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
     assert m.dependency_closure([exe],run=runner({exe:[name]}),_system_root=root)['shared_cache_provided'][0]['name']==name
 
-@pytest.mark.parametrize('name',['/opt/homebrew/opt/foo/lib/libfoo.dylib','/usr/local/lib/x.dylib','/Users/x/y.dylib','/usr/lib/../../etc/x','@rpath/missing','@loader_path/missing','@executable_path/missing'])
+@pytest.mark.parametrize('name',['/opt/homebrew/opt/foo/lib/libfoo.dylib','/usr/local/lib/x.dylib',os.path.join(os.path.dirname(os.path.expanduser('~')), 'x', 'y.dylib'),'/usr/lib/../../etc/x','@rpath/missing','@loader_path/missing','@executable_path/missing'])
 def test_cache_never_accepts_other_names(tmp_path,name):
     m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
     with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[name]}),_system_root=root)

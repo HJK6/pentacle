@@ -137,7 +137,7 @@ tmux-launched children are refused at the tmux launch, before any session starts
 | `services/chat-stream-v2/tests/test_loop_stall_process.py` | 50 | Covered / impossible / refused by exact runtime argv policy |
 | `services/chat-stream-v2/tests/test_loopback_privileged_rpc.py` | 191 | Covered / impossible / refused by exact runtime argv policy |
 | `services/chat-stream-v2/tests/test_managed_logs.py` | 271, 348 | Covered / impossible / refused by exact runtime argv policy |
-| `services/chat-stream-v2/tests/test_merlin_claude_auth_context.py` | 66 | Covered / impossible / refused by exact runtime argv policy |
+| `services/chat-stream-v2/tests/test_*_claude_auth_context.py` | 66 | Covered / impossible / refused by exact runtime argv policy |
 | `services/chat-stream-v2/tests/test_native_trust_recovery.py` | 29 | Covered / impossible / refused by exact runtime argv policy |
 | `services/chat-stream-v2/tests/test_nightly_journey.py` | 205 | Covered / impossible / refused by exact runtime argv policy |
 | `services/chat-stream-v2/tests/test_primary_assistant_name.py` | 27 | Covered / impossible / refused by exact runtime argv policy |
