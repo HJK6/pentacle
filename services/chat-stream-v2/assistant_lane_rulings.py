@@ -137,11 +137,13 @@ def _question_digest(intent: dict[str, Any]) -> str:
 
 
 def _work_item(spec_id: str) -> tuple[dict[str, Any], str | None]:
-    item = {"spec_id": spec_id, "title": "", "status": "", "lane_ids": [],
+    item = {"spec_id": spec_id, "title": "", "status": "", "lane_ids": [], "lane_titles": [], "small": False,
             "agent_authored_goal": "", "origin": None, "origin_missing": True}
     try:
         from _shared.spec_reader import SpecReader
         status, _, _, text = SpecReader(None).read(spec_id)
+        from work_item_admission import small_tag
+        item["small"] = small_tag(text)
         item["status"] = status
         item["spec_content_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         match = re.search(r"(?m)^title:\s*['\"]?(.+?)['\"]?\s*$", text)
@@ -539,7 +541,7 @@ class AssistantLaneRulings:
     def _safe_intent(msg: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in msg.items()
                 if key not in {"stream_token", "_auth_context", "_ruling_release",
-                               "_ruling_report", "_ruling_report_waiver"}}
+                               "_ruling_report", "_ruling_report_waiver", "assignment_exempt"}}
 
     async def _known_covered(self, key: str, auth: dict[str, Any]) -> bool:
         if not auth.get("token_verified"):
@@ -707,20 +709,16 @@ class AssistantLaneRulings:
         return result
 
     async def request_spawn(self, msg: dict[str, Any]) -> dict[str, Any] | None:
-        from spawnctl import new_work_commission
+        from spawnctl import front_desk_commission, front_desk_exemption
+        from store import effective_assignment, normalize_spec_ids
         from sessions import VerbError
         from _shared.spawn_profiles import SpawnProfileError, resolve_spawn, validate_v2
         composite = self._composite()
         auth = msg.get("_auth_context") or {}
         key = str(msg.get("idempotency_key") or msg.get("request_id") or "")
         known = await self._known_covered("spawn:" + key, auth) if key else False
-        if not known and (composite is None or not composite.enabled or not composite.config.direct_primary
-                or not new_work_commission(msg, resume=msg.get("resume_session_id") is not None)
-                or str(msg.get("role") or "").lower() == "qa"
-                or (auth.get("stream_id"), auth.get("session_generation")) != (
-                    composite.config.direct_primary_stream_id,
-                    composite.config.direct_primary_generation,
-                )):
+        if not known and (not front_desk_commission(msg, composite)
+                          or str(msg.get("role") or "").lower() == "qa"):
             return None
         binding = await self.request_binding("spawn")
         message = self._safe_intent(msg)
@@ -737,14 +735,16 @@ class AssistantLaneRulings:
                 objective, _, _ = resolve_objective(message["objective"], objective_supported=True,
                                                      parent_stream_id=message.get("parent_stream_id"))
                 message["objective"] = objective
-        if known and not str(message.get("objective") or "").strip():
-            # A legacy producer's derived objective belongs to the frozen
-            # intent too; replay must not depend on a mutable blob/spec read.
+        if known:
+            # Frozen daemon decisions survive mutable parent bindings and forged
+            # caller keys. Legacy requests without the key remain byte-identical.
             prior = await self.store.submit(lambda conn: conn.execute(
                 "SELECT intent_json FROM v2_assistant_lane_rulings WHERE request_key=?", ("spawn:" + key,)
             ).fetchone())
             frozen = json.loads(prior[0])
-            if frozen.get("objective_source") == "derived":
+            if "assignment_exempt" in frozen:
+                message["assignment_exempt"] = frozen["assignment_exempt"]
+            if not str(message.get("objective") or "").strip() and frozen.get("objective_source") == "derived":
                 message["objective"] = frozen.get("objective")
                 message["objective_source"] = frozen["objective_source"]
         if not known:
@@ -779,6 +779,9 @@ class AssistantLaneRulings:
         spec_id = str(message.get("spec_id") or "")
         item = None
         if not known:
+            exempt = front_desk_exemption(msg, composite)
+            if exempt and not normalize_spec_ids(message.get("spec_ids"), message.get("spec_id")):
+                message["assignment_exempt"] = exempt
             # These are the same pure tuple predicates used by _resolve_launch;
             # account choice was authorized by Server before entering admission.
             # A command-only launch has no provider tuple to validate here.
@@ -805,14 +808,12 @@ class AssistantLaneRulings:
                     host, name = target.split(":", 1)
                     authenticated = {**message, "_auth_context": {**auth, "covered_admission": True}}
                     spec_binding = await spawnctl._resolve_spec_binding(authenticated, host, name)
-                    spec_id = str(spec_binding.get("assigned_spec_id") or "")
-                    if not spec_id:
-                        raise VerbError("work_assignment_required", "Supply this commission's assigned spec with --spec-id.")
+                    spec_id = str(effective_assignment(spec_binding) or "")
                     refusal = await spawnctl._work_link_refusal(authenticated, spec_binding)
                     if refusal is not None:
                         # The resolved spec is still independently readable.
                         correction(refusal.code, "spec_id", str(refusal))
-                elif not spec_id:
+                elif not spec_id and not message.get("assignment_exempt"):
                     raise VerbError("work_assignment_required", f"{auth['stream_id']} requires an assigned spec")
             except VerbError as exc:
                 code = ("spec_unavailable" if exc.code == "spec_unresolved" and "spec_resolution" in exc.extra
@@ -820,13 +821,17 @@ class AssistantLaneRulings:
                 correction(code, "spec_id", "Restore fresh spec resolution before resubmitting." if code == "spec_unavailable"
                            else "Supply a resolvable assigned --spec-id for this commission.")
                 spec_id = ""  # Origin and link depend on this prerequisite.
+            if message.get("assignment_exempt"):
+                spec_id = ""
             if spec_id:
                 item, item_error = _work_item(spec_id)
                 if item_error:
                     correction(item_error, "spec_id", "Restore readable canonical spec content before resubmitting."
                                if item_error == "spec_unavailable" else "Supply a uniquely resolvable canonical --spec-id.")
                 if hasattr(self.store, "open_lanes_for_spec"):
-                    item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec_id)]
+                    lanes = await self.store.open_lanes_for_spec(spec_id)
+                    item["lane_ids"] = [lane["lane_id"] for lane in lanes]
+                    item["lane_titles"] = [lane["title"] for lane in lanes]
             if errors:
                 raise VerbError("spawn_preflight_failed", "Repair the admission packet and submit a new intent.", errors=errors)
         request = await self._create(
@@ -1112,6 +1117,8 @@ class AssistantLaneRulings:
                     packet = {"ruling_request_id": request_id, "action": action, "target": target,
                               "deadline": now + self.sla_s, "intent_digest": intent_digest,
                               "requester": requester, "covered": True, "work_item": work_item}
+                    if action == "spawn" and intent.get("assignment_exempt"):
+                        packet["exempt"] = intent["assignment_exempt"]
                     if work_item_error:
                         packet["work_item_error"] = work_item_error
                     if action == "advice":
@@ -1135,6 +1142,8 @@ class AssistantLaneRulings:
                         packet["brief"]["acceptance"] = _acceptance_brief(
                             {**intent, "initial_prompt": brief_text} if action == "spawn" and brief_text is not None else intent)
                         if action == "spawn":
+                            for brief_key in ("objective", "role", "provider", "model", "effort"):
+                                packet["brief"].setdefault(brief_key, "")
                             excerpt, rule = _brief_excerpt(brief_text or "", intent)
                             packet["brief"].update(brief_excerpt=excerpt, excerpt_rule=rule)
                             packet = {"objective": intent.get("objective"),

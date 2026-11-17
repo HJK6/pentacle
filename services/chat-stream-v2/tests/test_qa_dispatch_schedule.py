@@ -68,7 +68,8 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
             agent_orch_bin_dir="/test/bin",
         )
         ctl = SpawnCtl(
-            store, sessions, tmux=tmux, machine=machine, specs=RouteProbeSpecs()
+            store, sessions, tmux=tmux, machine=machine,
+            specs=RouteProbeSpecs.rooted(tmp_path, SPEC),
         )
         schedule = WindowSchedule(store, sessions, comms, ctl, local_host="localhost")
         schedule.mark_store_ready()

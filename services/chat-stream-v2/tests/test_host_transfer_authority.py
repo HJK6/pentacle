@@ -524,7 +524,7 @@ def test_emergency_retirement_drains_detached_spawn_effect(tmp_path):
         async with fixture(tmp_path, authority=True, tmux=panes) as (store, server, composite, gateway, _, __):
             row, _, auth, _ = await claim_bundle(store, server, gateway, composite)
             from test_window_schedule_contract import RouteProbeSpecs
-            ctl = SpawnCtl(store, server.sessions, tmux=panes, specs=RouteProbeSpecs())
+            ctl = SpawnCtl(store, server.sessions, tmux=panes, specs=RouteProbeSpecs.rooted(tmp_path, SPEC))
             server.spawnctl = ctl
             await link_specs(store, SPEC)  # item (1): the detached spawn is an admitted, lane-linked commission
             reached, release = asyncio.Event(), asyncio.Event()

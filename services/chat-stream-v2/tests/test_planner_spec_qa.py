@@ -76,7 +76,9 @@ def test_planner_explicit_account_keeps_spec_phase_admission(tmp_path, monkeypat
     from test_provider_cli_pin import artifact_executor
     from provider_cli_fixtures import seed_pin
     from work_lane_link import link_specs
+    from test_window_schedule_contract import spec_tree
     class Catalog:
+        memory_root = spec_tree(tmp_path, SPEC)
         def resolution_for(self, value):
             return 'resolved' if value == SPEC else 'zero_matches'
         def canonical_spec_identity(self, value):

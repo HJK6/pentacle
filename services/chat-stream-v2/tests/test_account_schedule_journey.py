@@ -110,7 +110,9 @@ def test_schedule_materialized_before_cap_checks_current_control_at_fire(tmp_pat
 
 async def fixture(tmp_path):
     store, sessions, _, comms, _, server = await state(tmp_path/'state.db')
+    from test_window_schedule_contract import spec_tree
     class Catalog:
+        memory_root = spec_tree(tmp_path, SPEC)
         def resolution_for(self, value):
             return 'resolved' if value == SPEC else 'zero_matches'
         def canonical_spec_identity(self, value):

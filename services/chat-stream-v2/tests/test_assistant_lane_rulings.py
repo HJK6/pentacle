@@ -950,7 +950,7 @@ async def _rulings_rig(store, *, advisor_pane="pane_alive", spawnctl=None, autho
 
 def _spawn_msg(root, key):
     return {"type": "spawn", "spec_id": "spec_demo__linked", "role": "lead", "session_name": key, "request_id": key,
-            "idempotency_key": key, "objective": "Implement lane",
+            "idempotency_key": key, "objective": "Implement lane", "command": "stub",
             "_auth_context": {"token_verified": True, "stream_id": ROOT,
                               "session_generation": root["session_generation"]}}
 
@@ -1325,7 +1325,7 @@ def test_ruled_lead_spawn_checks_assignment_at_admission_not_release():
             # A retry of the admitted request is never re-gated.
             again = await server._on_spawn({**_spawn_msg(root, "linked"), "spec_id": "spec_demo__linked"})
             assert again["ruling_request_id"] == reply["ruling_request_id"]
-            assert spawned.resolved == ["spec_demo__linked"]
+            assert spawned.resolved == [None, "spec_demo__linked"]
         finally:
             store.stop()
 
@@ -2325,3 +2325,185 @@ def test_same_primary_advisor_follows_binding_and_independent_advisor_stays(sele
             else:
                 assert binding["stream_id"] == JADVISOR
     asyncio.run(go())
+
+
+from test_work_lane_assignment import env as admission_env
+
+
+async def admission_rig(env, **kwargs):
+    from test_work_lane_assignment import front_desk, seat, HOST
+    ctl, sessions, tmux, caller, home, target, composite = await front_desk(env, **kwargs)
+    advisor = await seat(env.store, "advisor")
+    await env.store.update_session(HOST, "advisor", pane_status="pane_alive")
+    server = Server(store=env.store, sessions=sessions, spawnctl=ctl, local_host=HOST)
+    server.assistant_composite = composite
+    return server, ctl, tmux, caller, advisor, home, target
+
+
+async def approve_admission(server, pending, advisor):
+    return await server._on_assistant_ruling({
+        "request_id": "approve-" + pending["ruling_request_id"],
+        "ruling_request_id": pending["ruling_request_id"], "ruling": "approve",
+        "_auth_context": {"token_verified": True, "stream_id": advisor[0], "session_generation": advisor[1]},
+    })
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exemption", ["planner", "promptless"])
+async def test_admission_exemption_survives_held_retry_and_release(admission_env, exemption):
+    from test_work_lane_assignment import agent, HOST
+    from store import UNASSIGNED, effective_assignment
+    from store_work_lanes import _assigned_seats_conn
+    e = admission_env
+    server, _, tmux, caller, advisor, home, target = await admission_rig(e)
+    msg = agent(caller, key="exempt", name="exempt", role="planner" if exemption == "planner" else "worker")
+    if exemption == "promptless":
+        msg.pop("command")
+    msg.update(provider="codex", model="gpt-6-luna", effort="low")
+    try:
+        pending = await server._on_spawn(msg)
+        row = await server.lane_rulings._fetch(pending["ruling_request_id"])
+        stored = json.loads(row["intent_json"])
+        packet = json.loads(stored["_ruling_packet"].split("\n", 1)[1])
+        assert stored["assignment_exempt"] == exemption
+        assert packet["exempt"] == exemption and packet["work_item"] is None
+        assert all(packet["brief"][key] == msg[key] for key in ("objective", "role", "provider", "model", "effort"))
+        assert tmux.created == 0
+        # Mutable parent assignment and forged caller keys cannot change frozen admission.
+        await e.store.update_session(HOST, "front-desk", assigned_spec_id=target)
+        again = await server._on_spawn({**msg, "assignment_exempt": "forged"})
+        assert again["ruling_request_id"] == pending["ruling_request_id"]
+        approved = await approve_admission(server, pending, advisor)
+        assert approved["state"] == "done", approved
+        child = await e.store.fetch_session(HOST, "exempt")
+        assert child["assigned_spec_id"] == UNASSIGNED and effective_assignment(child) is None
+        assert child["usage"]["attribution"]["spec_id"] == home
+        assigned = await e.store.submit(lambda conn: _assigned_seats_conn(conn, [home, target]))
+        assert HOST + ":exempt" not in {row["stream_id"] for row in assigned}
+        assert (await server._on_spawn(msg))["ruling_request_id"] == pending["ruling_request_id"]
+        assert tmux.created == 1
+    finally:
+        await server.lane_rulings.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case,code", [("implicit", "work_assignment_required"),
+    ("unlaned", "work_lane_membership_required"), ("small", "work_small_item_limit")])
+async def test_admission_refusals_are_spec_corrections_without_ruling(admission_env, case, code):
+    from test_work_lane_assignment import agent, seat
+    e = admission_env
+    server, _, tmux, caller, _, _, target = await admission_rig(e, small=case == "small", linked=case != "unlaned")
+    if case == "small":
+        await seat(e.store, "already-used", target, assigned=target)
+    try:
+        with pytest.raises(VerbError) as exc:
+            await server._on_spawn(agent(caller, key="refused", spec=None if case == "implicit" else target))
+        assert exc.value.code == "spawn_preflight_failed"
+        assert [(x["field"], x["code"]) for x in exc.value.extra["errors"]] == [("spec_id", code)]
+        assert await e.store.submit(lambda conn: conn.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+        assert tmux.created == 0
+    finally:
+        await server.lane_rulings.stop()
+
+
+@pytest.mark.asyncio
+async def test_admission_packet_and_membership_are_frozen_until_release(admission_env):
+    from test_work_lane_assignment import agent, HOST
+    e = admission_env
+    server, _, tmux, caller, advisor, _, target = await admission_rig(e)
+    try:
+        pending = await server._on_spawn(agent(caller, key="linked", spec=target))
+        row = await server.lane_rulings._fetch(pending["ruling_request_id"])
+        packet = json.loads(json.loads(row["intent_json"])["_ruling_packet"].split("\n", 1)[1])
+        assert packet["work_item"]["lane_titles"] == ["Fixture lane"]
+        assert packet["work_item"]["small"] is False
+        assert "exempt" not in packet
+        await e.store.submit(lambda conn: conn.execute("UPDATE v2_assistant_composite_lanes SET members_json='[]'"))
+        assert (await approve_admission(server, pending, advisor))["state"] == "done"
+        assert (await e.store.fetch_session(HOST, "child"))["assigned_spec_id"] == target
+        assert tmux.created == 1
+    finally:
+        await server.lane_rulings.stop()
+
+
+@pytest.mark.asyncio
+async def test_admission_two_approved_small_requests_launch_only_one_seat(admission_env):
+    from test_work_lane_assignment import agent
+    e = admission_env
+    server, _, tmux, caller, advisor, _, target = await admission_rig(e, small=True)
+    try:
+        first = await server._on_spawn(agent(caller, key="small-first", name="small-first", spec=target))
+        second = await server._on_spawn(agent(caller, key="small-second", name="small-second", spec=target))
+        assert (await approve_admission(server, first, advisor))["state"] == "done"
+        assert (await approve_admission(server, second, advisor))["state"] == "release_blocked"
+        row = await server.lane_rulings._fetch(second["ruling_request_id"])
+        assert "work_small_item_limit" in row["outcome_json"]
+        assert tmux.created == 1
+    finally:
+        await server.lane_rulings.stop()
+
+
+@pytest.mark.asyncio
+async def test_admission_release_blocked_exemption_retry_is_frozen(admission_env):
+    from test_work_lane_assignment import agent, HOST
+    from store import UNASSIGNED
+    e = admission_env
+    server, ctl, tmux, caller, advisor, _, target = await admission_rig(e)
+    msg = agent(caller, key="blocked-planner", name="blocked-planner", role="planner")
+    original = ctl._resolve_launch
+    async def blocked(*args, **kwargs):
+        raise VerbError("fixture_launch_blocked", "Synthetic launch resource unavailable")
+    try:
+        pending = await server._on_spawn(msg)
+        e.monkeypatch.setattr(ctl, "_resolve_launch", blocked)
+        assert (await approve_admission(server, pending, advisor))["state"] == "release_blocked"
+        await e.store.update_session(HOST, "front-desk", assigned_spec_id=target,
+            spec_ids=[target], spec_binding_provenance=[{"spec_id": target, "provenance": "spawn_explicit",
+                "granting_principal": "operator", "granted_at": "2026-11-01T00:00:00Z"}])
+        e.monkeypatch.setattr(ctl, "_resolve_launch", original)
+        again = await server._on_spawn({**msg, "assignment_exempt": "forged"})
+        assert again["ruling_request_id"] == pending["ruling_request_id"]
+        assert (await e.store.fetch_session(HOST, "blocked-planner"))["assigned_spec_id"] == UNASSIGNED
+        assert tmux.created == 1
+    finally:
+        await server.lane_rulings.stop()
+
+
+@pytest.mark.asyncio
+async def test_admission_legacy_held_request_without_exemption_key_is_unchanged(admission_env):
+    from test_work_lane_assignment import agent, HOST
+    e = admission_env
+    server, _, _, caller, advisor, home, _ = await admission_rig(e)
+    msg = agent(caller, key="legacy-planner", name="legacy-planner", role="planner")
+    try:
+        # Seed the previously admitted wire intent, with no daemon exemption
+        # key. Production retry/release must consume it without rewriting it.
+        legacy = server.lane_rulings._safe_intent(msg)
+        legacy["request_id"] = msg["idempotency_key"]
+        pending = await server.lane_rulings._create(
+            action="spawn", key="spawn:legacy-planner", intent=legacy,
+            requester=caller[0], requester_generation=caller[1],
+            binding=await server.lane_rulings.binding(), target=HOST + ":legacy-planner",
+            target_generation="", covered=True, work_item={"spec_id": home}, brief_text="")
+        assert (await server._on_spawn({**msg, "assignment_exempt": "planner"}))["ruling_request_id"] == pending["ruling_request_id"]
+        assert (await approve_admission(server, pending, advisor))["state"] == "done"
+        assert (await e.store.fetch_session(HOST, "legacy-planner"))["assigned_spec_id"] == home
+    finally:
+        await server.lane_rulings.stop()
+
+
+@pytest.mark.asyncio
+async def test_admission_explicit_planner_packet_has_item_and_no_exemption(admission_env):
+    from test_work_lane_assignment import agent
+    e = admission_env
+    server, _, _, caller, _, _, target = await admission_rig(e)
+    try:
+        pending = await server._on_spawn(agent(caller, key="explicit-planner", spec=target, role="planner",
+                                              assignment_exempt="forged"))
+        row = await server.lane_rulings._fetch(pending["ruling_request_id"])
+        stored = json.loads(row["intent_json"])
+        packet = json.loads(stored["_ruling_packet"].split("\n", 1)[1])
+        assert "assignment_exempt" not in stored
+        assert "exempt" not in packet and packet["work_item"]["spec_id"] == target
+    finally:
+        await server.lane_rulings.stop()

@@ -128,6 +128,18 @@ def _payload_sha(msg: dict[str, Any]) -> str:
     return hashlib.sha256(_compact(safe).encode("utf-8")).hexdigest()
 
 
+def _insert_binding(assignment: Any, *, explicit: bool) -> dict[str, Any]:
+    """The binding stub the insert-time work check sees, before any resolution.
+
+    Only a spec the request itself named is ``spawn_explicit``; an assignment
+    the owner's seat carries is not, so a front desk commission cannot reach
+    its own item that way.
+    """
+    spec_id = normalize_spec_ids(spec_id=assignment)[0] if assignment else None
+    return {"assigned_spec_id": spec_id,
+            "spec_binding_provenance": [{"spec_id": spec_id, "provenance": "spawn_explicit"}] if spec_id and explicit else []}
+
+
 def _valid_uuid(value: Any) -> str:
     raw = str(value or "")
     try:
@@ -644,7 +656,7 @@ class WindowSchedule:
             assignment = requested_spec_ids[0] if requested_spec_ids else effective_assignment(seat)
             refusal = await link_refusal(
                 {**msg, "parent_stream_id": msg.get("parent_stream_id") or actor},
-                {"assigned_spec_id": normalize_spec_ids(spec_id=assignment)[0] if assignment else None})
+                _insert_binding(assignment, explicit=bool(requested_spec_ids)))
             if refusal is not None:
                 raise refusal
             canonical = normalize_spec_ids(spec_id=assignment)[0]
@@ -1558,7 +1570,7 @@ class WindowSchedule:
             assignment = requested_spec_ids[0] if requested_spec_ids else effective_assignment(seat)
             refusal = await link_refusal(
                 {**msg, "parent_stream_id": parent_stream_id or actor},
-                {"assigned_spec_id": normalize_spec_ids(spec_id=assignment)[0] if assignment else None})
+                _insert_binding(assignment, explicit=bool(requested_spec_ids)))
             if refusal is not None:
                 raise refusal
             canonical = normalize_spec_ids(spec_id=assignment)[0]

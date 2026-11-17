@@ -57,8 +57,9 @@ Updates arrive both live (as a `chat.event` broadcast) and through history (`req
 
 A paused, unparked lane with a live assigned work seat or current external packet resumes on refresh with reason `work_started`; either also suppresses lead-lost and permits explicit activation. A parked lane stays parked. A manual pause lasts until the next refresh if work continues. The existing display-only `lead.presence.working` ORs actual working/background activity across every effectively assigned member seat, before member/seat/page caps, plus the bound lead's existing busy descendants. Lead identity, generation, qualification, status, online and card still describe the bound lead. Historical bindings remain available for fault display. Terminal/unresolved residual execution remains observable and grants no new execution. Existing client paused/blocked/done/needs-you motion gates remain; when all question-bearing members are beyond the eight-row preview, its final row is replaced with one such member.
 
-Lanes are display and grouping state, not execution admission. Spawn, send,
-close and assignment changes do not depend on lane state or lead presence.
+Lane state and lead presence do not gate spawn, send, close or assignment
+changes. New front desk work commissions require lane membership at admission,
+as described below; a done lane still satisfies that membership check.
 Accepted idempotent replays retain their existing outcome without new execution.
 Authentication, routing integrity, receipts, readiness and advisor judgments remain.
 
@@ -78,6 +79,62 @@ in-use reason and source-epic checks, but does not stop work.
   - was answered `Confirm` by a direct operator (an agent-relayed answer does not count); accompanying text is recorded as a comment and does not change the selected decision;
   - is `answered` or `consumed` by answer-notice delivery;
   - has not been used for a lane mutation before (the lane event store consumes it separately, once).
+
+## Front desk spawn rule
+
+A new token-authenticated commission from the current direct-primary front desk
+(stream and generation) must explicitly name its own work item with `--spec-id`.
+Its effective membership must include a lane, counting active, paused, blocked
+and done lanes. The direct spawn path returns `work_assignment_required` for a
+missing explicit assignment, or `work_lane_membership_required` for no lane.
+The held advisor path reports these as `spawn_preflight_failed` corrections on
+`spec_id`, without creating a ruling. Only an unavailable work index skips the
+membership check, with one log line naming the item; stale or errored available
+observations remain authoritative. Spec resolution/readability still applies.
+
+Planners and requests with neither an initial prompt nor a command are exempt.
+Without an explicit item they keep inherited authority/usage tags but store an
+explicitly unassigned work assignment, so they appear under no lane member.
+An explicit item still binds an exempt seat. The daemon freezes an exempt
+request's decision in its held intent and restores it on retries; callers cannot
+supply that decision. Previously held requests retain their original behavior.
+
+A spec whose frontmatter `tags` list includes `small` gets one seat and no QA
+round. Every new token-authenticated commission checks this, including a lead's
+supporting children. QA is classified by role, phase or QA flags; either a small
+QA target or a small assignment refuses with `work_small_item_limit`. Open and
+closed assigned sessions, and retained intent-bearing spawn reservations even
+past expiry, consume the one seat. Remove the small tag and fill the full spec
+to add seats. Handoffs, resumes and admitted replays keep continuity.
+
+The tag is read once per commission, from the target spec file only, bound to
+the same identity snapshot the commission's binding resolved from; no second
+board scan runs and nothing is read under the graph lock. A change to the file
+after that read (a Syncthing delivery) applies from the next commission, so
+staleness is bounded by one commission's admission-to-intent interval; the seat
+claim itself stays atomic in the store. A registry with no memory root refuses
+with `spec_unavailable`; it never reads the process-wide memory root. A
+scheduled seat commission is checked at insert with the spec ids the request
+named, which count as explicit; an assignment inherited from the owner's seat
+does not.
+
+Explicit assignment and membership are checked when requested, not again when
+an approved held request releases. The small-item seat claim commits atomically
+with the first spawn intent, so racing callers or two approved held requests
+cannot launch two seats. Recovery keeps its existing claim until ordinary
+terminalization or confirmed cleanup releases the reservation.
+
+The advisor's work item includes `lane_titles` in the order of its non-done
+`lane_ids`, plus `small`. An exempt request without an explicit item has
+`work_item: null` and `exempt: planner | promptless`; its brief carries the
+objective, role and provider/model/effort tuple. Holding and ruling states do
+not change.
+
+Operator spawns without a seat token and existing seats are unchanged. Ordinary
+lead children still inherit their assignment. Covered `send` commissions still
+require an assigned target: assign an unassigned planner with `agent-orch spec
+assign` or start a new planner. Usage continues to charge the first inherited
+`spec_ids` entry, even when the work assignment is explicitly empty.
 
 ## CLI
 

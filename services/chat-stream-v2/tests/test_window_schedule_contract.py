@@ -178,7 +178,25 @@ class RouteProbeHosts:
         return self.peer_tmux
 
 
+def spec_tree(tmp_path, *spec_ids: str):
+    """A memory root holding a minimal readable spec for each id, for admission's tag read."""
+    root = tmp_path / "specs-memory"
+    for spec_id in spec_ids:
+        folder = root / "work" / "in_progress" / spec_id.removeprefix("spec_")
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "spec.md").write_text(f"---\nid: {spec_id}\ntitle: Probe fixture\n---\n")
+    return root
+
+
 class RouteProbeSpecs:
+    def __init__(self, memory_root=None) -> None:
+        # Admission reads a spec's tags from this root only; None means no readable spec.
+        self.memory_root = memory_root
+
+    @classmethod
+    def rooted(cls, tmp_path, *spec_ids: str) -> "RouteProbeSpecs":
+        return cls(spec_tree(tmp_path, *spec_ids))
+
     def resolution_for(self, _spec_id: str) -> str:
         return "resolved"
 
@@ -863,7 +881,7 @@ def test_remote_scheduled_fire_routes_profile_tmux_prompt_and_child_token_to_pee
         tmux=local_tmux,
         machine=machine,
         hosts=hosts,
-        specs=RouteProbeSpecs(),
+        specs=RouteProbeSpecs.rooted(tmp_path, SPEC),
     )
     surface = WindowSchedule(
         store,
@@ -985,7 +1003,7 @@ def test_schedule_generation_key_replays_once_and_rejects_changed_payload(tmp_pa
                 codex_bin="/tmp/public-local/bin/codex", projects_root="/tmp/public-local/projects",
                 agent_orch_bin_dir="/tmp/public-local/bin",
             ),
-            specs=RouteProbeSpecs(),
+            specs=RouteProbeSpecs.rooted(tmp_path, SPEC),
         )
         surface = WindowSchedule(
             store, FakeSessions(), FakeComms(), spawnctl, local_host="hosta",
