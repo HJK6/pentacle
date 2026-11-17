@@ -361,6 +361,11 @@ class OutboundNoticeQueue:
                 if kind=="account_cap_blocker":
                     from front_desk_digest import WAKE_TOKEN
                     message['_front_desk_wake_token']=WAKE_TOKEN
+            if kind in {"account_pool_cap_warning","account_pool_meter_problem","account_pool_meter_recovered"}:
+                from account_pool_control import NOTICE_TOKEN
+                from front_desk_digest import WAKE_TOKEN
+                message.update(_pool_notice_token=NOTICE_TOKEN,_pool_notice_metadata=metadata,
+                               _pool_notice_kind=kind,_front_desk_wake_token=WAKE_TOKEN)
             if kind == NOTICE_KIND_LANE_DIGEST or metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN

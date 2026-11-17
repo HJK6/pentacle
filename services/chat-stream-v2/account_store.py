@@ -197,6 +197,8 @@ class AccountStore:
                     and number(previous.get("observed_at")) and previous.get("windows")):
                 # Keep the upstream timestamp: a failed fetch never refreshes quota.
                 allowed.update(observed_at=previous["observed_at"],windows=previous["windows"])
+            else:
+                allowed.update(observed_at=None,windows=None)
         # A quota probe never clears an auth failure or identity conflict.
         self.conn.execute("INSERT OR REPLACE INTO v2_account_observations VALUES (?,?,?)",(key,json.dumps(allowed),now))
         return allowed["collection"]!="identity_conflict"
@@ -234,7 +236,7 @@ class AccountStore:
         for provider,pool in sorted({(r["provider"],r["pool_id"]) for r in rows}):
             sources=[a for a in accounts if a["provider"]==provider and a["pool_id"]==pool and a["active"]]
             measured=[a for a in sources if a["health"]=="healthy" and isinstance(a["observation"],dict)
-                and a["observation"].get("collection")=="ok" and number(a["observation"].get("observed_at"))]
+                and a["observation"].get("collection") in {"ok","failed"} and number(a["observation"].get("observed_at"))]
             best=max(measured,key=lambda a:a["observation"]["observed_at"],default=None)
             if best is None:
                 retained=[a for a in sources if a["health"] in {"healthy","auth_unhealthy"} and isinstance(a["observation"],dict)
@@ -255,8 +257,7 @@ class AccountStore:
                 "observation":data,"age_seconds":age,"fresh":bool(complete and data.get("collection")=="ok" and not conflict and age is not None and number(max_age) and 0<=age<=max_age),
                 "error_codes":{a["host"]+":"+provider+":"+a["alias"]+":"+a["generation"]:a["observation"]["error_code"]
                     for a in sources if isinstance(a["observation"],dict) and a["observation"].get("error_code")},
-                "identity_conflict":conflict,
-                "legacy_cap":self.policy.get("account_caps",{}).get(provider,{}).get(pool)})
+                "identity_conflict":conflict})
             from account_pool_control import read, pool_key, eligibility
             pools[-1]["cap"]=read(self,pool_key(provider,pool))
             pools[-1]["eligibility"]=eligibility(self,provider,pool,now=now,measured=pools[-1])

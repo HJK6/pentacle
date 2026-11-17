@@ -19,13 +19,19 @@ class Notices:
         assert previous==row  # The durable substrate rejects changed same-ID notices.
 
 
+class SeatNotices(Notices):
+    """This fixture checks seat reminders independently of pool notifications."""
+    async def enqueue(self,**row):
+        if row['kind'] in {REMINDER,FLAG}: await super().enqueue(**row)
+
+
 async def fixture():
     store,runtime=await setup(initialize_pin=False)
     clock=[NOW]; runtime.clock=lambda:clock[0]
     await seed(runtime)
     worker=await runtime.sessions.open('host-a','worker',provider='codex',session_generation='worker-one',
                                        account_binding=binding().public(),pane_status='pane_alive')
-    notices=Notices();runtime.cap_monitor.attach(notices)
+    notices=SeatNotices();runtime.cap_monitor.attach(notices)
     queued=[False]
     async def queue_probe(*args,**kwargs): return queued[0]
     runtime.comms=SimpleNamespace(_prompt_in_native_queue=queue_probe)
@@ -92,6 +98,7 @@ def test_unknown_offline_and_stale_working_samples_send_no_notices(cell):
         try:
             if cell=='unknown':
                 obs=observation(binding());obs['collection']='failed'
+                clock[0]+=7201
                 await runtime.record_observation(binding(),obs)
             if cell=='offline': sample(online=False)
             if cell=='stale_capture': sample(stamp=NOW-31)

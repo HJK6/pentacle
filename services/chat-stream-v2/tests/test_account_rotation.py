@@ -101,12 +101,12 @@ def test_default_resolution_is_transactional_with_second_connection(tmp_path):
 
 
 def test_readback_keeps_caps_shared_and_missing_windows_unknown():
-    accounts=inventory(); accounts.policy["account_caps"]={"codex":{"pool-primary":{"weekly":37}}}
+    accounts=inventory()
     accounts.policy["cells"]=[{"host":"host-a","provider":"claude","alias":"primary"}]
     partial=observation(binding()); partial["windows"]={}
     accounts.observe(binding().key,partial,now=NOW)
     result=accounts.readback(now=NOW)
     pool=next(p for p in result["quota_pools"] if p["pool_id"]=="pool-primary")
-    assert pool["cap"] is None and pool["legacy_cap"]=={"weekly":37} and not pool["fresh"]
+    assert pool["cap"] is None and "legacy_cap" not in pool and not pool["fresh"]
     missing=next(a for a in result["accounts"] if a["provider"]=="claude")
     assert missing["health"]=="unconfigured" and missing["pool_id"] is None
