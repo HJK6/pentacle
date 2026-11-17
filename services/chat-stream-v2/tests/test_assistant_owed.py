@@ -163,7 +163,37 @@ def test_closing_requires_evidence(tmp_path,mode):
                 c.execute('UPDATE v2_assistant_composite_routes SET '+('stream_id' if mode=='foreign' else 'actor_stream_id')+'=? WHERE route_id=?',('other:seat',row['route_id']));c.commit()
             await h.store.submit(change);args={'withdrawn_by':'request-b'}
         if mode=='not_open':await owed(h,'close',owed_id=oid,void=True,reason='This was opened by mistake')
-        with pytest.raises(ValueError):await owed(h,'close',owed_id=oid,**args)
+        with pytest.raises(ValueError,match='assistant_owed_(source|evidence)_invalid|assistant_owed_not_open|assistant_owed_text_invalid'):await owed(h,'close',owed_id=oid,**args)
+    run(tmp_path,body)
+
+
+async def card(h,r,key):
+    return await h.store.record_assistant_composite_publication(stream_id=ASSISTANT,publication_key=key,dispatch_id=r['dispatch_id'],reply_to_message_id=r['input_identity'],reply_to_question_id=None,publish_kind='lane_update',attachment_ids=[],evidence_refs=[],canonical_payload={'dispatch_id':r['dispatch_id'],'reply_to_message_id':r['input_identity'],'publish_kind':'lane_update','message':'Lane finished'},event={'stream_id':ASSISTANT,'kind':'ASSIST_TEXT','text':'Lane finished'})
+
+
+def test_delivered_by_lane_card_and_foreign_publication(tmp_path):
+    async def body(h):
+        r=await h.route('request-a');oid=(await owed(h,'open',label='result',message_id='request-a'))['item']['owed_id']
+        await card(h,r,'lane-card-a')
+        def move(c):
+            c.execute('UPDATE v2_assistant_composite_publications SET stream_id=? WHERE publication_key=?',('other:composite','lane-card-a'));c.commit()
+        await h.store.submit(move)
+        with pytest.raises(ValueError,match='assistant_owed_source_invalid'):await owed(h,'close',owed_id=oid,delivered_by='lane-card-a')
+        def back(c):
+            c.execute('UPDATE v2_assistant_composite_publications SET stream_id=? WHERE publication_key=?',(ASSISTANT,'lane-card-a'));c.commit()
+        await h.store.submit(back)
+        closed=(await owed(h,'close',owed_id=oid,delivered_by='lane-card-a'))['item']
+        assert closed['closed_kind']=='delivered' and closed['closed_ref']=='lane-card-a'
+    run(tmp_path,body)
+
+
+@pytest.mark.parametrize('mode',['withdrawn_by','superseded_by'])
+def test_operator_word_must_follow_the_source(tmp_path,mode):
+    async def body(h):
+        await h.route('earlier-message');await h.route('request-a')
+        oid=(await owed(h,'open',label='result',message_id='request-a'))['item']['owed_id']
+        with pytest.raises(ValueError,match='assistant_owed_evidence_invalid'):await owed(h,'close',owed_id=oid,**{mode:'earlier-message'})
+        assert (await owed(h,'show',owed_id=oid))['item']['state']=='open'
     run(tmp_path,body)
 
 
