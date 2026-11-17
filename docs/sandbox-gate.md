@@ -107,9 +107,22 @@ or Homebrew-wide rule is inferred. Dylibs get exact file read/map grants, not
 write or directory-wide grants. Python stdlib code directories are explicit
 narrow runtime read roots discovered from the selected interpreter. Cycles
 terminate; excessive depth, drift or an unresolved/unreadable dependency makes
-the attempt INCOMPLETE. This includes system dylibs available only through a
-dyld shared cache when no readable exact file exists; no implicit shared-cache
-exception is added.
+the attempt INCOMPLETE. Only missing absolute system install names under `/usr/lib/`,
+`/System/Library/` or `/Library/Apple/System/Library/` may be recorded as
+`shared_cache_provided` rather than granted. Raw `..` components, symlink
+escapes, existing paths (including unreadable files and dangling links),
+non-system misses and token-expanded misses never qualify. This exception
+requires readable main `dyld_shared_cache_<arch>` files in the Cryptex
+`/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/`, legacy
+`/System/Library/dyld/`, or `/private/var/db/dyld/` locations. All discovered
+main caches are streaming-hashed (at most 16); main-file symlinks and directory
+symlink escapes from the fixed OS cache locations are refused, and hashes are rechecked before
+returning the closure. Numbered subcaches, maps and symbols are not main-cache
+receipts. Missing/unreadable caches, hashing errors and drift are INCOMPLETE.
+The closure and `sandbox-profile.json` record each accepted name and cache
+path/SHA256. This establishes cache presence, not individual image membership;
+fleet's native proof remains required. No name, cache path or new directory
+allow is added to the profile: its grant set is unchanged.
 
 Every launched probe/preflight/test has a realpath cwd within declared allowed
 roots and `close_fds=True`, `pass_fds=()`. Only standard descriptors 0/1/2 are

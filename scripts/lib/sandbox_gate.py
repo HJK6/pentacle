@@ -110,6 +110,7 @@ class Context:
                 'attempt_root': str(self.root), 'root': str(self.root), 'passed': status == 'PASS', 'resolved_allow_paths': {'read_exec': self.read_paths, 'write': self.write_paths},
                 'socket_dir': str(self.socket_dir), 'launcher_argv': [LAUNCHER, '-f', str(self.profile_path)],
                 'probes': self.probes, 'controls': self.controls, 'execution_mode': self.execution_mode, 'imported_profiles': self.imports,
+                'shared_cache_provided': self.dependencies.get('shared_cache_provided', []),
                 'dependencies': self.dependencies, 'descriptor_policy': {'close_fds': True, 'pass_fds': []},
                 'cwd': str(self.root)}
         self.receipt_path.write_text(json.dumps(body, sort_keys=True, indent=2) + '\n')

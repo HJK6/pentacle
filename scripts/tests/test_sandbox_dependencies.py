@@ -68,7 +68,7 @@ def test_unresolved_reference_forms(tmp_path,reference):
 def test_no_directory_or_write_grants_returned(tmp_path):
     m=module();exe=file(tmp_path/'main');dep=file(tmp_path/'lib/dylib')
     result=m.dependency_closure([exe],run=runner({exe:[dep]}))
-    assert set(result)=={'files','metadata_paths','binaries','roots'}
+    assert set(result)=={'files','metadata_paths','binaries','roots','shared_cache_provided'}
     assert str(tmp_path/'lib') not in result['files']
     assert all(set(row)=={'path','sha256'} for row in result['binaries'])
 
@@ -143,3 +143,109 @@ def test_dylib_install_name_not_dependency(tmp_path):
         if argv[1]=='-l':return subprocess.CompletedProcess(argv,0,'Load command 0\n cmd LC_ID_DYLIB\n name @rpath/other-name.dylib (offset 24)\n','')
         return base(argv,**kwargs)
     assert m.dependency_closure([lib],run=own_id)['files']==[lib]
+
+SYSTEM_NAME='/usr/lib/libExample.dylib'
+CACHE_DIR='System/Library/dyld'
+def cache_fixture(tmp_path):
+    root=tmp_path/'system'; cache=root/CACHE_DIR/'dyld_shared_cache_arm64e'
+    file(cache); return root,cache
+
+def test_shared_cache_receipt_and_unchanged_grants(tmp_path):
+    import hashlib
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    baseline=m.dependency_closure([exe],run=runner({}))
+    result=m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+    assert result['shared_cache_provided']==[{'name':SYSTEM_NAME,'caches':[{'path':str(cache),'sha256':hashlib.sha256(cache.read_bytes()).hexdigest()}]}]
+    for key in ('files','metadata_paths','binaries','roots'):assert result[key]==baseline[key]
+
+@pytest.mark.parametrize('name',[SYSTEM_NAME,'/System/Library/Frameworks/Test.framework/Test','/Library/Apple/System/Library/libX.dylib'])
+def test_shared_cache_all_system_prefixes(tmp_path,name):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    assert m.dependency_closure([exe],run=runner({exe:[name]}),_system_root=root)['shared_cache_provided'][0]['name']==name
+
+@pytest.mark.parametrize('name',['/opt/homebrew/opt/foo/lib/libfoo.dylib','/usr/local/lib/x.dylib','/Users/x/y.dylib','/usr/lib/../../etc/x','@rpath/missing','@loader_path/missing','@executable_path/missing'])
+def test_cache_never_accepts_other_names(tmp_path,name):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[name]}),_system_root=root)
+
+def test_cache_absent_and_unreadable(tmp_path,monkeypatch):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    original=Path.open
+    def denied(path,*args,**kwargs):
+        if path==cache:raise PermissionError('synthetic denial')
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(Path,'open',denied)
+    with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+    monkeypatch.setattr(Path,'open',original);cache.unlink()
+    with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+
+def test_system_file_resolves_normally_and_symlink_miss_refuses(tmp_path):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    disk=root/SYSTEM_NAME.lstrip('/');file(disk)
+    result=m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+    assert str(disk) in result['files'] and result['shared_cache_provided']==[]
+    disk.unlink();disk.symlink_to(tmp_path/'missing')
+    with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+
+def test_system_parent_symlink_escape_refuses(tmp_path):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    (root/'usr').mkdir();(root/'usr/lib').symlink_to(tmp_path/'outside')
+    with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+
+@pytest.mark.parametrize('mode',['drift','overflow','dangling'])
+def test_cache_bad_inventory_or_hash_fails(tmp_path,monkeypatch,mode):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    if mode=='overflow':
+        for i in range(17):file(cache.parent/('dyld_shared_cache_arch'+str(i)))
+    elif mode=='dangling':
+        (cache.parent/'dyld_shared_cache_other').symlink_to(tmp_path/'absent')
+    else:
+        original=m._cache_hash;calls=[]
+        def changed(path):
+            result=original(path);calls.append(path)
+            return result if len(calls)==1 else 'different'
+        monkeypatch.setattr(m,'_cache_hash',changed)
+    with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+
+def test_multiple_main_caches_and_not_subcache(tmp_path):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    second=cache.parent/'dyld_shared_cache_x86_64';file(second)
+    file(cache.parent/'dyld_shared_cache_arm64e.01');file(cache.parent/'dyld_shared_cache_arm64e.map')
+    result=m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME,SYSTEM_NAME]}),_system_root=root)
+    assert len(result['shared_cache_provided'])==1
+    assert {r['path'] for r in result['shared_cache_provided'][0]['caches']}=={str(cache),str(second)}
+
+def test_system_existing_unreadable_never_cache(tmp_path,monkeypatch):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    disk=root/SYSTEM_NAME.lstrip('/');file(disk);original=m._read
+    def denied(path):
+        if Path(path)==disk:raise m.DependencyError('unreadable fixture')
+        return original(path)
+    monkeypatch.setattr(m,'_read',denied)
+    with pytest.raises(m.DependencyError,match='unreadable'):m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+
+def test_shared_cache_does_not_change_profile_and_is_in_receipt(tmp_path):
+    import json
+    spec=importlib.util.spec_from_file_location('sandbox_gate_receipt',P.with_name('sandbox_gate.py'))
+    gate=importlib.util.module_from_spec(spec);sys.modules[spec.name]=gate;spec.loader.exec_module(gate)
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    baseline=m.dependency_closure([exe],run=runner({}))
+    closure=m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)
+    assert gate.profile_text([tmp_path],[tmp_path],tmp_path,dependencies=baseline)==gate.profile_text([tmp_path],[tmp_path],tmp_path,dependencies=closure)
+    # Construct the context without running native launch/probe initialization.
+    context=object.__new__(gate.Context)
+    for key,value in dict(root=tmp_path,evidence=tmp_path,profile_path=tmp_path/'profile',profile_sha256='fixture',read_paths=[],write_paths=[],socket_dir=tmp_path,probes=[],controls=[],execution_mode='not-run',imports=[],dependencies=closure).items():setattr(context,key,value)
+    body=context.write_receipt('INCOMPLETE','synthetic only')
+    assert body['shared_cache_provided']==closure['shared_cache_provided']
+    assert json.loads(context.receipt_path.read_text())['shared_cache_provided']==closure['shared_cache_provided']
+
+@pytest.mark.parametrize('kind',['file','directory','external'])
+def test_cache_symlinks_cannot_read_outside_fixed_os_locations(tmp_path,kind):
+    m=module();exe=file(tmp_path/'main');root,cache=cache_fixture(tmp_path)
+    target=(tmp_path if kind=='external' else root)/'Users/user/not-a-cache';file(target)
+    if kind=='directory':
+        cache.unlink();cache.parent.rmdir();cache.parent.symlink_to(target.parent)
+        target.rename(target.parent/cache.name)
+    else:
+        cache.unlink();cache.symlink_to(target)
+    with pytest.raises(m.DependencyError):m.dependency_closure([exe],run=runner({exe:[SYSTEM_NAME]}),_system_root=root)

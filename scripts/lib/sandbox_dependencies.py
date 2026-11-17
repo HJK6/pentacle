@@ -125,7 +125,88 @@ def _install_names(output):
     return result
 
 
-def dependency_closure(executables, *, extra_roots=(), run=subprocess.run, max_depth=32):
+SYSTEM_PREFIXES = ('/usr/lib/', '/System/Library/', '/Library/Apple/System/Library/')
+CACHE_DIRECTORIES = ('/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld',
+                     '/System/Library/dyld', '/private/var/db/dyld')
+
+
+def _cache_hash(path):
+    # Main caches are large: do not materialize them in memory.
+    try:
+        with Path(path).open('rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise DependencyError('shared cache is not a regular file: ' + str(path))
+            digest = hashlib.sha256()
+            while block := stream.read(1024 * 1024):
+                digest.update(block)
+            after = os.fstat(stream.fileno())
+        identity = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if identity(before) != identity(after) or identity(after) != identity(Path(path).stat()):
+            raise DependencyError('shared cache changed while hashing: ' + str(path))
+        return digest.hexdigest()
+    except OSError as exc:
+        raise DependencyError('unreadable shared cache: ' + str(path)) from exc
+
+
+def _cache_inventory(root):
+    paths = set()
+    allowed = [root / p.lstrip("/") for p in CACHE_DIRECTORIES]
+    for directory in CACHE_DIRECTORIES:
+        folder = root / directory.lstrip('/')
+        try:
+            canonical = folder.resolve()
+            if not any(canonical == base or canonical.is_relative_to(base) for base in allowed):
+                raise DependencyError("shared cache directory escapes fixed OS locations")
+            entries = folder.iterdir()
+            for entry in entries:
+                # Main caches only, never numbered subcaches, maps or symbols.
+                if re.fullmatch(r'dyld_shared_cache_[A-Za-z0-9_]+', entry.name):
+                    if entry.is_symlink():
+                        raise DependencyError('shared cache main file must not be a symlink')
+                    try:
+                        path = entry.resolve(strict=True)
+                    except (OSError, RuntimeError) as exc:
+                        raise DependencyError('unreadable shared cache entry') from exc
+                    if not path.is_relative_to(root):
+                        raise DependencyError('shared cache escapes system root')
+                    paths.add(path)
+                    if len(paths) > 16:
+                        raise DependencyError('too many shared cache main files')
+        except FileNotFoundError:
+            if folder.is_symlink():
+                raise DependencyError('dangling shared cache directory')
+            continue
+        except (OSError, RuntimeError) as exc:
+            raise DependencyError('unreadable shared cache inventory') from exc
+    if not paths:
+        raise DependencyError('dyld shared cache unavailable')
+    return [{'path': str(path), 'sha256': _cache_hash(path)} for path in sorted(paths)]
+
+
+def _cache_name(reference, root):
+    if not reference.startswith(SYSTEM_PREFIXES) or '..' in Path(reference).parts:
+        return None
+    path = root / reference.lstrip('/')
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise DependencyError('unreadable system dependency: ' + reference) from exc
+    else:
+        return None  # Existing files, directories and dangling symlinks never qualify.
+    try:
+        normalized = path.resolve()
+        logical = '/' + str(normalized.relative_to(root))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DependencyError('system dependency symlink escape: ' + reference) from exc
+    if not logical.startswith(SYSTEM_PREFIXES):
+        raise DependencyError('system dependency symlink escape: ' + reference)
+    return logical
+
+
+def dependency_closure(executables, *, extra_roots=(), run=subprocess.run, max_depth=32, _system_root=Path("/")):
     """Return exact real files and symlink-metadata paths, cycle/depth bounded.
 
     extra_roots contains {path, executable} records for dlopen modules such as
@@ -135,6 +216,8 @@ def dependency_closure(executables, *, extra_roots=(), run=subprocess.run, max_d
     """
     if max_depth < 0:
         raise DependencyError('negative dependency depth limit')
+    system_root = Path(_system_root).resolve()  # Private fake-root seam for synthetic tests only.
+    shared_names, caches = set(), None
     metadata, files, inspected, visited = set(), {}, {}, set()
     roots = []
     for executable in executables:
@@ -162,6 +245,7 @@ def dependency_closure(executables, *, extra_roots=(), run=subprocess.run, max_d
         return [reference]
 
     def visit(path, anchor, inherited, depth, chain):
+        nonlocal caches
         key = (str(path), str(anchor), tuple(inherited))
         # A cycle is not additional depth. The active chain is anchor-scoped.
         if str(path) in chain or key in visited:
@@ -192,10 +276,18 @@ def dependency_closure(executables, *, extra_roots=(), run=subprocess.run, max_d
             candidates = expanded(reference, path, anchor, search)
             resolved = None
             for candidate in candidates:
-                if Path(candidate).exists():
+                if candidate.startswith(SYSTEM_PREFIXES):
+                    candidate = str(system_root / candidate.lstrip("/"))
+                if os.path.lexists(candidate):
                     resolved = _resolve(candidate, metadata)
                     break
             if resolved is None:
+                name = _cache_name(reference, system_root)
+                if name is not None:
+                    if caches is None:
+                        caches = _cache_inventory(system_root)
+                    shared_names.add(name)
+                    continue
                 raise DependencyError('unresolved dependency ' + reference + ' loaded by ' + str(path))
             visit(resolved, anchor, tuple(search), depth + 1, chain | {str(path)})
     for path, anchor in roots:
@@ -214,7 +306,11 @@ def dependency_closure(executables, *, extra_roots=(), run=subprocess.run, max_d
     for path, sha in files.items():
         if hashlib.sha256(_read(path)).hexdigest() != sha:
             raise DependencyError('dependency changed during inspection: ' + path)
-    return {'files': sorted(files), 'metadata_paths': sorted(metadata),
+    for item in caches or []:
+        if _cache_hash(item['path']) != item['sha256']:
+            raise DependencyError('shared cache changed during inspection: ' + item['path'])
+    return {'shared_cache_provided': [{'name': name, 'caches': caches} for name in sorted(shared_names)],
+            'files': sorted(files), 'metadata_paths': sorted(metadata),
             'binaries': [{'path': p, 'sha256': files[p]} for p in sorted(files)],
             'roots': [{'path': str(p), 'executable': str(a)} for p, a in roots]}
 
