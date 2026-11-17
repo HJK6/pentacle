@@ -266,7 +266,7 @@ def direct_dispatch_envelope(
         f"--request-id publish:{dispatch_id} --composite-stream-id {config.stream_id} "
         f"--dispatch-id {dispatch_id} --reply-to-message-id {input_id} "
         f"{question_arg}--publish-kind prose --response-state final "
-        "--message <safely quoted final answer>"
+        "--owes <none or safely quoted label> --message <safely quoted final answer>"
     )
     original_json = json.dumps(original_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     wire_body = (
@@ -379,6 +379,8 @@ class AssistantComposite:
         sessions: Any = None,
     ) -> None:
         self.store = store
+        from assistant_owed import OwedItems
+        self.owed = OwedItems(self)
         self.sessions = sessions
         from front_desk_digest import FrontDeskDigest
         self.front_desk_digest = FrontDeskDigest(store, lambda: self.config, lambda: self.sessions)
@@ -1720,6 +1722,7 @@ class AssistantComposite:
             "reply_to_message_id", "reply_to_question_id", "publish_kind", "message",
             "attachment_ids", "evidence_refs", "response_state", "reply_to_message_ids",
             "note_type", "ref", "note_reason",
+            "owes", "owes_due", "owes_spec", "owes_lane", "closes",
         }
         if {str(key) for key in msg if not str(key).startswith("_")} - publish_fields:
             raise ValueError("assistant_publish_payload_invalid")
@@ -1888,6 +1891,8 @@ class AssistantComposite:
             proactive_binding_name=self.config.name if proactive else None,
             proactive_env_binding=self._env_binding() if proactive else None,
             reply_to_message_ids=reply_to_message_ids,
+            owed_flags={k: msg[k] for k in ("owes", "owes_due", "owes_spec", "owes_lane", "closes") if k in msg},
+            owed_authorize=lambda conn: self.owed.authorize(conn,msg.get("_auth_context") or {},True),
         )
         await self.refresh_activity()
         if not stored.get("duplicate"):
@@ -1908,6 +1913,8 @@ class AssistantComposite:
             "type": "assistant.publish.ok", "publication_key": publication_key,
             "event_id": stored["event_id"], "duplicate": bool(stored.get("duplicate")),
             "closed_dispatch_ids": list(stored.get("closed_dispatch_ids") or []),
+            "owed_id": stored.get("owed_id"),
+            "closed_owed_ids": stored.get("closed_owed_ids", []),
         }
 
     async def operation(self, msg: dict[str, Any], *, actor_stream_id: str | None) -> dict[str, Any]:

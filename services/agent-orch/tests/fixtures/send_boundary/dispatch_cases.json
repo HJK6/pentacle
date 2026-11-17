@@ -500,6 +500,59 @@
     "not_applicable": null
   },
   {
+    "command": "assistant owed open",
+    "argv": [
+      "assistant",
+      "owed",
+      "open",
+      "--label",
+      "fixture",
+      "--message-id",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.assistant_owed",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant owed close",
+    "argv": [
+      "assistant",
+      "owed",
+      "close",
+      "fixture",
+      "--void",
+      "--reason",
+      "fixture opened in error"
+    ],
+    "handler": "agent_orch.cli.assistant_owed",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant owed list",
+    "argv": [
+      "assistant",
+      "owed",
+      "list"
+    ],
+    "handler": "agent_orch.cli.assistant_owed",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant owed show",
+    "argv": [
+      "assistant",
+      "owed",
+      "show",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.assistant_owed",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
     "command": "account",
     "argv": [
       "account",

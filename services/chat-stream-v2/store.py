@@ -2014,6 +2014,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             for table in ("sessions", "v2_schedules"):
                 if "objective" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
+            import assistant_owed
+            assistant_owed.initialize(conn)
             store_qa.initialize(conn)
             store_ingest_checkpoint.initialize(conn)
             lifecycle_authority.initialize(conn)
@@ -2554,7 +2556,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ack = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id + ':ack')} "
                    f"{args}--publish-kind status --response-state acknowledged --message 'I received your message.'")
             final = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id)} "
-                     f"{args}--publish-kind prose --response-state final --message '<final answer>'")
+                     f"{args}--publish-kind prose --response-state final --owes '<none or label>' --message '<final answer>'")
             body = (f"No reply was published for dispatch {dispatch_id}.\n"
                     f"Message: {str(route['body'] or '')[:80]}\nAcknowledgment: {ack}\nFinal: {final}")
             _insert_outbound_notice_conn(conn, notice_id=notice_id, kind="dispatch_no_reply",

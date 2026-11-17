@@ -1829,8 +1829,8 @@ NOTE_TYPES = ("result", "problem", "reminder", "relay", "started", "change", "ot
 
 
 def _publication_ref(value: str) -> str:
-    if not re.fullmatch(r"(?:message|lane|report|wake|tell):\S+", value):
-        raise argparse.ArgumentTypeError("expected <message|lane|report|wake|tell>:<id>")
+    if not re.fullmatch(r"(?:message|lane|report|wake|tell|owed):\S+", value):
+        raise argparse.ArgumentTypeError("expected <message|lane|report|wake|tell|owed>:<id>")
     return value
 
 
@@ -1884,7 +1884,17 @@ def assistant_publish(args: argparse.Namespace) -> int:
             payload[field] = getattr(args, field)
     if getattr(args, "why", None) is not None:
         payload["note_reason"] = args.why
+    payload.update({k: getattr(args,k) for k in ("owes", "owes_due", "owes_spec", "owes_lane", "closes") if getattr(args,k,None) is not None})
     return _assistant_call(args, payload)
+
+
+def assistant_owed(args):
+    payload = {"type": "assistant.owed." + args.owed_action}
+    if args.composite_stream_id: payload["composite_stream_id"] = args.composite_stream_id
+    for key in ("owed_id", "label", "message_id", "publication_key", "due", "spec_id", "lane_id", "delivered_by", "withdrawn_by", "superseded_by", "void", "reason", "closed", "since"):
+        value = getattr(args,key,None)
+        if value is not None: payload[key] = value
+    return _assistant_call(args,payload)
 
 
 def assistant_operation(args: argparse.Namespace) -> int:
@@ -4576,7 +4586,7 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
         print(
             "agent-orch send-image: the front desk publishes to the operator chat and needs "
             "--note-type {result,problem,reminder,relay,started,change,other} and --ref "
-            "{message|lane|report|wake|tell}:<id> (--why with other)",
+            "{message|lane|report|wake|tell|owed}:<id> (--why with other)",
             file=sys.stderr,
         )
         return 2
@@ -5909,7 +5919,7 @@ def build_parser() -> argparse.ArgumentParser:
     send_image_parser.add_argument("--from-stream-id", dest="from_stream_id", help="Override the caller stream id (defaults to your seat env).")
     send_image_parser.add_argument("--to", help="Assistant composite the front desk publishes to (default: the daemon binding; override: PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID).")
     send_image_parser.add_argument("--note-type", choices=NOTE_TYPES, help="Front desk: note type for the operator chat.")
-    send_image_parser.add_argument("--ref", type=_publication_ref, help="Front desk: message|lane|report|wake|tell:<id> the note refers to.")
+    send_image_parser.add_argument("--ref", type=_publication_ref, help="Front desk: message|lane|report|wake|tell|owed:<id> the note refers to.")
     send_image_parser.add_argument("--why", help="With --note-type other: the one-line reason.")
     send_image_parser.add_argument("--timeout", type=float, default=30.0)
     send_image_parser.set_defaults(func=send_image)
@@ -5982,6 +5992,37 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_publish_parser.add_argument("--evidence-refs-json")
     assistant_publish_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_publish_parser.add_argument("--message", required=True)
+    for owed_flags_parser in (assistant_publish_parser, send_file_parser):
+        owed_flags_parser.add_argument("--owes")
+        owed_flags_parser.add_argument("--owes-due")
+        target = owed_flags_parser.add_mutually_exclusive_group()
+        target.add_argument("--owes-spec")
+        target.add_argument("--owes-lane")
+        owed_flags_parser.add_argument("--closes", action="append")
+    owed_parser = assistant_sub.add_parser("owed", help="read and manage follow-up items")
+    owed_sub = owed_parser.add_subparsers(dest="owed_action", required=True)
+    for action in ("open", "close", "list", "show"):
+        owed_flags_parser = owed_sub.add_parser(action)
+        owed_flags_parser.add_argument("--composite-stream-id", help="Defaults to the primary assistant")
+        owed_flags_parser.add_argument("--timeout", type=float, default=30)
+        owed_flags_parser.set_defaults(func=assistant_owed)
+        if action in {"show", "close"}: owed_flags_parser.add_argument("owed_id")
+        if action == "open":
+            owed_flags_parser.add_argument("--label", required=True)
+            source = owed_flags_parser.add_mutually_exclusive_group(required=True)
+            source.add_argument("--message-id"); source.add_argument("--publication-key")
+            owed_flags_parser.add_argument("--due")
+            target = owed_flags_parser.add_mutually_exclusive_group()
+            target.add_argument("--spec-id"); target.add_argument("--lane-id")
+        if action == "close":
+            evidence = owed_flags_parser.add_mutually_exclusive_group(required=True)
+            for option in ("delivered-by", "withdrawn-by", "superseded-by"): evidence.add_argument("--"+option)
+            evidence.add_argument("--void", action="store_true")
+            owed_flags_parser.add_argument("--reason")
+        if action == "list":
+            state = owed_flags_parser.add_mutually_exclusive_group()
+            state.add_argument("--closed", action="store_true"); state.add_argument("--void", action="store_true")
+            owed_flags_parser.add_argument("--since")
     assistant_publish_parser.set_defaults(func=assistant_publish)
     assistant_operation_parser = assistant_sub.add_parser(
         "operation", help="submit one fixed typed assistant authority operation",
