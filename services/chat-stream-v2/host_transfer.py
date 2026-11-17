@@ -229,6 +229,15 @@ class HostTransfer:
                     raise journal.TransferError('transfer_pointer_unavailable')
 
     async def prepare(self,row):
+        rulings = getattr(self.server, 'lane_rulings', None)
+        if rulings is not None:
+            manager = rulings.advisor_sessions
+            async with manager.lock:
+                records = await self.store.submit(lambda c: [dict(r) for r in c.execute(
+                    "SELECT * FROM v2_advisor_sessions WHERE ended_at IS NULL")])
+                for record in records:
+                    if not await manager.finish(record, 'host_transfer'):
+                        raise journal.TransferError('advisor_session_cleanup_pending')
         if self.server.spawnctl is None: raise journal.TransferError('transfer_spawn_unavailable')
         await self.mutate(lambda c:(self.check_runtime_scope(c,row),journal.check_source(c,row,self.server.operator_credential_registry)),credential=True)
         await self.verify_pointers(row)

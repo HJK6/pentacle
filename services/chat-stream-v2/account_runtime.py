@@ -190,6 +190,16 @@ class AccountRuntime:
                 row=c.execute("SELECT payload FROM v2_authority_restore_episode WHERE spawn_key=? AND state IN ('spawning','unresolved')",(key,)).fetchone()
                 return bool(row and json.loads(row[0]).get('account')==alias)
             return await self.store.submit(retained)
+        if actor == "daemon:scheduler" and message.get("_advisor_session") is True:
+            def advisor_intent(c):
+                row = c.execute("SELECT payload FROM v2_advisor_sessions WHERE stream_id=? "
+                    "AND generation=? AND ended_at IS NULL AND end_reason IS NULL",
+                    (f"{message.get('host')}:{message.get('session_name')}", message.get("_session_generation"))).fetchone()
+                if not row:
+                    return False
+                payload = json.loads(row[0])
+                return payload.get("account") == alias and payload.get("idempotency_key") == key
+            return await self.store.submit(advisor_intent)
         return False
 
     def manages(self,host,provider=None):
@@ -448,6 +458,13 @@ class AccountRuntime:
                 row=_seat_conn(conn,current["stream_id"])
                 if row and row.get("status")=="open" and row.get("session_generation")==current["generation"]:
                     result.add((current["stream_id"],current["generation"]))
+            for row in conn.execute("SELECT s.stream_id,s.generation FROM v2_advisor_sessions s "
+                    "JOIN v2_assistant_lane_rulings r ON r.ruling_request_id=s.ruling_request_id "
+                    "AND r.authority_stream_id=s.stream_id AND r.authority_generation=s.generation "
+                    "WHERE s.ended_at IS NULL"):
+                seat = _seat_conn(conn, row["stream_id"])
+                if seat and seat.get("status") == "open" and seat.get("session_generation") == row["generation"]:
+                    result.add((row["stream_id"], row["generation"]))
         return result
 
     async def cap_input(self,row,message,*,claim=False):

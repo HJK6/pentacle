@@ -1863,8 +1863,15 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     conn.execute(f"ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN {column} TEXT")
             conn.execute(SCOPED_OWNERSHIP_DDL)
             conn.execute(RULING_REQUESTS_DDL)
+            from advisor_sessions import DDL as ADVISOR_SESSIONS_DDL
+            conn.execute(ADVISOR_SESSIONS_DDL)
             if "covered" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_lane_rulings)")}:
                 conn.execute("ALTER TABLE v2_assistant_lane_rulings ADD COLUMN covered INTEGER NOT NULL DEFAULT 0")
+            ruling_columns = {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_lane_rulings)")}
+            for column, definition in (("work_item", "TEXT NOT NULL DEFAULT ''"), ("answer", "TEXT")):
+                if column not in ruling_columns:
+                    conn.execute(f"ALTER TABLE v2_assistant_lane_rulings ADD COLUMN {column} {definition}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_ruling_work_item ON v2_assistant_lane_rulings(work_item,created_at)")
             conn.execute(ASSISTANT_LANE_OWNERSHIP_DDL)
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)

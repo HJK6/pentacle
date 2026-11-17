@@ -2,6 +2,11 @@
 
 Direct CLI for orchestrating agent sessions through `chat_streamd`. Lets one agent spawn, drive, and observe other agents without the leader's LLM context having to read raw tmux scrollback.
 
+Advisor reviews can use [short per-request sessions](../../docs/advisor_sessions.md).
+`assistant advise` submits a work-scoped request, `assistant answer` answers it,
+and `assistant authority --session-kinds` controls the gradual rollout. The
+default empty list preserves the bound-advisor behavior.
+
 ## Supporting spawn admission
 
 An immediate parented worker, evaluator, planner, advisory reviewer (`reviewer-advisory`),

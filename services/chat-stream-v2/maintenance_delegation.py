@@ -108,11 +108,21 @@ def verify_acquire(conn, msg, auth, now):
         binding = authority.binding_conn(conn)
     except ValueError:
         invalid("advisor_binding")
-    if binding.get("state") != "ready":
-        invalid("advisor_binding")
-    if (tell.get("from_stream_id") != binding["stream_id"]
-            or tell["sender_generation"] != binding["generation"]):
-        invalid("advisor_rotated")
+    if not (binding.get("state") == "ready" and tell.get("from_stream_id") == binding["stream_id"]
+            and tell["sender_generation"] == binding["generation"]):
+        composite = authority._composite()
+        desk = composite.config.direct_primary_stream_id if composite else ""
+        session = conn.execute("SELECT 1 FROM v2_assistant_lane_rulings r JOIN v2_advisor_sessions s "
+            "ON s.ruling_request_id=r.ruling_request_id AND s.stream_id=r.authority_stream_id "
+            "AND s.generation=r.authority_generation WHERE r.action='advice' "
+            "AND r.authority_stream_id=? AND r.authority_generation=? AND r.created_at>=? "
+            "AND r.requester_stream_id IN (?,?) LIMIT 1",
+            (tell.get("from_stream_id"), tell["sender_generation"], now - 3600,
+             auth["stream_id"], desk)).fetchone()
+        if not session:
+            invalid("advisor_binding" if binding.get("state") != "ready" else "advisor_rotated")
+        binding = {"state": "ready", "source": "session", "stream_id": tell["from_stream_id"],
+                   "generation": tell["sender_generation"]}
     body = tell.get("text")
     lines = [line for line in body.splitlines() if line.lstrip().startswith("DELEGATED-HOLD")] if isinstance(body, str) else []
     match = _SCOPE.fullmatch(lines[0]) if len(lines) == 1 else None

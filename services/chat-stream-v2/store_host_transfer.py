@@ -229,7 +229,7 @@ def claim(conn,msg,auth,*,name,composite,env_binding,advisor,helpers,trusted_hos
          'advisor':advisor,'helpers':helpers,'state':'preparing','sources':{},'cleanup':{}}
     _fresh(row,now)
     required={actor,*helpers.values()}
-    if advisor and advisor not in {'disabled',actor}: required.add(advisor)
+    if advisor and advisor not in {'disabled','sessions',actor}: required.add(advisor)
     if not required.issubset(set(members)):
         raise TransferError('transfer_roster_incomplete')
     for sid in sorted(members):

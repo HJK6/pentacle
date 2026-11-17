@@ -442,7 +442,9 @@ class SpawnCtl:
         if source_id and ":" in source_id:
             source_host, source_name = source_id.split(":", 1)
             source_row = await self.store.fetch_session(source_host, source_name) or {}
-            if not explicit:
+            if not explicit and not ((msg.get('_auth_context') or {}).get('service_authenticated')
+                    and (msg.get('_auth_context') or {}).get('service_actor') == assistant_restore.SERVICE_ACTOR
+                    and msg.get('_advisor_session') is True):
                 explicit = normalize_spec_ids(source_row.get("spec_ids"), source_row.get("spec_id"))
                 inherited = bool(explicit)
 
