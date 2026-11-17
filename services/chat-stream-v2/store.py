@@ -4076,7 +4076,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
     async def record_spawn_intent(
         self, host: str, session_name: str, payload: dict[str, Any], *,
         request_id: str | None = None, nonce: str | None = None,
-        expected_spec_sources=(), prepared_qa=None, lane_admission=None,
+        expected_spec_sources=(), prepared_qa=None, lane_admission=None, small_item_spec_id=None,
     ) -> bool:
         """Persist what it would take to finish this spawn's row, BEFORE the
         pane exists. Written to the reservation the spawn already holds."""
@@ -4102,6 +4102,13 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             # and record_spawn_intent runs before payload exists.
             if res.get("payload") is None and float(res.get("expires_at") or 0.0) < time.time():
                 return False
+            # Claim once with the first durable intent, never on recovery/replay.
+            if small_item_spec_id and res.get("payload") is None:
+                from work_item_admission import small_item_occupied_conn, small_item_message
+                if small_item_occupied_conn(conn, small_item_spec_id,
+                        own_reservation=(host, session_name, identity)):
+                    from sessions import VerbError
+                    raise VerbError("work_small_item_limit", small_item_message(small_item_spec_id))
             if lane_admission:
                 from store_work_lanes import fd_backend_conn, _session_conn
                 from work_lane_progress import seat_live

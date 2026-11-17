@@ -731,6 +731,20 @@ class _WorkLanesStoreMixin:
                 return _op(conn)
         return await self.submit(coherent)
 
+    async def work_item_lane_membership(self, spec_id: str) -> dict:
+        """Admission uses effective membership in every state, in one store read."""
+        def read(conn):
+            from store_work_index import index_status_conn
+            status = index_status_conn(conn)
+            if status["available"] is False:
+                return {"available": False, "lane_ids": []}
+            snapshot = effective_membership_ids_conn(conn)
+            ids = [row["lane_id"] for row in conn.execute(
+                "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL ORDER BY lane_id")
+                if spec_id in effective_member_ids(conn, dict(row), snapshot)]
+            return {"available": status["available"], "lane_ids": ids}
+        return await self.submit(read)
+
     async def open_lanes_for_spec(self, spec_id: str) -> list[dict[str, Any]]:
         """Non-done product lanes whose membership names this canonical spec."""
         def _op(conn):

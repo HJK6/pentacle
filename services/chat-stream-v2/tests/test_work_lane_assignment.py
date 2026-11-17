@@ -418,3 +418,280 @@ def test_synthetic_membership_over_32_keeps_shape_and_duplicate_validation():
         validate_members(members + [members[0]], None)
     with pytest.raises(ValueError, match="work_lane_members_invalid"):
         validate_members(["not-a-spec"], None)
+
+
+async def front_desk(env, *, small=False, linked=True, state="active"):
+    """A real configured FD and real store; only the provider transport is fake."""
+    from assistant_composite import AssistantComposite, AssistantCompositeConfig
+    home = item(env.root, "admission__home")
+    target = item(env.root, "admission__target")
+    if small:
+        path = env.root / "work/in_progress/admission__target/spec.md"
+        path.write_text(path.read_text().replace("title:", "tags: [small]\ntitle:", 1))
+    env.monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(env.root))
+    ctl, sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
+    caller = await seat(env.store, "front-desk", home, assigned=home, role="assistant")
+    composite = AssistantComposite(env.store, config=AssistantCompositeConfig.from_env({
+        "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": HOST + ":assistant",
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": caller[0],
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": caller[1],
+        "PENTACLE_ASSISTANT_AUTHORITY_STREAM_ID": HOST + ":advisor",
+    }))
+    sessions.assistant.front_desk = composite
+    await env.store.submit(lambda conn: conn.execute(
+        "INSERT OR REPLACE INTO v2_work_index_state(singleton,state_json) VALUES(1,?)",
+        (json.dumps({"available": True, "root_configured": True}),)))
+    if linked:
+        await lane(env.store, "wl-admission", target, state=state)
+    return ctl, sessions, tmux, caller, home, target, composite
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["lead", "worker", "evaluator", "", None, "reviewer-advisory"])
+async def test_fd_work_requires_its_own_explicit_item(env, role):
+    ctl, _, tmux, caller, _, _, _ = await front_desk(env)
+    error = await refused(ctl, agent(caller, role=role))
+    assert error.code == "work_assignment_required"
+    assert "own work item" in str(error)
+    assert tmux.created == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["lead", "worker", "evaluator", ""])
+async def test_fd_explicit_item_in_done_lane_is_admitted(env, role):
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, state="done")
+    await ctl.spawn(agent(caller, spec=target, role=role), HOST)
+    row = await env.store.fetch_session(HOST, "child")
+    assert row["assigned_spec_id"] == target
+    assert row["spec_binding_provenance"][0]["provenance"] == "spawn_explicit"
+    assert tmux.created == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exemption", ["planner", "promptless"])
+async def test_fd_exempt_inherits_tags_but_has_no_assignment(env, exemption):
+    ctl, _, _, caller, home, _, _ = await front_desk(env)
+    msg = agent(caller, role="planner" if exemption == "planner" else "worker")
+    if exemption == "promptless":
+        msg.pop("command")
+    await ctl.spawn(msg, HOST)
+    row = await env.store.fetch_session(HOST, "child")
+    assert row["spec_ids"] == [home]
+    assert row["assigned_spec_id"] == UNASSIGNED
+    assert effective_assignment(row) is None
+    assigned = await env.store.submit(lambda conn: _assigned_seats_conn(conn, [home]))
+    assert HOST + ":child" not in {entry["stream_id"] for entry in assigned}
+    assert row["usage"]["attribution"]["spec_id"] == home
+
+
+@pytest.mark.asyncio
+async def test_fd_explicit_planner_remains_assigned_even_without_lane(env):
+    ctl, _, _, caller, _, target, _ = await front_desk(env, linked=False)
+    await ctl.spawn(agent(caller, spec=target, role="planner"), HOST)
+    assert (await env.store.fetch_session(HOST, "child"))["assigned_spec_id"] == target
+
+
+@pytest.mark.asyncio
+async def test_fd_unlaned_item_refused_before_reservation(env):
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, linked=False)
+    error = await refused(ctl, agent(caller, spec=target))
+    assert error.code == "work_lane_membership_required"
+    assert await env.store.reservations(include_expired=True) == []
+    assert tmux.created == 0
+
+
+@pytest.mark.asyncio
+async def test_fd_unavailable_index_skips_only_membership(env, caplog):
+    ctl, _, _, caller, _, target, _ = await front_desk(env, linked=False, small=True)
+    await env.store.submit(lambda conn: conn.execute(
+        "UPDATE v2_work_index_state SET state_json=?", (json.dumps({"available": False}),)))
+    await ctl.spawn(agent(caller, spec=target), HOST)
+    assert sum(target in record.message and "index" in record.message for record in caplog.records) == 1
+    error = await refused(ctl, agent(caller, name="implicit"))
+    assert error.code == "work_assignment_required"
+
+    assert (await refused(ctl, agent(caller, spec=target, name="second"))).code == "work_small_item_limit"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("closed", [False, True])
+async def test_small_item_counts_open_and_closed_seats(env, closed):
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, small=True)
+    await seat(env.store, "prior", target, assigned=target)
+    if closed:
+        await env.store.submit(lambda conn: conn.execute(
+            "UPDATE sessions SET status='closed' WHERE session_name='prior'"))
+    error = await refused(ctl, agent(caller, spec=target))
+    assert error.code == "work_small_item_limit"
+    assert tmux.created == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flags", [{"role": "qa"}, {"phase": "qa"}, {"qa_spec_id": "spec_admission__target"},
+                                    {"qa_surface": "implementation"}, {"qa_cycle": 1}])
+async def test_small_item_rejects_every_qa_classifier(env, flags):
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, small=True)
+    error = await refused(ctl, agent(caller, spec=target, **flags))
+    assert error.code == "work_small_item_limit"
+    assert tmux.created == 0
+
+
+@pytest.mark.asyncio
+async def test_small_lead_cannot_spawn_supporting_child_and_tag_removal_allows_it(env):
+    ctl, _, tmux, _, _, target, _ = await front_desk(env, small=True)
+    lead = await seat(env.store, "small-lead", target, assigned=target)
+    error = await refused(ctl, agent(lead))
+    assert error.code == "work_small_item_limit"
+    path = env.root / "work/in_progress/admission__target/spec.md"
+    path.write_text(path.read_text().replace("tags: [small]\n", ""))
+    assert (await ctl.spawn(agent(lead), HOST))["type"] == "spawn.ok"
+    assert tmux.created == 1
+
+
+@pytest.mark.asyncio
+async def test_small_item_two_callers_race_for_one_intent(env):
+    import asyncio
+    ctl, _, tmux, caller, home, target, _ = await front_desk(env, small=True)
+    other = await seat(env.store, "other-caller", home, assigned=home)
+    entered = asyncio.Event()
+    original = ctl._work_link_refusal
+    checks = 0
+    async def barrier(msg, binding):
+        nonlocal checks
+        result = await original(msg, binding)
+        checks += 1
+        if checks == 2:
+            entered.set()
+        await asyncio.wait_for(entered.wait(), 2)
+        return result
+    env.monkeypatch.setattr(ctl, "_work_link_refusal", barrier)
+    results = await asyncio.gather(
+        ctl.spawn(agent(caller, spec=target, name="first"), HOST),
+        ctl.spawn(agent(other, spec=target, name="second", role="lead"), HOST), return_exceptions=True)
+    assert sum(isinstance(r, dict) and r.get("type") == "spawn.ok" for r in results) == 1
+    assert [r.code for r in results if isinstance(r, VerbError)] == ["work_small_item_limit"]
+    assert tmux.created == 1
+
+
+@pytest.mark.asyncio
+async def test_small_item_expired_intent_holds_seat_until_terminalized(env):
+    import time
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, small=True)
+    assert await env.store.reserve_stream_id(HOST, "recovering", ttl_s=60, request_id="first", nonce="first")
+    payload = {"open_fields": {"assigned_spec_id": target}}
+    assert await env.store.record_spawn_intent(HOST, "recovering", payload, request_id="first", nonce="first",
+                                               small_item_spec_id=target)
+    await env.store.submit(lambda conn: conn.execute(
+        "UPDATE v2_stream_reservations SET expires_at=? WHERE session_name='recovering'", (time.time() - 60,)))
+    await env.store.submit(lambda conn: conn.commit())
+    assert (await refused(ctl, agent(caller, spec=target))).code == "work_small_item_limit"
+    # Recovery updates its own retained intent, without another claim.
+    assert await env.store.record_spawn_intent(HOST, "recovering", payload, request_id="first", nonce="first",
+                                               small_item_spec_id=target)
+    assert await env.store.fetch_session(HOST, "recovering") is None
+    assert tmux.created == 0
+    assert await env.store.release_stream_id_fenced(HOST, "recovering", "first", cleanup_confirmed=True)
+    assert (await ctl.spawn(agent(caller, spec=target), HOST))["type"] == "spawn.ok"
+
+
+@pytest.mark.asyncio
+async def test_small_item_admitted_replay_does_not_claim_twice(env):
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, small=True)
+    msg = agent(caller, spec=target, key="one-seat")
+    first = await ctl.spawn(msg, HOST)
+    assert (await ctl.spawn(msg, HOST))["stream_id"] == first["stream_id"]
+    assert tmux.created == 1
+
+
+@pytest.mark.asyncio
+async def test_small_item_handoff_keeps_continuity(env):
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, small=True)
+    first = await seat(env.store, "predecessor", target, assigned=target)
+    await ctl.spawn(agent(caller, spec=target, name="successor", parent=False,
+                          handoff=True, handoff_from_stream_id=first[0]), HOST)
+    assert (await env.store.fetch_session(HOST, "successor"))["assigned_spec_id"] == target
+    assert tmux.created == 1
+
+
+@pytest.mark.asyncio
+async def test_small_qa_target_refused_even_when_assigned_item_is_ordinary(env):
+    ctl, _, tmux, caller, home, target, _ = await front_desk(env, small=True)
+    await lane(env.store, "wl-home", home)
+    error = await refused(ctl, agent(caller, spec=home, qa_spec_id=target))
+    assert error.code == "work_small_item_limit" and target in str(error)
+    assert tmux.created == 0
+
+
+@pytest.mark.asyncio
+async def test_index_unavailable_does_not_waive_spec_readability(env):
+    from _shared.spec_reader import SpecReader
+    ctl, _, tmux, caller, _, target, _ = await front_desk(env, linked=False)
+    await env.store.submit(lambda conn: conn.execute(
+        "UPDATE v2_work_index_state SET state_json=?", (json.dumps({"available": False}),)))
+    def unavailable(*args):
+        raise ValueError("spec_changed")
+    env.monkeypatch.setattr(SpecReader, "read", unavailable)
+    assert (await refused(ctl, agent(caller, spec=target))).code == "spec_unavailable"
+    assert tmux.created == 0
+
+
+@pytest.mark.asyncio
+async def test_available_errored_index_still_requires_membership(env):
+    ctl, _, _, caller, _, target, _ = await front_desk(env, linked=False)
+    await env.store.submit(lambda conn: conn.execute(
+        "UPDATE v2_work_index_state SET state_json=?", (json.dumps({"available": True, "error": "stale"}),)))
+    assert (await refused(ctl, agent(caller, spec=target))).code == "work_lane_membership_required"
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_uses_goal_derived_effective_membership(env):
+    ctl, _, _, caller, _, target, _ = await front_desk(env, linked=False)
+    await lane(env.store, "wl-goal", state="done")
+    def observations(conn):
+        conn.execute("UPDATE v2_work_index_state SET state_json=?", (json.dumps({"available": True,
+            "goal_observations": {"epic_fixture": {"quality": "fresh", "facts": {"lane_id": "wl-goal"}}}}),))
+        conn.execute("INSERT INTO v2_work_item_observations(spec_id,record_json) VALUES(?,?)",
+                     (target, json.dumps({"last_good": {"_epic": "epic_fixture"}})))
+        conn.commit()
+    await env.store.submit(observations)
+    assert (await ctl.spawn(agent(caller, spec=target), HOST))["type"] == "spawn.ok"
+
+
+@pytest.mark.asyncio
+async def test_wrong_fd_generation_does_not_apply_front_desk_rules(env):
+    ctl, _, _, caller, _, _, _ = await front_desk(env)
+    msg = agent((caller[0], "different-generation"))
+    # This isolated controller entry assumes upstream caller auth; specifically
+    # assert the new FD predicate does not classify the wrong generation.
+    from spawnctl import front_desk_commission
+    assert not front_desk_commission(msg, ctl.sessions.assistant.front_desk)
+
+
+@pytest.mark.asyncio
+async def test_forged_assignment_exemption_cannot_bypass_direct_admission(env):
+    ctl, _, _, caller, _, _, _ = await front_desk(env)
+    assert (await refused(ctl, agent(caller, assignment_exempt="planner"))).code == "work_assignment_required"
+
+
+@pytest.mark.asyncio
+async def test_fd_resume_of_small_seat_preserves_identity_without_new_claim(env):
+    from test_spawn_resume import (_machine, _write_transcript, _closed_prior,
+                                   ResumeTmux, _install_successful_spawn, RESUME_ID)
+    from sessions import Sessions
+    from spawnctl import SpawnCtl
+    original, _, _, caller, _, target, composite = await front_desk(env, small=True)
+    machine = _machine(env.root.parent)
+    path = _write_transcript(machine)
+    await _closed_prior(env.store, path)
+    await env.store.update_session("localhost", "v2-original-fable", spec_ids=[target], assigned_spec_id=target)
+    tmux = ResumeTmux()
+    sessions = Sessions(env.store, tmux=tmux, local_host="localhost")
+    sessions.assistant.front_desk = composite
+    ctl = SpawnCtl(env.store, sessions, tmux=tmux, machine=machine, specs=original.specs)
+    commands = _install_successful_spawn(ctl, sessions, tmux)
+    await ctl.spawn({"provider": "claude", "model": "claude-fable-5-1", "effort": "low",
+        "resume_session_id": RESUME_ID, "request_id": "resume-small", "objective": "Continue the small item",
+        "_auth_context": {"token_verified": True, "stream_id": caller[0], "session_generation": caller[1]}}, "localhost")
+    row = await env.store.fetch_session("localhost", "v2-original-fable")
+    assert row["assigned_spec_id"] == target and row["claude_session_id"] == RESUME_ID
+    assert len(commands) == 1 and "--resume" in commands[0]

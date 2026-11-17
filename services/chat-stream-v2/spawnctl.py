@@ -271,6 +271,25 @@ def new_work_commission(msg: dict[str, Any], *, resume: bool) -> bool:
     return bool(auth.get("token_verified"))
 
 
+def front_desk_commission(msg: dict[str, Any], composite) -> bool:
+    """The same current direct-primary stream/generation test on both entries."""
+    auth = msg.get("_auth_context") or {}
+    return bool(composite is not None and composite.enabled and composite.config.direct_primary
+                and new_work_commission(msg, resume=msg.get("resume_session_id") is not None)
+                and (auth.get("stream_id"), auth.get("session_generation")) ==
+                    (composite.config.direct_primary_stream_id, composite.config.direct_primary_generation))
+
+
+def front_desk_exemption(msg: dict[str, Any], composite) -> str | None:
+    if not front_desk_commission(msg, composite):
+        return None
+    if str(msg.get("role") or "").lower() == "planner":
+        return "planner"
+    if not SpawnCtl._prompt_requested(msg) and not str(msg.get("command") or "").strip():
+        return "promptless"
+    return None
+
+
 class _SpecBinding(dict):
     """Local checked-source evidence; never serialized into public bindings."""
     source_checks = ()
@@ -431,6 +450,12 @@ class SpawnCtl:
     ) -> dict[str, Any]:
         """Resolve and materialize the binding before reserving or creating a pane."""
         explicit = normalize_spec_ids(msg.get("spec_ids"), msg.get("spec_id"))
+        auth = msg.get("_auth_context") or {}
+        composite = getattr(getattr(self.sessions, "assistant", None), "front_desk", None)
+        # Only daemon-owned release context may consume the frozen exemption.
+        exempt = (msg.get("assignment_exempt") if auth.get("ruled_release")
+                  else front_desk_exemption(msg, composite))
+        unassigned = not explicit and exempt in {"planner", "promptless"}
         if any(not tmux_transport.SPEC_ID_RE.fullmatch(spec_id) for spec_id in explicit):
             raise VerbError("invalid_spec_id", "spec_id must match <repo>__<topic>")
 
@@ -456,7 +481,7 @@ class SpawnCtl:
                 "qualified_spec_ids": [],
                 "spec_binding_provenance": [],
                 # A handoff/resume successor keeps its predecessor's assignment (R1).
-                "assigned_spec_id": carried_assignment(source_row) if msg.get("handoff_from_stream_id") else None,
+                "assigned_spec_id": UNASSIGNED if unassigned else (carried_assignment(source_row) if msg.get("handoff_from_stream_id") else None),
             }
 
         resolver = getattr(self.specs, "resolution_for", None) if self.specs is not None else None
@@ -628,23 +653,72 @@ class SpawnCtl:
             "spec_resolution": "resolved",
             "qualified_spec_ids": [binding["spec_id"] for binding in provenance],
             "spec_binding_provenance": provenance,
-            "assigned_spec_id": assigned,
+            "assigned_spec_id": UNASSIGNED if unassigned else assigned,
         })
         if source_row:
             binding.source_checks = ((source_id, spec_binding_source(source_row)),)
         return binding
 
+    async def _small_assigned_item(self, msg: dict[str, Any], binding: dict[str, Any]) -> str | None:
+        """Read the actual spec, including a distinct QA target, before launch."""
+        from _shared.spec_reader import SpecReader
+        from yaml import YAMLError
+        from work_item_admission import small_tag, small_item_message
+        spec_id = binding.get("assigned_spec_id") or None
+        qa = qa_dispatch.classified(msg, {"role": msg.get("role"), "phase": msg.get("phase")})
+        ids = list(dict.fromkeys(value for value in (spec_id, msg.get("qa_spec_id") if qa else None) if value))
+        def read():
+            try:
+                reader = SpecReader(getattr(self.specs, "memory_root", None), identity_only=True)
+                return {identity: small_tag(reader.read(identity)[3]) for identity in ids}
+            except (ValueError, OSError, UnicodeError, YAMLError):
+                raise VerbError("spec_unavailable", "Restore readable canonical spec content before resubmitting.") from None
+        small = await asyncio.to_thread(read) if ids else {}
+        if qa and any(small.values()):
+            identity = next(identity for identity, value in small.items() if value)
+            raise VerbError("work_small_item_limit", small_item_message(identity))
+        return spec_id if small.get(spec_id) else None
+
     async def _work_link_refusal(self, msg: dict[str, Any], binding: dict[str, Any]) -> VerbError | None:
-        """Retain assignment validation without requiring lane membership."""
-        spec_id = binding.get("assigned_spec_id")
-        if not spec_id:
+        """Request-time assignment/lane checks and the first small-item check."""
+        from work_item_admission import small_item_occupied_conn, small_item_message
+        composite = getattr(getattr(self.sessions, "assistant", None), "front_desk", None)
+        fd = front_desk_commission(msg, composite)
+        exempt = front_desk_exemption(msg, composite)
+        spec_id = binding.get("assigned_spec_id") or None
+        if fd and not exempt:
+            explicit = any(entry.get("spec_id") == spec_id and entry.get("provenance") == "spawn_explicit"
+                           for entry in binding.get("spec_binding_provenance", []))
+            if not explicit:
+                return VerbError("work_assignment_required",
+                    "Name this commission's own work item with --spec-id. A front desk commission does not inherit "
+                    "the front desk's item. If no item fits, create a small one first.")
+        supporting = (bool(msg.get("parent_stream_id"))
+                      and msg.get("role") in {None, "", "worker", "evaluator", "planner", "reviewer-advisory"}
+                      and not qa_dispatch.classified(msg, {"role": msg.get("role"), "phase": msg.get("phase")}))
+        if not spec_id and not exempt and (fd or not supporting):
             source_id = str(msg.get("parent_stream_id") or "")
             source = await self.store.fetch_session(*source_id.split(":", 1)) if ":" in source_id else None
             carried = len(normalize_spec_ids((source or {}).get("spec_ids"), (source or {}).get("spec_id")))
-            return VerbError(
-                "work_assignment_required",
+            return VerbError("work_assignment_required",
                 "a managed commission needs one assigned spec: pass --spec-id naming this commission's spec"
                 + (f"; {source_id} carries {carried} specs and no assignment" if source_id else ""))
+        if fd and not exempt:
+            membership = await self.store.work_item_lane_membership(spec_id)
+            if membership["available"] is False:
+                log.warning("work index unavailable; skipping lane membership for %s", spec_id)
+            elif not membership["lane_ids"]:
+                return VerbError("work_lane_membership_required",
+                                 f"{spec_id} is in no lane. Give it a goal that carries a lane, then spawn again.")
+        try:
+            small = await self._small_assigned_item(msg, binding)
+        except VerbError as exc:
+            return exc
+        if small:
+            own = (msg.get("host") or self.sessions.local_host, msg.get("session_name"), msg.get("request_id"))
+            occupied = await self.store.submit(lambda conn: small_item_occupied_conn(conn, small, own_reservation=own))
+            if occupied:
+                return VerbError("work_small_item_limit", small_item_message(small))
         return None
 
     async def _lane_admission(self, msg, binding, role):
@@ -2211,15 +2285,8 @@ class SpawnCtl:
                     return replay
                 raise VerbError(decision["error_code"], decision["message"], wip=decision)
         work_role = open_overrides.get("role", msg.get("role"))
-        supporting = (
-            bool(msg.get("parent_stream_id"))
-            and work_role in {None, "", "worker", "evaluator", "planner", "reviewer-advisory"}
-            and not qa_dispatch.classified(msg, {"role": work_role, "phase": msg.get("phase")})
-        )
-        # Supporting work carries the existing inherited attribution without
-        # requiring a manual assignment or lane link. Acceptance owners retain it.
-        if new_work_commission(msg, resume=resume_session_id is not None) and not supporting:
-            refusal = await self._work_link_refusal(msg, spec_binding)
+        if new_work_commission(msg, resume=resume_session_id is not None):
+            refusal = await self._work_link_refusal({**msg, "role": work_role}, spec_binding)
             if refusal is not None:
                 # As above: a same-key caller may have been admitted meanwhile.
                 if replay := await recorded_reply():
@@ -2360,6 +2427,10 @@ class SpawnCtl:
                             "new_generation": spawn_generation, "actor": assistant_restore.SERVICE_ACTOR,
                         }
                         open_flds["parent_stream_id"] = None
+                small_claim = None
+                claim_context = {**msg, "_auth_context": {**(msg.get("_auth_context") or {}), "ruled_release": False}}
+                if new_work_commission(claim_context, resume=resume_session_id is not None):
+                    small_claim = await self._small_assigned_item({**msg, "role": work_role}, spec_binding)
                 recorded = await self.store.record_spawn_intent(
                     host, name,
                     {
@@ -2381,6 +2452,7 @@ class SpawnCtl:
                         *((((f"{host}:{name}", spec_binding_source(resume_prior_row)),)) if resume_prior_row is not None else ()),
                     ),
                     prepared_qa=prepared_qa,
+                    small_item_spec_id=small_claim,
                     lane_admission={"provisioning": bool(lane_provisioning),
                                     "provisioning_auth": msg.get("_auth_context") or {}},
                 )
