@@ -307,6 +307,8 @@ def test_prior_reader_opens_candidate_store(tmp_path):
     base='5b96751a2266d450faeea01df5e2a680bd043ec8'
     repo=Path(__file__).resolve().parents[3]
     git=shutil.which('git');assert git
+    if subprocess.run([git,'cat-file','-e',base+'^{commit}'],cwd=repo,capture_output=True).returncode:
+        pytest.skip('prior release commit is not in this checkout (shallow clone)')
     prior=tmp_path/'prior';prior.mkdir()
     data=subprocess.check_output([git,'archive',base,'services/chat-stream-v2','services/_shared','scripts/lib','pentacle-chat-core'],cwd=repo)
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:archive.extractall(prior,filter='data')
