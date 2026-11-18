@@ -1945,6 +1945,18 @@ class NudgeJob:
                             "write your checkpoint, carry the Operator directives register verbatim, then run agent-orch compact. "
                             "The daemon will submit /compact at the compact threshold if needed."
                         )
+                        # Only the exact bound front-desk generation resumes from
+                        # daemon state. Other seats retain their checkpoint contract.
+                        guidelines = getattr(self.comms, "guidelines", None)
+                        composite = getattr(guidelines, "composite", None)
+                        if target == sid and composite is not None:
+                            binding = await composite.binding()
+                            if (binding.get("stream_id"), binding.get("generation")) == (sid, row.get("session_generation")):
+                                action = (
+                                    "Compact at your next safe point: finish the current step, "
+                                    "then run agent-orch compact; a fresh daemon brief follows. "
+                                    "The daemon will submit /compact at the compact threshold if needed."
+                                )
                         if target != sid:
                             action = f"Coordinate safe compaction and checkpoint readiness for {sid}."
                         text = (f"{kind}: {sid} crossed {crossing['tokens']:,} context tokens "

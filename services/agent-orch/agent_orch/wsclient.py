@@ -1749,7 +1749,7 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
     # in that hello, never as extra fields in the publication/operation body.
     from_stream_id = _resolved_rpc_from_stream_id()
     verb = str(payload.get("type") or "")
-    if verb not in {"assistant.owed.open", "assistant.owed.close", "assistant.owed.list", "assistant.owed.show", "assistant.publish", "assistant.operation", "assistant.binding", "assistant.rebind",
+    if verb not in {"assistant.brief", "assistant.owed.open", "assistant.owed.close", "assistant.owed.list", "assistant.owed.show", "assistant.publish", "assistant.operation", "assistant.binding", "assistant.rebind",
                     "assistant.authority", "assistant.ruling", "assistant.transfer", "assistant.advise", "assistant.answer",
                     # Work-lanes v1 read verbs (`agent-orch work-lane list|show|adopt --preview`);
                     # the mutators stay `assistant.operation` with `operation: work_lane.*`.

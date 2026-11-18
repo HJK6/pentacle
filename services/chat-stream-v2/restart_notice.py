@@ -39,7 +39,6 @@ BOOT_TIME_TOLERANCE_S = 2  # Linux btime can move by a second between reads.
 # Fleet hosts stay out of the public tree: the default names the printer
 # ability record; a host sets the literal command in its environment.
 DEFAULT_PRINTER_CMD = "printer status, as given in docs/abilities/printer_quest.md"
-DEFAULT_CHECKPOINT = "~/agent-workspace/agent-outputs/fd-checkpoint/checkpoint-current.md"
 QUESTION_HELD_STATES = ("pending", "approved", "bypassed", "unruled_disabled")
 PRINT_SPEC = re.compile(r"^spec_printer__")
 KIND_NOTES = {
@@ -51,7 +50,7 @@ KIND_NOTES = {
 SEATS_FOOTER = ("  gone = pane absent at probe time (provisional); the reconciler confirms "
                 "after 2 observations (~2 min) and closes them; respawn is the owner's call")
 RESUME_LINE = ("Resume: agent-orch list; agent-orch prompt list --open; "
-               "agent-orch assistant binding; agent-orch inspect <stream>")
+               "agent-orch assistant binding; agent-orch inspect <stream>; agent-orch assistant brief")
 
 # Process start, read once at import (main imports this module at startup).
 PROCESS_STARTED_AT = time.time()
@@ -174,7 +173,7 @@ class _List:
 
 
 def compose(facts: dict) -> str:
-    """Eleven fixed sections, per-list caps, 6000-byte total (header never cut)."""
+    """Fixed restart sections and shared brief state; 6000-byte total."""
     fd = facts["front_desk"]
     fd_stream = fd.get("stream_id") or ""
     head = [facts["header"], f"  kind {facts['kind']}: {KIND_NOTES.get(facts['kind'], '')}"]
@@ -245,7 +244,7 @@ def compose(facts: dict) -> str:
                            window_lines, "agent-orch hold list; agent-orch screen status; agent-orch spawn freeze --help",
                            count=window_total)
 
-    now = facts.get("probed_at") or time.time()
+    now = facts.get("probed_at") or 0
     rulings = facts["rulings"]
     pending = rulings["pending"]
     ruling_lines = [
@@ -280,12 +279,18 @@ def compose(facts: dict) -> str:
     undelivered_section = _List(undelivered_head, [f"  by kind: {detail}"] if detail else [],
                                 "per-kind counts", count=total)
 
-    cp = facts["checkpoint"]
-    cp_line = (f"Checkpoint: {_clip(cp['path'])} exists {cp['size']} bytes modified {_utc(cp['mtime'])}"
-               if cp.get("exists") else f"Checkpoint: {_clip(cp['path'])} missing")
+    shared = []
+    for name in ("owed", "wakes", "usage", "lanes"):
+        section = facts.get("brief_sections", {}).get(name)
+        if section is None:
+            shared.append(_List(f"{name.title()}: unavailable (not_gathered)", [], "agent-orch assistant brief"))
+        else:
+            rendered = section.render()
+            shared.append(_List(rendered[0], rendered[1:], "agent-orch assistant brief",
+                                count=len(rendered) - 1))
 
     sections: list[Any] = [head, [fd_line], [adv_line], seat_section, print_section, window_section,
-                           ruling_section, question_section, undelivered_section, [cp_line], [RESUME_LINE]]
+                           ruling_section, question_section, undelivered_section, *shared, [RESUME_LINE]]
 
     def render() -> str:
         out: list[str] = []
@@ -295,7 +300,7 @@ def compose(facts: dict) -> str:
 
     text = render()
     for section in (seat_section, question_section, ruling_section, window_section,
-                    print_section, undelivered_section):
+                    print_section, undelivered_section, *reversed(shared)):
         if len(text.encode()) <= CAP_BYTES:
             break
         section.dropped = True
@@ -427,6 +432,47 @@ class RestartNotice:
                           "created_at": envelope.get("created_at") or row["created_at"], "source": "held"}
         return sorted(found.values(), key=lambda q: _epoch(q.get("created_at")) or 0.0)
 
+    async def _windows(self, now: float, limit: int | None = None) -> dict:
+        """Shared read-only window inventory, with counts independent of row caps."""
+        result: dict[str, Any] = {"counts": {}}
+        # SQLite parses ISO timestamps (including offsets); lexical ordering
+        # would misclassify equivalent instants. Legacy no-expiry holds remain.
+        queries = (
+            ("admission", "SELECT host, held_until, reason FROM v2_spawn_admission_hold "
+             "WHERE held_until > ?", (now,), "held_until"),
+            ("holds", "SELECT resource, owner_stream, reason, expires_at FROM holds "
+             "WHERE released_at IS NULL AND (expires_at IS NULL OR expires_at='' "
+             "OR julianday(expires_at)>julianday(?,'unixepoch'))", (now,), "expires_at"),
+            ("screen", "SELECT host, holder_stream_id, expires_at FROM v2_screen_leases "
+             "WHERE released_at IS NULL" + (" AND expires_at > ?" if limit is not None else ""),
+             (now,) if limit is not None else (), "expires_at"),
+        )
+        for name, query, args, order in queries:
+            counts = await self._rows("SELECT COUNT(*) AS n FROM (" + query + ")", args)
+            result["counts"][name] = counts[0]["n"] if counts else 0
+            query += " ORDER BY " + order
+            if limit is not None:
+                query += " LIMIT ?"
+                args = (*args, max(0, int(limit)))
+            result[name] = await self._rows(query, args)
+        return result
+
+    async def _rulings(self, limit: int | None = None) -> dict:
+        """Shared pending-ruling inventory; a cap never changes the count."""
+        query = ("SELECT ruling_request_id, action, requester_stream_id, target_stream_id, created_at "
+                 "FROM v2_assistant_lane_rulings WHERE state='pending' ORDER BY created_at")
+        args: tuple = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            args = (max(0, int(limit)),)
+        pending = await self._rows(query, args)
+        counts = await self._rows("SELECT COUNT(*) AS n FROM v2_assistant_lane_rulings WHERE state='pending'")
+        other_counts = {r["state"]: r["n"] for r in await self._rows(
+            "SELECT state, COUNT(*) AS n FROM v2_assistant_lane_rulings "
+            "WHERE state NOT IN ('done','pending') GROUP BY state")}
+        return {"pending": pending, "pending_count": counts[0]["n"] if counts else 0,
+                "other_counts": other_counts}
+
     async def gather(self, kind: str, current: dict, previous: dict | None, snapshot: dict) -> dict:
         fd_stream = snapshot["binding"]["stream_id"]
         adv_stream = snapshot["authority_stream_id"]
@@ -441,35 +487,19 @@ class RestartNotice:
         # captured population, so a print-spec FD or advisor is still listed.
         rows = [r for r in population if r["stream_id"] not in (fd_stream, adv_stream)]
         now = self.clock()
-        admission = await self._rows(
-            "SELECT host, held_until, reason FROM v2_spawn_admission_hold WHERE held_until > ? ORDER BY held_until",
-            (now,))
-        # holds.expires_at is ISO text; compare as epochs, not strings.
-        holds = [r for r in await self._rows(
-            "SELECT resource, owner_stream, expires_at FROM holds WHERE released_at IS NULL "
-            "ORDER BY acquired_at")
-            if not r.get("expires_at") or (_epoch(r["expires_at"]) or 0.0) > now]
-        screen = await self._rows(
-            "SELECT host, holder_stream_id, expires_at FROM v2_screen_leases WHERE released_at IS NULL "
-            "ORDER BY acquired_at")
-        pending = await self._rows(
-            "SELECT ruling_request_id, action, requester_stream_id, target_stream_id, created_at "
-            "FROM v2_assistant_lane_rulings WHERE state='pending' ORDER BY created_at")
-        other_counts = {r["state"]: r["n"] for r in await self._rows(
-            "SELECT state, COUNT(*) AS n FROM v2_assistant_lane_rulings "
-            "WHERE state NOT IN ('done','pending') GROUP BY state")}
+        windows = await self._windows(now)
+        rulings = await self._rulings()
         by_kind = {r["kind"]: r["n"] for r in await self._rows(
             "SELECT kind, COUNT(*) AS n FROM v2_outbound_notices WHERE recipient_stream_id=? "
             "AND delivered_at IS NULL AND terminal_at IS NULL GROUP BY kind", (fd_stream,))} if fd_stream else {}
         depth = (await self._rows(
             "SELECT COUNT(*) AS n FROM v2_assistant_composite_tell_queue WHERE name=?",
             (self.composite.config.name,)) or [{"n": 0}])[0]["n"]
-        cp_path = os.path.expanduser(str(self.env.get("PENTACLE_FD_CHECKPOINT_PATH") or DEFAULT_CHECKPOINT))
-        try:
-            st = os.stat(cp_path)
-            checkpoint = {"path": cp_path, "exists": True, "size": st.st_size, "mtime": st.st_mtime}
-        except OSError:
-            checkpoint = {"path": cp_path, "exists": False}
+        from assistant_brief import Brief
+        brief = Brief(self.store, self.composite,
+                      server=getattr(getattr(self.composite, "owed", None), "server", None),
+                      notify=self.notify)
+        brief_facts = await brief.gather("daemon_start", binding=snapshot["binding"])
         return {
             "kind": kind,
             "header": header(kind, current, previous),
@@ -481,11 +511,11 @@ class RestartNotice:
             "population": population,
             "probed_at": probed_at,
             "printer_cmd": self.env.get("PENTACLE_RESTART_NOTICE_PRINTER_CMD") or DEFAULT_PRINTER_CMD,
-            "windows": {"admission": admission, "holds": holds, "screen": screen},
-            "rulings": {"pending": pending, "other_counts": other_counts},
+            "windows": windows,
+            "rulings": rulings,
             "questions": await self._questions(),
             "undelivered": {"by_kind": by_kind, "queue_depth": depth},
-            "checkpoint": checkpoint,
+            "brief_sections": brief_facts["sections"],
         }
 
     async def run_once(self, snapshot: dict | None = None) -> dict | None:

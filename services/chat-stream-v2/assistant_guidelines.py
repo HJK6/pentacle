@@ -61,6 +61,8 @@ class AssistantGuidelines:
             'advisor': tuple(filter(None, env.get('PENTACLE_ASSISTANT_GUIDELINES_ADVISOR_FILES', os.pathsep.join(DEFAULT_ADVISOR)).split(os.pathsep))),
         }
         self._fd_lock = asyncio.Lock()
+        from assistant_brief import Brief
+        self.brief = Brief(store, composite)
 
     def load(self, seat):
         return read_set(self.paths[seat]) if self.paths[seat] else None
@@ -156,6 +158,7 @@ class AssistantGuidelines:
                     and record.get('delivery_status') in {'committed_pending_proof', 'pasted_unsubmitted', 'proof_unavailable'}):
                 if previous is not None and current is not None and current * 2 < previous:
                     record['pending'] = True
+                    record['pending_reason'] = 'compaction'
                     await self._write_record('front_desk', record)
                 return False
             loaded = self.load('front_desk')
@@ -171,15 +174,25 @@ class AssistantGuidelines:
             if not needed:
                 return True
             if same and time.time() - float(record.get('delivered_at') or 0) < 600:
-                if not record.get('pending'):
+                if compacted:
+                    record['pending_reason'] = 'compaction'
+                if not record.get('pending') or compacted:
                     record['pending'] = True
                     await self._write_record('front_desk', record)
                 return
             from front_desk_digest import WAKE_TOKEN
             tell_id = 'guidelines:' + uuid.uuid4().hex
             try:
+                reason = 'compaction' if compacted else ('rebind' if record and not same else 'bind' if not same else record.get('pending_reason', 'requested'))
+                brief = getattr(self, 'brief', None)
+                if brief is None:
+                    from assistant_brief import Brief
+                    brief = Brief(self.store, self.composite)
+                if not same and target == record.get('stream_id'):
+                    reason = 'restore'
+                brief_text = await brief.text(reason, binding=binding)
                 reply = await self.comms.tell({'to_stream_id': target, 'from_stream_id': 'daemon:guidelines',
-                    'text': f'[role baseline: assistant]\nguidelines {identity[:12]}\n{text}',
+                    'text': f'[role baseline: assistant]\nguidelines {identity[:12]}\n{text}\n\n{brief_text}',
                     'tell_id': tell_id, 'sanitize': True,
                     '_front_desk_wake_token': WAKE_TOKEN, '_guidelines_token': DELIVERY_TOKEN,
                     '_guidelines_role': 'front_desk', '_guidelines_generation': gen})
