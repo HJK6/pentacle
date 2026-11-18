@@ -71,10 +71,10 @@ def test_luna_is_spawnable_across_all_supported_efforts() -> None:
 def test_sol61_catalog_aliases_and_explicit_sol60_policy() -> None:
     assert spawn_profiles.CATALOG_VERSION == "spawn-catalog-v2"
     assert catalog()["models"]["codex"]["gpt-6.1-sol"] == {
-        "aliases": ("gpt-6.1-sol", "sol-6.1", "sol"),
+        "aliases": ("gpt-6.1-sol", "sol-6.1"),
         "efforts": ("low", "medium", "high", "xhigh", "max"),
     }
-    for alias in ("gpt-6.1-sol", "sol-6.1", "sol"):
+    for alias in ("gpt-6.1-sol", "sol-6.1"):
         for effort in ("low", "medium", "high", "xhigh", "max"):
             request = resolve_spawn(provider="codex", model=alias, effort=effort)
             assert (request["model"], request["effort"]) == ("gpt-6.1-sol", effort)
@@ -84,7 +84,7 @@ def test_sol61_catalog_aliases_and_explicit_sol60_policy() -> None:
                 resolution_source="explicit_override",
             )
             assert validated["model"] == "gpt-6.1-sol"
-    assert resolve_spawn(provider="codex", model="sol")["model"] == "gpt-6.1-sol"
+    assert resolve_spawn(provider="codex", model="sol")["model"] == "gpt-6.2-sol"
     assert catalog()["models"]["codex"]["gpt-6-sol"]["aliases"] == ("gpt-6-sol",)
     assert resolve_spawn(provider="codex", model="gpt-6-sol")["model"] == "gpt-6-sol"
     assert spawn_profiles.INTENTIONALLY_UNSPAWNABLE["codex"] == frozenset({"gpt-5.4", "gpt-5.5"})
@@ -105,7 +105,7 @@ def test_all_codex_models_are_spawnable_at_max_effort() -> None:
 def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
     astra = catalog()["models"]["codex"]["gpt-6-astra"]
     assert astra == {
-        "aliases": ("gpt-6-astra", "astra"),
+        "aliases": ("gpt-6-astra", "astra-6"),
         "efforts": ("low", "medium", "high", "xhigh", "max"),
     }
     for profile in ("agent_orch", "desktop_manual"):
@@ -115,7 +115,7 @@ def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
 
 def test_astra_alias_resolves_to_canonical_model() -> None:
     request = resolve_spawn(provider="codex", model="astra", effort="high")
-    assert request["model"] == "gpt-6-astra"
+    assert request["model"] == "gpt-6.2-astra"
     assert request["effort"] == "high"
 
 
@@ -146,9 +146,9 @@ def test_profiles_derive_same_provider_default_and_legacy_fallback() -> None:
 def test_codex_partial_explicit_overrides_are_pinned_for_both_profiles() -> None:
     cases = (
         (None, None, "gpt-6-luna", "max", "profile_default"),
-        ("sol", None, "gpt-6.1-sol", "max", "explicit_override"),
+        ("sol", None, "gpt-6.2-sol", "max", "explicit_override"),
         (None, "high", "gpt-6-luna", "high", "explicit_override"),
-        ("sol", "high", "gpt-6.1-sol", "high", "explicit_override"),
+        ("sol", "high", "gpt-6.2-sol", "high", "explicit_override"),
     )
     for profile in ("agent_orch", "desktop_manual"):
         for model, effort, expected_model, expected_effort, source in cases:
@@ -212,7 +212,7 @@ def test_host_override_and_policy_readback_share_one_config(monkeypatch, tmp_pat
 
 def test_explicit_claude_and_codex_efforts_are_canonical() -> None:
     assert resolve_spawn(provider="claude", model="opus", effort="max")["resolution_source"] == "explicit_override"
-    assert resolve_spawn(provider="codex", model="sol", effort="xhigh")["model"] == "gpt-6.1-sol"
+    assert resolve_spawn(provider="codex", model="sol", effort="xhigh")["model"] == "gpt-6.2-sol"
     terra = resolve_spawn(provider="codex", model="terra", effort="high")
     assert (terra["model"], terra["effort"], terra["resolution_source"]) == (
         "gpt-6.1-terra", "high", "explicit_override",
@@ -438,7 +438,7 @@ def test_terra61_catalog_aliases_and_retained_56_terra() -> None:
 
 def test_gpt6_aliases_and_retained_56_models_across_efforts() -> None:
     aliases = {
-        "sol": "gpt-6.1-sol", "luna": "gpt-6-luna",
+        "sol": "gpt-6.2-sol", "luna": "gpt-6-luna",
         "gpt-6-sol": "gpt-6-sol", "gpt-6-luna": "gpt-6-luna",
         "gpt-5.6-sol": "gpt-5.6-sol", "gpt-5.6-luna": "gpt-5.6-luna",
         "gpt-5.6-terra": "gpt-5.6-terra", "terra": "gpt-6.1-terra",
@@ -452,12 +452,13 @@ def test_gpt6_aliases_and_retained_56_models_across_efforts() -> None:
     assert spawn_profiles.INTENTIONALLY_UNSPAWNABLE["codex"] == frozenset({"gpt-5.4", "gpt-5.5"})
 
 
-def test_codex_fallback_uses_gpt6_sol_high(monkeypatch, tmp_path) -> None:
+def test_codex_missing_policy_has_no_fallback(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", tmp_path / "absent.json")
     spawn_profiles.load_spawn_config.cache_clear()
     try:
-        request = resolve_spawn(provider="codex")
-        assert (request["model"], request["effort"]) == ("gpt-6-sol", "high")
+        with pytest.raises(SpawnProfileError) as exc:
+            resolve_spawn(provider="codex")
+        assert exc.value.code == "spawn_config_invalid"
     finally:
         spawn_profiles.load_spawn_config.cache_clear()
 
@@ -521,12 +522,10 @@ def test_available_models_preserves_config_list_order(monkeypatch, tmp_path) -> 
     # picker display order for every provider. The daemon must emit
     # available_models in the config's list order, NOT the MODELS declaration
     # order. The fleet order below differs from MODELS on purpose:
-    # MODELS codex order is 5.6-terra, 5.6-sol, 5.6-luna, 6-sol, 6.1-sol, 6-luna,
-    # 6-astra, so a config of [6-luna, 6.1-sol, 6-astra] that round-trips in that
-    # exact sequence can only be list-ordered, not catalog-ordered.
+    # The requested order differs from declaration order on purpose.
     config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
     config["available_models"] = {
-        "codex": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"],
+        "codex": ["gpt-6.2-sol", "gpt-6-luna", "gpt-6.2-astra"],
         "claude": ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1"],
     }
     config_path = tmp_path / "spawn_defaults.json"
@@ -537,7 +536,7 @@ def test_available_models_preserves_config_list_order(monkeypatch, tmp_path) -> 
         available = catalog()["available_models"]
         # list() captures insertion/key order, which is what the web picker
         # (Object.keys) and the mobile picker (Object.entries) render in.
-        assert list(available["codex"]) == ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
+        assert list(available["codex"]) == ["gpt-6.2-sol", "gpt-6-luna", "gpt-6.2-astra"]
         assert list(available["claude"]) == ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1"]
         # Discriminating guard: this is the config order, not the MODELS order.
         assert list(available["codex"]) != [m for m in spawn_profiles.MODELS["codex"] if m in available["codex"]]
@@ -548,7 +547,7 @@ def test_available_models_preserves_config_list_order(monkeypatch, tmp_path) -> 
 def test_available_models_fleet_list_with_terra61_keeps_6_luna(monkeypatch, tmp_path) -> None:
     # The deployment-local available_models list is the 6.0-vs-6.1 rule: a 6.1
     # model is listed (and its 6.0 twin dropped) only once it is launchable.
-    fleet = ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]
+    fleet = ["gpt-6-luna", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-6.2-astra"]
     config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
     config["available_models"] = {"codex": fleet}
     config_path = tmp_path / "spawn_defaults.json"
@@ -625,7 +624,7 @@ def test_local_empty_list_hides_provider_only_from_advertised_models(installatio
         source_provider=hidden, source_model=model, source_effort=effort, source_role="worker",
     ).spawn["model"] == model
     if hidden == "codex":
-        assert resolve_spawn(provider=hidden, model="sol", effort="high")["model"] == "gpt-6.1-sol"
+        assert resolve_spawn(provider=hidden, model="sol", effort="high")["model"] == "gpt-6.2-sol"
 
 
 def test_only_gemini_can_be_advertised(installation_config):
@@ -700,6 +699,7 @@ def test_test_profile_overlay_replaces_complete_pair_and_ignores_picker(test_pol
     {"codex": {"model": "gpt-6-luna", "effort": "invalid"}}])
 def test_test_profile_never_falls_back_to_work_defaults(test_policy_file, bad):
     path, raw = test_policy_file
+    resolve_spawn(provider="codex")  # warm valid work policy before an invalid edit
     raw["profiles"]["test_prompt"] = bad
     path.write_text(json.dumps(raw))
     with pytest.raises(SpawnProfileError): spawn_profiles.resolve_test_profile()
@@ -723,6 +723,7 @@ def test_haiku_all_installed_efforts_validate_at_shared_boundary():
 @pytest.mark.parametrize("case", ["missing", "partial", "unsupported"])
 def test_catalog_preserves_work_profiles_when_test_policy_cannot_launch(test_policy_file, case):
     path, raw = test_policy_file
+    resolve_spawn(provider="codex")  # last-good serves work; test consumers stay strict
     if case == "missing":
         raw["profiles"].pop("test_prompt")
     elif case == "partial":
@@ -739,3 +740,158 @@ def test_catalog_preserves_work_profiles_when_test_policy_cannot_launch(test_pol
     assert resolve_spawn(provider="codex")["effort"] == "max"
     with pytest.raises(SpawnProfileError):
         spawn_profiles.test_prompt_tuple("codex")
+
+
+@pytest.fixture
+def reload_config(monkeypatch, tmp_path):
+    import os
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text())
+    path = tmp_path / 'spawn_defaults.json'
+    path.write_text(json.dumps(config))
+    monkeypatch.setattr(spawn_profiles, 'SPAWN_DEFAULTS_PATH', path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    def write(value, target=path):
+        before = target.stat().st_mtime_ns if target.exists() else path.stat().st_mtime_ns
+        target.write_text(value if isinstance(value, str) else json.dumps(value))
+        os.utime(target, ns=(before + 1_000_000, before + 1_000_000))
+    yield config, path, write
+    spawn_profiles.load_spawn_config.cache_clear()
+
+
+def test_sol_and_astra_aliases_point_at_6_2():
+    for name in ('sol', 'astra'):
+        for alias in (name, name+'-6.2', 'gpt-6.2-'+name):
+            assert resolve_spawn(provider='codex', model=alias)['model'] == 'gpt-6.2-'+name
+    for alias, canonical in (('gpt-6.1-sol','gpt-6.1-sol'),('sol-6.1','gpt-6.1-sol'),('gpt-6-astra','gpt-6-astra'),('astra-6','gpt-6-astra')):
+        assert resolve_spawn(provider='codex',model=alias)['model'] == canonical
+    assert catalog()['models'] == spawn_profiles.models()
+    assert isinstance(spawn_profiles.models()['codex']['gpt-6.2-sol']['aliases'], tuple)
+
+
+def test_catalog_hot_reloads_on_file_change(reload_config):
+    config, path, write = reload_config
+    resolve_spawn(provider='codex')
+    config['models']['codex']['test-model'] = dict(aliases=['test-model'],efforts=['low','max'])
+    write(config)
+    assert resolve_spawn(provider='codex',model='test-model')['model'] == 'test-model'
+    assert 'test-model' in catalog()['models']['codex']
+
+
+@pytest.mark.parametrize('case',['malformed','duplicate_alias','removed_default','unknown_provider'])
+def test_invalid_reload_keeps_last_good(reload_config, caplog, case):
+    import copy
+    config, path, write = reload_config
+    before = resolve_spawn(provider='codex',model='sol')
+    bad = copy.deepcopy(config)
+    if case=='duplicate_alias': bad['models']['codex']['gpt-6-luna']['aliases'].append('sol')
+    elif case=='removed_default': del bad['models']['codex']['gpt-6-luna']
+    elif case=='unknown_provider': bad['models']['unknown'] = bad['models']['codex']
+    write('{' if case=='malformed' else bad)
+    assert resolve_spawn(provider='codex',model='sol') == before
+    assert resolve_spawn(provider='codex',model='sol') == before
+    assert sum('spawn_config_reload_rejected' in r.message for r in caplog.records) == 1
+    config['models']['codex']['test-repaired'] = dict(aliases=['test-repaired'],efforts=['max'])
+    write(config)
+    assert resolve_spawn(provider='codex',model='test-repaired')['model'] == 'test-repaired'
+
+
+def test_local_models_replace_provider_catalog(reload_config):
+    config,path,write = reload_config
+    old = spawn_profiles.models()
+    write(dict(schema_version=1, models={'codex':{'gpt-6-luna':dict(aliases=['gpt-6-luna','local-luna'],efforts=['low','max'])}}),path.with_name('spawn_defaults.local.json'))
+    current = spawn_profiles.models()
+    assert set(current['codex']) == {'gpt-6-luna'}
+    assert current['claude'] == old['claude']
+    assert resolve_spawn(provider='codex',model='local-luna')['model'] == 'gpt-6-luna'
+    with pytest.raises(SpawnProfileError): resolve_spawn(provider='codex',model='sol')
+
+
+def test_missing_spawn_defaults_fails_closed(reload_config):
+    _,path,_=reload_config
+    path.unlink()
+    with pytest.raises(SpawnProfileError) as exc: spawn_profiles.load_spawn_config()
+    assert exc.value.code == 'spawn_config_invalid'
+
+
+def test_local_catalog_removal_and_cache_clear(reload_config, caplog):
+    config,path,write = reload_config
+    baseline = spawn_profiles.models()
+    local = path.with_name('spawn_defaults.local.json')
+    write(dict(schema_version=1,intentionally_unspawnable={'codex':['extra-omission']}),local)
+    assert spawn_profiles.INTENTIONALLY_UNSPAWNABLE['codex'] == frozenset({'extra-omission'})
+    local.unlink()
+    assert spawn_profiles.INTENTIONALLY_UNSPAWNABLE['codex'] == frozenset({'gpt-5.4','gpt-5.5'})
+    write('{')
+    assert spawn_profiles.models() == baseline
+    spawn_profiles.load_spawn_config.cache_clear()
+    with pytest.raises(SpawnProfileError):spawn_profiles.models()
+
+
+def test_atomic_replacement_same_mtime_and_size_reloads(reload_config):
+    import os
+    config,path,write = reload_config
+    resolve_spawn(provider='codex',model='sol')
+    original = path.stat()
+    replacement = path.with_name('replacement.json')
+    # Both names have the same byte length: only inode changes in the signature.
+    replacement.write_text(path.read_text().replace('sol-6.2','new-6.2'))
+    os.utime(replacement,ns=(original.st_atime_ns,original.st_mtime_ns))
+    replacement.replace(path)
+    assert path.stat().st_size == original.st_size
+    assert resolve_spawn(provider='codex',model='new-6.2')['model'] == 'gpt-6.2-sol'
+
+
+@pytest.mark.parametrize('kind',['effort','canonical_alias','overlap','bad_model_type','bad_local_shape'])
+def test_invalid_catalog_shapes_fail_closed(reload_config,kind):
+    config,path,write = reload_config
+    if kind=='effort':config['models']['codex']['gpt-6-luna']['efforts']=['ultra']
+    elif kind=='canonical_alias':config['models']['codex']['gpt-6-luna']['aliases']=['luna']
+    elif kind=='overlap':config['intentionally_unspawnable']['codex'].append('gpt-6-luna')
+    elif kind=='bad_model_type':config['models']['codex']=[]
+    else:write(dict(schema_version=1,models=[]),path.with_name('spawn_defaults.local.json'))
+    write(config)
+    with pytest.raises(SpawnProfileError) as exc:spawn_profiles.models()
+    assert exc.value.code=='spawn_config_invalid'
+
+
+def test_reload_lock_validates_bad_signature_once(reload_config,monkeypatch,caplog):
+    from concurrent.futures import ThreadPoolExecutor
+    _,path,write=reload_config
+    good=spawn_profiles.models()
+    calls=[]
+    original=spawn_profiles._load_spawn_config
+    def counted():
+        calls.append(1)
+        return original()
+    monkeypatch.setattr(spawn_profiles,'_load_spawn_config',counted)
+    write('{')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results=list(pool.map(lambda _:spawn_profiles.models(),range(24)))
+    assert all(result==good for result in results)
+    assert len(calls)==1
+    assert sum('spawn_config_reload_rejected' in r.message for r in caplog.records)==1
+
+
+def test_returned_catalog_cannot_mutate_last_good(reload_config):
+    first=spawn_profiles.models()
+    first['codex'].clear()
+    assert resolve_spawn(provider='codex',model='sol')['model']=='gpt-6.2-sol'
+
+
+def test_catalog_does_not_mix_test_profile_revisions(reload_config,monkeypatch):
+    config,path,write=reload_config
+    resolve_spawn(provider='codex')
+    original=spawn_profiles.resolve_test_profile
+    def changed():
+        config['models']['codex']['test-next']=dict(aliases=['test-next'],efforts=['low','max'])
+        config['profiles']['test_prompt']['codex']=dict(model='test-next',effort='low')
+        write(config)
+        return original()
+    monkeypatch.setattr(spawn_profiles,'resolve_test_profile',changed)
+    result=catalog()
+    assert 'test_prompt_error' in result
+    assert 'test-next' not in result['models']['codex']
+    monkeypatch.setattr(spawn_profiles,'resolve_test_profile',original)
+    next_result=catalog()
+    assert next_result['profiles']['test_prompt']['codex']==('test-next','low')
+    assert 'test-next' in next_result['models']['codex']

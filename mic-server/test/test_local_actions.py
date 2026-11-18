@@ -27,23 +27,23 @@ def decision(**fields):
 def test_default_and_explicit_tuple_are_grounded():
     from local_actions import validate_decision
     got = validate_decision(decision(model='astra'), 'Spawn an Astra agent to review tests')
-    assert (got['provider'], got['model'], got['effort'], got['host']) == ('codex', 'gpt-6-astra', 'high', 'samplehost')
+    assert (got['provider'], got['model'], got['effort'], got['host']) == ('codex', 'gpt-6.2-astra', 'high', 'samplehost')
     assert validate_decision(decision(), 'Spawn an agent to review tests')['spawn']['missing'] == ['model']
     got = validate_decision(decision(model='sol', effort='medium', host='otherhost'), 'Start a Sol agent with medium effort on Otherhost to review tests')
-    assert got['model'] == 'gpt-6.1-sol' and got['host'] == 'otherhost'
+    assert got['model'] == 'gpt-6.2-sol' and got['host'] == 'otherhost'
     for d, text in [(decision(task='delete files'), 'Spawn an agent to review tests')]:
         with pytest.raises(ValueError): validate_decision(d, text)
 
 
 @pytest.mark.parametrize('effort', ['', 'medium'])
-def test_spoken_sol_selects_61_and_preserves_effort(effort):
+def test_spoken_sol_selects_62_and_preserves_effort(effort):
     from local_actions import validate_decision
     text = 'Spawn a Sol agent to review tests'
     if effort:
         text = f'Spawn a Sol agent with {effort} effort to review tests'
     got = validate_decision(decision(model='sol', effort=effort), text)
     assert (got['route'], got['provider'], got['model'], got['effort'], got['host']) == (
-        'spawn_agent', 'codex', 'gpt-6.1-sol', effort or 'high', 'samplehost')
+        'spawn_agent', 'codex', 'gpt-6.2-sol', effort or 'high', 'samplehost')
 
 
 def test_spoken_terra_selects_61():
@@ -138,7 +138,7 @@ def test_typed_claim_requires_new_client_and_outcome_is_once(monkeypatch):
     actions._process(item)
     assert listener.wake.claim() is None and len(listener.wake.pending)==1
     claim=listener.wake.claim(actions_version=2)
-    assert claim['action']['model']=='gpt-6-astra'
+    assert claim['action']['model']=='gpt-6.2-astra'
     assert actions.outcome(claim['id'],claim['generation'],'spawned')
     assert not actions.outcome(claim['id'],claim['generation'],'spawned')
     assert actions.queue.qsize()==1
@@ -277,7 +277,7 @@ def test_task_mentions_are_not_launch_options():
     from local_actions import validate_decision
     task='review the Otherhost and Sol documentation'
     got=validate_decision(decision(task=task, model='astra'),'Start an Astra agent to '+task)
-    assert got['host']=='samplehost' and got['model']=='gpt-6-astra'
+    assert got['host']=='samplehost' and got['model']=='gpt-6.2-astra'
 
 
 @pytest.mark.parametrize('asset', ['Ford','FORD','ford','Acme'])

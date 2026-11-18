@@ -31,7 +31,7 @@ def test_only_model_is_required():
 def test_named_model_uses_guidance_default():
     result = validate_decision(proposal(task='Review tests.', model='astra'), 'Spawn an Astra agent to Review tests.')
     assert result['route'] == 'spawn_agent'
-    assert (result['model'], result['effort'], result['host']) == ('gpt-6-astra', 'high', 'samplehost')
+    assert (result['model'], result['effort'], result['host']) == ('gpt-6.2-astra', 'high', 'samplehost')
 
 
 def test_invalid_option_keeps_task_for_repair():
@@ -108,7 +108,7 @@ def test_followup_spawns_once_with_original_id_exact_task_and_default_effort(dia
     assert claim['id'] == original['id']
     assert claim['text'] == original['text']
     assert claim['action']['task'] == task
-    assert claim['action']['model'] == 'gpt-6-astra' and claim['action']['effort'] == 'high'
+    assert claim['action']['model'] == 'gpt-6.2-astra' and claim['action']['effort'] == 'high'
     assert actions.snapshot()['pending'] is None
     hear(listener, task); hear(listener, 'over')
     assert listener.wake.claim(actions_version=2) is None and actions.queue.empty()
@@ -123,7 +123,7 @@ def test_two_answers_fill_only_missing_fields(dialogue):
     clock[0] += 2
     answer('High', effort='high')
     claim = listener.wake.claim(actions_version=2)
-    assert claim['action']['model'] == 'gpt-6.1-sol' and claim['action']['effort'] == 'high'
+    assert claim['action']['model'] == 'gpt-6.2-sol' and claim['action']['effort'] == 'high'
 
 
 def test_invalid_option_repair_preserves_task(dialogue):
@@ -239,7 +239,7 @@ def test_model_and_task_in_one_answer_grounded_from_same_utterance(dialogue):
     start('Spawn an agent')
     answer('Use Sol to Review tests.', model='sol', task='Review tests.')
     claim = listener.wake.claim(actions_version=2)
-    assert claim['action']['model'] == 'gpt-6.1-sol'
+    assert claim['action']['model'] == 'gpt-6.2-sol'
     assert actions.last['field_sources']['task']['text'] == 'Use Sol to Review tests.'
 
 
@@ -313,7 +313,7 @@ def test_missing_model_reply_alone_opens_idle_agent(dialogue):
     assert actions.pending['spawn']['missing'] == ['model']
     answer('Astra', model='astra')
     claim=listener.wake.claim(actions_version=2)
-    assert claim['action']['task'] == '' and claim['action']['model'] == 'gpt-6-astra'
+    assert claim['action']['task'] == '' and claim['action']['model'] == 'gpt-6.2-astra'
     assert claim['action']['effort'] == 'high' and actions.pending is None
 
 
@@ -386,7 +386,7 @@ def test_unspoken_model_cannot_supply_required_model():
 def test_spoken_options_win_over_model_echo_defaults():
     result=validate_decision(proposal(task='review tests',model='astra',host='samplehost',effort='high'),
                              'Start a Sol agent on Otherhost with medium effort to review tests')
-    assert (result['model'],result['host'],result['effort'])==('gpt-6.1-sol','otherhost','medium')
+    assert (result['model'],result['host'],result['effort'])==('gpt-6.2-sol','otherhost','medium')
 
 
 @pytest.mark.parametrize('text', ['Use an Astra high.', 'Spawn me an Astra high. Spawn and Astra High.'])
@@ -396,7 +396,7 @@ def test_option_echo_in_task_does_not_discard_valid_answer(dialogue, text):
     answer(text, model='astra', effort='high', task='high')
     claim = listener.wake.claim(actions_version=2)
     assert claim and claim['id'] == original['id']
-    assert claim['action']['model'] == 'gpt-6-astra'
+    assert claim['action']['model'] == 'gpt-6.2-astra'
     assert claim['action']['effort'] == 'high'
     assert claim['action']['task'] == ''
     assert claim['action']['effort_source'] == 'explicit'
