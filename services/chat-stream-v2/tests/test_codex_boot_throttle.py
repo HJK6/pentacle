@@ -188,6 +188,10 @@ def test_boot_limits_are_catalogued_and_positive(monkeypatch: pytest.MonkeyPatch
             }},
         },
     }
+    shipped = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text())
+    policy['models'] = shipped['models']
+    policy['intentionally_unspawnable'] = shipped['intentionally_unspawnable']
+    policy['profiles']['test_prompt'] = shipped['profiles']['test_prompt']
     path = tmp_path / "spawn_defaults.json"
     path.write_text(json.dumps(policy), encoding="utf-8")
     monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", path)
