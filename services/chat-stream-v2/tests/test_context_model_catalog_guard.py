@@ -26,6 +26,7 @@ def test_catalog_gap_is_warned_on_successful_reload(tmp_path, monkeypatch, caplo
     path = tmp_path / 'spawn_defaults.json'
     path.write_text(json.dumps(config))
     monkeypatch.setattr(spawn_profiles, 'SPAWN_DEFAULTS_PATH', path)
+    spawn_profiles.register_known_ids('claude', context_adapters._CLAUDE_MODEL_WINDOWS)
     spawn_profiles.load_spawn_config.cache_clear()
     try:
         spawn_profiles.load_spawn_config()
@@ -49,3 +50,32 @@ def test_register_known_ids_after_cache_warm_warns(caplog):
     finally:
         spawn_profiles.register_known_ids('claude', context_adapters._CLAUDE_MODEL_WINDOWS)
         spawn_profiles.load_spawn_config.cache_clear()
+
+
+def test_context_modules_import_without_shared():
+    import subprocess
+    import sys
+    from pathlib import Path
+    daemon = str(Path(__file__).resolve().parents[1])
+    for module in ('context_adapters', 'ingest', 'event_push'):
+        result = subprocess.run(
+            [sys.executable, '-I', '-c',
+             f'import sys; sys.path[:0] = [{daemon!r}]; import {module}'],
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, f'{module}: {result.stderr}'
+
+
+def test_routing_integrity_registers_claude_ids():
+    import subprocess
+    import sys
+    from pathlib import Path
+    daemon = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, '-I', '-c',
+         f'import sys; sys.path[:0] = {[str(daemon.parent), str(daemon)]!r}; '
+         'import routing_integrity, context_adapters; '
+         'from _shared import spawn_profiles; '
+         "assert spawn_profiles._known_ids['claude'] == "
+         'frozenset(context_adapters._CLAUDE_MODEL_WINDOWS)'],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr

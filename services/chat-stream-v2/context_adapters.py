@@ -35,9 +35,6 @@ _CLAUDE_MODEL_WINDOWS = {
     "claude-fable-5-2": 1_000_000,
 }
 
-from _shared.spawn_profiles import register_known_ids
-register_known_ids("claude", _CLAUDE_MODEL_WINDOWS)
-
 _DEFAULT_CLAUDE_WINDOW = 1_000_000
 
 

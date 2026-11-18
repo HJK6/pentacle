@@ -14,8 +14,9 @@ SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
 if SERVICES_ROOT not in sys.path:
     sys.path.insert(0, SERVICES_ROOT)
 
-from _shared.spawn_profiles import canonical_model
+from _shared.spawn_profiles import canonical_model, register_known_ids
 from context_adapters import (
+    _CLAUDE_MODEL_WINDOWS,
     ContextReading,
     context_fields,
     parse_claude_context,
@@ -23,6 +24,8 @@ from context_adapters import (
 )
 from inventory import InventoryEmitter
 from store_specs import normalize_spec_ids
+
+register_known_ids("claude", _CLAUDE_MODEL_WINDOWS)
 
 log = logging.getLogger("chat_streamd_v2.routing_integrity")
 
