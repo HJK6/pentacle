@@ -56,8 +56,13 @@ incomplete handoff for explicit recovery.
 Reparenting one child moves only watches, facts and cancellation receipts bound
 to that child from its old parent to the new parent. The old parent's unrelated
 watches and timed wakes stay with it. A raw parent removal still retires watches.
-Context advisories remind the seat to carry the Operator directives register
-verbatim with its checkpoint before compaction.
+Context advisories for the exact bound front-desk generation ask it to finish
+the current step and run `agent-orch compact`; a fresh daemon brief follows.
+Other seats retain the reminder to carry the Operator directives register
+verbatim with their checkpoint before compaction. The brief lists currently
+armed wakes and canceled future wakes belonging to the previous binding,
+excluding explicit cancellations and notes already rearmed by the current
+binding. This is readback only: the daemon does not automatically rearm them.
 
 Custody moves only while the old owner's session is open at transfer time. A
 closed predecessor's watches have already been cancelled by lifecycle handling;

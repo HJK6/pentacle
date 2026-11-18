@@ -1036,6 +1036,8 @@ class Server:
             "send": self._on_send,
             "compact": self._on_compact,
             "transcribe_blob": self._on_transcribe_blob,
+            "assistant.brief": self._on_assistant_brief,
+            **{"coordination.hold." + action: self._on_coordination_hold for action in ("acquire", "release", "list")},
             "assistant.publish": self._on_assistant_publish,
             **{"assistant.owed." + action: self._on_assistant_owed for action in ("open", "close", "list", "show")},
             "assistant.operation": self._on_assistant_operation,
@@ -5051,6 +5053,28 @@ class Server:
             mime=str(msg.get("mime") or ""),
         )
         return {"type": "transcribe_blob.ok", **result}
+
+    async def _on_assistant_brief(self, msg):
+        from assistant_brief import Brief
+        composite = self._composite_for_message(msg)
+        if composite is None:
+            raise VerbError('assistant_brief_unauthorized', 'assistant composite unavailable')
+        composite.owed.server = self
+        try:
+            await self.store.submit(lambda conn: composite.owed.authorize(conn, msg.get('_auth_context') or {}, False))
+        except ValueError as exc:
+            raise VerbError('assistant_brief_unauthorized', 'brief requires front desk, advisor, or operator') from exc
+        text = await Brief(self.store, composite, server=self).text('requested')
+        return {'type': 'assistant.brief.ok', 'text': text}
+
+    async def _on_coordination_hold(self, msg):
+        from coordination_holds import Holds
+        try:
+            result = await Holds(self.store, self._composite_for_message(msg)).request(
+                msg['type'].rsplit('.', 1)[1], msg, msg.get('_auth_context') or {})
+            return {'type': msg['type'] + '.ok', **result}
+        except ValueError as exc:
+            raise VerbError(str(exc).split(':', 1)[0], str(exc)) from exc
 
     async def _on_assistant_owed(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)

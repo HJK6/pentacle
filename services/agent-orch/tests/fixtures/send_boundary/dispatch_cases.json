@@ -386,6 +386,16 @@
     "not_applicable": null
   },
   {
+    "command": "assistant brief",
+    "argv": [
+      "assistant",
+      "brief"
+    ],
+    "handler": "agent_orch.cli.assistant_brief",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
     "command": "assistant operation",
     "argv": [
       "assistant",

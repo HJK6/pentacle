@@ -591,6 +591,8 @@ async def run(args: argparse.Namespace) -> int:
 
     from assistant_guidelines import AssistantGuidelines
     guidelines = AssistantGuidelines(store, assistant_composite, server.lane_rulings, comms)
+    from assistant_brief import Brief
+    guidelines.brief = Brief(store, assistant_composite, server=server)
     assistant_composite.guidelines = guidelines
     comms.guidelines = guidelines
     server.guidelines = guidelines

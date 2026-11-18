@@ -513,3 +513,30 @@ def test_codex_file_batch_ingestion_tracks_tokens_without_nudging(tmp_path, monk
 def test_haiku_5_5_window_is_its_own_not_the_deployment_default(monkeypatch):
     monkeypatch.setenv('PENTACLE_CONTEXT_DEFAULT_WINDOW', '200000')
     assert context_fields('claude', ContextReading(1, model='claude-haiku-5-5'))[1] == 1_000_000
+
+
+@pytest.mark.parametrize("binding_case", ["bound", "other", "stale_generation"])
+def test_only_bound_front_desk_advisory_uses_daemon_brief(binding_case):
+    from types import SimpleNamespace
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(store)
+            row = h.sessions.get(f'{HOST}:child')
+            async def binding():
+                return {'stream_id': f'{HOST}:parent' if binding_case == 'other' else f'{HOST}:child',
+                        'generation': 'stale' if binding_case == 'stale_generation' else row['session_generation']}
+            h.comms.guidelines = SimpleNamespace(composite=SimpleNamespace(binding=binding))
+            await _read(h, 450_000, time.time())
+            assert (await h.job.run_pass()).sent == 2
+            text = next(text for name, text in h.tmux.pasted_by_name if name == 'child')
+            if binding_case == 'bound':
+                assert 'daemon brief follows' in text
+                assert 'write your checkpoint' not in text
+                assert 'agent-orch compact' in text
+            else:
+                assert 'write your checkpoint' in text
+                assert 'daemon brief follows' not in text
+        finally:
+            store.stop()
+    asyncio.run(run())

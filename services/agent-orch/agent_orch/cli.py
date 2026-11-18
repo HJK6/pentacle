@@ -1888,6 +1888,13 @@ def assistant_publish(args: argparse.Namespace) -> int:
     return _assistant_call(args, payload)
 
 
+def assistant_brief(args):
+    payload = {'type': 'assistant.brief'}
+    if args.composite_stream_id:
+        payload['composite_stream_id'] = args.composite_stream_id
+    return _assistant_call(args, payload)
+
+
 def assistant_owed(args):
     payload = {"type": "assistant.owed." + args.owed_action}
     if args.composite_stream_id: payload["composite_stream_id"] = args.composite_stream_id
@@ -2170,6 +2177,8 @@ def hold(args: argparse.Namespace) -> int:
             "resource": args.resource,
             "reason": args.reason,
         }
+        if getattr(args, "owner", None):
+            payload["owner"] = args.owner
         expires_at = _ttl_expires_at(getattr(args, "ttl", None))
         if expires_at:
             payload["expires_at"] = expires_at
@@ -5968,6 +5977,10 @@ def build_parser() -> argparse.ArgumentParser:
         "assistant", help="typed backend publish/authority operations for an assistant composite",
     )
     assistant_sub = assistant_parser.add_subparsers(dest="assistant_command", required=True)
+    brief_parser = assistant_sub.add_parser('brief', help='Read the daemon front-desk brief')
+    brief_parser.add_argument('--composite-stream-id')
+    brief_parser.add_argument('--timeout', type=float, default=30.0)
+    brief_parser.set_defaults(func=assistant_brief)
     assistant_publish_parser = assistant_sub.add_parser(
         "publish", help="publish backend prose to the daemon-owned composite stream",
     )
@@ -6148,6 +6161,7 @@ def build_parser() -> argparse.ArgumentParser:
     hold_acquire.add_argument("resource")
     hold_acquire.add_argument("--reason", required=True)
     hold_acquire.add_argument("--ttl", type=int)
+    hold_acquire.add_argument("--owner", help="hold owner stream (default: caller)")
     hold_acquire.add_argument("--from", dest="from_stream_id")
     hold_acquire.add_argument("--timeout", type=float, default=30.0)
     hold_acquire.set_defaults(func=hold)

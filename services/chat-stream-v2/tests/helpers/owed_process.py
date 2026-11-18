@@ -41,6 +41,10 @@ async def run(root):
         server.operator_credential_registry=OperatorCredentialRegistry(root/'operator.json')
         credential=server.operator_credential_registry.issue('pentacle')[1]
         await composite.ensure_projection();await sessions.refresh()
+        if '--brief' in sys.argv:
+            await store.update_session('fixture-host','v2-test',role='assistant',pane_status='pane_alive')
+            successor=await sessions.open('fixture-host','desk-next',provider='codex',role='assistant',visibility='visible',pane_status='pane_alive',pane_pid='4244',effective_model='gpt-6-sol',effective_effort='high')
+            await sessions.refresh()
         port=await server.bind();counter=0
         async def user(text):
             nonlocal counter
@@ -49,10 +53,16 @@ async def run(root):
             await store.append_session_events_lifecycle_cas([{'stream_id':target,'event':event,'identity':identity,'lifecycle':await store.fetch_open_session_lifecycle(target,pane_pid='4242')}],limit=100)
             write_json(root/'pastes.json',provider.pastes)
         provider.user=user
-        write_json(root/'ready.json',dict(port=port,token=token,credential=credential,pid=os.getpid()))
+        write_json(root/'ready.json',dict(port=port,token=token,credential=credential,pid=os.getpid(),generation=generation))
         stop=asyncio.Event();asyncio.get_running_loop().add_signal_handler(signal.SIGTERM,stop.set)
         async def sweep():
             while not stop.is_set():
+                if '--brief' in sys.argv and (root/'retire-old').exists():
+                    (root/'retire-old').unlink()
+                    await store.update_session('fixture-host','v2-test',status='closed')
+                    await store.evaluate_watch_wake({})
+                    await sessions.refresh()
+                    write_json(root/'retired.json',True)
                 await queue.drain_once();await asyncio.sleep(.1)
         task=asyncio.create_task(sweep())
         try:await stop.wait()
