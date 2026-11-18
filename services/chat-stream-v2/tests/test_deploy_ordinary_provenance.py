@@ -302,3 +302,150 @@ def test_coordinated_prepare_and_rollback_revalidate_inherited_record(legacy_pri
         with pytest.raises(c.Invalid, match='receipt reference invalid'):
             runtime.validate_common(receipt, forward=False)
     assert not runtime.stopped
+
+
+# --- declared host exclusions (SKIPPED_DECLARED) ------------------------------------------------
+
+AUTHORITY = 'pentacle__merlin_native_provider_readiness_failure_2026_11'
+
+
+def declared_rows(host='merlin'):
+    return [dict(host=host, provider=provider, prompt_mode=mode, outcome='SKIPPED_DECLARED',
+                 reason='native provider readiness failure', authority=AUTHORITY)
+            for provider in ('claude', 'codex') for mode in ('prompted', 'promptless')]
+
+
+def declared_stamp(sha=PRIOR, hosts=('thoth', 'amaterasu')):
+    """The live 4f67fceb shape: 8 passed cells plus 4 declared merlin skips, no skip binding."""
+    stamp = forward_qualified(sha)
+    smoke = stamp['fleet_smoke']
+    smoke['cells'] = []
+    bindings = []
+    for host in hosts:
+        for provider in ('claude', 'codex'):
+            binding = dict(BINDING, host=host, provider=provider)
+            bindings.append(binding)
+            for mode in ('prompted', 'promptless'):
+                smoke['cells'].append(dict(host=host, provider=provider, prompt_mode=mode,
+                                           outcome='passed', account_binding=dict(binding)))
+    skips = declared_rows()
+    smoke['cells'].extend(copy.deepcopy(skips))
+    smoke.update(skipped=skips, not_selected=[])
+    return stamp, bindings
+
+
+def write_declared(tmp_path, mutate=None):
+    path = tmp_path / 'receipt.json'
+    receipt = sealed_receipt(path, PRIOR)
+    stamp, bindings = declared_stamp()
+    stamp = with_ancestry(stamp, str(path))
+    stamp['prior_sha'] = PRIOR
+    if mutate:
+        mutate(stamp)
+    r.complete_ordinary_qualification(stamp, receipt['receipt_sha256'])
+    return stamp, bindings
+
+
+def test_declared_skips_yield_record_and_direct_restoration_accepts(tmp_path):
+    stamp, bindings = write_declared(tmp_path)
+    assert stamp['ordinary_provenance']['kind'] == 'ordinary_inherited'
+    assert len(bindings) == 4
+    reference = r.qualified_prior(stamp, PRIOR, bindings)
+    assert reference['ancestry_receipt'] == stamp['coordinated_receipt']
+    retained = r.qualification_stamp(stamp)
+    assert r.qualified_prior(retained, PRIOR, bindings) == reference
+
+
+def test_declared_skip_hosts_may_be_not_selected(tmp_path):
+    def move(stamp):
+        smoke = stamp['fleet_smoke']
+        smoke['not_selected'], smoke['skipped'] = smoke['skipped'], []
+    stamp, bindings = write_declared(tmp_path, move)
+    assert r.qualified_prior(stamp, PRIOR, bindings)['ancestry_receipt'] == stamp['coordinated_receipt']
+
+
+def test_declared_skip_record_matches_all_passed_digest_rule(tmp_path):
+    """The skip rows are part of the digested payload; tampering with them refuses."""
+    stamp, bindings = write_declared(tmp_path)
+    stamp['fleet_smoke']['cells'][-1]['reason'] = 'edited after sealing'
+    with pytest.raises(c.Invalid):
+        r.qualified_prior(stamp, PRIOR, bindings)
+
+
+def undeclared_host(stamp):
+    stamp['fleet_smoke']['skipped'] = []
+
+
+def other_outcome(stamp):
+    stamp['fleet_smoke']['cells'][-1]['outcome'] = 'SKIPPED_OFFLINE'
+
+
+def no_authority(stamp):
+    for row in stamp['fleet_smoke']['cells'][-4:]:
+        del row['authority']
+
+
+def blank_authority(stamp):
+    stamp['fleet_smoke']['cells'][-1]['authority'] = ''
+
+
+def no_reason(stamp):
+    del stamp['fleet_smoke']['cells'][-1]['reason']
+
+
+def nonstring_reason(stamp):
+    stamp['fleet_smoke']['cells'][-1]['reason'] = 7
+
+
+def failed_cell(stamp):
+    stamp['fleet_smoke']['cells'][0]['outcome'] = 'failed'
+
+
+def unpaired_mode(stamp):
+    del stamp['fleet_smoke']['cells'][1]
+
+
+def all_skipped(stamp):
+    smoke = stamp['fleet_smoke']
+    smoke['cells'] = [dict(row, outcome='SKIPPED_DECLARED', reason='r', authority=AUTHORITY)
+                      for row in smoke['cells']]
+    smoke['skipped'] = copy.deepcopy(smoke['cells'])
+    for row in smoke['cells']:
+        row.pop('account_binding', None)
+
+
+@pytest.mark.parametrize('mutate', [undeclared_host, other_outcome, no_authority, blank_authority, no_reason,
+                                    nonstring_reason, failed_cell, unpaired_mode, all_skipped])
+def test_writer_refuses_undeclared_or_failed_cells(tmp_path, mutate):
+    path = tmp_path / 'receipt.json'
+    receipt = sealed_receipt(path, PRIOR)
+    stamp, _ = declared_stamp()
+    stamp = with_ancestry(stamp, str(path))
+    stamp['prior_sha'] = PRIOR
+    mutate(stamp)
+    with pytest.raises(c.Invalid, match='invalid ordinary inherited qualification'):
+        r.complete_ordinary_qualification(stamp, receipt['receipt_sha256'])
+    assert 'ordinary_provenance' not in stamp
+
+
+@pytest.mark.parametrize('mutate', [undeclared_host, other_outcome, no_authority, no_reason, failed_cell,
+                                    all_skipped])
+def test_prior_refuses_undeclared_or_failed_cells_even_after_sealing(tmp_path, mutate):
+    """A good record sealed first, then its smoke edited: the verifier refuses on its own."""
+    stamp, bindings = write_declared(tmp_path)
+    mutate(stamp)
+    with pytest.raises(c.Invalid):
+        r.qualified_prior(stamp, PRIOR, bindings)
+
+
+@pytest.mark.parametrize('mutate', [undeclared_host, other_outcome, no_authority, no_reason, failed_cell])
+def test_direct_prior_refuses_undeclared_or_failed_cells(tmp_path, mutate):
+    """Direct (receipt-sealed) priors share the coverage rule; no ordinary record to catch it."""
+    path = tmp_path / 'receipt.json'
+    receipt = sealed_receipt(path, PRIOR)
+    stamp, bindings = declared_stamp()
+    stamp.update(coordinated_receipt=str(path), receipt_sha256=receipt['receipt_sha256'])
+    assert r.qualified_prior(stamp, PRIOR, bindings)['receipt_sha256'] == receipt['receipt_sha256']
+    mutate(stamp)
+    with pytest.raises(c.Invalid):
+        r.qualified_prior(stamp, PRIOR, bindings)
