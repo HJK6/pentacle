@@ -113,13 +113,16 @@ def test_explicit_rollback_qualifies_only_declared_included_bindings(tmp_path, m
     bindings = [{'host': host, 'provider': 'claude', 'alias': 'primary',
         'generation': 'one', 'executable_sha256': '1' * 64, 'version': '1.0'}
         for host in ('primary', 'optional')]
+    cells = [{'host': b['host'], 'provider': b['provider'], 'prompt_mode': mode,
+              'outcome': 'passed', 'account_binding': dict(b)}
+             for b in bindings[:1] for mode in ('prompted', 'promptless')]
+    skips = [{'host': 'optional', 'provider': 'claude', 'prompt_mode': mode,
+              'outcome': 'SKIPPED_DECLARED', 'reason': DECLARATION['reason'],
+              'authority': DECLARATION['readiness_item']} for mode in ('prompted', 'promptless')]
     witness = {'sha': TARGET_SHA, 'daemon_runtime_readback': {'sha': TARGET_SHA},
         'daemon_boot_readback': {'outcome': 'observed'},
-        'fleet_smoke': {'outcome': 'passed', 'cells': [
-            {'host': b['host'], 'provider': b['provider'], 'prompt_mode': mode,
-             'outcome': 'passed' if b['host'] == 'primary' else 'SKIPPED_DECLARED',
-             'account_binding': dict(b)}
-            for b in bindings for mode in ('prompted', 'promptless')]}}
+        'fleet_smoke': {'outcome': 'passed', 'cells': cells + skips, 'skipped': skips,
+                        'not_selected': []}}
     seen = []
     def proof(receipt, source, boot):
         seen.append(receipt['scope'])
