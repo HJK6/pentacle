@@ -85,7 +85,7 @@ class CloseBindingTmux(Tmux):
         return 0, rendered + "\n" + self.extra
 
 
-@pytest.mark.parametrize("version", ["3.4", "3.7c"])
+@pytest.mark.parametrize("version", ["3.4", "3.7c", "3.8"])
 def test_close_binding_requires_complete_qualified_live_snapshot(version):
     tmux = CloseBindingTmux(version=version)
     result = asyncio.run(tmux.close_pane_identity("v2-owned"))
@@ -100,7 +100,7 @@ def test_close_binding_requires_complete_qualified_live_snapshot(version):
 @pytest.mark.parametrize("field,value", [
     ("pane_dead", "1"), ("pane_dead", ""), ("pane_pipe", "1"),
     ("pane_dead_status", "0"), ("pane_dead_status", "1"), ("pane_dead_signal", "9"),
-    ("version", ""), ("version", "3.7"), ("version", "3.4a"),
+    ("version", ""), ("version", "3.7"), ("version", "3.4a"), ("version", "3.8a"), ("version", "3.9"),
     ("pane_pid", "0"), ("pane_pid", "-1"), ("pane_pid", "１２３"),
     ("pid", ""), ("pid", "0"), ("pane_id", ""), ("session_id", ""),
     ("pane_tty", ""), ("socket_path", ""), ("session_name", "other"),
@@ -142,7 +142,7 @@ def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentine
             assert rc == 0
             live = await tmux.close_pane_identity("v2-owned")
             assert live is not None
-            assert live["server_version"] in {"3.4", "3.7c"}
+            assert live["server_version"] in {"3.4", "3.7c", "3.8"}
             # This server is private. Latch the actual retained-pane exit before
             # triggering it, so scheduler load cannot exhaust a polling guess.
             rc, _ = await tmux.run("set-hook", "-g", "pane-died",
@@ -182,6 +182,26 @@ def test_private_tmux_pipe_and_second_window_refuse_anchor(isolated_tmux_env):
             assert await tmux.close_pane_identity("v2-owned") is not None
             # The extra pane lives in an unselected window. -s must still see it.
             rc, _ = await tmux.run("new-window", "-d", "-t", "=v2-owned:", "exec sleep 60")
+            assert rc == 0
+            assert await tmux.close_pane_identity("v2-owned") is None
+        finally:
+            await tmux.run("kill-server")
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("modal", [False, True])
+def test_private_tmux_floating_or_modal_pane_refuses_anchor(isolated_tmux_env, modal):
+    """tmux 3.8 adds floating and modal panes; -s must list them so one refuses."""
+    async def go():
+        tmux = Tmux(isolated_tmux_env)
+        try:
+            await tmux.new_session("v2-owned", "exec sleep 60")
+            live = await tmux.close_pane_identity("v2-owned")
+            assert live is not None
+            if live["server_version"] in {"3.4", "3.7c"}:
+                pytest.skip("this tmux server has no floating or modal panes")
+            args = ("new-pane", *(("-O",) if modal else ()), "-t", "=v2-owned:", "exec sleep 60")
+            rc, _ = await tmux.run(*args)
             assert rc == 0
             assert await tmux.close_pane_identity("v2-owned") is None
         finally:

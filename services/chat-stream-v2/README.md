@@ -57,7 +57,7 @@ An unavailable probe leaves cleanup unverified. Birth, boot, user, process group
 session and tmux ownership checks still apply before survivor signals.
 Forced local close first brackets capture with the same live, single-pane tmux
 binding across the whole session. The pane root must be a direct child of the
-responding server. Both snapshots require server version `3.4` or `3.7c`,
+responding server. Both snapshots require server version `3.4`, `3.7c` or `3.8`,
 `pane_dead=0`, `pane_pipe=0`, and exactly empty `pane_dead_status` and
 `pane_dead_signal`; even exit status `0` refuses authority. Other server versions
 defer until their format/reap/respawn contract is independently qualified.
