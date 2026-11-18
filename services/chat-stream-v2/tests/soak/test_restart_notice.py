@@ -18,11 +18,11 @@ sha256 to the evidence directory.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import signal
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ import pytest
 from tests.soak import restart_matrix as rm
 from tests.soak.fd_resume_matrix import FdCell, sid
 
-pytestmark = [pytest.mark.live_daemon, pytest.mark.timeout(900)]
+pytestmark = [pytest.mark.soak, pytest.mark.live_daemon, pytest.mark.timeout(900)]
 
 MARKER_KEY = "daemon.restart_notice.last"
 STAND_IN_SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -46,8 +46,16 @@ def evidence(tmp_path, request):
 
 
 def _marker(cell: rm.Cell) -> dict[str, Any] | None:
-    rows = cell.sql("SELECT v FROM kv WHERE k=?", (MARKER_KEY,))
-    return json.loads(rows[0]["v"]) if rows else None
+    from store import Store
+    async def read():
+        store = Store(cell.daemon.db)
+        store.start()
+        try:
+            raw = await store.get(MARKER_KEY)
+            return json.loads(raw) if raw else None
+        finally:
+            store.stop()
+    return asyncio.run(read())
 
 
 def _new_marker(cell: rm.Cell, previous_instance: str | None, timeout: float = 60) -> dict[str, Any] | None:
@@ -98,8 +106,6 @@ def _wait_notice(cell: rm.Cell, fd_name: str, marker: dict[str, Any], timeout: f
 
 def _bound_cell(cell: rm.Cell) -> FdCell:
     fd = FdCell(cell, assistant_role=None)
-    cell.daemon.extra_env["PENTACLE_FD_CHECKPOINT_PATH"] = str(cell.root / "checkpoint-current.md")
-    (cell.root / "checkpoint-current.md").write_text("checkpoint body never copied\n")
     cell.daemon.start()  # composite disabled: no notice
     fd.seed("fd", role="lead")
     fd.seed("daff", role="daff-assistant")
@@ -149,21 +155,25 @@ def run_cells(root: Path, evidence: Path) -> list[dict[str, Any]]:
             "killed_child_gone": any(l.startswith(f"  {sid('childb')} ") and " gone parent=FD" in l for l in lines_a),
             "live_child_alive": any(l.startswith(f"  {sid('childa')} ") and " alive parent=FD" in l for l in lines_a),
             "front_desk_alive": f"Front desk: {sid('fd')} generation " in text_a and " pane alive;" in text_a,
-            "checkpoint_path_only": "Checkpoint: " in text_a and "checkpoint body never copied" not in text_a,
+            "daemon_brief_state": "Checkpoint: " not in text_a and all(p in text_a for p in ("Owed:", "Wakes:", "Usage:", "Lanes:")),
         }
         records.append(_classify(rec_a))
 
         # Cell B: marker stand-in for a deploy (rewrite only the isolated DB's sha).
         stop_b = cell.daemon.stop(signal.SIGTERM)
-        conn = sqlite3.connect(cell.daemon.db, timeout=10)
-        try:
-            stored = json.loads(conn.execute("SELECT v FROM kv WHERE k=?", (MARKER_KEY,)).fetchone()[0])
-            real_sha = stored.get("daemon_sha")
-            stored["daemon_sha"] = STAND_IN_SHA
-            conn.execute("UPDATE kv SET v=? WHERE k=?", (json.dumps(stored), MARKER_KEY))
-            conn.commit()
-        finally:
-            conn.close()
+        stored = _marker(cell)
+        assert stored is not None
+        real_sha = stored.get("daemon_sha")
+        stored["daemon_sha"] = STAND_IN_SHA
+        from store import Store
+        async def replace_marker():
+            store = Store(cell.daemon.db)
+            store.start()
+            try:
+                await store.put(MARKER_KEY, json.dumps(stored))
+            finally:
+                store.stop()
+        asyncio.run(replace_marker())
         cell.daemon.start()
         marker_b = _new_marker(cell, (marker_a or {}).get("instance_id"))
         rows_b, text_b = _wait_notice(cell, "fd", marker_b) if marker_b else ({"all_notice_tells": []}, "")

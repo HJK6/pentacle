@@ -159,7 +159,7 @@ def test_invalid_flag_fails_daemon_startup_before_the_store_opens(monkeypatch):
 # (b) compose against a seeded store
 # --------------------------------------------------------------------------- #
 
-async def _seed(store, tmp_path, *, checkpoint=True, notify=None):
+async def _seed(store, tmp_path, *, notify=None):
     fd = await _seat(store, FD, role="assistant")
     await _seat(store, ADVISOR, role="lead")
     await _seat(store, "hostx:v2-alive", parent_stream_id=FD, spec_id="spec_x__alive", title="Alive child")
@@ -217,10 +217,7 @@ async def _seed(store, tmp_path, *, checkpoint=True, notify=None):
             "dedup_key": f"agent-question:{FD}:q-store", "producer_stream_id": FD, "producer_provider": None,
             "spec_id": "spec_fd", "response_mode": "free_text", "options": [], "ttl_seconds": None,
         }, actions=[])
-    path = tmp_path / "checkpoint-current.md"
-    if checkpoint:
-        path.write_text("x" * 1234)
-    return fd, {"PENTACLE_FD_CHECKPOINT_PATH": str(path), "PENTACLE_ASSISTANT_AUTO_RESTORE": "1"}
+    return fd, {"PENTACLE_ASSISTANT_AUTO_RESTORE": "1"}
 
 
 def _run(body):
@@ -236,7 +233,7 @@ def _run(body):
 
 SECTION_PREFIXES = ["BLOCKER restart from daemon: ", "Front desk: ", "Advisor: ", "Seats open at start: ",
                     "Print work: ", "Windows: ", "Advisor rulings: ", "Operator questions: ",
-                    "Undelivered FD traffic: ", "Checkpoint: ", "Resume: "]
+                    "Undelivered FD traffic: ", "Owed: ", "Wakes: ", "Usage: ", "Lanes: ", "Resume: "]
 
 
 def _section_order(text):
@@ -244,13 +241,12 @@ def _section_order(text):
     return [next(i for i, l in enumerate(lines) if l.startswith(p)) for p in SECTION_PREFIXES]
 
 
-@pytest.mark.parametrize("checkpoint", [True, False])
-def test_compose_lists_every_section_in_order(tmp_path, checkpoint):
+def test_compose_lists_every_section_in_order(tmp_path):
     async def body(store):
         notify = Notify(str(tmp_path / "notifications.db"))
         await notify.start()
         try:
-            fd, env = await _seed(store, tmp_path, checkpoint=checkpoint, notify=notify)
+            fd, env = await _seed(store, tmp_path, notify=notify)
             composite = await _composite(store, fd)
             states = {"hostx:v2-alive": "alive", "hostx:v2-print": "alive"}  # FD/advisor/gone: gone
             notice = _notice(store, composite, probe=_probe(states), notify=notify, env=env)
@@ -260,7 +256,7 @@ def test_compose_lists_every_section_in_order(tmp_path, checkpoint):
             await notify.stop()
         assert marker["kind"] == "first_instrumented_start"
         order = _section_order(text)
-        assert order == sorted(order) and len(set(order)) == 11
+        assert order == sorted(order) and len(set(order)) == 14
         lines = text.splitlines()
         assert lines[0].startswith("BLOCKER restart from daemon: first_instrumented_start — host booted ")
         assert lines[0].endswith("; no previous marker")
@@ -290,11 +286,9 @@ def test_compose_lists_every_section_in_order(tmp_path, checkpoint):
         undelivered = "\n".join(lines[order[8]:order[9]])
         assert "Undelivered FD traffic: 1 notice(s); composite queue depth 0 before this notice" in undelivered
         assert "by kind: front_desk_held 1" in undelivered
-        if checkpoint:
-            assert lines[order[9]].endswith("exists 1234 bytes modified " + lines[order[9]].split("modified ")[1])
-            assert "x" * 10 not in text  # path only, never the contents
-        else:
-            assert lines[order[9]].endswith("checkpoint-current.md missing")
+        assert "Checkpoint:" not in text
+        for prefix in ("Owed:", "Wakes:", "Usage:", "Lanes:"):
+            assert prefix in text
         assert lines[-1] == rn.RESUME_LINE
         assert len(text.encode()) <= rn.CAP_BYTES
     _run(body)
@@ -326,8 +320,7 @@ def test_empty_sections_say_none(tmp_path):
     async def body(store):
         fd = await _seat(store, FD, role="assistant")
         composite = await _composite(store, fd)
-        notice = _notice(store, composite, probe=_probe({FD: "alive"}),
-                         env={"PENTACLE_FD_CHECKPOINT_PATH": str(tmp_path / "nope.md")})
+        notice = _notice(store, composite, probe=_probe({FD: "alive"}))
         await notice.run_once(await notice.capture())
         text = (await _queued(store, notice.tell_id))[0]["body"]
         for line in ("Advisor: none configured", "Seats open at start: none", "Print work: none",
@@ -357,7 +350,7 @@ def _facts(n_seats=0, n_prints=0, n_questions=0, n_rulings=0, n_windows=0, title
         "questions": [{"question_id": f"q{i}" + "z" * 40, "producer": "p" * 30, "spec_id": "s" * 40,
                        "created_at": "2026-11-03T00:00:00Z", "source": "store"} for i in range(n_questions)],
         "undelivered": {"by_kind": {"front_desk_held": 3}, "queue_depth": 0},
-        "checkpoint": {"path": "/x/checkpoint-current.md", "exists": False},
+        "brief_sections": {},
     }
 
 
@@ -386,7 +379,7 @@ def test_byte_cap_drops_lists_in_priority_order_and_keeps_fixed_lines():
     text = rn.compose(facts)
     assert len(text.encode()) <= rn.CAP_BYTES
     assert text.splitlines()[0] == facts["header"]
-    assert "Front desk: " in text and "Checkpoint: " in text and text.splitlines()[-1] == rn.RESUME_LINE
+    assert "Front desk: " in text and "Checkpoint: " not in text and text.splitlines()[-1] == rn.RESUME_LINE
     assert "(50 listed in the count above, omitted for size: agent-orch list)" in text  # seats first
     assert "Seats open at start: 50 open:" in text  # its count line survives
     # Questions are next in priority; with seats dropped this fits, so they stay.
@@ -640,4 +633,29 @@ def test_questions_are_daemon_wide_and_deduplicated(tmp_path):
         assert block[2].startswith("  q-held hostx:v2-gone spec_x__gone age ") and block[2].endswith(" held")
         assert text.count("q-store") == 1
         assert stored["state"] == "open"  # read-only: no question state changed
+    _run(body)
+
+
+def test_compose_has_no_clock_read(monkeypatch):
+    facts = _facts()
+    facts.pop('probed_at')
+    def forbidden():
+        raise AssertionError('compose must be pure')
+    monkeypatch.setattr(rn.time, 'time', forbidden)
+    assert rn.compose(facts).startswith(facts['header'])
+
+
+def test_shared_window_and_ruling_gatherers_bound_rows_not_counts(tmp_path):
+    async def body(store):
+        fd, env = await _seed(store, tmp_path)
+        composite = await _composite(store, fd)
+        notice = _notice(store, composite, probe=_probe({}), env=env)
+        windows = await notice._windows(NOW, limit=1)
+        assert windows['counts'] == {'admission': 1, 'holds': 1, 'screen': 1}
+        assert all(len(windows[key]) <= 1 for key in windows['counts'])
+        rulings = await notice._rulings(limit=1)
+        assert len(rulings['pending']) == 1
+        assert rulings['pending_count'] == 2
+        assert rulings['other_counts'] == {'approved': 1, 'release_blocked': 1}
+        assert len((await notice._rulings())['pending']) == 2
     _run(body)

@@ -81,20 +81,25 @@ when empty):
 7. Advisor rulings: `pending` rows (at most 8), then counts for the other states that are not `done`.
 8. Operator questions, across the whole daemon: open `agent_questions` whose producer is still current (the stale-question policy, applied read-only), plus held question rulings (`pending`/`approved`/`bypassed`/`unruled_disabled`), deduplicated by `question_id`, at most 8.
 9. Undelivered front-desk traffic: `v2_outbound_notices` counts per kind and the composite queue depth before this notice.
-10. Checkpoint: path, size and mtime, or `missing`. The file's contents are never copied.
-11. Resume commands.
+10. Owed: open and overdue obligations from the shared daemon brief builder.
+11. Wakes: armed wakes and canceled future wakes from the previous binding.
+12. Usage: provider pool caps, measured percentages and freshness.
+13. Lanes: active/blocked lanes, plus paused and parked counts.
+14. Resume commands, including `agent-orch assistant brief` for the full brief.
 
 If the per-list caps still leave the text above 6000 bytes, these lists are
 replaced by their count and overflow command, in this order: seats, questions,
-rulings, windows, print work, then the undelivered per-kind detail. The header,
-front desk, advisor, checkpoint and resume lines are never cut.
+rulings, windows, print work, undelivered per-kind detail, then lanes, usage,
+wakes and owed. The header, front desk, advisor, section count and resume lines
+are never cut. Owed, Wakes, Usage and Lanes use the same builders as the
+front-desk brief. A failed shared builder reports `unavailable (<code>)` without
+suppressing the other sections. No hand-maintained checkpoint file is read.
 
 ## Configuration
 
 | Variable | Default | Effect |
 |---|---|---|
 | `PENTACLE_RESTART_NOTICE` | `1` | `0` skips the snapshot, compose, delivery and marker (`main._start_restart_notice`). Any other value fails startup before the store opens. |
-| `PENTACLE_FD_CHECKPOINT_PATH` | `~/agent-workspace/agent-outputs/fd-checkpoint/checkpoint-current.md` | Checkpoint path reported in section 10. |
 | `PENTACLE_RESTART_NOTICE_PRINTER_CMD` | a pointer to `printer status` in `docs/abilities/printer_quest.md` | Command named in section 5; a host sets the literal command here (fleet hosts stay out of this public tree). |
 
 Rollback: set `PENTACLE_RESTART_NOTICE=0` in the LaunchAgent plist and

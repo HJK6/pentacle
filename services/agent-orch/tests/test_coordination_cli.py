@@ -17,7 +17,7 @@ def test_hold_acquire_cli_sends_coordination_rpc(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "coordination_once", fake_coordination_once)
 
     args = cli.build_parser().parse_args(
-        ["hold", "acquire", "daemon:com.pentacle.chat-streamd", "--reason", "freeze", "--ttl", "60"]
+        ["hold", "acquire", "daemon:com.pentacle.chat-streamd", "--reason", "freeze", "--ttl", "60", "--owner", "hosta:worker"]
     )
 
     assert args.func(args) == 0
@@ -25,6 +25,7 @@ def test_hold_acquire_cli_sends_coordination_rpc(monkeypatch, capsys, tmp_path):
     assert payload["type"] == "coordination.hold.acquire"
     assert payload["resource"] == "daemon:com.pentacle.chat-streamd"
     assert payload["reason"] == "freeze"
+    assert payload["owner"] == "hosta:worker"
     assert payload["from_stream_id"] == "hosta:codex-owner"
     assert "expires_at" in payload
     assert json.loads(capsys.readouterr().out)["type"] == "coordination.hold.acquire.ok"

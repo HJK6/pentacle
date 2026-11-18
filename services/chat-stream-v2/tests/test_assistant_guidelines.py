@@ -445,3 +445,57 @@ def test_unconfirmed_advisor_baseline_does_not_wedge_later_tells(tmp_path, monke
         finally:
             store.stop()
     asyncio.run(go())
+
+
+def test_brief_gathers_only_at_delivery_and_identity_stays_file_only(tmp_path, monkeypatch):
+    async def go():
+        files(tmp_path, monkeypatch)
+        clock=[1000];monkeypatch.setattr(ag.time,'time',lambda:clock[0])
+        comp=Composite();store=Store();comms=RecordingComms()
+        service=ag.AssistantGuidelines(store,comp,Rulings(),comms,env={'PENTACLE_ASSISTANT_GUIDELINES_ENABLED':'1'})
+        calls=[]
+        async def brief(reason,binding=None):
+            calls.append(reason);return '[front desk brief] changing '+str(len(calls))
+        service.brief=SimpleNamespace(text=brief)
+        await service.front_desk()
+        identity=(await service._read_record('front_desk'))['identity']
+        assert calls==['bind']
+        assert '[front desk brief]' in comms.sent[-1]['text']
+        await service.inspect('host:desk');await service.front_desk()
+        await service.front_desk(previous=200000,current=50000)
+        assert len(calls)==1
+        clock[0]+=600
+        await service.front_desk()
+        assert len(calls)==2
+        assert (await service._read_record('front_desk'))['identity']==identity
+        comp.current={'stream_id':'host:new','generation':'g2'}
+        await service.front_desk()
+        assert calls[-1]=='rebind' and len(comms.sent)==3
+    asyncio.run(go())
+
+
+def test_brief_changed_files_restore_and_deferred_compaction(tmp_path, monkeypatch):
+    async def go():
+        files(tmp_path,monkeypatch);now=[1000];monkeypatch.setattr(ag.time,'time',lambda:now[0])
+        comp=Composite();store=Store();comms=RecordingComms()
+        service=ag.AssistantGuidelines(store,comp,Rulings(),comms,env={'PENTACLE_ASSISTANT_GUIDELINES_ENABLED':'1'})
+        calls=[]
+        async def text(reason,binding=None):calls.append(reason);return '[front desk brief] '+reason
+        service.brief=SimpleNamespace(text=text)
+        await service.front_desk()
+        (tmp_path/'agents/assistant_baseline.md').write_text('changed')
+        await service.front_desk()  # changed-file pending already set
+        await service.front_desk(previous=200000,current=50000)
+        now[0]+=600;await service.front_desk()
+        assert calls==['bind','compaction']
+        now[0]+=600
+        (tmp_path/'agents/assistant_baseline.md').write_text('changed again')
+        await service.front_desk();assert calls[-1]=='requested'
+        comp.current['generation']='g2';await service.front_desk();assert calls[-1]=='restore'
+        record=await service._read_record('front_desk')
+        record.update(delivery_status='pasted_unsubmitted',pending=False)
+        await service._write_record('front_desk',record)
+        await service.front_desk(previous=200000,current=50000)
+        assert (await service._read_record('front_desk'))['pending_reason']=='compaction'
+        assert len(calls)==4
+    asyncio.run(go())
