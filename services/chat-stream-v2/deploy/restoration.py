@@ -63,6 +63,15 @@ def _inherited_receipt(path):
     return receipt
 
 
+def _declared_skip(row, smoke):
+    """A release-exclusion row the smoke runner itself declared; it carries no binding."""
+    named = {entry.get('host') for source in ('skipped', 'not_selected')
+             for entry in smoke.get(source) or [] if isinstance(entry, dict)}
+    return (row['outcome'] == 'SKIPPED_DECLARED'
+            and all(isinstance(row.get(k), str) and row[k] for k in ('authority', 'reason'))
+            and row['host'] in named)
+
+
 def _ordinary_record(stamp, seal):
     """Canonical v1 linkage under the trusted writer/uid consistency boundary."""
     try:
@@ -82,6 +91,8 @@ def _ordinary_record(stamp, seal):
             raise ValueError()
         modes = {}
         for row in smoke['cells']:
+            if _declared_skip(row, smoke):
+                continue
             binding = row['account_binding']
             if (row['outcome'] != 'passed' or row['prompt_mode'] not in ('prompted', 'promptless')
                     or any(not isinstance(binding[k], str) or not binding[k] for k in BINDING_FIELDS)
@@ -90,7 +101,7 @@ def _ordinary_record(stamp, seal):
                 raise ValueError()
             key = tuple(binding[k] for k in BINDING_FIELDS)
             modes.setdefault(key, []).append(row['prompt_mode'])
-        if any(sorted(value) != ['prompted', 'promptless'] for value in modes.values()):
+        if not modes or any(sorted(value) != ['prompted', 'promptless'] for value in modes.values()):
             raise ValueError()
         return {'version': 1, 'kind': 'ordinary_inherited', 'sha': sha, 'prior_sha': prior_sha,
                 'receipt': pointer, 'receipt_sha256': seal, 'qualification_sha256': digest(payload)}
@@ -122,6 +133,8 @@ def _qualified_prior(stamp, sha, bindings):
             or stamp.get('daemon_boot_readback', {}).get('outcome') != 'observed'):
         raise Invalid('prior lacks accepted production forward qualification')
     rows = smoke.get('cells', [])
+    if any(row.get('outcome') != 'passed' and not _declared_skip(row, smoke) for row in rows):
+        raise Invalid('prior production qualification holds an undeclared skip or failed cell')
     for binding in bindings:
         for mode in ('prompted', 'promptless'):
             matches = [row for row in rows if (row.get('host'), row.get('provider'), row.get('prompt_mode')) ==
