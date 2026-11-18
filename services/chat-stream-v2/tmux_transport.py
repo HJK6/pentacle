@@ -413,7 +413,7 @@ class Tmux:
         if len(fields) != len(keys) or not all(fields[:-2]) or any(fields[-2:]):
             return None
         pane = dict(zip(keys, fields))
-        if (pane["session_name"] != name or pane["server_version"] not in {"3.4", "3.7c"}
+        if (pane["session_name"] != name or pane["server_version"] not in {"3.4", "3.7c", "3.8"}
                 or pane["pane_dead"] != "0" or pane["pane_pipe"] != "0"
                 or not re.fullmatch(r"%[0-9]+", pane["pane_id"])
                 or not re.fullmatch(r"\$[0-9]+", pane["session_id"])):
