@@ -140,7 +140,7 @@ jobs:
       with:
         python-version: '3.13'
     - name: System packages
-      timeout-minutes: 5
+      timeout-minutes: 15
       run: |
         missing=()
         for package in tmux lsof zsh ffmpeg; do
