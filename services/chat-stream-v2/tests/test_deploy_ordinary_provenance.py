@@ -306,17 +306,17 @@ def test_coordinated_prepare_and_rollback_revalidate_inherited_record(legacy_pri
 
 # --- declared host exclusions (SKIPPED_DECLARED) ------------------------------------------------
 
-AUTHORITY = 'pentacle__merlin_native_provider_readiness_failure_2026_11'
+AUTHORITY = 'example__optional_host_readiness_2026_11'
 
 
-def declared_rows(host='merlin'):
+def declared_rows(host='optional'):
     return [dict(host=host, provider=provider, prompt_mode=mode, outcome='SKIPPED_DECLARED',
                  reason='native provider readiness failure', authority=AUTHORITY)
             for provider in ('claude', 'codex') for mode in ('prompted', 'promptless')]
 
 
-def declared_stamp(sha=PRIOR, hosts=('thoth', 'amaterasu')):
-    """The live 4f67fceb shape: 8 passed cells plus 4 declared merlin skips, no skip binding."""
+def declared_stamp(sha=PRIOR, hosts=('fixture', 'peer')):
+    """Live release shape: 8 passed cells plus 4 declared skips of one optional host, no skip binding."""
     stamp = forward_qualified(sha)
     smoke = stamp['fleet_smoke']
     smoke['cells'] = []
