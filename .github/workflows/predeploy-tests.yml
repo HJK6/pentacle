@@ -27,8 +27,15 @@ jobs:
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
+          # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
+          # priorities, fallbacks, suites and signing stay as the image configured them.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i -E 's#^http://[a-z0-9-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?([[:space:]])#http://azure.archive.ubuntu.com/ubuntu/\1#' /etc/apt/apt-mirrors.txt
+            echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
         fi
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
@@ -92,8 +99,15 @@ jobs:
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
+          # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
+          # priorities, fallbacks, suites and signing stay as the image configured them.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i -E 's#^http://[a-z0-9-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?([[:space:]])#http://azure.archive.ubuntu.com/ubuntu/\1#' /etc/apt/apt-mirrors.txt
+            echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
         fi
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
@@ -147,8 +161,15 @@ jobs:
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
+          # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
+          # priorities, fallbacks, suites and signing stay as the image configured them.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i -E 's#^http://[a-z0-9-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?([[:space:]])#http://azure.archive.ubuntu.com/ubuntu/\1#' /etc/apt/apt-mirrors.txt
+            echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
         fi
     - name: Require qualified tmux 3.4
       run: |
@@ -224,8 +245,15 @@ jobs:
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
+          # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
+          # priorities, fallbacks, suites and signing stay as the image configured them.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i -E 's#^http://[a-z0-9-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?([[:space:]])#http://azure.archive.ubuntu.com/ubuntu/\1#' /etc/apt/apt-mirrors.txt
+            echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
         fi
     - name: Require qualified tmux 3.4
       run: |
@@ -309,8 +337,15 @@ jobs:
         done
         command -v ffprobe >/dev/null || missing+=(ffmpeg)
         if ((${#missing[@]})); then
+          # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
+          # priorities, fallbacks, suites and signing stay as the image configured them.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i -E 's#^http://[a-z0-9-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?([[:space:]])#http://azure.archive.ubuntu.com/ubuntu/\1#' /etc/apt/apt-mirrors.txt
+            echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
         fi
     - name: Installed doctor and exact upgrade checklist
       run: |
