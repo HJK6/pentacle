@@ -1775,3 +1775,22 @@ native turn. See [provider accounts](../../docs/provider_accounts.md).
 
 Test and proof actors use the [test prompt settings](../../docs/test_prompt_profiles.md),
 exposed by `agent-orch profiles`; they pass explicit model/effort values.
+
+### Change a future advisor template model
+
+Read `agent-orch assistant authority`, then use the current session kinds and exact
+prior model with the current front desk identity:
+
+```sh
+agent-orch assistant authority --session-kinds spawn,session_close \
+  --model gpt-6.2-astra --expected-model gpt-6-astra
+```
+
+This authenticated compare-and-swap changes only the future session-template
+model, canonicalizes the target and preserves account, provider, effort and
+other fields. Kinds must remain the same and `--account` cannot be combined with
+a model update. Both model arguments are required; an absent template, stale
+prior model, invalid target or stale principal fails without applying the update.
+Read authority status again to verify the new `session_shape.model`. The bound
+advisor identity and running process are unchanged. No direct database access
+is needed.

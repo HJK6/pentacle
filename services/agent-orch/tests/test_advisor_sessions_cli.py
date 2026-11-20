@@ -25,3 +25,29 @@ def test_session_controls_are_one_authority_action(monkeypatch):
     assert captured["session_kinds"] == "spawn,session_close"
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["assistant", "authority", "--set", "sessions", "--session-kinds", "none"])
+
+
+def test_model_cas_is_serialized_only_on_session_controls(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(cli, "_assistant_call", lambda args, payload: captured.update(payload) or 0)
+    args = cli.build_parser().parse_args(["assistant", "authority", "--session-kinds", "spawn,session_close",
+        "--model", "gpt-6.2-astra", "--expected-model", "gpt-6-astra"])
+    assert args.func(args) == 0
+    assert captured["action"] == "session_kinds"
+    assert (captured["model"], captured["expected_model"]) == ("gpt-6.2-astra", "gpt-6-astra")
+    assert "account" not in captured
+
+
+@pytest.mark.parametrize("flags", [
+    ["--model", "gpt-6.2-astra"], ["--expected-model", "gpt-6-astra"],
+    ["--model", "gpt-6.2-astra", "--expected-model", "gpt-6-astra"],
+    ["--session-kinds", "spawn", "--model", "" , "--expected-model", "gpt-6-astra"],
+    ["--session-kinds", "spawn", "--model", "gpt-6.2-astra", "--expected-model", "gpt-6-astra", "--account", "other"],
+])
+def test_invalid_model_modifiers_never_reach_rpc(monkeypatch, flags):
+    def forbidden(*args):
+        raise AssertionError("invalid model modifiers reached RPC")
+    monkeypatch.setattr(cli, "_assistant_call", forbidden)
+    args = cli.build_parser().parse_args(["assistant", "authority", *flags])
+    with pytest.raises(ValueError):
+        args.func(args)
