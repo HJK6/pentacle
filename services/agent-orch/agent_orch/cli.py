@@ -2039,6 +2039,13 @@ def assistant_authority(args: argparse.Namespace) -> int:
         payload["brief_file"] = args.brief_file
     if args.session_kinds is not None:
         payload["session_kinds"] = args.session_kinds
+    model, expected_model = getattr(args, "model", None), getattr(args, "expected_model", None)
+    if model is not None or expected_model is not None:
+        if args.session_kinds is None or not all(isinstance(v, str) and v.strip() for v in (model, expected_model)):
+            raise ValueError("--model and --expected-model require each other and --session-kinds")
+        if args.account is not None:
+            raise ValueError("model update cannot change account")
+        payload.update(model=model, expected_model=expected_model)
     if args.account is not None:
         if args.session_kinds is None:
             raise ValueError("--account requires --session-kinds")
@@ -6101,6 +6108,8 @@ def build_parser() -> argparse.ArgumentParser:
     authority_change.add_argument("--retry", action="store_true")
     authority_change.add_argument("--session-kinds", metavar="KINDS_OR_NONE")
     assistant_authority_parser.add_argument("--account")
+    assistant_authority_parser.add_argument("--model", help="future advisor template model; requires --expected-model and unchanged --session-kinds")
+    assistant_authority_parser.add_argument("--expected-model", help="exact prior template model for compare-and-swap")
     assistant_authority_parser.add_argument("--brief-file")
     assistant_authority_parser.add_argument("--request-id")
     assistant_authority_parser.add_argument("--timeout", type=float, default=30.0)
