@@ -5516,7 +5516,7 @@ class Server:
     async def _on_contact_dispatch_proof(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Return only operator-dispatch proof to the current authenticated FD."""
         auth = msg.get("_auth_context") or {}
-        composite = self._composite_for("bart:assistant")
+        composite = self._composites().get(ASSISTANT_ALIAS)
         config = getattr(composite, "config", None)
         if not (auth.get("token_verified") and config is not None and getattr(composite, "enabled", False)
                 and getattr(config, "direct_primary", False)
@@ -5530,7 +5530,7 @@ class Server:
                 and isinstance(input_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", input_id)):
             raise VerbError("bad_request", "invalid dispatch identity")
         row = await self.store.find_assistant_composite_route_by_dispatch(dispatch)
-        if not (row and row.get("stream_id") == "bart:assistant" and row.get("input_identity") == input_id
+        if not (row and row.get("stream_id") == config.stream_id and row.get("input_identity") == input_id
                 and row.get("routing_state") == "resolved" and row.get("delivery_state") == "landed"
                 and row.get("route_target") == auth.get("stream_id")
                 and row.get("route_target_generation") == auth.get("session_generation")

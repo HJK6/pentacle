@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from server import Server, VerbError
+from server import ASSISTANT_ALIAS, Server, VerbError
 from test_system_notification_producer import Peer
 
 DISPATCH = "assistant-direct-" + "a" * 32
@@ -14,7 +14,7 @@ GEN = "test-generation"
 
 
 def fixture_row():
-    row = {"stream_id": "bart:assistant", "input_identity": INPUT,
+    row = {"stream_id": "fixture:assistant", "input_identity": INPUT,
             "routing_state": "resolved", "delivery_state": "landed",
             "route_target": FD, "route_target_generation": GEN,
             "actor_stream_id": "operator:12345678-1234-1234-1234-123456789abc",
@@ -32,8 +32,8 @@ def test_proof_requires_current_fd_and_matching_operator_dispatch():
         async def find(dispatch):
             return row if dispatch == DISPATCH else None
         server = Server(store=SimpleNamespace(find_assistant_composite_route_by_dispatch=find))
-        config = SimpleNamespace(direct_primary=True, direct_primary_stream_id=FD, direct_primary_generation=GEN)
-        server._composite_for = lambda stream: SimpleNamespace(enabled=True, config=config) if stream == "bart:assistant" else None
+        config = SimpleNamespace(stream_id="fixture:assistant", direct_primary=True, direct_primary_stream_id=FD, direct_primary_generation=GEN)
+        server._composites = lambda: {ASSISTANT_ALIAS: SimpleNamespace(enabled=True, config=config)}
         msg = {"dispatch_id": DISPATCH, "input_id": INPUT,
                "_auth_context": {"token_verified": True, "stream_id": FD, "session_generation": GEN}}
         result = await server._on_contact_dispatch_proof(msg)
@@ -82,8 +82,8 @@ def test_proof_connection_uses_seat_token_once_without_logging(tmp_path, caplog)
             async def find(dispatch):
                 return row if dispatch == DISPATCH else None
             store.find_assistant_composite_route_by_dispatch = find
-            config = SimpleNamespace(direct_primary=True, direct_primary_stream_id=FD, direct_primary_generation=generation)
-            server._composite_for = lambda stream: SimpleNamespace(enabled=True, config=config) if stream == "bart:assistant" else None
+            config = SimpleNamespace(stream_id="fixture:assistant", direct_primary=True, direct_primary_stream_id=FD, direct_primary_generation=generation)
+            server._composites = lambda: {ASSISTANT_ALIAS: SimpleNamespace(enabled=True, config=config)}
             server._register_client(peer)
             hello = {"type": "hello", "request_id": "hello", "client": "fast-contact-proof-v1",
                      "from_stream_id": FD, "stream_token": token, "subscribe": {"snapshot": False, "mode": "rpc"}}
