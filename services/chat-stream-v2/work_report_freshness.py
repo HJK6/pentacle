@@ -59,7 +59,7 @@ def _explicitly_assigned(row, spec):
 
 def _helper_witness(conn, reporter, spec, authenticated):
     from store_host_transfer import authority_state
-    from work_unattended import assigned_owners_conn
+    from work_attendance import attendance_conn
 
     def refuse(reason):
         raise ReportStatusRefusal("seat_only_ineligible", spec, reason)
@@ -68,11 +68,14 @@ def _helper_witness(conn, reporter, spec, authenticated):
     if (not authenticated or not spec or not seat_live(reporter) or not _explicitly_assigned(reporter, spec)
             or authority_state(conn, stream, reporter["session_generation"])):
         refuse("helper eligibility unverifiable")
-    owners = assigned_owners_conn(conn).get(spec, [])
+    attendance = attendance_conn(conn)
+    owners = attendance.owners.get(spec, [])
     if stream in owners:
         refuse("reporter owns this item")
+    if stream in attendance.uncertain.get(spec, ()) or reporter.get("provider") == "composite":
+        refuse("helper eligibility unverifiable")
     rows = conn.execute("""SELECT host,session_name,s.status,s.spec_id,s.spec_ids,s.assigned_spec_id,
-        s.spec_binding_provenance,s.presumed_dead_at,s.offline_since_ts,s.pane_status,
+        s.spec_binding_provenance,s.presumed_dead_at,s.offline_since_ts,s.pane_status,s.provider,
         g.generation AS session_generation FROM sessions s
         LEFT JOIN v2_session_generations g USING(host,session_name) WHERE s.status='open'
         ORDER BY s.host,s.session_name""")
@@ -80,7 +83,9 @@ def _helper_witness(conn, reporter, spec, authenticated):
     for raw in rows:
         peer = dict(raw)
         witness = f"{peer['host']}:{peer['session_name']}"
-        if witness == stream or not seat_live(peer) or not (witness in owners or _explicitly_assigned(peer, spec)):
+        if witness == stream or peer.get("provider") == "composite" or not seat_live(peer):
+            continue
+        if not (witness in owners or _explicitly_assigned(peer, spec)):
             continue
         if authority_state(conn, witness, peer["session_generation"]):
             continue
