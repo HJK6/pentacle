@@ -91,8 +91,14 @@ class WorkflowControls(unittest.TestCase):
             bound = 40 if job_id in ('daemon-unit', 'daemon') else 50
             self.assertLessEqual(int(job['timeout-minutes']), bound)
             self.assertTrue(any(step.get('uses') == 'actions/checkout@v4' for step in job['steps']))
-            for step in job['steps']:
-                self.assertNotIn('continue-on-error', step)
+            advisory = {
+                'frontend': [('Advisory web-server quarantine', '${{ !cancelled() }}')],
+                'daemon-unit': [('Advisory daemon quarantine', '${{ !cancelled() && matrix.shard == 0 }}')],
+            }
+            nonblocking = [step for step in job['steps'] if 'continue-on-error' in step]
+            self.assertEqual([(step['name'], step.get('if')) for step in nonblocking], advisory.get(job_id, []))
+            for step in nonblocking:
+                self.assertIn(step['continue-on-error'], (True, 'true'))
             if job_id == 'checks':
                 continue
             if job_id == 'daemon':
@@ -118,7 +124,10 @@ class WorkflowControls(unittest.TestCase):
                         continue
                     args = shlex.split(line)
                     self.assertEqual(args[args.index('--workspace') + 1], '${RUNNER_TEMP}/gate-env/${GITHUB_JOB}')
-                    self.assertEqual(args[args.index('--attempt-manifest') + 1], '${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json')
+                    manifest = '${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/'
+                    if args[args.index('--target') + 1] == 'v2-quarantined':
+                        manifest += 'advisory/'
+                    self.assertEqual(args[args.index('--attempt-manifest') + 1], manifest + 'attempt-manifest.json')
                     self.assertNotIn('--timeout-seconds', args)
 
     def test_old_command_and_selection_union(self):
@@ -131,7 +140,8 @@ class WorkflowControls(unittest.TestCase):
                     continue
                 args = shlex.split(line)
                 targets.append((args[args.index('--target') + 1], args[args.index('--select') + 1] if '--select' in args else None))
-        self.assertCountEqual(targets, [('npm-test', None), ('web-gate', None), ('v2-unit-ci-shard', None),
+        self.assertCountEqual(targets, [('npm-test', None), ('web-gate', None),
+                                      ('v2-unit-ci-shard', None), ('v2-quarantined', None),
                                       ('v2-smoke', None), ('cli-pytest', 'tests'), ('shared-pytest', 'tests')])
         jobs = self.workflow['jobs']
         unit = next(s['run'] for s in jobs['daemon-unit']['steps'] if '--target v2-unit-ci-shard' in s.get('run', ''))

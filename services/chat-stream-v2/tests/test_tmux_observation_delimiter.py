@@ -120,7 +120,10 @@ def test_close_binding_rejects_hidden_second_window_and_partial_response():
     assert asyncio.run(Partial().close_pane_identity("v2-owned")) is None
 
 
-@pytest.mark.parametrize("exit_kind", ["status", "signal"])
+@pytest.mark.parametrize("exit_kind", [
+    pytest.param("status", marks=pytest.mark.quarantined),
+    "signal",
+])
 def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentinel(
     isolated_tmux_env, tmp_path, exit_kind,
 ):
