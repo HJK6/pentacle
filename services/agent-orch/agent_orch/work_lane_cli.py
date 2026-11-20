@@ -159,6 +159,7 @@ def _complete_members(args, request, response):
             return first  # Preserve complete legacy response shapes verbatim.
         revision = first.get("detail_revision")
         members = list(first.get("members") or [])
+        explicit_positions = dict(first.get("explicit_member_positions") or {})
         cursor = first.get("members_next")
         seen = {member["spec_id"] for member in members}
         if len(seen) != len(members):
@@ -178,6 +179,7 @@ def _complete_members(args, request, response):
                 restarted = True
                 response = _call(args, request)
                 break
+            explicit_positions.update(page.get("explicit_member_positions") or {})
             for member in page.get("members") or []:
                 if member["spec_id"] in seen:
                     raise ValueError("lane detail duplicated a member; retry the complete read")
@@ -193,10 +195,9 @@ def _complete_members(args, request, response):
                 result["projection"] = {**first["projection"], "members": members, "members_next": None}
             if isinstance(first.get("lane"), dict):
                 result["lane"] = {**first["lane"], "members": [member["spec_id"] for member in members]}
-                if all("explicit_position" in member for member in members):
-                    ordered = sorted((m["explicit_position"], m["spec_id"]) for m in members
-                                     if m["explicit_position"] is not None)
-                    result["lane"]["explicit_members"] = [identity for _, identity in ordered]
+                if "explicit_member_positions" in first:
+                    result["explicit_member_positions"] = explicit_positions
+                    result["lane"]["explicit_members"] = sorted(explicit_positions, key=explicit_positions.__getitem__)
             return result
 
 

@@ -302,13 +302,11 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
     trail_events, unblocks = shown.get("_trail_events") or [], shown.get("_unblocks") or {}
     # The cursor sorts by ID. Keep stored positions for ordered explicit-list repairs.
     explicit_positions = {spec: i for i, spec in enumerate(member_ids(shown["lane"]))}
-    page = [{**member, "explicit_position": explicit_positions.get(member["spec_id"]),
-             "unblocks": unblocks.get(member["spec_id"], [])[:4],
+    page = [{**member, "unblocks": unblocks.get(member["spec_id"], [])[:4],
              "recent": progress_trail(trail_events, {member["spec_id"]})} for member in page]
     # Keep the legacy projection page, but serialize new source prose/metadata
     # only in the canonical top-level detail members, never twice per response.
-    detail_only = detail_member_keys() | {"explicit_position"}
-    legacy_page = [{key: value for key, value in member.items() if key not in detail_only} for member in page]
+    legacy_page = [{key: value for key, value in member.items() if key not in detail_member_keys()} for member in page]
     projection = {**{key: value for key, value in projected.items() if not key.startswith("_")}, "members": legacy_page, "members_total": total,
                   "members_next": cursor,
                   "recent": progress_trail(trail_events, {member["spec_id"] for member in projected["members"]})}
@@ -336,6 +334,8 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
     response = {"type": "work_lanes.show.ok", "lane": lane, "projection": projection,
                 "events": shown["events"], "updates": shown["updates"], "members": page,
                 "members_total": total, "members_next": cursor,
+                "explicit_member_positions": {m["spec_id"]: explicit_positions[m["spec_id"]] for m in page
+                                              if m["spec_id"] in explicit_positions},
                 "detail_revision": projected.get("detail_revision"),
                 "work_index": shown["_work_index"]}
     # Use the actual normal response encoding's conservative ASCII size too:

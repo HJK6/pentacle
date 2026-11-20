@@ -40,8 +40,9 @@ def test_ordered_explicit_members_span_pages_and_restart_after_reorder(monkeypat
     def ordered(ids, version, positions, cursor=None):
         response = page(ids, total=3, cursor=cursor)
         response["lane"]["version"] = version
-        for member, position in zip(response["members"], positions):
-            member["explicit_position"] = position
+        response["explicit_member_positions"] = {member["spec_id"]: position
+                                                 for member, position in zip(response["members"], positions)
+                                                 if position is not None}
         return response
 
     first = ordered([0, 1], 1, [0, 1], "spec_demo__n01")

@@ -126,7 +126,7 @@ def test_missing_members_and_source_repair(tmp_path):
             shown = await cli("show", lid, "--members", "--json")
             explicit = shown["lane"]["explicit_members"]
             assert explicit == ["spec_demo__keep", typo]
-            ids = explicit + [m["spec_id"] for m in shown["members"] if m["explicit_position"] is None]
+            ids = explicit + [spec for spec in shown["lane"]["members"] if spec not in explicit]
             replace = mutation("set-members", lid, 1, "correct-id", "--reason", "Verified canonical banner ID")
             for spec in ids:
                 replace.extend(["--member", BANNER_ID if spec == typo else spec])
