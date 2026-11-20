@@ -469,8 +469,13 @@ class AssistantLaneRulings:
         self._ensure_worker()
         return {"type": "assistant.authority.ok", **result}
 
-    async def configure_sessions(self, kinds, *, actor_stream_id, actor_generation, account=None):
+    async def configure_sessions(self, kinds, *, actor_stream_id, actor_generation, account=None,
+                                 model=None, expected_model=None):
         from advisor_sessions import KINDS_KEY, SHAPE_KEY, json_record, owns_conn
+        from _shared.spawn_profiles import SpawnProfileError, resolve_spawn, require_spawnable
+        modifying_model = model is not None or expected_model is not None
+        if modifying_model and (not all(isinstance(v, str) and v.strip() for v in (model, expected_model)) or account is not None):
+            raise ValueError("assistant_session_model_invalid")
         if not isinstance(kinds, str):
             raise ValueError("assistant_session_kinds_invalid")
         selected = set() if kinds == "none" else set(kinds.split(","))
@@ -488,11 +493,24 @@ class AssistantLaneRulings:
                 if not principal or (principal["stream_id"], principal["session_generation"]) != (actor_stream_id, actor_generation):
                     raise ValueError("assistant_authority_config_unauthorized")
                 old = set(json_record(conn, KINDS_KEY, []))
+                if modifying_model and selected != old:
+                    raise ValueError("assistant_session_model_kinds_conflict")
                 removed = old - selected
                 binding = self.binding_conn(conn)
                 if removed and binding["state"] != "ready":
                     raise ValueError("assistant_authority_seat_required")
                 shape = json_record(conn, SHAPE_KEY, None)
+                if modifying_model:
+                    if not isinstance(shape, dict):
+                        raise ValueError("assistant_session_shape_required")
+                    if shape.get("model") != expected_model:
+                        raise ValueError("assistant_session_model_conflict")
+                    try:
+                        resolved = resolve_spawn(provider=shape.get("provider"), model=model, effort=shape.get("effort"))
+                        require_spawnable(resolved["provider"], resolved["model"])
+                    except SpawnProfileError as exc:
+                        raise ValueError(exc.code) from exc
+                    shape["model"] = resolved["model"]
                 if shape is None and selected:
                     original = json_record(conn, "assistant.authority.shape", {})
                     shape = {k: original.get(k) for k in ("provider", "model", "effort")}
@@ -504,7 +522,7 @@ class AssistantLaneRulings:
                         raise ValueError("assistant_session_shape_required")
                     shape["account"] = account
                 return removed, binding, shape
-            removed, binding, shape = await self.store.submit(plan)
+            removed, binding, _ = await self.store.submit(plan)
             rows = await self.store.submit(lambda c: [dict(r) for r in c.execute(
                 "SELECT * FROM v2_assistant_lane_rulings WHERE state='pending'")
                 if r["action"] in removed and (not r["authority_stream_id"] or owns_conn(c, r))])
@@ -514,12 +532,12 @@ class AssistantLaneRulings:
             def apply(conn):
                 with conn:
                     # Validate actor and ready generation again after async cleanup.
-                    _, current, _ = plan(conn)
+                    _, current, shape_now = plan(conn)
                     if removed and (current["stream_id"], current["generation"]) != (binding["stream_id"], binding["generation"]):
                         raise ValueError("assistant_authority_target_generation_changed")
                     conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", (KINDS_KEY, _canonical(sorted(selected))))
-                    if shape is not None:
-                        conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", (SHAPE_KEY, _canonical(shape)))
+                    if shape_now is not None:
+                        conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", (SHAPE_KEY, _canonical(shape_now)))
                     for row in rows:
                         current = conn.execute("SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?",
                                                (row["ruling_request_id"],)).fetchone()
