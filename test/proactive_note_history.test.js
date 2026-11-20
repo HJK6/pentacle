@@ -7,7 +7,7 @@ const esbuild = require('esbuild');
 const { installRenderer, STREAM } = require('./helpers/renderer_chat');
 
 const session = {
-  stream_id: STREAM, host: 'hostc', session_name: 'claude-hostc-race',
+  stream_id: STREAM, host: STREAM.split(':')[0], session_name: STREAM.split(':')[1],
   session_kind: 'assistant_composite', provider: 'composite', visibility: 'default',
   capabilities: { pane: false, terminal: false, assistant_composite_v1: true },
 };
@@ -38,7 +38,7 @@ test('actual composite slot fetches on cold reload and reconnect and merges over
     const store = h.dom.window.PentacleChatStore;
     vm.runInContext(`
       ensureSlotChatSurface(0);
-      state.slots[0] = { name: 'claude-hostc-race', displayName: 'Assistant', hostId: 'local' };
+      state.slots[0] = { name: ${JSON.stringify(session.session_name)}, displayName: 'Assistant', hostId: 'local' };
       state.slotViewModes[0] = 'chat';
       state.chatStream.sessions = [${JSON.stringify(session)}];
     `, h.context);
