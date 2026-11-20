@@ -111,7 +111,7 @@ class FakeSpawn:
             "host": msg.get("host") or _local_host,
             "role": msg.get("role"),
             "resolved_provider": msg.get("provider") or "codex",
-            "resolved_model": msg.get("model") or "gpt-5.6-sol",
+            "resolved_model": msg.get("model") or "gpt-6.2-sol",
             "resolved_effort": msg.get("effort") or "high",
             "spec_binding": binding,
             "admission_name": admission_name,
@@ -268,7 +268,7 @@ def harness(
 
 def schedule_insert(surface: WindowSchedule, actor: str = "hosta:requester", **values):
     payload = {"objective": "Exercise scheduled spawn", "fires_at_utc": future_time(), "target_host": "hosta", "provider": "codex",
-               "model": "gpt-5.6-sol", "effort": "high", "spec_ids": [SPEC]}
+               "model": "gpt-6.2-sol", "effort": "high", "spec_ids": [SPEC]}
     payload.update(values)
     return run(surface.schedule_insert(message("schedule.insert", actor, **payload)))
 
@@ -468,7 +468,7 @@ def test_schedule_service_actor_persists_only_canonical_admission_binding(tmp_pa
     try:
         payload = {
             "objective": "Exercise scheduled spawn", "fires_at_utc": future_time(), "target_host": "hosta", "provider": "codex",
-            "model": "gpt-5.6-sol", "effort": "high", "spec_ids": [alias],
+            "model": "gpt-6.2-sol", "effort": "high", "spec_ids": [alias],
             "spec_binding_provenance": [{"kind": "caller_raw", "spec_id": alias}],
         }
         inserted = run(surface.schedule_insert(message(
@@ -498,8 +498,8 @@ def test_schedule_insert_reschedule_cancel_run_and_replay(tmp_path) -> None:
         assert schedule["state"] == "pending" and schedule["generation"] == 1
         assert schedule["created_by_stream_id"] == "hosta:requester"
         assert len(spawn.admissions) == 1
-        assert schedule["requested_model"] == "gpt-5.6-sol"
-        assert schedule["resolved_model"] == "gpt-5.6-sol"
+        assert schedule["requested_model"] == "gpt-6.2-sol"
+        assert schedule["resolved_model"] == "gpt-6.2-sol"
 
         reschedule = message(
             "schedule.reschedule", "hosta:requester", schedule_id=schedule["schedule_id"],
@@ -737,7 +737,7 @@ def test_scheduled_handoff_uses_admission_owner_generation_not_reopened_owner(tm
     ("create_values", "row_key", "spawn_key", "expected"),
     [
         ({"provider": "claude"}, "provider", "provider", "claude"),
-        ({"model": "gpt-5.6-sol"}, "model", "model", "gpt-5.6-sol"),
+        ({"model": "gpt-6.2-sol"}, "model", "model", "gpt-6.2-sol"),
         ({"effort": "xhigh"}, "effort", "effort", "xhigh"),
         ({"target_host": "hostb"}, "target_host", "host", "hostb"),
         ({"role": "worker"}, "role", "role", "worker"),

@@ -402,7 +402,8 @@ class AuthorityRestore:
                     return 'attempt_failed'
                 self.sent.add(key)
                 try:
-                    await self.server.spawnctl.spawn(payload, self.server.local_host)
+                    await self.server.spawnctl.spawn(payload, self.server.local_host,
+                        continuation=(payload["provider"], payload["model"], payload["effort"]))
                 except Exception as exc:
                     log.exception('authority restore spawn failed; reconcile durable state')
                     if getattr(exc, 'code', None):

@@ -78,7 +78,7 @@ def test_preflight_packet_has_concrete_frozen_redacted_intent(tmp_path, monkeypa
             prompt = baseline + task if rule != "first_1600" else "Concrete plain task " * 150
             msg = {"type": "spawn", "host": HOST, "session_name": "packet", "request_id": "packet",
                    "idempotency_key": "packet", "spec_id": "spec_fixture__ingress", "role": "planner",
-                   "provider": "codex", "model": "gpt-6.1-sol", "effort": "high",
+                   "provider": "codex", "model": "gpt-6.2-sol", "effort": "high",
                    "objective": "Implement preflight checks", "acceptance": "No malformed packet wakes the advisor",
                    "initial_prompt": prompt, "risks": "Caller supplied risk", "exclusions": "No policy rewrite"}
             if rule == "composer_boundary":

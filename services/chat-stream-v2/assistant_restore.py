@@ -673,7 +673,8 @@ class AssistantRestore:
         if never_admitted and spawn_key not in self._sent:
             self._sent.add(spawn_key)
             try:
-                reply = await self.spawnctl.spawn(self._spawn_message(episode), self.local_host)
+                reply = await self.spawnctl.spawn(self._spawn_message(episode), self.local_host,
+                    continuation=(episode["provider"], episode["model"], episode["effort"]))
             except Exception as exc:  # noqa: BLE001 - classified below
                 code = getattr(exc, "code", None)
                 if code:

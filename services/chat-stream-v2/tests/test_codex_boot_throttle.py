@@ -172,7 +172,7 @@ def test_boot_limits_are_catalogued_and_positive(monkeypatch: pytest.MonkeyPatch
         "spawn_queue_timeout_seconds": 180,
         "providers": {
             "claude": {"model": "claude-opus-4-8", "effort": "high"},
-            "codex": {"model": "gpt-5.6-sol", "effort": "high"},
+            "codex": {"model": "gpt-6.2-sol", "effort": "high"},
         },
         "host_overrides": {
             "hostb": {"max_concurrent_boots": 2},
@@ -292,7 +292,7 @@ def test_spawn_returns_a_durable_queue_handle(
 
             async def resolve(*_args: object, **_kwargs: object):
                 return "provider", {"resolved_launch_tuple": {"provider": "codex"}}, {
-                    "provider": "codex", "effective_model": "gpt-5.6-sol",
+                    "provider": "codex", "effective_model": "gpt-6.2-sol",
                     "effective_effort": "high",
                 }
 
@@ -379,7 +379,7 @@ def test_preserved_boot_binding_indeterminate_exit_releases_the_permit(
 
             async def resolve(*_args: object, **_kwargs: object):
                 return "provider", {"resolved_launch_tuple": {"provider": "codex"}}, {
-                    "provider": "codex", "effective_model": "gpt-5.6-sol",
+                    "provider": "codex", "effective_model": "gpt-6.2-sol",
                     "effective_effort": "high",
                 }
 
@@ -447,7 +447,7 @@ def test_queued_spawn_timeout_is_terminal_and_releases_its_reservation(
 
             async def resolve(*_args: object, **_kwargs: object):
                 return "provider", {"resolved_launch_tuple": {"provider": "codex"}}, {
-                    "provider": "codex", "effective_model": "gpt-5.6-sol",
+                    "provider": "codex", "effective_model": "gpt-6.2-sol",
                     "effective_effort": "high",
                 }
 

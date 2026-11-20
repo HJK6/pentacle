@@ -153,7 +153,7 @@ def test_transfer_preparation_carries_recorded_alias_before_custody(tmp_path, mo
             runtime = AccountRuntime(store, server.sessions, policy={'enabled': True})
             seen = []
             class Target:
-                async def spawn(self, message, _host):
+                async def spawn(self, message, _host, *, continuation=None):
                     await runtime.authorize_choice(message)
                     seen.append(message)
                     assert message['account'] == 'spare'

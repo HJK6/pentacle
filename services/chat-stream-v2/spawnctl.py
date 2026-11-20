@@ -93,6 +93,7 @@ from _shared.spawn_profiles import (  # noqa: E402
     SpawnProfileError,
     boot_limits,
     resolve_handoff,
+    require_spawnable,
     resolve_spawn,
     validate_v2,
 )
@@ -1694,7 +1695,27 @@ class SpawnCtl:
         reply["do_not_respawn"] = True
         return reply
 
-    async def spawn(self, msg: dict[str, Any], local_host: str) -> dict[str, Any]:
+    def _check_fresh_model(self, msg: dict[str, Any], host: str, *, continuation: tuple[str, str, str] | None = None) -> None:
+        """Only trusted Python callers supply a tuple from their durable record.
+
+        No payload field or service-auth label grants continuation. Handoffs are
+        checked separately against their stored source by _resolve_handoff.
+        """
+        provider, model = msg.get("provider"), msg.get("model")
+        try:
+            if continuation is not None:
+                expected = resolve_spawn(provider=continuation[0], model=continuation[1],
+                                         effort=continuation[2], host=host)
+                actual = resolve_spawn(provider=provider, model=model, effort=msg.get("effort"), host=host)
+                keys = ("provider", "model", "effort")
+                if any(expected[key] != actual[key] for key in keys):
+                    raise VerbError("continuation_tuple_mismatch", "continuation must preserve the stored provider/model/effort")
+            elif not msg.get("handoff") and provider and model:
+                require_spawnable(provider, model)
+        except SpawnProfileError as exc:
+            raise VerbError(exc.code, str(exc)) from exc
+
+    async def spawn(self, msg: dict[str, Any], local_host: str, *, continuation: tuple[str, str, str] | None = None) -> dict[str, Any]:
         """Keep the durable spawn obligation running after request cancellation."""
         from provider_accounts import AccountError, reject_overrides
         try:
@@ -1706,6 +1727,7 @@ class SpawnCtl:
             # This existing path verifies the exact stored receipt and cannot
             # launch, mutate a default or revive the retired caller's authority.
             return await self._replay_retired_handoff(msg, local_host, retired)
+        self._check_fresh_model(msg, str(msg.get("host") or local_host), continuation=continuation)
         if "account" in msg:
             try:
                 runtime = getattr(self, "account_runtime", None)
@@ -1889,6 +1911,7 @@ class SpawnCtl:
         brief = await self._brief_from_message(msg)
         if brief:
             tmux_transport.assert_injectable(brief, "brief")
+        self._check_fresh_model(msg, host)
         binding = await self._resolve_spec_binding(msg, host, admission_name)
         await self._lane_admission(msg, binding, msg.get("role"))
         provider = str(msg.get("provider") or "").strip()
