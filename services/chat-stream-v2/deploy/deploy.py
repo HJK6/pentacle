@@ -1606,7 +1606,7 @@ def _scan_slow_consumer_window(
         )
         return {**scan, "attribution": attribution, "scan_complete": True, "inputs": inputs,
                 "selected_inputs": [item for group in selected for item in group],
-                "old_generation": {"basis": "pre-marker range: outgoing tail plus incoming boot logs",
+                "old_generation": {"basis": "retained ranges outside the activated generation",
                                    "inputs": [item for group in preceding for item in group],
                                    "classifier": prior_scan},
                 "bytes_read": sum(i["bytes_read"] for i in inputs),
@@ -1876,8 +1876,9 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
             args = tuple(arg for entry in accounts for arg in ("--account", entry))
             if "test_profile" in stamp:
                 frozen = _write_test_profile(repo, service, stamp["test_profile"])
-                if _release_test_profile(repo, service, runner) != stamp["test_profile"]:
-                    raise DeployError("test profile/settings drift before canary")
+                current_profile = _release_test_profile(repo, service, runner)
+                if current_profile["providers"] != stamp["test_profile"]["providers"]:
+                    raise DeployError("test_prompt profile drift before canary")
                 args += ("--test-profile-snapshot", str(frozen))
             smoke = runner(("/usr/bin/env", "-u", "PENTACLE_MACHINES_JSON", "-u", "PENTACLE_SMOKE_HOSTS",
                 "-u", "PENTACLE_SMOKE_ACCOUNTS", "-u", "PENTACLE_SMOKE_EXCLUDED_HOSTS",

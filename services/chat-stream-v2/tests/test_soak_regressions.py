@@ -55,6 +55,52 @@ def _run(argv, cwd):
     assert json.loads((tmp_path / 'evidence/receipt.json').read_text())['result'] == 'PASS'
 
 
+@pytest.mark.parametrize(('change', 'expected'), [
+    ('local-settings', 'passed'),
+    ('test-prompt', 'failed'),
+])
+def test_post_release_profile_drift_tracks_only_test_prompt_content(tmp_path, monkeypatch, change, expected):
+    from _shared.spawn_profiles import MODELS, _profile_digest
+
+    providers = {name: None for name in MODELS}
+    stamped = {
+        'schema': 'pentacle.test-profile.v1',
+        'providers': providers,
+        'profile_sha256': _profile_digest(providers),
+        'settings_sha256': {'spawn_defaults.json': '0' * 64, 'spawn_defaults.local.json': '1' * 64},
+        'resolver_sha256': '2' * 64,
+    }
+    live = json.loads(json.dumps(stamped))
+    if change == 'local-settings':
+        live['settings_sha256']['spawn_defaults.local.json'] = '3' * 64
+    else:
+        live['providers']['codex'] = {'model': 'gpt-6-luna', 'effort': 'low'}
+        live['profile_sha256'] = _profile_digest(live['providers'])
+
+    d = deploy_mod
+    monkeypatch.setattr(d, '_launchd_state', lambda *_: d.LaunchdState(loaded=True, pid=222))
+    monkeypatch.setattr(d, '_capture_log_offsets', lambda *_, **__: {})
+    monkeypatch.setattr(d, '_daemon_log_paths', lambda *_: ())
+    monkeypatch.setattr(d, '_release_machines_file', lambda *_: str(tmp_path / 'machines.json'))
+    monkeypatch.setattr(d, '_declared_release_scope', lambda *_: [])
+    monkeypatch.setattr(d, '_release_test_profile', lambda *_, **__: live)
+    monkeypatch.setattr(d, '_fleet_smoke_verdict', lambda *_, **__: {'outcome': 'passed'})
+    monkeypatch.setattr(d, '_process_start', lambda *_: 'fixture-start')
+    monkeypatch.setattr(d, '_scan_slow_consumer_window', lambda *_, **__: {'outcome': 'passed'})
+    monkeypatch.setattr(d, '_smoke_payload', lambda *_: {'outcome': 'passed'})
+    monkeypatch.setattr(d, '_notify_failed_checks', lambda *_: None)
+    runner = lambda argv, cwd: subprocess.CompletedProcess(argv, 0, '{}', '')
+
+    checks = d.run_post_release_checks(
+        d.SERVICES['chat-streamd-v2'], tmp_path, 'a' * 40,
+        {'test_profile': stamped}, runner=runner,
+    )
+
+    assert checks['fleet_smoke']['outcome'] == expected
+    if change == 'test-prompt':
+        assert 'test_prompt profile drift before canary' in checks['fleet_smoke']['detail']
+
+
 def test_receipt_keepalive_lapses_are_excluded():
     lines = (SERVICE / 'tests/fixtures/soak_keepalive_closes.log').read_text().splitlines()
     scan = deploy_mod.classify_slow_consumer_lines(lines)

@@ -40,6 +40,9 @@ settings/resolver identity. `--test-profile-snapshot PATH` accepts that derived
 artifact in the fleet runner's dry and live modes. The deployer verifies it;
 each forward cell checks the live catalog and requested/effective tuple before
 cleanup. Missing/invalid target settings and drift still refuse before inference.
+Nightly post-release drift checks compare the provider pairs under
+`profiles.test_prompt`; settings and resolver hashes remain snapshot provenance,
+so unrelated local overlay edits do not invalidate an existing deployment stamp.
 
 Daemon rollback sends no model input. A known-good prior needs its accepted
 production forward qualification and exact source gate, but no test-profile API,
