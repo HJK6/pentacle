@@ -17,6 +17,9 @@ from _shared.work_observations import advance_observation, timestamp, unresolved
 from _shared.work_goals import advance_goals, detail_revision, goal_id
 
 DDL = (
+    "CREATE TABLE IF NOT EXISTS v2_work_attendance_causes (spec_id TEXT NOT NULL,gate TEXT NOT NULL,"
+    "stream_id TEXT,generation TEXT,seat_role TEXT,cause TEXT NOT NULL,observed_at TEXT NOT NULL,"
+    "PRIMARY KEY(spec_id,gate))",
     "CREATE TABLE IF NOT EXISTS v2_work_item_observations (spec_id TEXT PRIMARY KEY, record_json TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_work_index_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), state_json TEXT NOT NULL)",
 )

@@ -1082,9 +1082,10 @@ class Sessions:
         self, host: str, session_name: str, role: str, *,
         auth_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        available = await self.refresh_attendance() if role not in {"lead", "nexus"} else True
         async with self._graph_lock:
             return await _finish_despite_cancel(
-                self._set_role_locked(host, session_name, role, auth_context=auth_context))
+                self._set_role_locked(host, session_name, role, auth_context=auth_context, observation_available=available))
 
     async def _set_role_locked(
         self,
@@ -1092,6 +1093,7 @@ class Sessions:
         session_name: str,
         role: str,
         *,
+        observation_available=True,
         auth_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Set a role on one LIVE seat (`role set`).
@@ -1168,7 +1170,7 @@ class Sessions:
 
         try:
             updated = await self.store.update_session(
-                host, session_name, role=role,
+                host, session_name, role=role, attendance_gate="role_set", attendance_available=observation_available,
                 expected_spec_source=spec_binding_source(target),
             )
         except SpecInputsUnavailable:
@@ -1465,45 +1467,22 @@ class Sessions:
             restored = self._cache(row)
             return {"restored": True, "already_open": False, "liveness": "alive", "session": restored}
 
-    async def _guard_lead_disposition(self, host, name, generation, close_kind, *, operator_confirm=False):
-        if close_kind not in {"session_close", "manager_close", "idle_reap"} or not generation:
-            return True, True
-        # Confirmed offline retirement preserves recovery custody.
-        if self.hosts is not None and not self.hosts.is_local(host) and (operator_confirm or close_kind == "manager_close"):
-            if not await self.hosts.probe_once(host):
-                return True, True
-        stream = f"{host}:{name}"
-        try:
-            context = await asyncio.wait_for(
-                self.store.lead_close_context(stream, generation, pending_only=False),
-                timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
-        except Exception:
-            return False, False
-        if context is None:
-            return False, True
-        if close_kind == "manager_close":
-            try:
-                tmux = self.hosts.tmux_for(host) if self.hosts is not None and not self.hosts.is_local(host) else self.tmux
-                probe = getattr(tmux, "session_state", None)
-                if callable(probe):
-                    state = await asyncio.wait_for(probe(name), timeout=5)
-                elif tmux and await asyncio.wait_for(tmux.has_session(name), timeout=5):
-                    state = "alive"
-                else:
-                    state = "unknown"
-            except Exception:
-                state = "unknown"
-            if state == "gone":
-                return True, True  # Only confirmed absence makes this an involuntary close.
-        observation_available = True
+    async def _guard_lead_disposition(self, row, close_kind):
+        if close_kind not in {"session_close", "manager_close", "idle_reap"}:
+            return True
+        if not (row.get("assigned_spec_id") or row.get("spec_ids") or row.get("spec_id")):
+            return False
+        return await self.refresh_attendance()
+
+    async def refresh_attendance(self):
         refresh = getattr(self, "refresh_work_for_close", None)
-        if refresh is not None:
-            try:
-                await asyncio.wait_for(refresh(), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
-            except Exception:
-                # An unavailable refresh is reported as unknown.
-                observation_available = False
-        return False, observation_available
+        if refresh is None:
+            return True
+        try:
+            await asyncio.wait_for(refresh(), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
+        except Exception:
+            return False
+        return True
 
     async def _check_lead_disposition(self, stream, generation, *, observation_available=True):
         try:
@@ -1563,7 +1542,7 @@ class Sessions:
             self.assistant.guard_close(row, close_kind)
             if expected_generation is None and row is not None:
                 expected_generation = self._row_generation(row)
-            recovery, observation_available = False, True
+            observation_available = True
             warnings = []
             if row and row.get("status") == "open" and (
                 expected_generation is None or self._row_generation(row) == expected_generation
@@ -1575,12 +1554,8 @@ class Sessions:
                     # force request. Fresh busy proof distinguishes recovery
                     # from ordinary disposition; unknown capture grants neither.
                     await self._probe_capture_liveness(host, session_name, row)
-                    recovery = self._capture_liveness(sid, row) == "idle" and row.get("working") is True
-                    operator_override = recovery
-                if not recovery:
-                    recovery, observation_available = await self._guard_lead_disposition(
-                        host, session_name, self._row_generation(row), close_kind,
-                        operator_confirm=operator_confirm)
+                    operator_override = self._capture_liveness(sid, row) == "idle" and row.get("working") is True
+                observation_available = await self._guard_lead_disposition(row, close_kind)
             if row and row.get("status") == "open" and row.get("role") in {"lead", "nexus", "planner"}:
                 try:
                     report = await asyncio.wait_for(self.store.find_report(
@@ -1604,12 +1579,24 @@ class Sessions:
                         observation_available=observation_available))
                 if row is None or row.get("status") == "open":
                     await self._guard_child_preservation(sid)
+                async def check_attendance(recovery=None):
+                    if not row or close_kind not in {"session_close", "manager_close"}:
+                        return
+                    from work_attendance import departure_conn
+                    deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
+                    def check(conn):
+                        with conn:
+                            return departure_conn(conn, sid, self._row_generation(row), None, close_kind,
+                                observation_available=observation_available, recovery=recovery, deadline=deadline)
+                    warnings.extend(await self.store.submit(check))
+
                 result = await self._close_locked(
                     host, session_name, reason,
                     expected_generation=expected_generation, close_kind=close_kind,
                     requires_idle=requires_idle, requires_hidden=requires_hidden,
                     operator_override=operator_override,
                     operator_confirm=operator_confirm,
+                    attendance_guard=check_attendance,
                     defer_if_working=defer_if_working, attribution=attribution,
                 )
                 if warnings:
@@ -1647,6 +1634,7 @@ class Sessions:
         operator_override: bool = False,
         operator_confirm: bool = False,
         defer_if_working: bool = False,
+        attendance_guard=None,
         attribution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Bounded, idempotent close with separate durable process cleanup.
@@ -1677,6 +1665,7 @@ class Sessions:
                 requires_idle=requires_idle, requires_hidden=requires_hidden,
                 operator_override=operator_override,
                 operator_confirm=operator_confirm,
+                attendance_guard=attendance_guard,
                 defer_if_working=defer_if_working, attribution=attribution,
             )
         self.assert_local(host, "close")
@@ -1747,6 +1736,8 @@ class Sessions:
         # No pane at entry is not a process-tree readback. Keep the close
         # unknown so descendants cannot be silently lost behind `reaped, []`.
         reap: dict[str, Any] = {"reap_status": "unknown", "survivors": []}
+        if attendance_guard:
+            await attendance_guard(None if pane_live else "confirmed_death" if manager_gone else "pane_unverified")
         if pane_live:
             state, pane_pid, reap = await self._terminate_pane(session_name)
             if state == "failed":
@@ -2097,6 +2088,7 @@ class Sessions:
         operator_override: bool = False,
         operator_confirm: bool = False,
         defer_if_working: bool = False,
+        attendance_guard=None,
         attribution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Close a PEER row over SSH, degrading honestly.
@@ -2152,6 +2144,8 @@ class Sessions:
         manager_gone = False
         if manager_close:
             if not await self.hosts.probe_once(host):
+                if attendance_guard:
+                    await attendance_guard("offline_retirement")
                 return await self._close_offline_locked(row, reason, expected_generation, attribution)
             try:
                 state = await self.hosts.tmux_for(host).session_state(session_name)
@@ -2181,12 +2175,15 @@ class Sessions:
         # below is still the correctness guard for a host that drops mid-close.
         if not manager_close and not await self.hosts.probe_once(host):
             if operator_confirm and row is not None:
+                if attendance_guard:
+                    await attendance_guard("offline_retirement")
                 return await self._close_offline_locked(row, reason, expected_generation, attribution)
             return self._close_failed(row, "ssh_unreachable")
         tmux = self.hosts.tmux_for(host)
         identity_reader = getattr(tmux, "pane_identity", None)
         pane_lease: dict[str, Any] | None = None
         confirmed_gone = manager_gone
+        attempted_kill = False
         for attempt in range(0 if manager_gone else REMOTE_CLOSE_RETRY_ATTEMPTS):
             try:
                 state = await tmux.session_state(session_name)
@@ -2213,6 +2210,9 @@ class Sessions:
                             pane_lease = dict(current_identity)
                         elif current_identity != pane_lease:
                             return self._close_failed(row, "pane_identity_changed")
+                    if attendance_guard:
+                        await attendance_guard()
+                    attempted_kill = True
                     await tmux.kill_session(session_name)
                     deadline = time.monotonic() + CLOSE_GRACEFUL_CONFIRM_S
                     while True:
@@ -2239,6 +2239,8 @@ class Sessions:
                 if attempt + 1 >= REMOTE_CLOSE_RETRY_ATTEMPTS:
                     return self._close_failed(row, "ssh_unreachable")
                 await asyncio.sleep(REMOTE_CLOSE_RETRY_S)
+        if confirmed_gone and attendance_guard and not attempted_kill:
+            await attendance_guard("confirmed_death")
         if not confirmed_gone:
             return self._close_failed(row, "ssh_unreachable")
         if row is None:  # host reachable, pane confirmed gone, never had a row

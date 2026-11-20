@@ -300,7 +300,7 @@ def test_assignment_matrix(fields, assigned, attended):
             await cached(store)
             owner_fields = dict(fields)
             status = owner_fields.pop("status", "open")
-            await store.open_session("host-a", "owner", **owner_fields)
+            await store.open_session("host-a", "owner", pane_status="pane_alive", **owner_fields)
             # Exercise persisted NULL versus explicit empty independently of
             # current creation defaults, including normalized legacy tags.
             await store.update_session("host-a", "owner", assigned_spec_id=assigned, status=status)
@@ -339,7 +339,7 @@ def test_whole_population_hash_quality_order_recovery_and_clear(monkeypatch):
             assert unattended_signature(work) == unattended_signature(await store.work_unattended(now=110))
             # The unknown-age row is outside the eight stems, but its removal
             # must still change the digest's full population hash.
-            await store.open_session("host-a", "successor", role="lead", visibility="hidden",
+            await store.open_session("host-a", "successor", role="lead", visibility="hidden", pane_status="pane_alive",
                 assigned_spec_id="spec_demo__item_00", spec_ids=["demo__item_00", "demo__item_09"])
             await store.evaluate_watch_wake(obs, now=115, root_binding=binding)
             assert len(await notices(store)) == 2
@@ -356,7 +356,7 @@ def test_whole_population_hash_quality_order_recovery_and_clear(monkeypatch):
             await store.evaluate_watch_wake(obs, now=125, root_binding=binding)
             assert len(await notices(store)) == 4
             for i in range(1, 9):
-                await store.open_session("host-a", f"owner-{i}", role="nexus", assigned_spec_id=f"spec_demo__item_{i:02}")
+                await store.open_session("host-a", f"owner-{i}", role="nexus", pane_status="pane_alive", assigned_spec_id=f"spec_demo__item_{i:02}")
             await store.evaluate_watch_wake(obs, now=130, root_binding=binding)
             assert match_message_envelope((await notices(store))[-1]["body"])["unattended_work"]["count"] == 0
             await store.evaluate_watch_wake(obs, now=135, root_binding=binding)

@@ -3131,6 +3131,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         *,
         expected_generation: str | None = None,
         expected_spec_source: dict[str, Any] | None = None,
+        attendance_gate: str | None = None,
+        attendance_available: bool = True,
         transfer_child_watch_custody: bool = False,
         **fields: Any,
     ) -> dict[str, Any] | None:
@@ -3148,6 +3150,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ):
                 return None
             return row
+        if attendance_gate:
+            from sessions import LEAD_CLOSE_REFRESH_TIMEOUT_S
+            attendance_deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
         closing = str(cols.get("status") or "") == "closed"
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -3163,6 +3168,12 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 if current is None or str(current[0] or "") != expected_generation:
                     conn.commit()
                     return None
+            if attendance_gate:
+                from work_attendance import departure_conn
+                current = _session_for_stream_conn(conn, f"{host}:{session_name}")
+                if current:
+                    departure_conn(conn, f"{host}:{session_name}", current["session_generation"],
+                                   cols, attendance_gate, observation_available=attendance_available, deadline=attendance_deadline)
             custody_child = _session_for_stream_conn(conn, f"{host}:{session_name}") if transfer_child_watch_custody else None
             assign = ", ".join(f"{k}=?" for k in cols)
             cur = conn.execute(
@@ -3521,6 +3532,14 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
     ) -> dict[str, Any] | None:
         """CAS the reconciler's death transition to one unreserved row generation."""
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            from work_attendance import assigned_owners_conn, attendance_ids, record_attendance_cause
+            from store_lifecycle_authority import configured, front_desk_principal
+            stream_id = f"{host}:{session_name}"
+            prior = _session_for_stream_conn(conn, stream_id)
+            try:
+                desk = front_desk_principal(conn, configured(conn)) or {}
+            except ValueError:
+                desk = {}
             cur = conn.execute(
                 "UPDATE sessions SET status='closed', closed_at=?, pane_status='pane_dead', "
                 "presumed_dead_at=?, presumed_dead_fired_at=?, dead_open_closed_at=? "
@@ -3539,6 +3558,13 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            lost = attendance_ids(prior, front_desk=desk.get("stream_id") == stream_id)
+            if lost:
+                remaining = assigned_owners_conn(conn)
+                for spec in lost:
+                    if not remaining.get(spec):
+                        record_attendance_cause(conn, spec, stream_id, expected_generation, prior.get("role"),
+                                                "reconciler_dead", "confirmed_death")
             store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
             release_holder_conn(conn, stream_id, time.time())

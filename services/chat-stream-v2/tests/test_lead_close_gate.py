@@ -15,7 +15,7 @@ from test_work_unattended import cached
 
 
 @pytest.mark.parametrize("elevated", [False, True])
-def test_real_socket_sole_active_lead_close_warns(tmp_path, elevated):
+def test_real_socket_sole_active_lead_close_refuses(tmp_path, elevated):
     async def run():
         store = Store(":memory:")
         store.start()
@@ -56,15 +56,15 @@ def test_real_socket_sole_active_lead_close_warns(tmp_path, elevated):
                         if reply.get("request_id") == "sole-lead-close":
                             break
             current = await store.fetch_session(HOST, name)
-            assert reply["type"] == "close.ok" and current["status"] == "closed"
-            assert tmux.kills == 1
-            warning = next(w for w in reply["warnings"] if w["kind"] == "disposition")
+            assert reply["error_code"] == "work_last_owner" and current["status"] == "open"
+            assert tmux.kills == 0
+            warning, = reply["items"]
             assert warning["spec_id"] == "spec_demo__item_00"
-            assert warning["status"] == "in_progress" and warning["observed_at"]
+            assert warning["expected_generation"] == row["session_generation"]
             command = next(c for c in warning["next_commands"] if " move <<'JSON'" in c)
             move = json.loads(command.split("\n", 1)[1].rsplit("\n", 1)[0])
             assert move["item_id"] == "spec_demo__item_00"
-            assert move["requesting_stream_id"] == stream and move["reason"] and move["next_action"]
+            assert "requesting_stream_id" not in move and move["reason"] and move["next_action"]
             assert move["expected"] == {
                 "work/in_progress/demo__item_00/spec.md": hashlib.sha256(spec).hexdigest(),
                 "work/in_progress/demo__item_00/summary.md": hashlib.sha256(summary).hexdigest()}
@@ -397,21 +397,12 @@ def test_bound_fd_busy_override_is_explicit_recovery_with_debt(case):
             msg.pop("request_id")
         if case == "stale_fd":
             auth["session_generation"] = "stale"
-        if case == "busy":
-            assert (await env.server._on_close(msg))["type"] == "close.ok"
-            assert env.tmux.killed == ["target"]
-            owed = await env.store.work_owed()
-            assert [(i["spec_id"], i["closing_stream_id"]) for i in owed["items"]] == [
-                ("spec_demo__item_00", FD_HOST + ":target")]
-            from store_work_index import _state_conn
-            state = await env.store.submit(_state_conn)
-            debt, = state["_lead_dispositions"]["owed"].values()
-            assert debt["front_desk_owned"] is True
-        elif case == "idle":
-            reply = await env.server._on_close(msg)
-            assert reply["type"] == "close.ok"
-            assert any(w["kind"] == "disposition" for w in reply["warnings"])
-            assert env.tmux.killed == ["target"]
+        if case in {"busy", "idle"}:
+            with pytest.raises(VerbError) as error:
+                await env.server._on_close(msg)
+            assert error.value.code == "work_last_owner"
+            assert env.tmux.killed == []
+            assert error.value.extra["items"][0]["spec_id"] == "spec_demo__item_00"
         elif case in {"unknown", "no_force", "nonchild"}:
             reply = await env.server._on_close(msg)
             assert reply["type"] == "close.failed"
@@ -450,11 +441,9 @@ def test_bound_fd_busy_override_socket_uses_cli_force_wire_shape():
                         reply = json.loads(await ws.recv())
                         if reply.get("request_id") == "fd-cli-force":
                             break
-            assert reply["type"] == "close.ok", reply
-            assert env.tmux.killed == ["target"]
-            assert (await env.store.work_owed())["total"] == 1
-            audit = await env.store.latest_close_audit(FD_HOST + ":target")
-            assert audit["actor_kind"] == "front_desk" and audit["request_id"] == "fd-cli-force"
+            assert reply["type"] == "close.error" and reply["error_code"] == "work_last_owner"
+            assert env.tmux.killed == []
+            assert (await env.store.fetch_session(FD_HOST, "target"))["status"] == "open"
         finally:
             await env.server.close()
     scenario(run)

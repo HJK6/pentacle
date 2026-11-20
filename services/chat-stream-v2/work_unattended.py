@@ -6,29 +6,12 @@ from datetime import datetime, timezone
 import json
 from pathlib import PurePath
 
-from store_specs import (effective_assignment, normalize_spec_ids, normalize_spec_binding_provenance,
-                         _hydrate_spec_row, _row)
+from store_specs import normalize_spec_ids, _hydrate_spec_row, _row
+from work_attendance import assigned_owners_conn, attendance_conn
 from store_work_index import _state_conn, _observed_record, members_conn, effective_membership_ids_conn
 
 LABEL = "in_progress with no assigned implementation lead"
 REVIEW = "Review the report outcome and current item before selecting a disposition."
-
-
-def assigned_owners_conn(conn, *, exclude: str | None = None) -> dict[str, list[str]]:
-    """Current assignments and explicit grants attend work; inherited tags do not."""
-    owners: dict[str, list[str]] = {}
-    for raw in conn.execute("SELECT * FROM sessions WHERE status='open' AND role IN ('lead','nexus')"):
-        row = dict(raw)
-        stream = f"{row['host']}:{row['session_name']}"
-        if stream == exclude or row.get("presumed_dead_at"):
-            continue
-        attended = {effective_assignment(row)} - {None}
-        attended.update(binding["spec_id"] for binding in normalize_spec_binding_provenance(
-            row.get("spec_binding_provenance"), spec_ids=row.get("spec_ids"))
-            if binding["provenance"] in {"spawn_explicit", "operator_v2"})
-        for identity in attended:
-            owners.setdefault(identity, []).append(stream)
-    return {identity: sorted(streams) for identity, streams in owners.items()}
 
 
 def _epoch(stamp):
@@ -44,8 +27,8 @@ def _epoch(stamp):
 def unattended_work_conn(conn, *, now: float | None = None) -> dict:
     from work_owed import disposition_spec_ids_conn
     state = _state_conn(conn)
-    owners = assigned_owners_conn(conn)
-    referenced = set(owners) | disposition_spec_ids_conn(conn)
+    attendance = attendance_conn(conn)
+    referenced = set(attendance.owners) | set(attendance.uncertain) | disposition_spec_ids_conn(conn)
     membership = effective_membership_ids_conn(conn)["membership"]
     for lane in conn.execute("SELECT lane_id FROM v2_assistant_composite_lanes "
                              "WHERE work_state IS NOT NULL AND work_state!='done'"):
@@ -63,7 +46,10 @@ def unattended_work_conn(conn, *, now: float | None = None) -> dict:
             omitted.append({"spec_id": raw[0], "quality": observation.get("quality", "unknown"),
                             "error": observation.get("error")})
             continue
-        if member.get("status") != "in_progress" or owners.get(raw[0]):
+        if member.get("status") != "in_progress" or attendance.owners.get(raw[0]):
+            continue
+        if attendance.uncertain.get(raw[0]):
+            omitted.append({"spec_id": raw[0], "quality": "unknown", "error": "seat_liveness_unverified"})
             continue
         stem = PurePath(record.get("path") or raw[0].removeprefix("spec_")).name
         stamp = member.get("source_changed_at")

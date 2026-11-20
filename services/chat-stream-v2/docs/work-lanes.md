@@ -92,6 +92,13 @@ The held advisor path reports these as `spawn_preflight_failed` corrections on
 membership check, with one log line naming the item; stale or errored available
 observations remain authoritative. Spec resolution/readability still applies.
 
+For a prompted execution commission on fresh ready or in-progress work, a sole
+roleless seat receives `work_owner_required` before the advisor ruling or spawn
+reservation. Resubmit the commission with `--role lead --spec-id ITEM`. Use
+the same role on the single execution seat for a small item. A helper can serve
+an item with a live implementation owner. Uncertain ownership admits with a
+recorded cause. The original admission decision carries through held release.
+
 Planners and requests with neither an initial prompt nor a command are exempt.
 Without an explicit item they keep inherited authority/usage tags but store an
 explicitly unassigned work assignment, so they appear under no lane member.
