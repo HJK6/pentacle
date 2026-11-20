@@ -157,7 +157,8 @@ jobs:
       timeout-minutes: 5
       run: |
         missing=()
-        for package in tmux lsof zsh ffmpeg; do
+        # Daemon unit tests need no media binaries; web and microphone jobs install ffmpeg.
+        for package in tmux lsof zsh; do
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
