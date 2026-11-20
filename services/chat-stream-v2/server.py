@@ -2418,8 +2418,6 @@ class Server:
                     if websocket in self._contact_proof_consumed:
                         return [self._auth_error_frame(verb, request_id, "contact_proof_consumed")]
                     self._contact_proof_consumed.add(websocket)
-            elif verb == "contact.dispatch.proof":
-                return [self._auth_error_frame(verb, request_id, "contact_proof_only")]
         caller = self._client_identities.get(websocket) if websocket is not None else None
         if verb == "hello" and websocket is not None:
             client = str(msg.get("client") or "").strip()
@@ -2544,6 +2542,8 @@ class Server:
                     return [self._auth_error_frame(
                         verb, request_id, "system_producer_payload_invalid"
                     )]
+            if verb == "contact.dispatch.proof" and websocket not in self._contact_proof_clients:
+                return [self._auth_error_frame(verb, request_id, "contact_proof_only")]
             if handler is None:
                 return [self._unsupported(verb, request_id, caller=caller)]
             auth = dispatch_msg["_auth_context"]
