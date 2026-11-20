@@ -47,6 +47,33 @@ async def seed_pending_goal(store, epic_id, lane_id, *, title="Synthetic goal", 
     await store.submit(write)
 
 
+async def seed_lane_work(store, lane_id, status="completed"):
+    """Give synthetic goals and explicit members fresh indexed work at a chosen stage."""
+    from test_work_lane_episodes import member
+    shown = await store.get_work_lane(lane_id)
+    goals = shown["_projection_row"]["_goals"]
+    records = {spec: {"member": {**member(status), "spec_id": spec}} for spec in shown["lane"]["members"]}
+    for epic in goals:
+        spec = "spec_fixture__" + epic
+        records[spec] = {"member": {**member(status), "spec_id": spec}, "last_good": {"_epic": epic, "status": status}}
+
+    def write(conn):
+        conn.executemany("INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
+                         [(spec, json.dumps(record)) for spec, record in records.items()])
+        conn.commit()
+    await store.submit(write)
+
+
+async def seed_legacy_done(env, lane):
+    """Restore a lane state produced by a manual close before the content check."""
+    def write(conn):
+        conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='done',work_state_reason='fd',"
+                     "done_at=updated_at,version=version+1 WHERE lane_id=?", (lane["lane_id"],))
+        conn.commit()
+    await env.store.submit(write)
+    return (await env.store.get_work_lane(lane["lane_id"]))["lane"]
+
+
 def synthetic_epic(key):
     return "epic_fixture_" + re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
 
@@ -210,10 +237,12 @@ def test_lifecycle_invariants_v3_v6_v7():
         with pytest.raises(ValueError) as e:
             await env.op("set_state", {"to": "done"}, lane=lid, version=4)
         assert code(e) == "work_lane_outcome_required"
+        await seed_lane_work(env.store, lid)
         r = await env.op("set_state", {"to": "done", "outcome": "Shipped"}, lane=lid, version=4)
         assert r["lane"]["done_at"]
         assert [l["lane_id"] for l in await env.store.work_lane_rows()] == []
         assert [l["lane_id"] for l in await env.store.work_lane_rows(include_done=True)] == [lid]
+        await seed_lane_work(env.store, lid, "in_progress")
         r = await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=5)
         assert r["lane"]["work_state_reason"] == "reopened" and r["update"] is None
         kinds = [u["raw"]["lane_update"]["kind"] for u in await lane_updates(env.store)]
@@ -332,6 +361,8 @@ def test_each_update_kind_atomic_retry_restart_v12(kind):
                                     derive_lane_id(ASSISTANT, "stream:started"))
             return None
         lid = (await env.adopt(key="stream:k"))["lane"]["lane_id"]
+        if kind == "lane_completed":
+            await seed_lane_work(env.store, lid)
         if kind == "lane_unblocked":
             await env.op("set_state", {"to": "blocked", "blocker": "dep", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=1)
             return lid, 2
@@ -427,10 +458,12 @@ def test_emit_started_once_and_owner_kind_v13():
                              lane=lid, version=1)
             assert code(e) == "work_lane_operator_confirmation_mismatch", c
         # mismatched-target refusals for unguarded targets: test_supplied_confirmation_must_match_operation_qa_f2
+        await seed_lane_work(env.store, lid)
         good = env.confirm("q-good", lid, "set_state:done")
         r = await env.op("set_state", {"to": "done", "outcome": "x", "operator_confirmation": good},
                          lane=lid, version=1)
         assert r["lane"]["work_state"] == "done" and r["event"]["consumed_question_id"] == "q-good"
+        await seed_lane_work(env.store, lid, "in_progress")
         r = await env.op("set_state", {"to": "paused", "reason": "Reopen managed work", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=2)
         with pytest.raises(ValueError) as e:
             await env.op("set_state", {"to": "done", "outcome": "y", "operator_confirmation": good},
@@ -449,6 +482,7 @@ def test_emit_started_once_and_owner_kind_v13():
         assert r["lane"]["owner_kind"] == "fd"
         kinds = [u["raw"]["lane_update"]["kind"] for u in await lane_updates(env.store)]
         assert kinds == ["lane_completed", "major_decision"]
+        await seed_lane_work(env.store, lid)
         # fd lane: done needs no confirmation
         r = await env.op("set_state", {"to": "done", "outcome": "z"}, lane=lid, version=4)
         assert r["lane"]["work_state"] == "done"
@@ -573,16 +607,21 @@ def test_routing_close_and_cancel_guarded_on_operator_lane_v13():
                 await routing(operation, payload, env.confirmations[wrong["question_id"]])
             assert code(e) == "work_lane_operator_confirmation_mismatch"
             ok = env.confirm("q-ok-" + action, lid, action)
-            try:  # guard passes; the routing rule then decides
-                result = await routing(operation, payload, env.confirmations[ok["question_id"]],
-                                       op_id="rt-ok-" + action)
-            except ValueError as exc:
-                assert not str(exc).startswith("work_lane_operator")
-            else:
-                assert operation == "lane.decision" and result["lane"]["phase"] == "cancelled"
-                consumed = [e for e in (await env.store.get_work_lane(lid))["events"]
-                            if e.get("consumed_question_id") == ok["question_id"]]
-                assert len(consumed) == 1
+            confirmation = env.confirmations[ok["question_id"]]
+            if operation == "lane.close":
+                with pytest.raises(ValueError, match="assistant_lane_close_state_invalid"):
+                    await routing(operation, payload, confirmation)
+                continue
+            from store_work_lanes import WorkLaneCloseBlocked
+            with pytest.raises(WorkLaneCloseBlocked) as blocked:
+                await routing(operation, payload, confirmation)
+            assert blocked.value.code == "work_lane_close_unfinished"
+            assert not any(e["consumed_question_id"] for e in (await env.store.get_work_lane(lid))["events"])
+            await seed_lane_work(env.store, lid)
+            result = await routing(operation, payload, confirmation)
+            assert result["lane"]["phase"] == "cancelled"
+            events = (await env.store.get_work_lane(lid))["events"]
+            assert sum(e.get("consumed_question_id") == ok["question_id"] for e in events) == 1
         # fd lane: routing guard never fires
         fd_lead = await env.seat("rt-fd", role="lead", parent_stream_id=FD)
         fd_lane = (await env.adopt(key="stream:rt-fd", lead=fd_lead))["lane"]["lane_id"]
@@ -660,7 +699,9 @@ def test_supplied_confirmation_must_match_operation_qa_f2():
 def test_reopen_emits_no_update_even_to_blocked_qa_f4():
     async def body(env):
         lid = (await env.adopt(key="stream:f4"))["lane"]["lane_id"]
+        await seed_lane_work(env.store, lid)
         await env.op("set_state", {"to": "done", "outcome": "ok"}, lane=lid, version=1)
+        await seed_lane_work(env.store, lid, "in_progress")
         r = await env.op("set_state", {"to": "blocked", "blocker": "again", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=2)
         assert r["update"] is None and r["lane"]["work_state_reason"] == "reopened"
         assert r["lane"]["blocker"] == "again"
@@ -728,9 +769,13 @@ def test_parking_transitions_replay_and_version(state):
     async def body(env):
         lane = (await env.adopt())["lane"]
         lid = lane["lane_id"]
+        if state == "done":
+            await seed_lane_work(env.store, lid)
         if state != "active":
             lane = (await env.op("set_state", {"to": state, "reason": "Wait", "next_action": "Resume",
                           "blocker": "Dependency", "outcome": "Complete"}, lane=lid, version=lane["version"]))["lane"]
+        if state == "done":
+            await seed_lane_work(env.store, lid, "in_progress")
         payload = {"to": "paused", "parked": True, "reason": "\t Later season \t"}
         result = await env.op("set_state", payload, lane=lid, version=lane["version"], request_id="park")
         assert result["lane"]["parked_reason"] == "Later season"
@@ -785,6 +830,8 @@ def test_unparking_obeys_transition_rules(target, kind):
         lane = (await env.adopt())["lane"]
         lid = lane["lane_id"]
         await env.op("set_state", {"to": "paused", "parked": True, "reason": "Later"}, lane=lid, version=1)
+        if target == "done":
+            await seed_lane_work(env.store, lid)
         if target == "paused":
             for payload, error in [({"to": target}, "work_lane_reason_required"),
                                    ({"to": target, "reason": "Resume"}, "work_lane_next_action_required")]:
@@ -844,6 +891,7 @@ def test_park_record_survives_other_mutations_and_preserves_membership_and_hue()
 def test_parking_done_lane_preserves_reopen_member_conflict_guard():
     async def body(env):
         lane = (await env.adopt(members=["spec_demo__parked"]))["lane"]
+        await seed_lane_work(env.store, lane["lane_id"])
         await env.op("set_state", {"to": "done", "outcome": "Complete"}, lane=lane["lane_id"], version=1)
         await env.adopt(key="stream:other", members=["spec_demo__parked"])
         with pytest.raises(ValueError, match="work_lane_member_conflict"):
@@ -884,7 +932,9 @@ def test_done_activation_work_seat_still_checks_member_conflict():
         spec = 'spec_demo__conflicting'
         await observe(env.store, 'in_progress', 'conflicting', 100, identity=spec)
         lane = (await env.adopt(key='stream:closed-seat', state='paused', owner='operator', members=[spec]))['lane']
+        await seed_lane_work(env.store, lane["lane_id"])
         done = (await env.op('set_state', {'to': 'done', 'outcome': 'Finished', 'operator_confirmation': env.confirm('close-seat', lane['lane_id'], 'set_state:done')}, lane=lane['lane_id'], version=lane['version']))['lane']
+        await seed_lane_work(env.store, lane["lane_id"], "in_progress")
         await env.adopt(key='stream:competing-seat', state='paused', owner='operator', members=[spec])
         await env.seat('conflict-worker', role='worker', assigned_spec_id=spec)
         before = await env.store.get_work_lane(lane['lane_id'])
@@ -903,8 +953,10 @@ def test_done_lane_activates_without_lead_when_work_seat_exists():
         await observe(env.store, 'in_progress', 'done-resume', 100, identity=spec)
         lane = (await env.adopt(key='stream:done-resume', state='paused', owner='operator', members=[spec]))['lane']
         confirmation = env.confirm('close-done-resume', lane['lane_id'], 'set_state:done')
+        await seed_lane_work(env.store, lane["lane_id"])
         done = (await env.op('set_state', {'to': 'done', 'outcome': 'Completed prior work', 'operator_confirmation': confirmation},
                              lane=lane['lane_id'], version=lane['version']))['lane']
+        await seed_lane_work(env.store, lane["lane_id"], "in_progress")
         await env.seat('done-worker', role='worker', assigned_spec_id=spec)
         active = (await env.op('set_state', {'to': 'active', 'reason': 'New work'}, lane=lane['lane_id'], version=done['version']))['lane']
         assert active['work_state'] == 'active'
@@ -945,8 +997,10 @@ def test_packet_allows_done_lane_activation_but_preserves_member_conflict():
         await observe(env.store, 'in_progress', 'packet-conflict', 100, identity=spec)
         lane = (await env.adopt(key='stream:packet-done', state='paused', owner='operator', members=[spec]))['lane']
         confirm = env.confirm('packet-done-confirm', lane['lane_id'], 'set_state:done')
+        await seed_lane_work(env.store, lane["lane_id"])
         done = (await env.op('set_state', {'to':'done', 'outcome':'Prior work', 'operator_confirmation':confirm},
                              lane=lane['lane_id'], version=lane['version']))['lane']
+        await seed_lane_work(env.store, lane["lane_id"], "in_progress")
         await env.adopt(key='stream:packet-conflict', state='paused', owner='operator', members=[spec])
         env.store.external_work_config = ExternalWorkConfig(status='enabled', watch_id='dot', label='Dot')
         def insert(conn):

@@ -7,7 +7,7 @@ import pytest
 from _shared.specs_service import SpecsSubsystem
 from sessions import Sessions
 from store import Store
-from test_work_lanes import FD, run
+from test_work_lanes import FD, run, seed_lane_work
 
 SPEC = 'spec_fixture__retirement'
 
@@ -43,6 +43,7 @@ def test_completion_never_reads_spec_source(tmp_path, monkeypatch, route, source
             raise AssertionError('Completion must not resolve or read spec files')
         monkeypatch.setattr(SpecsSubsystem, '_scan_folders_by_id', forbidden)
         if route == 'lane':
+            await seed_lane_work(env.store, lane["lane_id"])
             done = await env.op('set_state', {'to': 'done', 'outcome': 'Recorded by owner'},
                                 lane=lane['lane_id'], version=lane['version'])
             assert done['lane']['work_state'] == 'done'

@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 from work_lane_members import validate_members, validate_title
 from _shared.lane_icons import validate_icon
-from _shared.work_goals import EPIC_ID, derive_lane_id, goal_id, lane_work_status
+from _shared.work_goals import EPIC_ID, derive_lane_id, goal_id, goal_progress, lane_work_status
 from work_lane_progress import lane_lead_lost, members_working, seat_live, seat_working
 from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
                               effective_membership_conn, effective_membership_ids_conn,
@@ -164,6 +164,62 @@ def _accept_goals_conn(conn, goals: list[str], lane_id: str, stamp: str) -> None
     conn.execute("INSERT INTO v2_work_index_state(singleton,state_json) VALUES (1,?) "
                  "ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",
                  (json.dumps(state, separators=(",", ":")),))
+
+
+class WorkLaneCloseBlocked(ValueError):
+    """Current effective work that prevents a manual terminal transition."""
+
+    def __init__(self, lane, work_status):
+        self.code = "work_lane_close_" + work_status
+        available = lane["_work_index_available"]
+        members = lane["_members"]
+        goals = lane["_goals"]
+        by_goal = {goal_id(epic): epic for epic in goals}
+        affected_members = []
+        for member in members:
+            observation = member["observation"]
+            quality = observation["quality"]
+            status = member.get("_goal_status", member.get("status"))
+            if quality == "fresh" and status in ("completed", "deprecated"):
+                continue
+            epic = by_goal.get(member.get("goal_id"))
+            affected_members.append({"spec_id": member["spec_id"], "source": "goal" if epic else "explicit",
+                                     "epic_id": epic, "status": status, "quality": quality,
+                                     "error": observation.get("error")})
+        affected_goals = []
+        for wire, epic in by_goal.items():
+            record = goals[epic]
+            group = [member for member in members if member.get("goal_id") == wire]
+            if record["quality"] != "fresh" or goal_progress(group)["state"] != "done":
+                affected_goals.append({"epic_id": epic, "quality": record["quality"], "error": record.get("error")})
+        self.details = {"lane_id": lane["lane_id"], "lane_version": lane["version"], "index_available": available,
+                        "members": affected_members, "member_count": len(affected_members),
+                        "goals": affected_goals, "goal_count": len(affected_goals)}
+        instruction = ("Finish or transfer the listed work and empty goals to their visible destination."
+                       if work_status == "unfinished" else
+                       "Verify the exact source ID before correcting an explicit entry. Restore unreadable sources "
+                       "and retry after a fresh sweep.")
+        super().__init__(f"{instruction} Read agent-orch work-lane show <lane> --members --json. "
+                         "For explicit membership, use set-members with the current version and the full ordered list. "
+                         "For goal membership, update the spec/summary pair or charter through the publisher. "
+                         "To retain the work here, use set-state --to paused --parked --reason.")
+
+
+def require_finished_lane(lane):
+    status = lane_work_status(lane["_goals"], lane["_members"], lane["_work_index_available"])
+    if status != "finished":
+        raise WorkLaneCloseBlocked(lane, status)
+
+
+def require_finished_routing_lane_conn(conn, lane):
+    if lane.get("work_state") is None:
+        return
+    ids = effective_membership_ids_conn(conn)
+    snapshot = effective_membership_conn(conn, spec_ids=effective_member_ids(conn, lane, ids), snapshot=ids)
+    facts = {**lane, "_members": members_conn(conn, lane, snapshot), "_work_index_available": ids["state"]["available"],
+             "_goals": {epic: record for epic, record in ids["goals"].items()
+                        if record["facts"]["lane_id"] == lane["lane_id"]}}
+    require_finished_lane(facts)
 
 
 class WorkLaneMemberConflict(ValueError):
@@ -1032,7 +1088,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         if operation == "set_state":
             enriched = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id, external_config=external_config)), None)
             if enriched:
-                lane.update({key: enriched[key] for key in ("_members", "_external_packets", "_has_work_seat", "_has_external_work")})
+                lane.update({key: enriched[key] for key in ("_members", "_goals", "_work_index_available", "_external_packets", "_has_work_seat", "_has_external_work")})
         _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor)
         if expected != int(lane["version"]):
             raise ValueError("assistant_lane_version_conflict")
@@ -1104,9 +1160,8 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == "done":
                 outcome = _text(payload.get("outcome"), UPDATE_TEXT_MAX, "work_lane_outcome_required",
                                 required=True)
-                changes["done_at"] = stamp
-                if lane.get("owner_kind") == "operator" and consumed is not None:
-                    changes["work_state_reason"] = "operator_confirmed"
+                require_finished_lane(lane)
+                changes.update(done_at=stamp, work_state_reason="goals_done")
                 update = ("lane_completed", "transition", outcome)
             elif prior_state == "blocked" and to in ("active", "paused"):
                 resolution = _text(payload.get("resolution"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")

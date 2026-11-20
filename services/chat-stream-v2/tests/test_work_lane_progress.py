@@ -189,7 +189,7 @@ def test_legacy_id_title_does_not_block_other_operations():
 
 # A1 conflict cells intentionally use unknown canonical ids: sync is not admission authority.
 import pytest
-from test_work_lanes import FD
+from test_work_lanes import FD, seed_legacy_done
 from test_assistant_prose_mirror import ASSISTANT
 
 
@@ -214,27 +214,6 @@ async def seed_fresh(env, *spec_ids, status="in_progress"):
     membership fixtures otherwise leave their synthetic members unresolved."""
     from test_work_lane_episodes import member, seed_observations
     await seed_observations(env.store, [{**member(status), "spec_id": spec_id} for spec_id in spec_ids])
-
-
-async def a1_close(env, lane, *, memory_root=None):
-    # These membership tests keep IDs unresolved until completion setup.
-    # Completion now needs readable synthetic members, without a runtime tree.
-    from contextlib import nullcontext
-    from pathlib import Path
-    import tempfile
-    fixture_root = (tempfile.TemporaryDirectory(prefix="lane-member-fixture-")
-                    if memory_root is None else nullcontext(str(memory_root)))
-    with fixture_root as root, pytest.MonkeyPatch.context() as patch:
-        root = Path(root).resolve()
-        for spec_id in lane["members"]:
-            path = root / "work" / "in_progress" / spec_id.removeprefix("spec_") / "spec.md"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"---\nid: {spec_id}\nowner: fixture-owner\n---\n"
-                            "## Acceptance Criteria\n### Custom\n- [x] **Fixture** — complete\n",
-                            encoding="utf-8")
-        patch.setenv("PENTACLE_MEMORY_ROOT", str(root))
-        return (await env.op("set_state", {"to": "done", "outcome": "Retained history", "reason": "Fixture decision"},
-                             lane=lane["lane_id"], version=lane["version"]))["lane"]
 
 
 async def a1_holder(env, state="paused"):
@@ -282,7 +261,7 @@ def test_self_excluded():
 
 def test_done_lane_excluded():
     async def body(env):
-        await a1_close(env, await a1_holder(env))
+        await seed_legacy_done(env, await a1_holder(env))
         assert (await env.adopt("stream:new", state="paused", owner="operator", members=[A]))["lane"]["members"] == [A]
     run(body)
 
@@ -301,7 +280,7 @@ def test_routing_only_excluded():
 
 def test_done_history_retained():
     async def body(env):
-        history = await a1_close(env, await a1_holder(env))
+        history = await seed_legacy_done(env, await a1_holder(env))
         await env.adopt("stream:current", state="paused", owner="operator", members=[A])
         changed = await env.op("set_members", {"members": [A, B]}, lane=history["lane_id"], version=history["version"])
         assert changed["lane"]["members"] == [A, B] and changed["lane"]["work_state"] == "done"
@@ -311,7 +290,7 @@ def test_done_history_retained():
 @pytest.mark.parametrize("to", ["active", "paused", "blocked"])
 def test_every_done_to_open_conflicts_without_consuming_confirmation(to):
     async def body(env):
-        history = await a1_close(env, (await env.adopt("stream:history", owner="operator", members=[A]))["lane"])
+        history = await seed_legacy_done(env, (await env.adopt("stream:history", owner="operator", members=[A]))["lane"])
         holder = await a1_holder(env)
         # A fresh member makes the reopen certain once the conflicting lane is gone.
         await seed_fresh(env, A)
@@ -324,7 +303,7 @@ def test_every_done_to_open_conflicts_without_consuming_confirmation(to):
             await env.op("set_state", payload, lane=history["lane_id"], version=history["version"])
         assert holder["lane_id"] in str(error.value)
         assert await a1_snapshot(env) == before
-        await a1_close(env, holder)
+        await seed_legacy_done(env, holder)
         reopened = await env.op("set_state", payload, lane=history["lane_id"], version=history["version"])
         assert reopened["lane"]["work_state"] == to
     run(body)
@@ -333,7 +312,7 @@ def test_every_done_to_open_conflicts_without_consuming_confirmation(to):
 @pytest.mark.parametrize("replacement", [[], [B]])
 def test_done_membership_repair_allows_reopen(replacement):
     async def body(env):
-        history = await a1_close(env, await a1_holder(env))
+        history = await seed_legacy_done(env, await a1_holder(env))
         await env.adopt("stream:current", state="paused", owner="operator", members=[A])
         fixed = (await env.op("set_members", {"members": replacement, "no_spec_reason": None if replacement else "Replanned"},
                             lane=history["lane_id"], version=history["version"]))["lane"]
@@ -354,7 +333,7 @@ def test_replay_before_conflict(operation):
         else:
             lane = (await env.adopt("stream:original", state="paused", owner="operator", members=[B]))["lane"]
             if operation == "reopen":
-                lane = await a1_close(env, lane)
+                lane = await seed_legacy_done(env, lane)
                 lane = (await env.op("set_members", {"members": [A]}, lane=lane["lane_id"], version=lane["version"]))["lane"]
                 await seed_fresh(env, A)
                 payload, verb = {"to": "paused", "reason": "Resume fixture", "next_action": "Resume after the fixture dependency clears"}, "set_state"
@@ -362,7 +341,7 @@ def test_replay_before_conflict(operation):
                 payload, verb = {"members": [A]}, "set_members"
             kwargs = {"lane": lane["lane_id"], "version": lane["version"]}
         first = await env.op(verb, payload, request_id="original-operation", **kwargs)
-        await a1_close(env, first["lane"])
+        await seed_legacy_done(env, first["lane"])
         await a1_holder(env)
         if operation == "set_members":
             # Model pre-existing conflicting inventory; public mutations cannot create it.
@@ -391,7 +370,7 @@ def test_digest_conflict_before_member_conflict():
 def test_member_conflict_before_cas(operation):
     async def body(env):
         if operation == "reopen":
-            lane = await a1_close(env, await a1_holder(env))
+            lane = await seed_legacy_done(env, await a1_holder(env))
             holder = (await env.adopt("stream:current", state="paused", owner="operator", members=[A]))["lane"]
             verb, payload = "set_state", {"to": "paused", "reason": "Resume", "next_action": "Resume after the fixture dependency clears"}
         else:

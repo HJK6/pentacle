@@ -11,6 +11,7 @@ from assistant_composite import AssistantComposite
 from notification_answer_fixture import fixture
 from server import Server
 from store import STREAM_TOKEN_HASH_VERSION
+from test_work_lanes import seed_lane_work
 from test_assistant_prose_mirror import ASSISTANT, _config_for
 from test_work_lanes import FD, run
 
@@ -53,13 +54,14 @@ def test_fd_done_override_real_cli(tmp_path):
                         proc.kill(); await proc.wait(); raise
                     assert stdout, stderr.decode()
                     return proc.returncode, json.loads(stdout)
+                await seed_lane_work(store, lane["lane_id"])
                 args = ["set-state", lane["lane_id"], "--to", "done", "--outcome", "Completed",
                         "--reason", "FD closes completed work", "--expected-version", str(lane["version"]),
                         "--request-id", "override-done", "--composite-stream-id", ASSISTANT]
                 rc, result = await cli(*args)
                 assert rc == 0, result
                 assert result["lane"]["work_state"] == "done"
-                assert result["lane"]["work_state_reason"] == "fd"
+                assert result["lane"]["work_state_reason"] == "goals_done"
                 assert result["event"]["payload"]["override"] == {
                     "schema": "WorkLaneOverrideV1", "action": "set_state:done", "from": "paused", "to": "done",
                     "reason": "FD closes completed work", "actor_stream_id": actor,
@@ -88,6 +90,8 @@ def test_override_audit_and_replay(operation, payload):
     async def body(env):
         lead = await env.seat("override-lead", role="lead", parent_stream_id=FD)
         lane = (await env.adopt(owner="operator", state="paused", lead=lead))["lane"]
+        if payload["to"] == "done":
+            await seed_lane_work(env.store, lane["lane_id"])
         payload_with_reason = dict(payload, reason="FD manages this work")
         if operation == "set_state" and payload["to"] == "blocked":
             payload_with_reason["next_action"] = "Resume after dependency clears"
@@ -140,6 +144,7 @@ def test_override_store_refuses_stale_binding_and_rolls_back_audit():
                 lane_id=lane["lane_id"], expected_lane_version=1, payload=payload, actor_stream_id=FD,
                 actor_generation="stale", binding_name=env.composite.config.name,
                 env_binding=env.composite._env_binding())
+        await seed_lane_work(env.store, lane["lane_id"])
         def fail(_operation):
             raise RuntimeError("fixture fault")
         env.store._work_lane_fault = fail
@@ -156,13 +161,14 @@ def test_override_store_refuses_stale_binding_and_rolls_back_audit():
     run(body)
 
 
-def test_fd_owned_explicit_confirmation_keeps_existing_state_reason():
+def test_fd_owned_explicit_confirmation_preserves_confirmation_on_settlement():
     async def body(env):
         lane = (await env.adopt(owner="fd"))["lane"]
+        await seed_lane_work(env.store, lane["lane_id"])
         confirmation = env.confirm("q-fd-owned", lane["lane_id"], "set_state:done")
         result = await env.op("set_state", {"to": "done", "outcome": "Shipped",
             "operator_confirmation": confirmation}, lane=lane["lane_id"], version=1)
-        assert result["lane"]["work_state_reason"] == "fd"
+        assert result["lane"]["work_state_reason"] == "goals_done"
         assert result["event"]["consumed_question_id"] == "q-fd-owned"
         assert "override" not in result["event"]["payload"]
     run(body)

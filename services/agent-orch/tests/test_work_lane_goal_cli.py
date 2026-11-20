@@ -34,6 +34,25 @@ def test_show_members_traverses_65_once_and_preserves_goal_filter(monkeypatch, c
     assert all(request['goal_id'] == goal for request in sent) and len(sent) == 3
 
 
+def test_ordered_explicit_members_span_pages_and_restart_after_reorder(monkeypatch):
+    request = {"type": "work_lanes.show", "lane_id": "wl-test"}
+
+    def ordered(ids, version, positions, cursor=None):
+        response = page(ids, total=3, cursor=cursor)
+        response["lane"]["version"] = version
+        for member, position in zip(response["members"], positions):
+            member["explicit_position"] = position
+        return response
+
+    first = ordered([0, 1], 1, [0, 1], "spec_demo__n01")
+    replies = iter([ordered([2], 2, [0]), ordered([0, 1], 2, [1, None], "spec_demo__n01"),
+                    ordered([2], 2, [0])])
+    monkeypatch.setattr(work_lane_cli, "_call", lambda *_: next(replies))
+    result = work_lane_cli._complete_members(SimpleNamespace(), request, first)
+    assert result["lane"]["version"] == 2
+    assert result["lane"]["explicit_members"] == ["spec_demo__n02", "spec_demo__n00"]
+
+
 def test_one_revision_restart_then_second_change_is_bounded(monkeypatch):
     request = {'type': 'work_lanes.show', 'lane_id': 'wl-test'}
     first = page([0], total=2, cursor='spec_demo__n00')

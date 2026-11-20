@@ -17,7 +17,7 @@ from _shared.specs_service import SpecsSubsystem
 from _shared.work_goals import derive_lane_id
 
 
-async def cli_call(port, tmp_path, *args, expected_status=0):
+async def cli_call(port, tmp_path, *args, expected_status=0, command="work-lane"):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "agent-orch"),
            "AGENT_ORCH_WS_URL": f"ws://127.0.0.1:{port}", "AGENT_ORCH_TOKEN": "",
@@ -25,7 +25,7 @@ async def cli_call(port, tmp_path, *args, expected_status=0):
            "AGENT_ORCH_STREAM_TOKEN": "fixture-lane-token",
            "AGENT_ORCH_RUNTIME_DIR": str(tmp_path / "cli"), "AGENT_ORCH_MEMORY_REPO": str(tmp_path / "memory"),
            "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT}
-    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "agent_orch.cli", "work-lane", *args,
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "agent_orch.cli", command, *args,
                                                 env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), 15)

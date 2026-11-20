@@ -12,6 +12,7 @@ from assistant_composite import AssistantComposite
 from notification_answer_fixture import fixture
 from server import Server
 from store import STREAM_TOKEN_HASH_VERSION
+from test_work_lanes import seed_lane_work
 from test_assistant_prose_mirror import ASSISTANT, _config_for
 
 
@@ -114,6 +115,7 @@ async def _journey(tmp_path, *, delivered, comment, refusal=None, transport="pro
             version = target["version"] + (1 if refusal == "wrong_version" else 0)
             args += ["--expected-version", str(version), "--request-id", "use-confirmation",
                      "--confirmation-question-id", qid, "--composite-stream-id", ASSISTANT]
+            await seed_lane_work(store, target["lane_id"])
             rc, result = await cli(*args)
             if refusal:
                 assert rc != 0, result
@@ -131,6 +133,7 @@ async def _journey(tmp_path, *, delivered, comment, refusal=None, transport="pro
                                       "--confirmation-question-id", qid, "--composite-stream-id", ASSISTANT)
                 # Wrong action is checked before single-use. Reopen, then repeat the same action.
                 assert rc != 0 and reused["error"] == "work_lane_operator_confirmation_mismatch", reused
+                await seed_lane_work(store, lane["lane_id"], "in_progress")
                 rc, reopened = await cli("set-state", lane["lane_id"], "--to", "paused", "--expected-version",
                                          str(result["lane"]["version"]), "--request-id", "reopen", "--reason", "Reopen for confirmation reuse check",
                                          "--next-action", "Repeat the same-action confirmation control",

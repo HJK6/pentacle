@@ -9,7 +9,7 @@ import pytest
 
 from _shared.lane_hues import LANE_HUE_KEYS, resolve_hue
 from store_lane_hues import ensure_lane_hues_schema, enter_open_conn, hue_transaction, prepare_hues_conn, repair_hues_conn
-from test_work_lanes import run
+from test_work_lanes import run, seed_lane_work
 
 
 def connection(path=':memory:'):
@@ -91,6 +91,7 @@ def test_store_creation_17_to_16_closure_and_reopen_repair_without_extra_progres
         lanes = [(await env.adopt(key=f'request:hue{i}', state='paused', owner='operator'))['lane'] for i in range(17)]
         assert [lane['hue'] for lane in lanes[:16]] == list(LANE_HUE_KEYS)
         assert lanes[16]['hue'] == 'violet'
+        await seed_lane_work(env.store, lanes[1]['lane_id'])
         closed = await env.op('set_state', {'to': 'done', 'outcome': 'Fixture complete', 'reason': 'Fixture lifecycle'},
                               lane=lanes[1]['lane_id'], version=1)
         last = await env.store.get_work_lane(lanes[16]['lane_id'])
@@ -112,8 +113,10 @@ def test_actual_reopen_moves_the_recent_entrant_only_and_fault_rolls_back():
     async def body(env):
         first = (await env.adopt(key='request:first', state='paused', owner='operator'))['lane']
         second = (await env.adopt(key='request:second', state='paused', owner='operator'))['lane']
+        await seed_lane_work(env.store, first['lane_id'])
         closed = await env.op('set_state', {'to': 'done', 'outcome': 'Fixture complete', 'reason': 'Fixture lifecycle'},
                               lane=first['lane_id'], version=1)
+        await seed_lane_work(env.store, first['lane_id'], "in_progress")
         third = (await env.adopt(key='request:third', state='paused', owner='operator'))['lane']
         assert third['hue'] == first['hue'] == 'violet'
         def fail(_):

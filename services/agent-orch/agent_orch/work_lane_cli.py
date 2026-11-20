@@ -171,7 +171,8 @@ def _complete_members(args, request, response):
             page = _call(args, {**request, "members_after": cursor})
             if page.get("type") != "work_lanes.show.ok":
                 return page
-            if page.get("detail_revision") != revision:
+            if (page.get("detail_revision") != revision
+                    or (page.get("lane") or {}).get("version") != (first.get("lane") or {}).get("version")):
                 if restarted:
                     raise ValueError("lane detail changed twice; retry the complete read")
                 restarted = True
@@ -192,6 +193,10 @@ def _complete_members(args, request, response):
                 result["projection"] = {**first["projection"], "members": members, "members_next": None}
             if isinstance(first.get("lane"), dict):
                 result["lane"] = {**first["lane"], "members": [member["spec_id"] for member in members]}
+                if all("explicit_position" in member for member in members):
+                    ordered = sorted((m["explicit_position"], m["spec_id"]) for m in members
+                                     if m["explicit_position"] is not None)
+                    result["lane"]["explicit_members"] = [identity for _, identity in ordered]
             return result
 
 

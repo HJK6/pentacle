@@ -8,7 +8,7 @@ import pytest
 
 from sessions import Sessions
 from work_lanes_projection import WorkLanesInventory
-from test_work_lanes import FD, code, lead_lost_episodes, run
+from test_work_lanes import FD, code, lead_lost_episodes, run, seed_lane_work
 from test_assistant_prose_mirror import ASSISTANT
 
 
@@ -122,6 +122,7 @@ def test_explicit_paused_blocked_done_fd_lanes_unchanged_t4():
         paused = (await env.adopt(key="stream:t4p", state="paused", lead=lead))["lane"]
         blocked = (await env.adopt(key="stream:t4b", state="blocked", lead=lead, blocker="keys"))["lane"]
         done = (await env.adopt(key="stream:t4d", lead=lead))["lane"]
+        await seed_lane_work(env.store, done["lane_id"])
         done = (await env.op("set_state", {"to": "done", "outcome": "Shipped"}, lane=done["lane_id"],
                              version=done["version"]))["lane"]
         _, inv = await inventory(env)

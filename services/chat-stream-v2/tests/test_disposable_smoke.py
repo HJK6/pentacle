@@ -10,7 +10,7 @@ import pytest
 
 import spawn_fleet_smoke
 from _shared.work_goals import derive_lane_id
-from test_work_lanes import seed_pending_goal
+from test_work_lanes import seed_pending_goal, seed_lane_work
 from tools.disposable_smoke import disposable_composite, guard_target
 
 
@@ -48,6 +48,7 @@ def test_real_cli_lane_and_card_are_disposable():
 
             result = await cli("adopt", "--apply", str(plan), "--composite-stream-id", target)
             lane = result["response"]["lane"]
+            await seed_lane_work(harness["store"], lane["lane_id"])
             closed = await cli("set-state", lane["lane_id"], "--to", "done", "--outcome", "Override verified.",
                 "--reason", "FD verifies the deployed administrative override.", "--expected-version", str(lane["version"]),
                 "--request-id", "smoke-close", "--composite-stream-id", target)
