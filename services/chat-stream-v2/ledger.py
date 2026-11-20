@@ -880,7 +880,9 @@ class Ledger:
             # notices, pane delivery and report-triggered close stay outside.
             row, inserted = await _finish_despite_cancel(persist_and_project())
         except ReportStatusRefusal as exc:
-            raise self._error(exc.code, str(exc), report_id, spec_id=exc.spec_id, reason=exc.reason) from exc
+            command = f'agent-orch report --msg-id {raw_msg_id} --status done --result "$(cat report.json)"'
+            raise self._error(exc.code, f"{exc} Use {command}", report_id,
+                              spec_id=exc.spec_id, reason=exc.reason, repair_command=command) from exc
         except ReportProvenanceUnavailable as exc:
             raise self._routing_refusal(
                 "report_provenance_unavailable",

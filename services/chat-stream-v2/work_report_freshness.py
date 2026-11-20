@@ -9,7 +9,7 @@ from work_lane_progress import STATUS_BEHIND_GRACE_S, seat_live
 class ReportStatusRefusal(ValueError):
     def __init__(self, code, spec_id, reason):
         self.code, self.spec_id, self.reason = code, spec_id, reason
-        super().__init__(f"{spec_id or 'Unknown assignment'}: {reason}. Update summary.md **Status** to the actual result and use agent-orch report --msg-id 0 --status done --result '<report JSON>'.")
+        super().__init__(f"{spec_id or 'Unknown assignment'}: {reason}. Update summary.md **Status** to the actual result and file an item report.")
 
 
 def ensure_schema(conn):
@@ -58,13 +58,15 @@ def _explicitly_assigned(row, spec):
 
 
 def _helper_witness(conn, reporter, spec, authenticated):
+    from store_host_transfer import authority_state
     from work_unattended import assigned_owners_conn
 
     def refuse(reason):
         raise ReportStatusRefusal("seat_only_ineligible", spec, reason)
 
     stream = reporter["stream_id"]
-    if not authenticated or not spec or not seat_live(reporter) or not _explicitly_assigned(reporter, spec):
+    if (not authenticated or not spec or not seat_live(reporter) or not _explicitly_assigned(reporter, spec)
+            or authority_state(conn, stream, reporter["session_generation"])):
         refuse("helper eligibility unverifiable")
     owners = assigned_owners_conn(conn).get(spec, [])
     if stream in owners:
@@ -79,6 +81,8 @@ def _helper_witness(conn, reporter, spec, authenticated):
         peer = dict(raw)
         witness = f"{peer['host']}:{peer['session_name']}"
         if witness == stream or not seat_live(peer) or not (witness in owners or _explicitly_assigned(peer, spec)):
+            continue
+        if authority_state(conn, witness, peer["session_generation"]):
             continue
         if peer["session_generation"] and peer.get("pane_status") == "pane_alive":
             return {"stream_id": witness, "generation": peer["session_generation"]}

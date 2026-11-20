@@ -266,15 +266,16 @@ def ensure_latest_report_schema(conn) -> None:
 
 def record_latest_report_conn(conn, report: dict) -> bool:
     attribution = (report.get("usage_snapshot") or {}).get("attribution") or {}
+    spec_id = (report.get("status_freshness") or {}).get("spec_id") or attribution.get("spec_id")
     if (report.get("status") != "done" or report.get("completion_kind") == "seat_only"
-            or attribution.get("mode") != "exclusive_primary" or not attribution.get("spec_id")):
+            or attribution.get("mode") != "exclusive_primary" or not spec_id):
         return False
     kind = {"accept": "review_passed", "reject": "review_failed"}.get(report.get("qa_verdict"), "reported_done")
     at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(report["created_at"]))
     return bool(conn.execute("INSERT INTO v2_work_item_latest_report (spec_id,kind,at,report_id) VALUES (?,?,?,?) "
         "ON CONFLICT(spec_id) DO UPDATE SET kind=excluded.kind,at=excluded.at,report_id=excluded.report_id "
         "WHERE excluded.at >= v2_work_item_latest_report.at",
-        (attribution["spec_id"], kind, at, report["report_id"])).rowcount)
+        (spec_id, kind, at, report["report_id"])).rowcount)
 
 
 def enrich_latest_reports_conn(conn, members: list[dict]) -> None:

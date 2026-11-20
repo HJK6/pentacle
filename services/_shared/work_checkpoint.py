@@ -62,7 +62,7 @@ def _status_publication(root, path, content, status, line):
     bounded history budget; an absent timestamp leaves the fallback active.
     """
     from .checkpoint_policy import parse_checkpoint
-    if not line or not (root / ".git").exists():
+    if not line or not (root / ".git").exists() or not re.fullmatch(r"[\w.-]+", path.parent.name):
         return None
     root = root.resolve()
     relative = path.resolve().relative_to(root).as_posix()

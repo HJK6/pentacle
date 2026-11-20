@@ -206,6 +206,12 @@ async def test_unreadable_source_and_reassignment(fixture, monkeypatch):
     with pytest.raises(VerbError,match=OTHER):
         await f.report("worker","reassigned")
     assert (await f.report("worker","unavailable"))["status_freshness"] == receipt["status_freshness"]
+    monkeypatch.setenv("PENTACLE_MEMORY_ROOT",str(f.root/"unavailable"))
+    next_report = await f.report("worker","other-item")
+    assert next_report["status_freshness"]["spec_id"] == OTHER
+    projected = await f.store.submit(lambda conn: conn.execute(
+        "SELECT spec_id FROM v2_work_item_latest_report WHERE report_id='other-item'").fetchone())
+    assert projected[0] == OTHER
 
 
 @pytest.mark.asyncio
