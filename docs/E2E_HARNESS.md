@@ -524,6 +524,12 @@ node test/e2e/web_gate.js
 node scripts/run-tests.js "test/*.test.js" "test/*.test.ts"
 ```
 
+Public checks run quarantined cases in advisory steps with their own results.
+The daemon advisory step uses `gate_env.py run --target v2-quarantined` with
+the standard workspace and evidence arguments. The web advisory step selects
+the quarantined case with Node's `--test-name-pattern` and owns its tmux socket
+directory.
+
 The web gate needs Chrome/Chromium, `tmux`, the daemon's provisioned Python
 packages and permission to create local sockets and attach Chrome over CDP.
 Use the no-profile invocation above for voice acceptance. The external

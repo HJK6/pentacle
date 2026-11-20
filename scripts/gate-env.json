@@ -135,6 +135,23 @@
           "max_timeout_s": 7200,
           "strict_capabilities": false
         },
+        "v2-quarantined": {
+          "kind": "pytest_files",
+          "needs": ["python", "node", "tmux"],
+          "capabilities": "v2_host",
+          "select": {
+            "root": "services/chat-stream-v2",
+            "pattern": "^tests/test_[A-Za-z0-9_]+\\.py$"
+          },
+          "default_patterns": [
+            "tests/test_store_call_diag.py",
+            "tests/test_tmux_observation_delimiter.py"
+          ],
+          "pytest_addopts": "-m quarantined",
+          "timeout_s": 120,
+          "max_timeout_s": 120,
+          "strict_capabilities": false
+        },
         "npm-test": {
           "kind": "npm_test",
           "needs": [
