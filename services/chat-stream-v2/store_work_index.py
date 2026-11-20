@@ -17,6 +17,11 @@ from _shared.work_observations import advance_observation, timestamp, unresolved
 from _shared.work_goals import advance_goals, detail_revision, goal_id
 
 DDL = (
+    "CREATE TABLE IF NOT EXISTS v2_item_tracking_activation (singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+    "activated_at TEXT NOT NULL,basis TEXT NOT NULL,clearance_sha256 TEXT)",
+    "CREATE TABLE IF NOT EXISTS v2_item_tracking (spec_id TEXT PRIMARY KEY,occurrence INTEGER NOT NULL,"
+    "opened_at TEXT NOT NULL,cleared_at TEXT,prior_clear TEXT,causes TEXT NOT NULL DEFAULT '{}',verified INTEGER NOT NULL DEFAULT 0,"
+    "sequence INTEGER NOT NULL DEFAULT 0,notice_id TEXT,last_success TEXT)",
     "CREATE TABLE IF NOT EXISTS v2_work_attendance_causes (spec_id TEXT NOT NULL,gate TEXT NOT NULL,"
     "stream_id TEXT,generation TEXT,seat_role TEXT,cause TEXT NOT NULL,observed_at TEXT NOT NULL,"
     "PRIMARY KEY(spec_id,gate))",

@@ -308,6 +308,10 @@ class ErrorAlerts:
 
     async def _current(self, ctx, now):
         """Fresh condition/code immediately before enqueue or submission."""
+        if ctx["family"] == WORK_LANE and ctx["code"] == "lane_status_behind":
+            from work_item_tracking import active
+            if await self.store.submit(active):
+                return "cancelled", ctx["code"]
         if ctx["family"] == VOICE:
             operation = await self.store.voice_get(ctx["principal"], ctx["operation_id"])
             condition, code, _ = evaluate(operation, now)

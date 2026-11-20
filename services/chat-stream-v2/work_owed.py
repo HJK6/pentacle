@@ -106,6 +106,7 @@ def reconcile_dispositions_conn(conn, now):
         observation = observed(episode["spec_id"])
         _advance(episode, observation)
         if key in owners:
+            episode["seat_role"] = owners[key][2].get("role")
             continue
         if episode["spec_id"] not in specs and not _disposed(episode, observation):
             registry["owed"][key] = {**episode, "closed_at": timestamp(now)}
@@ -117,7 +118,7 @@ def reconcile_dispositions_conn(conn, now):
             parent_row = _session(conn, parent) if parent else None
             registry["episodes"][key] = {"spec_id": spec, "closing_stream_id": stream,
                 "session_generation": row["session_generation"], "started_at": timestamp(now),
-                "baseline_known": observation["known"], "baseline_revision": observation["revision"],
+                "seat_role": row.get("role"), "baseline_known": observation["known"], "baseline_revision": observation["revision"],
                 "previous": observation, "disposition": None,
                 "parent_stream_id": parent, "parent_generation": parent_row["session_generation"] if parent_row else None,
                 "assignment_parent_stream_id": parent,
@@ -182,7 +183,7 @@ def disposition_root_conn(conn, root, now):
     _save(conn, state, registry)
 
 
-def owed_dispositions_conn(conn, *, now=None, root_binding=None):
+def owed_dispositions_conn(conn, *, now=None, root_binding=None, spec_id=None):
     state = _state_conn(conn)
     registry = _registry(state)
     valid_root = (isinstance(root_binding, (tuple, list)) and len(root_binding) == 2
@@ -190,6 +191,8 @@ def owed_dispositions_conn(conn, *, now=None, root_binding=None):
     root = root_binding if valid_root else registry.get("root")
     items = []
     for debt in registry["owed"].values():
+        if spec_id is not None and debt["spec_id"] != spec_id:
+            continue
         observation = _observation(conn, state, debt["spec_id"])
         unknown = not debt["baseline_known"] or not observation["known"]
         parent = root[0] if root and debt.get("front_desk_owned") else debt.get("parent_stream_id")
@@ -198,7 +201,7 @@ def owed_dispositions_conn(conn, *, now=None, root_binding=None):
         items.append({"spec_id": debt["spec_id"], "closing_stream_id": debt["closing_stream_id"],
             "session_generation": debt["session_generation"], "parent_stream_id": parent,
             "parent_generation": parent_generation,
-            "started_at": debt["started_at"], "closed_at": debt["closed_at"],
+            "started_at": debt["started_at"], "closed_at": debt["closed_at"], "seat_role": debt.get("seat_role"),
             "status": observation["status"], "quality": "unknown" if unknown else "fresh",
             "title": observation.get("title"), "repo": stem.split("__", 1)[0]})
     items.sort(key=lambda item: (item["closed_at"], item["spec_id"], item["closing_stream_id"]))

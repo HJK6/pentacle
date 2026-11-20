@@ -990,3 +990,44 @@ lane/selected-goal working counts. A seat and packet on one item count once.
 Queued/review packets do not make an item working. Any current packet can resume an unparked paused lane and suppress lead-lost. Older clients may ignore these optional facts.
 
 Open, unparked lanes carry `activity`: `working`, `waiting_on_dot`, `waiting_on_you`, `blocked`, or `idle`, in that precedence order. It is null when session or question inputs are unavailable; done and parked lanes omit it.
+
+### Daily tracking notices
+
+A release-qualified deployment opts in with `PENTACLE_ITEM_TRACKING_RELEASE=1`.
+Before 2026-11-23 19:00 UTC the release owner also supplies
+`PENTACLE_ITEM_TRACKING_CLEARANCE_SHA256`, the SHA-256 of the cleanup lead's
+verified clearance receipt for status behind, unattended work and owed
+dispositions. The digest is the deployment's attestation of that external
+verification. At or after the deadline the qualified deployment may activate
+without the receipt. The first eligible inventory sweep records its UTC time,
+basis and receipt digest in the singleton `v2_item_tracking_activation` row.
+The sweep evaluates the current board, including surviving legacy items.
+
+A fresh unfinished lane member behind a qualifying report by at least 30
+minutes, an unattended in-progress item, or a still-owed disposition opens an
+item occurrence. Attendance and disposition cover the whole board. A known debt
+with unavailable source evidence names the verification needed. Unknown index
+reads hold the occurrence open. Repair the source Status, restore a live owner
+or record the disposition named in the notice. A verified clear closes the
+occurrence and cancels unattempted delivery. A later recurrence opens a new one.
+
+The ordinary outbox delivers each item to the current front desk. A new cause
+can prompt an update. Continuing causes repeat once per elapsed 86,400 seconds
+from successful dispatch. Missed intervals coalesce. Retries use the original
+tell ID and possible input stays bound to its original generation for proof.
+For diagnosis, read `tools/work_tracking_counts.sql` on a read-only connection
+to the daemon store. Each alert row counts distinct delivered notice IDs in
+one condition, event, role, gate outcome and delivery-type group. Use
+`initial` for new occurrences, `changed` for updates and `repeat` for reminders.
+An item with several causes contributes to several groups. The query also
+returns the independent seat-only report metric. Missing event-time proof
+appears as `legacy/unknown`.
+
+For rollback on the candidate, turn off the release setting and restart through
+the release owner. This holds pending tracking notices at claim. Before restoring
+an older generic queue consumer, stop its predecessor, save the store preimage
+and dispose of pending tracking rows in the stopped store. Terminalize only
+proven-unsent rows. Settle any possible input through its original tell proof
+before switching consumers. Retain the activation cursor, incident rows,
+report history and outbound receipts for recovery. A fixture may inject a shorter Store interval
+for its own sweep. Production uses the daily constant.

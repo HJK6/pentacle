@@ -284,17 +284,28 @@ def _retarget_front_desk_notice_conn(conn: sqlite3.Connection, notice_id: str) -
     import store_lifecycle_authority as lifecycle_authority
     from store_assistant_binding import front_desk_aliases_conn
     front_desk = lifecycle_authority.configured(conn)
-    if not front_desk:
-        return None
     row = conn.execute("SELECT * FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone()
     if row is None:
         return None
     row = dict(row)
     metadata = json.loads(row.get("metadata") or "{}")
-    if not (row["kind"] in {"report", "assistant_lane_ruling_result"}
+    tracking = row["kind"] == "work_item_tracking"
+    if tracking:
+        from work_item_tracking import active
+        if not active(conn):
+            return "defer"
+        if conn.execute("SELECT 1 FROM v2_tell_deliveries WHERE tell_id=?", (row["tell_id"],)).fetchone():
+            return None  # Recover original-generation proof without another paste.
+        if not front_desk or not conn.execute(
+                "SELECT 1 FROM v2_item_tracking WHERE spec_id=? AND notice_id=? AND verified=1 AND cleared_at IS NULL",
+                (metadata["spec_id"], notice_id)).fetchone():
+            return "defer"
+    elif not front_desk:
+        return None
+    if not (tracking or row["kind"] in {"report", "assistant_lane_ruling_result"}
             or (row["kind"] == "lane_digest" and metadata.get("front_desk_digest"))):
         return None
-    if (row["recipient_stream_id"] not in front_desk_aliases_conn(conn, front_desk)
+    if not tracking and (row["recipient_stream_id"] not in front_desk_aliases_conn(conn, front_desk)
             or conn.execute("SELECT 1 FROM v2_tell_deliveries WHERE tell_id=?", (row["tell_id"],)).fetchone()):
         return None
     try:

@@ -1510,8 +1510,12 @@ class Comms:
                     "submission_attempts": 0, "delivered_at": None,
                     "request_payload_hash": payload_digest(target, body),
                     **watermark_fields(watermark)}
-        await self.store.put_tell_delivery(tell_id,
-            {"payload_digest": payload_digest(target, body), "reply": reply, "delivery": delivery})
+        from outbound_notices import TRACKING_INPUT_TOKEN
+        envelope = {"payload_digest": payload_digest(target, body), "reply": reply, "delivery": delivery}
+        if msg.get("_tracking_input_token") is TRACKING_INPUT_TOKEN:
+            await self.store.put_tell_delivery(tell_id, envelope, tracking_target=(target, msg["_notification_answer_generation"]))
+        else:
+            await self.store.put_tell_delivery(tell_id, envelope)
 
     async def _inject_body(
         self, tmux: Any, name: str, body: str, provider: str, urgent: bool, stream_id: str,
