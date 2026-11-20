@@ -5414,6 +5414,11 @@ class Server:
             raise VerbError("assistant_authority_unauthorized", "assistant.authority requires authentication")
         action = str(msg.get("action") or "read")
         try:
+            model, expected_model = msg.get("model"), msg.get("expected_model")
+            if "model" in msg or "expected_model" in msg:
+                if (action != "session_kinds" or not all(isinstance(v, str) and v.strip() for v in (model, expected_model))
+                        or msg.get("account") is not None):
+                    raise ValueError("assistant_session_model_invalid")
             if action == "read":
                 return {"type": "assistant.authority.ok", **await self.lane_rulings.binding(),
                         **await self.lane_rulings.advisor_sessions.status(),
@@ -5428,7 +5433,8 @@ class Server:
                 return {"type": "assistant.authority.ok", "restore": await self.authority_restore.manual(action, brief_file=msg.get("brief_file"))}
             if action == "session_kinds" and auth.get("token_verified"):
                 return await self.lane_rulings.configure_sessions(msg.get("session_kinds"),
-                    actor_stream_id=auth["stream_id"], actor_generation=auth["session_generation"], account=msg.get("account"))
+                    actor_stream_id=auth["stream_id"], actor_generation=auth["session_generation"], account=msg.get("account"),
+                    model=model, expected_model=expected_model)
             if action != "set" or not auth.get("token_verified"):
                 raise ValueError("assistant_authority_unauthorized")
             return await self.lane_rulings.configure(

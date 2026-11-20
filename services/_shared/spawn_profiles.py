@@ -481,6 +481,15 @@ def resolve_spawn(*, provider: str, model: str | None = None, effort: str | None
     }
 
 
+def require_spawnable(provider: str, model: str, *, _config=None) -> None:
+    """Fresh admission only; known-model resolution remains continuation-safe."""
+    config = load_spawn_config() if _config is None else _config
+    canonical = _canonical_model(provider, model, config["models"])
+    if config["models"][provider][canonical].get("spawnable") is False:
+        raise SpawnProfileError("spawn_model_retired", f"retired model is unavailable for new spawns: {canonical}")
+
+
+
 def _normalize_handoff_role(value: object) -> str | None:
     if value is None:
         return None
