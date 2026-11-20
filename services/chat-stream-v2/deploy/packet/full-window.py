@@ -80,7 +80,7 @@ def scan(source, offsets, end, attempts, window, out, expected_endpoint='ws://12
         boot = min(time for marker in markers for time, _line in timed_group(marker['inputs']))
         receipt.update(generation=identity, generation_proof_sha256=hashlib.sha256(Path(generation_proof).read_bytes()).hexdigest(),
                        generation_attribution='attributed', selected_inputs=[item for group in selected for item in group],
-                       old_generation={'basis': 'pre-marker range: outgoing tail plus incoming boot logs',
+                       old_generation={'basis': 'retained ranges outside the activated generation',
                                        'inputs': [item for group in preceding for item in group],
                                        'classifier': deploy.classify_slow_consumer_lines(
                                            (line for group in preceding for line in lines_many(group)), max_examples=100)})

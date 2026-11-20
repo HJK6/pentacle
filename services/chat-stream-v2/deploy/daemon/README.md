@@ -418,11 +418,14 @@ exception is a down-daemon rollback whose guard and activation launchd samples
 were both answered with no PID (`down_basis: launchd_answered_no_pid`): there is
 no outgoing writer, so attribution records `no_outgoing_writer` and the exit
 follows the slow-consumer scan and fleet-smoke verdicts instead of being forced
-to 8; `full-window.py` still rejects that outcome. The scanner reads only bytes
-after each matching marker. `old_generation.inputs` retains the exact
-pre-marker ranges: the outgoing tail plus incoming startup logs. Its classifier
-is separate evidence, not a verdict on the activated process. Existing 1011,
-4000, overflow and peer-liveness failure rules are unchanged.
+to 8; `full-window.py` still rejects that outcome. The scanner selects bytes
+after each matching marker up to the next valid generation marker in that
+stream. Valid markers from other retained generations are kept outside the
+selected range, before or after it, in `old_generation.inputs`; their classifier
+is separate evidence, not a verdict on the activated process. A legacy or
+malformed marker after the activated marker remains ambiguous because it cannot
+bound the next generation. Existing 1011, 4000, overflow and peer-liveness
+failure rules are unchanged.
 
 Missing, conflicting, duplicated, truncated, expired or unproven identity emits
 `attribution.outcome=attribution_ambiguous`, keeps the gate failed (exit 8), and
@@ -436,8 +439,9 @@ its final optional `GENERATION_PROOF` argument with the deploy stamp (or its
 attributed writer-lifetime receipt and the same exact marker boundaries. Offset
 rows may include `backups` with `device` to traverse retained managed generations.
 A missing or mismatched receipt fails as `attribution_ambiguous`. Retained
-pre-marker failures stay in the packet receipt and do not clear or condemn the
-new generation. Runtime rollback remains an explicit deployment-owner action.
+non-activated generation failures stay in the packet receipt and do not clear
+or condemn the new generation. Runtime rollback remains an explicit
+deployment-owner action.
 
 ## Ordinary deployment qualification provenance (version 1)
 

@@ -1243,7 +1243,7 @@ def test_prior_writer_exit_remains_fail_closed(rc, value, error, exited):
     assert deploy_mod._prior_writer_exited(123, 'birth', runner) is exited
 
 
-@pytest.mark.parametrize('fault', ['pid', 'birth', 'uuid', 'malformed', 'missing', 'mixed', 'rotated'])
+@pytest.mark.parametrize('fault', ['pid', 'birth', 'uuid', 'malformed', 'missing', 'rotated'])
 def test_process_identity_bad_proofs_still_refuse(fault, tmp_path):
     identity = {'pid': 123, 'start': 'Tue Nov 3 12:00:00 2026',
                 'boot_uuid': '00000000-0000-4000-8000-000000000001'}
@@ -1256,7 +1256,6 @@ def test_process_identity_bad_proofs_still_refuse(fault, tmp_path):
     elif fault == 'uuid': right = line({**identity, 'boot_uuid': '00000000-0000-4000-8000-000000000002'})
     elif fault == 'malformed': right = 'generation={} chat_streamd_v2 listening on hostx:1234\n'
     elif fault == 'missing': right = 'no marker\n'
-    elif fault == 'mixed': right += line({**identity, 'pid': 124})
     groups = []
     for name, text in [('out', left), ('err', right)]:
         path = tmp_path / name

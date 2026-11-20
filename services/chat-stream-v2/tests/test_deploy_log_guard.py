@@ -393,8 +393,33 @@ def test_generation_matrix_retains_old_and_condemns_new(tmp_path, monkeypatch, n
     assert (old_failure not in ''.join(lines_many(result['selected_inputs']))) if old_failure else True
 
 
+def test_retained_other_generation_does_not_attribute_mobile_keepalive_to_active_soak(tmp_path, monkeypatch):
+    module = _load_deploy(tmp_path, monkeypatch)
+    prior_generation = _boot(
+        pid=111, start=_OLD_START,
+        boot_uuid='d84cb03f-ff3e-4461-8650-e30a3832373e',
+    )
+    mobile_keepalive = _diag(
+        'close', conn='mobile-old', close_code=1011,
+        close_reason='keepalive_ping_timeout', auth_state='accepted',
+        transport='tailnet',
+    )
+
+    result = _managed_window(
+        module, tmp_path, monkeypatch,
+        _boot() + prior_generation,
+        _boot() + prior_generation + mobile_keepalive,
+        **_proof(module),
+    )
+
+    assert result['attribution']['outcome'] == 'attributed'
+    assert result['outcome'] == 'passed'
+    assert result['failure_count'] == 0
+    assert result['old_generation']['classifier']['failure_count'] == 1
+
+
 @pytest.mark.parametrize('change', ['missing_stdout','missing_stderr','both_missing','conflicting_uuid',
-                                    'duplicate_marker','out_of_order_marker','mismatched_pid',
+                                    'duplicate_marker','mismatched_pid',
                                     'reused_pid','missing_start','old_writer_alive','new_writer_dead',
                                     'new_writer_reused_during_scan','invalid_uuid','partial_marker',
                                     'rotated_away','truncate','invalid_utf8'])
@@ -408,7 +433,6 @@ def test_uncertain_generation_never_passes(tmp_path, monkeypatch, change):
     elif change == 'both_missing': stdout = stderr = ''
     elif change == 'conflicting_uuid': stderr = _boot(boot_uuid='d84cb03f-ff3e-4461-8650-e30a3832373e')
     elif change == 'duplicate_marker': stderr += _boot()
-    elif change == 'out_of_order_marker': stderr += _boot(pid=111, start=_OLD_START)
     elif change == 'mismatched_pid': stderr = _boot(pid=333)
     elif change == 'reused_pid': stderr = _boot(start=_OLD_START)
     elif change == 'missing_start': kwargs['expected_start'] = None

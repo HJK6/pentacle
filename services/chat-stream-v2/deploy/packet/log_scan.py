@@ -84,10 +84,11 @@ def _slice_ranges(items, begin, end):
 
 
 def generation_ranges(groups, expected_pid, expected_start):
-    """Select only bytes after one matching, paired process-generation marker.
+    """Select only bytes from the paired activated generation markers.
 
     Lifecycle ordering must be qualified separately on the target service
-    manager. Timestamps and connection age never establish this boundary.
+    manager. Retained markers from other valid generations bound separate
+    ranges; timestamps and connection age never establish this boundary.
     """
     import json
     import uuid
@@ -99,42 +100,43 @@ def generation_ranges(groups, expected_pid, expected_start):
     selected, preceding, markers = [], [], []
     for group in groups:
         position = 0
-        matching = []
-        boot_after = False
+        boot_markers = []
         for line in lines_many(group):
             size = len(line.encode('utf-8'))
             if BOOT_PREFIX in line:
-                # Legacy history is not attribution evidence. It is harmless
-                # only before a proven current marker, which remains required
-                # in both streams. A boot record after that marker fails closed.
-                if line.startswith(BOOT_PREFIX + ' ') and not matching:
-                    position += size
-                    continue
-                if matching:
-                    boot_after = True
-                try:
-                    if not line.startswith('generation='):
-                        raise ValueError('missing generation prefix')
-                    identity, end = json.JSONDecoder().raw_decode(line[len('generation='):])
-                    if not line[len('generation=') + end:].startswith(' ' + BOOT_PREFIX + ' '):
-                        raise ValueError('invalid listening record')
-                    if (not isinstance(identity, dict) or type(identity.get('pid')) is not int
-                            or not isinstance(identity.get('start'), str)
-                            or not identity['start'].strip()
-                            or str(uuid.UUID(identity['boot_uuid'])) != identity['boot_uuid']):
-                        raise ValueError('invalid generation identity')
-                except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError) as exc:
-                    raise AttributionAmbiguous('boot marker lacks valid PID/start/UUID proof') from exc
-                if identity['pid'] == expected_pid:
-                    if ' '.join(identity['start'].split()) != expected_start:
-                        raise AttributionAmbiguous('boot marker PID/start mismatch')
-                    matching.append((position, position + size, identity))
+                if line.startswith(BOOT_PREFIX + ' '):
+                    # Legacy history cannot identify a process generation.
+                    identity = None
+                else:
+                    try:
+                        if not line.startswith('generation='):
+                            raise ValueError('missing generation prefix')
+                        identity, marker_end = json.JSONDecoder().raw_decode(line[len('generation='):])
+                        if not line[len('generation=') + marker_end:].startswith(' ' + BOOT_PREFIX + ' '):
+                            raise ValueError('invalid listening record')
+                        if (not isinstance(identity, dict) or type(identity.get('pid')) is not int
+                                or not isinstance(identity.get('start'), str)
+                                or not identity['start'].strip()
+                                or str(uuid.UUID(identity['boot_uuid'])) != identity['boot_uuid']):
+                            raise ValueError('invalid generation identity')
+                    except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError) as exc:
+                        raise AttributionAmbiguous('boot marker lacks valid PID/start/UUID proof') from exc
+                boot_markers.append((position, position + size, identity))
             position += size
-        if len(matching) != 1 or boot_after:
-            raise AttributionAmbiguous('missing, duplicate or out-of-order activated boot marker')
+        matching = [row for row in boot_markers if row[2] is not None
+                    and row[2]['pid'] == expected_pid
+                    and ' '.join(row[2]['start'].split()) == expected_start]
+        if len(matching) != 1:
+            raise AttributionAmbiguous('missing or duplicate activated boot marker')
         begin, end, identity = matching[0]
-        preceding.append(_slice_ranges(group, 0, begin))
-        selected.append(_slice_ranges(group, end, position))
+        if any(marker_begin > begin and marker_identity is None
+               for marker_begin, _, marker_identity in boot_markers):
+            raise AttributionAmbiguous('unqualified boot marker follows activated marker')
+        later_generations = [marker_begin for marker_begin, _, marker_identity in boot_markers
+                             if marker_begin >= end and marker_identity is not None]
+        boundary = min(later_generations) if later_generations else position
+        preceding.append(_slice_ranges(group, 0, begin) + _slice_ranges(group, boundary, position))
+        selected.append(_slice_ranges(group, end, boundary))
         markers.append({'identity': identity, 'inputs': _slice_ranges(group, begin, end)})
     if markers[0]['identity'] != markers[1]['identity']:
         raise AttributionAmbiguous('stdout/stderr generation identities conflict')
