@@ -256,3 +256,18 @@ async def test_unrelated_edit_reversion_and_uncertain_witness(fixture):
     await f.store.update_session("fixture","peer",pane_status="unknown")
     with pytest.raises(VerbError,match="unverifiable"):
         await f.report("helper","uncertain",completion_kind="seat_only")
+
+
+@pytest.mark.asyncio
+async def test_review_after_progress_in_same_second_keeps_its_own_obligation(fixture):
+    f = fixture
+    await f.scan()
+    await f.seat("qa",role="qa")
+    f.clock += 2
+    f.publish(summary(CHANGED))
+    await f.scan()
+    f.clock += 0.2
+    reply = await f.report("qa","newer-review",qa_verdict="accept",target_sha="b"*40)
+    assert reply["status_freshness"]["seat_role"] == "qa"
+    f.clock += 1801
+    assert await f.behind()

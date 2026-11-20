@@ -103,7 +103,8 @@ def apply_report_gate(conn, report, reporter, context, now):
     spec = effective_assignment(reporter)
     auth = context.get("authenticated_generation")
     verified = bool(auth and auth == generation)
-    receipt = {"spec_id": spec, "generation": generation, "report_id": report["report_id"]}
+    receipt = {"spec_id": spec, "generation": generation, "report_id": report["report_id"],
+               "seat_role": reporter.get("role") or "roleless"}
     if report.get("completion_kind") == "seat_only":
         receipt.update(outcome="seat_only", witness=_helper_witness(conn, reporter, spec, verified))
         report["usage_snapshot"]["attribution"] = {"mode": "exclusive_primary", "spec_id": spec}
@@ -140,8 +141,6 @@ def apply_report_gate(conn, report, reporter, context, now):
             prior_seen = change.get("after")
             observed_after = (change.get("value") == line and prior_seen is not None
                               and prior_seen >= boundary["boundary_at"])
-            if published is not None and published + 1 <= boundary["boundary_at"] and not observed_after:
-                raise ReportStatusRefusal("report_status_unchanged", spec, "the accepted Status predates this assignment or report")
             if (published is not None and boundary["boundary_at"] < published <= now) or observed_after:
                 receipt.update(outcome="changed", status_revision=publication.get("revision") or change.get("revision"),
                                published_at=published, summary_revision=rev,

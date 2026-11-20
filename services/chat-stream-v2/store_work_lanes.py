@@ -284,11 +284,12 @@ def enrich_latest_reports_conn(conn, members: list[dict]) -> None:
             json_extract(r.status_freshness,'$.covers_event'),
             json_extract(r.status_freshness,'$.spec_id'),
             json_extract(r.status_freshness,'$.report_id'),
-            json_extract(r.status_freshness,'$.source_revisions')
+            json_extract(r.status_freshness,'$.source_revisions'), r.created_at
             FROM v2_work_item_latest_report l LEFT JOIN v2_reports r USING(report_id)
             WHERE l.spec_id=?""", (member["spec_id"],)).fetchone()
         member["_latest_event"] = {"kind": row[0], "at": row[1]} if row else None
         member["_latest_report_id"] = row[2] if row else None
+        member["_latest_report_epoch"] = row[7] if row else None
         if row and row[3] and row[4] == member["spec_id"] and row[5] == row[2]:
             member["_status_reflected_report"] = row[2]
         if row and row[6] and row[4] == member["spec_id"] and row[5] == row[2]:

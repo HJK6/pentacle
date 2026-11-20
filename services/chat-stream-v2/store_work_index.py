@@ -130,6 +130,7 @@ def effective_membership_conn(conn, *, spec_ids=None, snapshot: dict | None = No
             member["_progress_changed_at"] = record["progress_changed_at"]
         member["_progress_at"] = record.get("progress_at")
         member["_progress_source_revisions"] = record.get("progress_source_revisions")
+        member["_progress_epoch"] = record.get("progress_epoch")
         members[identity] = member
     return {**snapshot, "records": records, "members": members}
 

@@ -132,6 +132,7 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
             or prior_line is not None and facts.get("status_line") not in (None, prior_line))
         if progressed:
             record["progress_source_revisions"] = candidate.get("document_revisions") or {}
+            record["progress_epoch"] = now
         if material:
             fields = ("status", "ac_checked", "ac_total", "estimate", "estimate_exempt")
             change = {"spec_id": spec_id, "obs_rev": rev,
