@@ -83,6 +83,9 @@ def test_receipt_precedence_survives_lane_display_transition(tmp_path, to, archi
             assert receipt["first_created_at"] == "2030-01-01T00:00:00Z"
         payload = {"to": to, "reason": "Checkpoint settled work", "next_action": "Resume later",
                    "blocker": "keys", "outcome": "Done"}
+        if to == "done":
+            from test_work_lanes import seed_lane_work
+            await seed_lane_work(env.store, lane_row["lane_id"])
         result = await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
         assert result["lane"]["work_state"] == to
         # Lane display transitions do not consume or alter send receipt evidence.
@@ -210,6 +213,9 @@ def test_busy_assigned_worker_does_not_block_display_transition(to):
         await sessions.refresh()
         sessions.apply_live(worker[0], working=True, online=True)
         payload = {"to": to, "reason": "Checkpoint before hold", "next_action": "Resume when keys arrive", "blocker": "keys", "outcome": "Done"}
+        if to == "done":
+            from test_work_lanes import seed_lane_work
+            await seed_lane_work(env.store, lane_row["lane_id"])
         assert (await env.op("set_state", payload, lane=lane_row["lane_id"], version=1))["lane"]["work_state"] == to
 
     run(body)
