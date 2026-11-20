@@ -1894,11 +1894,16 @@ class AssistantComposite:
             owed_flags={k: msg[k] for k in ("owes", "owes_due", "owes_spec", "owes_lane", "closes") if k in msg},
             owed_authorize=lambda conn: self.owed.authorize(conn,msg.get("_auth_context") or {},True),
         )
-        await self.refresh_activity()
         if not stored.get("duplicate"):
             self._advance_summary(stored["event"])
-            if self.broadcast is not None:
-                await self.broadcast({"type": "chat.event", "event": stored["event"]})
+        # A proactive retry can follow a committed publication whose live fanout
+        # was interrupted. Replay its durable event identity; clients deduplicate
+        # live/history overlap by daemon_seq. Activity refresh must not prevent
+        # delivery of a note that has already committed.
+        if self.broadcast is not None and (proactive or not stored.get("duplicate")):
+            await self.broadcast({"type": "chat.event", "event": stored["event"]})
+        await self.refresh_activity()
+        if not stored.get("duplicate"):
             # One push per committed user-facing reply.  The publish-key dedup means
             # replays/reconnects (duplicate=True) never re-push.
             if (self.reply_push is not None and kind == "prose" and response_state == "final"):

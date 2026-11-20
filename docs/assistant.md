@@ -448,6 +448,13 @@ message; a started note refers to a tell, message or lane. An `other` note
 requires `--why` (stored as `note_reason`, 1–200 characters after trimming);
 any other type refuses it, both with `assistant_publish_reason_required`. The
 publication and chat event retain these fields; clients do not render them.
+After commit, the daemon broadcasts the note before refreshing activity. Retrying
+the same proactive publication replays its stored `chat.event` with the same
+`daemon_seq`, so an interrupted broadcast can recover without another stored
+row. Clients deduplicate this replay and overlapping history; summary-mode web
+and mobile clients fetch history when opening or reconnecting to the chat.
+Retries do not repeat reply pushes. Notes without a final response state do not
+produce a reply push.
 At most one `started` and one `change` note per ref is accepted from the
 composite in 24 hours; a repeat is refused with `assistant_publish_repeat` and
 the earlier event id. That check reads only the window, through
