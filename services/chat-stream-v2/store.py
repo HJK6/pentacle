@@ -1438,6 +1438,7 @@ REPORT_REJECTIONS_INDEX_DDL = (
 )
 
 REPORT_COLUMNS = (
+    "status_freshness",
     "usage_snapshot", "report_id", "from_stream_id", "msg_id", "session_generation", "status", "summary", "findings",
     "next_action", "details", "extras", "reason", "completion_kind", "qa_verdict", "target_sha",
     "qa_attestation", "ac_claim", "claim_verified", "ac_claim_mismatch", "agent_orch_attestation",
@@ -1455,6 +1456,7 @@ REPORT_IDENTITY_COLUMNS = (
 )
 #: Report columns holding JSON, decoded on read so a caller never sees a blob.
 REPORT_JSON_COLUMNS = (
+    "status_freshness",
     "usage_snapshot",
     "findings", "details", "extras", "qa_attestation", "ac_claim", "ac_claim_mismatch",
     "agent_orch_attestation", "qa_attestation_validation",
@@ -2032,6 +2034,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 conn.execute("UPDATE v2_schedules SET objective_source='explicit' WHERE objective IS NOT NULL")
             if "exchange_json" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
+            if "status_freshness" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
+                conn.execute("ALTER TABLE v2_reports ADD COLUMN status_freshness TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN observer_binding TEXT")
             if "account_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
@@ -3104,6 +3108,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     (stream_id,),
                 )
             try:
+                from work_report_freshness import assignment_changed_conn
+                assignment_changed_conn(conn, stream_id, time.time())
                 lifecycle_watch_conn(conn, time.time())
                 install_default_conn(conn, f"{host}:{session_name}", time.time())
             except BaseException:
@@ -3166,6 +3172,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            if {"assigned_spec_id", "spec_ids", "spec_id"}.intersection(cols):
+                from work_report_freshness import assignment_changed_conn
+                assignment_changed_conn(conn, f"{host}:{session_name}", time.time())
             if "pane_pid" in cols or "provider" in cols:
                 store_usage.history_fill_conn(
                     conn, host, session_name, pane_pid=cols.get("pane_pid"), provider=cols.get("provider"),
@@ -5261,6 +5270,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         *,
         routing_snapshot: dict[str, Any] | None = None,
         qa_attestation_mode: str = "warn",
+        status_context: dict[str, Any] | None = None,
         announce: bool = True,
         _cancel_owner: asyncio.Task | None = None,
     ) -> dict[str, Any]:
@@ -5357,6 +5367,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
             ).fetchone())
             stored_fields["usage_snapshot"] = usage_row["usage"]
+            accepted_at = time.time()
+            from work_report_freshness import apply_report_gate
+            apply_report_gate(conn, stored_fields, usage_row, status_context or {}, accepted_at)
             stored_fields.update({
                 "session_generation": str(routing_snapshot["session_generation"]),
                 "effective_model": routing_snapshot.get("effective_model"),
@@ -5388,7 +5401,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 f"INSERT INTO v2_reports ({','.join(REPORT_COLUMNS)}, created_at)"
                 f" VALUES ({','.join('?' * len(REPORT_COLUMNS))}, ?)"
                 " ON CONFLICT(report_id) DO NOTHING",
-                [*values, time.time()],
+                [*values, accepted_at],
             ).rowcount == 1
             stored = _report_row(conn.execute(
                 "SELECT * FROM v2_reports WHERE report_id=?", (stored_fields["report_id"],)

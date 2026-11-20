@@ -126,6 +126,7 @@ def effective_membership_conn(conn, *, spec_ids=None, snapshot: dict | None = No
         if record.get("progress_changed_at"):
             member["_progress_changed_at"] = record["progress_changed_at"]
         member["_progress_at"] = record.get("progress_at")
+        member["_progress_source_revisions"] = record.get("progress_source_revisions")
         members[identity] = member
     return {**snapshot, "records": records, "members": members}
 
@@ -255,6 +256,14 @@ def _prepare_records(rows, state: dict, scan: dict, *, settle_s: float, sweep: b
                 candidate = {"quality": "stale", "error": "work_goal_reference_unresolved"}
         record, transition = advance_observation(spec_id, previous, candidate,
             now=now, settle_s=settle_s, sweep=sweep)
+        if (candidate["quality"] == "fresh" and previous and state.get("available")
+                and previous["member"]["observation"]["quality"] == "fresh"
+                and "status_line" in previous["member"]
+                and previous["member"].get("checkpoint_policy_revision") == record["member"].get("checkpoint_policy_revision")
+                and previous["member"]["status_line"] != record["member"].get("status_line")):
+            record["status_change"] = {"after": state.get("_last_scan_at"),
+                                       "value": record["member"].get("status_line"),
+                                       "revision": (record.get("document_revisions") or {}).get("summary.md")}
         accepted |= candidate["quality"] == "fresh"
         if previous is not None:
             prior_quality = previous["member"]["observation"]["quality"]

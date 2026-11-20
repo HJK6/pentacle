@@ -258,13 +258,16 @@ from store_lane_hues import (ensure_lane_hues_schema, enter_open_conn, prepare_h
 
 
 def ensure_latest_report_schema(conn) -> None:
+    from work_report_freshness import ensure_schema
+    ensure_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS v2_work_item_latest_report ("
                  "spec_id TEXT PRIMARY KEY, kind TEXT NOT NULL, at TEXT NOT NULL, report_id TEXT NOT NULL)")
 
 
 def record_latest_report_conn(conn, report: dict) -> bool:
     attribution = (report.get("usage_snapshot") or {}).get("attribution") or {}
-    if report.get("status") != "done" or attribution.get("mode") != "exclusive_primary" or not attribution.get("spec_id"):
+    if (report.get("status") != "done" or report.get("completion_kind") == "seat_only"
+            or attribution.get("mode") != "exclusive_primary" or not attribution.get("spec_id")):
         return False
     kind = {"accept": "review_passed", "reject": "review_failed"}.get(report.get("qa_verdict"), "reported_done")
     at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(report["created_at"]))
@@ -276,9 +279,21 @@ def record_latest_report_conn(conn, report: dict) -> bool:
 
 def enrich_latest_reports_conn(conn, members: list[dict]) -> None:
     for member in members:
-        row = conn.execute("SELECT kind,at,report_id FROM v2_work_item_latest_report WHERE spec_id=?", (member["spec_id"],)).fetchone()
+        row = conn.execute("""SELECT l.kind,l.at,l.report_id,
+            json_extract(r.status_freshness,'$.covers_event'),
+            json_extract(r.status_freshness,'$.spec_id'),
+            json_extract(r.status_freshness,'$.report_id'),
+            json_extract(r.status_freshness,'$.source_revisions')
+            FROM v2_work_item_latest_report l LEFT JOIN v2_reports r USING(report_id)
+            WHERE l.spec_id=?""", (member["spec_id"],)).fetchone()
         member["_latest_event"] = {"kind": row[0], "at": row[1]} if row else None
         member["_latest_report_id"] = row[2] if row else None
+        if row and row[3] and row[4] == member["spec_id"] and row[5] == row[2]:
+            member["_status_reflected_report"] = row[2]
+        if row and row[6] and row[4] == member["spec_id"] and row[5] == row[2]:
+            if json.loads(row[6]) == member.get("_progress_source_revisions"):
+                # A delayed scan of the already reported edit is not an update after the report.
+                member["_progress_precedes_report"] = row[2]
 
 
 def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:

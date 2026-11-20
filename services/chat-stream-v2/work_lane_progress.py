@@ -71,6 +71,10 @@ def member_status_behind(member: dict[str, Any], now_iso: str, index_available: 
     event = member.get("_latest_event") or {}
     at = event.get("at")
     progress = member.get("_progress_at")
+    if member.get("_status_reflected_report") and member["_status_reflected_report"] == member.get("_latest_report_id"):
+        return False
+    if member.get("_progress_precedes_report") and member["_progress_precedes_report"] == member.get("_latest_report_id"):
+        progress = None
     return bool(index_available and member.get("status") not in ("completed", "deprecated")
                 and member.get("terminal") not in ("completed", "deprecated")
                 and member.get("observation", {}).get("quality") == "fresh"

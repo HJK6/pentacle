@@ -4185,6 +4185,9 @@ def _report_payload_from_args(args: argparse.Namespace) -> tuple[dict[str, objec
         if not isinstance(payload, dict):
             raise ValueError("schema_error: result file must be a JSON object")
         qa_grade = _merge_report_structured_flags(payload, args)
+        if payload.get("completion_kind") == "seat_only":
+            validate_report_payload(payload, args.status, enforce_inline_caps=True, qa_grade=qa_grade)
+            return payload, None
         if any(getattr(args, field, None) is not None for field in (
             "completion_kind", "qa_attestation_stream_id",
         )):
@@ -4728,12 +4731,11 @@ def report(args: argparse.Namespace) -> int:
     if getattr(args, "terminate", False) and args.status == "progress":
         print("agent-orch report: validation failed: report: --terminate is incompatible with --status=progress", file=sys.stderr)
         return 2
-    # Only non-QA self-closing, tell-driven workers may omit --msg-id. For an open
-    # seat, silently choosing 0 can make a commissioned report durable but
-    # invisible to the leader awaiting its actual inbox msg_id.
+    # Seat-only and self-closing workers can report a proactive errand at 0.
+    # Other open seats must name the commission their parent is awaiting.
     msg_id_omitted = args.msg_id is None
     if msg_id_omitted:
-        if not getattr(args, "terminate", False):
+        if not getattr(args, "terminate", False) and getattr(args, "completion_kind", None) != "seat_only":
             print(
                 "agent-orch report: validation failed: --msg-id is required unless --terminate is used; "
                 "use --msg-id 0 explicitly for a proactive non-terminating report",
@@ -6721,7 +6723,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--status", choices=["done", "progress", "error", "aborted"], required=True)
     report_parser.add_argument("--reason")
     report_parser.add_argument("--report-id")
-    report_parser.add_argument("--completion-kind", choices=["implementation_ready", "tracked"])
+    report_parser.add_argument("--completion-kind", choices=["implementation_ready", "tracked", "seat_only"])
     report_parser.add_argument("--qa-verdict", choices=["accept", "reject"])
     report_parser.add_argument("--target-sha", help="Full 40-hex reviewed candidate SHA; with QA review flags, copied exactly to extras.qa_review.candidate_identity")
     report_parser.add_argument("--qa-reviewed-scope", help="Reviewer-supplied nonempty acceptance scope; requires --target-sha and --qa-gate-evidence-digest")

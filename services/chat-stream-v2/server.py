@@ -5239,6 +5239,8 @@ class Server:
         response = {"type": "work.report.get.ok", **{key: report.get(key) for key in (
             "report_id", "status", "from_stream_id", "provenance_qualified_spec_ids", "created_at",
         )}}
+        if report.get("completion_kind") == "seat_only":
+            response.update(completion_kind="seat_only", provenance_qualified_spec_ids=[])
         # The dedicated reader may verify protected releases. Other metadata
         # readers retain their original response, and opaque payload stays private.
         extras = report.get("extras")

@@ -1258,10 +1258,16 @@ agent-orch report --msg-id 42 --status done --result '{"summary":"Finished the a
 
 Inline reports enforce per-field caps: `summary` <= 4 KiB, `next_action` <= 4 KiB, `reason` <= 512 bytes, serialized `findings` <= 64 KiB, serialized `details` <= 256 KiB, serialized `extras` <= 256 KiB, and total inline payload <= 1 MiB. If any cap is close or exceeded, commit the larger evidence through the git channel / committed-artifact path and keep the report's summary and artifact path inline.
 
-`--result-file` remains a legacy compatibility input. When paired with
+`--result-file` accepts an inline-sized `--completion-kind seat_only` errand report.
+The assigned helper must have another live assignee or attending owner on the
+same item. The parent receives the result. A commissioned helper passes the
+original `--msg-id`; a proactive errand defaults to zero. If the daemon refuses
+the classification, update the item's Status and file an ordinary item report.
+
+For QA, when paired with
 `--qa-verdict`, `--target-sha`, or either QA review evidence flag, the CLI validates the file under the inline
 caps, merges the absent typed fields, and sends the resulting payload inline;
-duplicate fields fail with `flag_payload_conflict`. Without those flags, the
+duplicate fields fail with `flag_payload_conflict`. For other file payloads the
 legacy blob upload remains unchanged and v2 rejects `result_blob_sha` before
 inserting a report row. For larger evidence, commit an artifact and cite it in
 the inline report.

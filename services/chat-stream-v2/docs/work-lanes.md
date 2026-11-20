@@ -793,6 +793,25 @@ Inventory budgets are unchanged: at most 800 added bytes per member over the exi
 
 A NEW open assigned execution lead's `implementation_ready` assertion requires a valid current coherently read checkpoint in addition to existing verified-QA requirements. Invalid/unverifiable source returns `work_checkpoint_invalid`/`work_checkpoint_unverifiable` and field repairs before the readiness row is stored. Ordinary progress/error/recovery/QA reports remain usable. Accepted report replay retains its original policy/source snapshot and payload identity even after source deletion or policy change; new assertions use current policy. These checks certify the recorded snapshot, never shipment or arbitrary prose truth.
 
+### Completion reports and Status
+
+An assigned seat making an item-level done claim needs a valid Status with a
+change since assignment or its preceding accepted item report. The daemon
+stores the report, generation, source revision and freshness decision together.
+An unchanged, missing or invalid line gets a repair command. Missing historical
+proof or an unreadable source admits an ordinary report with its diagnostic.
+Authenticated QA verdicts keep the owner's usual reflection obligation. A
+verified Status publication less than 30 minutes old covers only its own
+report. Later events each receive their own grace period.
+
+A non-owner can submit `agent-orch report --status done --completion-kind seat_only
+--result-file report.json` when another live seat attends or is assigned that
+item. The parent receipt retains the witness generation. Only item reports can
+advance the milestone or authorize source closure. Use
+`sqlite3 -readonly "$store" < services/chat-stream-v2/tools/work_tracking_counts.sql`
+to count distinct accepted helper reports per item and delivered tracking
+notices by cause and delivery type.
+
 ### Lead provisioning and rollout
 
 The authenticated current FD can use `agent-orch spawn --role lead --spec-id SPEC --provision-only [--lane-id LANE]` to create an ordinary promptless lead. The CLI sends neither task nor baseline input. The daemon verifies FD identity and role/input constraints again at commit. Explicit lane targeting resolves ambiguous membership. Then use existing `work-lane set-lead`, explicit `set-state --to active` (including blocked resolution), and ordinary admitted `send`. Binding alone never activates; a failed/spoofed provision delivers no task. Provisioning is control work; ordinary execution still follows existing commissioning rules.
