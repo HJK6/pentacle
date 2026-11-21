@@ -212,7 +212,7 @@ chatsButton.onclick = () => togglePopover('chats'); questionsButton.onclick = ()
 terminalButton.onclick = () => setMode('terminal'); statusButton.onclick = () => setMode('status');
 fullButton.onclick = () => { state.layout = layout.toggleFullScreen(state.layout, 'chat', innerWidth); syncLayout(); };
 document.addEventListener('keydown', event => { if (event.key !== 'Escape') return; if (state.popover) closePopover(); else if (state.layout.solo) { state.layout = layout.toggleFullScreen(state.layout, 'chat', innerWidth); syncLayout(); } });
-document.addEventListener('click', event => { if (state.popover && !popover.contains(event.target) && !rail.contains(event.target)) closePopover(); });
+document.addEventListener('click', event => { const path = event.composedPath?.() || []; if (state.popover && !path.includes(popover) && !path.includes(rail) && !popover.contains(event.target) && !rail.contains(event.target)) closePopover(); });
 window.addEventListener('resize', () => syncLayout());
 assistant.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'assistant'); });
 card.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'chat'); });

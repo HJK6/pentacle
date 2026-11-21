@@ -676,7 +676,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       await new Promise((resolve) => setTimeout(resolve, args.timeoutMs));
     }
 
-    const ctx = { session, report, cdp, cdpPort, url, wrapProof: args.wrapProof, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
+    const ctx = { session, report, cdp, cdpPort, url, python: args.python, wrapProof: args.wrapProof, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
       configureModeler, configureMic, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS.filter(([name]) => !args.scenarios?.length || args.scenarios.includes(name))) {

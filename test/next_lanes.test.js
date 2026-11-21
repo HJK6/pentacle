@@ -551,6 +551,31 @@ test('goal sections use mobile membership, six-row expansion, and the Done fold'
   assert.equal(allDone.sections.find(section => section.kind === 'done').rows.length, 10);
 });
 
+test('show more reveals all members without adding a collapse control', () => {
+  const later = Array.from({ length: 8 }, (_, index) => member(`later-expand-${index}`, 'goal-a', { status: 'backlog' }));
+  const done = Array.from({ length: 10 }, (_, index) => member(`done-expand-${index}`, 'goal-a', { status: 'completed' }));
+  const item = lane({ members: later.slice(0, 8), members_total: later.length + done.length });
+  const reads = readController({ getRead: () => ({ status: 'held', reply: heldReply(item.lane_id, item.goals, [...later, ...done]) }) });
+  const { dom, root } = makeDom();
+  const control = mountLanesCard(root, { getState: () => ({ inventory: inventory([item]) }), reads });
+  control.openGoal(item.lane_id, 'goal-a', 'Synthetic goal');
+
+  const section = () => root.querySelector('.next-lanes-section-later');
+  assert.equal(section().querySelectorAll('.next-lanes-member').length, 6);
+  section().querySelector('.next-lanes-show-more').click();
+  assert.equal(section().querySelectorAll('.next-lanes-member').length, 8);
+  assert.equal(section().querySelector('.next-lanes-show-more'), null);
+
+  root.querySelector('.next-lanes-section-done .next-lanes-section-toggle').click();
+  const doneSection = () => root.querySelector('.next-lanes-section-done');
+  assert.equal(doneSection().querySelectorAll('.next-lanes-member').length, 8);
+  doneSection().querySelector('.next-lanes-show-more').click();
+  assert.equal(doneSection().querySelectorAll('.next-lanes-member').length, 10);
+  assert.equal(doneSection().querySelector('.next-lanes-show-more'), null);
+  control.destroy();
+  dom.window.close();
+});
+
 test('member marks are accessible across mobile kinds and keep a separate question indicator only when needed', () => {
   const workingQuestion = member('mark-working-question', 'goal-a', {
     status: 'blocked', seats: [{ stream_id: 'synthetic-seat', parent_stream_id: null, activity: 'working' }],

@@ -642,11 +642,6 @@ function appendMemberSections(doc, parent, sections, location = {}) {
         show.dataset.sectionKey = section.key;
         show.dataset.sectionKind = section.kind;
       }
-      if (section.showAll) {
-        const hide = button(doc, 'Show fewer', 'Show fewer', 'next-lanes-show-more', wrapper, 'show-less');
-        hide.dataset.sectionKey = section.key;
-        hide.dataset.sectionKind = section.kind;
-      }
     }
   }
 }
@@ -934,10 +929,6 @@ function mountLanesCard(root, { getState = () => ({}), reads = {}, questions = {
       const key = target.dataset.sectionKey;
       if (target.dataset.sectionKind === 'done') ui.expandedSections.add(`${key}:all`);
       else ui.expandedSections.add(key);
-      render();
-    } else if (action === 'show-less') {
-      const key = target.dataset.sectionKey;
-      ui.expandedSections.delete(`${key}:all`);
       render();
     } else if (action === 'retry') {
       try { reads.retry && reads.retry(target.dataset.laneId, target.dataset.readKind, target.dataset.goalId || undefined); } catch (_) { /* The failed state remains visible. */ }
