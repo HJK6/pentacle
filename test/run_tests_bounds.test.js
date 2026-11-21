@@ -110,6 +110,10 @@ test('quarantined node case runs advisory while unrelated failure remains blocki
     assert.equal(result.exit_code, 0);
     assert.equal(result.files[0].advisory.exitCode, 1);
     assert.match(result.files[0].advisory.tail, /cases\.js:2/);
+    fs.writeFileSync(subject, source);
+    const onlyCase = await run();
+    assert.equal(onlyCase.exit_code, 0, 'the Node file wrapper represents an empty blocking set');
+    assert.equal(onlyCase.files[0].advisory.exitCode, 1);
     const held = await runner.run(dir, options, {spawn: isolatedSpawn, groupMembers: () => [],
       admissionQuery: () => ({complete: true, quarantine: quarantine(['test/cases.js::intermittent [case]']), files: {'test/cases.js': {state: 'advisory', reason: 'no review'}}}),
       stdout: quiet, stderr: quiet});
@@ -182,20 +186,23 @@ test('the live JavaScript quarantine seed is unique and only it is removed from 
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
-test('a top-level and nested name collision keeps both cases blocking', async () => {
+for (const [description, topName, nestedName] of [
+  ['a top-level and nested name collision', 'collision', 'collision'],
+  ['a case named like the Node harness root', '<root>', 'unrelated'],
+]) test(`${description} keeps both cases blocking`, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-collision-'));
   try {
     const file = 'test/cases.js';
-    const id = file + '::collision';
+    const id = file + '::' + topName;
     fs.mkdirSync(path.join(dir, 'scripts'));
     fs.mkdirSync(path.join(dir, 'test'));
     for (const name of ['admission_query.py', 'admission_fingerprint.py', 'admission_inputs.py', 'admission_policy.py'])
       fs.copyFileSync(path.join(root, 'scripts', name), path.join(dir, 'scripts', name));
     fs.writeFileSync(path.join(dir, file), `
       const test = require('node:test');
-      test('collision', () => {});
+      test(${JSON.stringify(topName)}, () => {});
       test('parent', async t => {
-        await t.test('collision', () => { throw Error('collateral product failure'); });
+        await t.test(${JSON.stringify(nestedName)}, () => { throw Error('collateral product failure'); });
         await t.test('sibling', () => {});
       });
     `);
@@ -214,7 +221,7 @@ test('a top-level and nested name collision keeps both cases blocking', async ()
     assert.equal(path.basename(row.junit), junitKey + '.xml');
     const junit = fs.readFileSync(row.junit, 'utf8');
     assert.match(junit, /collateral product failure/);
-    assert.equal((junit.match(/<testcase name="collision"/g) || []).length, 2);
+    assert.equal((junit.match(/<testcase name=/g) || []).length, 3);
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 

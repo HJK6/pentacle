@@ -48,7 +48,7 @@ def verify_junit(path, expected):
             'absent': all(name not in found for name in expected), 'observed': sorted(found)}
 
 
-def reconcile_junit(path, expected):
+def reconcile_junit(path, expected, empty_wrapper=None):
     if not isinstance(expected, list) or any(
             not isinstance(case, list) or not case or any(not isinstance(name, str) for name in case)
             for case in expected):
@@ -56,6 +56,11 @@ def reconcile_junit(path, expected):
     root = ET.parse(path).getroot()
     if root.tag != 'testsuites':
         raise ValueError('invalid Node JUnit root')
+    # Node reports the file itself when its filter removes every test.
+    if not expected and empty_wrapper and len(root) == 1:
+        wrapper = root[0]
+        if wrapper.tag == 'testcase' and wrapper.get('name') == empty_wrapper and not len(wrapper):
+            return {'complete': True, 'matches': True}
     observed = Counter()
 
     def walk(element, parents):
@@ -78,7 +83,7 @@ def main():
         if request.get('operation') == 'verify_junit':
             result = verify_junit(request['path'], request['expected'])
         elif request.get('operation') == 'reconcile_junit':
-            result = reconcile_junit(request['path'], request['expected'])
+            result = reconcile_junit(request['path'], request['expected'], request.get('empty_wrapper'))
         else:
             result = query(Path(request['root']), request['files'], request['platform'])
     except (OSError, ValueError, TypeError, KeyError, ET.ParseError) as exc:

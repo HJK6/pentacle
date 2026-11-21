@@ -62,10 +62,11 @@ function verifyAdvisory(repoRoot, junit, expected, timeoutMs) {
   } catch { return false; }
 }
 
-function verifyBlocking(repoRoot, junit, expected, timeoutMs) {
+function verifyBlocking(repoRoot, junit, expected, timeoutMs, emptyWrapper) {
   try {
     const output = execFileSync(process.env.PENTACLE_PYTHON || 'python3', [path.join(repoRoot, 'scripts/admission_query.py')], {
-      input: JSON.stringify({operation: 'reconcile_junit', path: junit, expected}), encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
+      input: JSON.stringify({operation: 'reconcile_junit', path: junit, expected, empty_wrapper: emptyWrapper}),
+      encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
     });
     const result = JSON.parse(output);
     return result.complete === true && result.matches === true;
@@ -83,7 +84,7 @@ function quarantineAlert(id, activation, timeoutMs) {
       '--title', 'JavaScript quarantine selector is ambiguous',
       '--message', id + ' stays blocking. Discovery could not establish a unique skip for activation ' + activation + '.',
       '--dedup-key', 'flaky-test-quarantine-selector:' + key],
-    {env, stdio: 'ignore', timeout: Math.min(30000, timeoutMs)});
+    {env, stdio: 'ignore', timeout: Math.max(1, Math.min(30000, timeoutMs))});
     return true;
   } catch { return false; }
 }
@@ -100,9 +101,10 @@ function discoveredCases(receipt, execution) {
 }
 
 // Node 22 matches the own name and each ancestor, and also the full name of
-// each node in that chain. Match the same strings before applying any skip.
+// each node in that chain. The invisible root is named '<root>'.
 function selectorMatches(pattern, names) {
-  return names.some((part, index) => pattern.test(part) || pattern.test(names.slice(0, index + 1).join(' ').trim()));
+  return pattern.test('<root>') ||
+    names.some((part, index) => pattern.test(part) || pattern.test(names.slice(0, index + 1).join(' ').trim()));
 }
 
 function sourceIdentity(repoRoot, timeoutMs) {
@@ -413,7 +415,7 @@ async function run(repoRoot, options, injected = {}) {
       if (quarantined.length) {
         const selected = new Set(quarantined.map(item => item.discovered));
         const blocking = discovered.filter(item => !selected.has(item));
-        if (remaining() <= 0 || !deps.verifyBlocking(repoRoot, junit, blocking.map(item => item.names), remaining())) {
+        if (remaining() <= 0 || !deps.verifyBlocking(repoRoot, junit, blocking.map(item => item.names), remaining(), target)) {
           row.status = 'fail'; row.reason = 'blocking_quarantine_incomplete';
         } else if (blocking.some(item => item.failure === 'testCodeFailure')) {
           row.status = 'fail'; row.reason = 'blocking_failure_during_discovery';
