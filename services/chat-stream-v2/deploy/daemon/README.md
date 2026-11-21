@@ -321,14 +321,37 @@ the already deployed stamp and never deploy or select a target. The detailed smo
 and log classifier reports remain available alongside the public disposition.
 
 Ordinary releases and nightly checks share the optional `release_exclusions`
-array in the installed machines JSON (`PENTACLE_MACHINES_FILE`). Each entry names
-an optional remote `host`, a nonempty `reason`, and an open `readiness_item`.
-For example: `{"host":"optional-host","reason":"CLI pin mismatch",
-"readiness_item":"provider-readiness-repair"}`. The front desk removes the entry
-when its readiness item closes. Declared hosts are not spawned and appear as
-`SKIPPED_DECLARED`; all included hosts must pass. Releases snapshot declarations
-on their stamp. Nightly reads the same home afresh and records its scope without
-rewriting the deployed stamp. Invocation environment overrides do not alter scope.
+array in the installed machines JSON (`PENTACLE_MACHINES_FILE`). Each entry
+names an optional remote `host`, a `reason`, a responsible `owner`, a linked
+`readiness_item`, and the timezone-qualified `starts_at` and `expires_at`
+instants. The front desk removes the entry early when readiness is verified.
+The window includes its start and ends at expiry. Only active exclusions
+produce `SKIPPED_DECLARED` cells. Those cells leave full-fleet acceptance
+false. Expired and pending exclusions select the host. Legacy and invalid
+declarations also select the host and leave a reported configuration miss
+through the existing release-check notification. Releases retain their
+scope decisions on their stamp. Nightly reads the installed catalog afresh
+and preserves the deployed stamp.
+
+Both paths report `client_delivery`. The probe checks the installed
+release SHA and serving instance, then opens a fresh loopback fixture from
+the installed source. It publishes a uniquely marked note to a disposable
+TEST composite through the stream-authenticated producer and receives it on
+an authenticated summary subscriber. After reconnect, it refetches the
+recent history window and applies the saved pre-publication cursor. A
+passing receipt records exactly one matching note on each wire path and one
+after the sequence-based merge, plus successful teardown. The receipt
+keeps the phase, assertion outcomes, counts, identities and timing. The
+fixture never opens an operator conversation.
+
+Set the optional top-level `client_delivery_incident` in the same installed
+catalog to the existing client-delivery work item ID. The receipt exposes
+it as `client_delivery.cause_target`. For a `delivery_failure`, the
+notification points to the failed receipt and incident. Link that record
+in the scorecard's cause register under the original release or scheduled
+occurrence ID. This failed installed check stays outside test quarantine.
+The nightly report owns its recurrence notification. Independent nightly
+failures keep the standard work-item route.
 
 A sealed receipt pins its controller SHA. To recover it from a repaired
 controller, the FD places an owner-only authorization file in the transaction
