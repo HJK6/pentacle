@@ -137,16 +137,39 @@ def reviewed_bindings(rows, bound, signatures):
     return accepted
 
 
+def _python_target(artifacts, repository, run_id, job, suite, download):
+    from .reliability_artifacts import job_artifacts
+
+    junit_name = 'daemon/gate/unit.junit.xml' if suite == 'daemon' else f'{suite}/gate/pytest.junit.xml'
+    progress_name = 'daemon/gate/unit.progress.jsonl' if suite == 'daemon' else f'{suite}/gate/pytest.progress.jsonl'
+    for artifact in job_artifacts(job, artifacts, run_id):
+        if artifact.get('expired') or not 0 < artifact['size_in_bytes'] <= 8_000_000:
+            continue
+        raw = download(repository, f"actions/artifacts/{int(artifact['id'])}/zip")
+        with ZipFile(BytesIO(raw)) as archive:
+            members = [member for member in archive.infolist() if member.filename == junit_name]
+            if len(members) != 1 or members[0].file_size > 12_000_000:
+                continue
+            facts = pytest_facts(archive.read(members[0]))
+        exact = identities(raw, {fact['test'] for fact in facts}, progress_name)
+        if len(exact) != len(facts):
+            raise ValueError('incomplete Python progress association')
+        return facts, exact
+    raise ValueError('Python test facts unavailable')
+
+
 def enrich_other_python(rows, settings, *, api, download):
     """Resolve Python failures using retained first-attempt gate receipts."""
     import copy
     from xml.etree import ElementTree as ET
     from . import reliability_hosted
-    from .reliability_artifacts import job_artifacts
+
     output = copy.deepcopy(rows)
     bound, missing = {}, []
     decisions = {(str(d['run']), d['sha'], d['job'], d['step']): d for d in settings.get('decisions', [])}
     suites = {'CLI checks': 'cli', 'Shared checks': 'shared'}
+    artifact_errors = (OSError, ValueError, KeyError, TypeError, BadZipFile, ET.ParseError,
+                       subprocess.SubprocessError)
     for row in output:
         if row.get('first') != 'failure' or row.get('missing'):
             continue
@@ -156,41 +179,29 @@ def enrich_other_python(rows, settings, *, api, download):
                            and failure.get('step') == 'Daemon unit partition'))]
         if not targets:
             continue
+        run_id = str(row['id'])
+        repository = settings['repository']
         try:
-            response = api(settings['repository'], f"actions/runs/{int(row['id'])}/artifacts?per_page=100")
+            response = api(repository, f'actions/runs/{int(run_id)}/artifacts?per_page=100')
             artifacts = response['artifacts']
             if response.get('total_count') != len(artifacts):
                 raise ValueError('incomplete artifact census')
-            for failure in targets:
-                suite = suites.get(failure['step'], 'daemon')
-                job = failure['job']
-                junit_name = 'daemon/gate/unit.junit.xml' if suite == 'daemon' else f'{suite}/gate/pytest.junit.xml'
-                progress_name = 'daemon/gate/unit.progress.jsonl' if suite == 'daemon' else f'{suite}/gate/pytest.progress.jsonl'
-                facts = None
-                for artifact in job_artifacts(job, artifacts, str(row['id'])):
-                    if artifact.get('expired') or not 0 < artifact['size_in_bytes'] <= 8_000_000:
-                        continue
-                    try:
-                        raw = download(settings['repository'], f"actions/artifacts/{int(artifact['id'])}/zip")
-                        with ZipFile(BytesIO(raw)) as archive:
-                            members = [m for m in archive.infolist() if m.filename == junit_name]
-                            if len(members) != 1 or members[0].file_size > 12_000_000:
-                                continue
-                            facts = pytest_facts(archive.read(members[0]))
-                        exact = identities(raw, {fact['test'] for fact in facts}, progress_name)
-                        if len(exact) != len(facts):
-                            facts = None
-                            continue
-                    except (OSError, ValueError, KeyError, TypeError, BadZipFile, ET.ParseError, subprocess.SubprocessError):
-                        continue
-                    break
-                if not facts:
-                    raise ValueError('Python test facts unavailable')
-                failure['tests'] = facts
-                for case, identity in exact.items():
-                    bound[(str(row['id']), failure['job'], failure['step'], case)] = {**identity, 'suite': suite}
-            row['classification'], row['causes'] = reliability_hosted.classifications(
-                row, decisions, settings.get('signatures', []), settings.get('checkout'))
-        except (OSError, ValueError, KeyError, TypeError, BadZipFile, ET.ParseError, subprocess.SubprocessError):
-            missing.append(f"public-checks/{row.get('id')}/1: Python failure identity unavailable")
+        except artifact_errors:
+            artifacts = []
+        unclassified_steps = set()
+        for failure in targets:
+            job, step = failure['job'], failure['step']
+            suite = suites.get(step, 'daemon')
+            try:
+                facts, exact = _python_target(artifacts, repository, run_id, job, suite, download)
+            except artifact_errors:
+                unclassified_steps.add((job, step))
+                missing.append(f'public-checks/{run_id}/1: Python failure identity unavailable for {job} / {step}')
+                continue
+            failure['tests'] = facts
+            for case, identity in exact.items():
+                bound[(run_id, job, step, case)] = {**identity, 'suite': suite}
+        row['classification'], row['causes'] = reliability_hosted.classifications(
+            row, decisions, settings.get('signatures', []), settings.get('checkout'),
+            unclassified_steps=unclassified_steps)
     return output, bound, missing

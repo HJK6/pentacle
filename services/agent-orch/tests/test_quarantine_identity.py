@@ -68,7 +68,7 @@ def test_cli_failure_is_bound_to_retained_case_and_phase(monkeypatch):
            'failures': [{'job': 'contracts', 'step': 'CLI checks', 'runner': ['ubuntu'], 'source': 'job'}]}
     def api(*_):
         return {'total_count': 1, 'artifacts': [{'name': 'gate-summaries-contracts-42-1', 'id': 7, 'size_in_bytes': len(raw)}]}
-    def classify(enriched, *_):
+    def classify(enriched, *_, **kwargs):
         assert enriched['failures'][0]['tests'][0]['test'] == 'tests.test_a::test_one'
         return 'false_red', [{'kind': 'non_code', 'test': 'tests.test_a::test_one'}]
     monkeypatch.setattr(reliability_hosted, 'classifications', classify)
@@ -81,3 +81,66 @@ def test_cli_failure_is_bound_to_retained_case_and_phase(monkeypatch):
 def test_parameter_identity_is_not_reduced_to_family():
     raw = b'<testsuite tests="1" errors="0" failures="1"><testcase classname="tests.test_a" name="test_one[case value]"><failure message="broken"/></testcase></testsuite>'
     assert pytest_facts(raw)[0]['test'] == 'tests.test_a::test_one[case value]'
+
+
+def incomplete_contract_artifact(*, include_cli_progress):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w') as artifact:
+        for suite, module, name in [('cli', 'test_a', 'test_one'), ('shared', 'test_b', 'test_two')]:
+            if suite == 'shared' and not include_cli_progress:
+                continue
+            artifact.writestr(f'{suite}/gate/pytest.junit.xml',
+                             f'<testsuite errors="0" failures="1"><testcase classname="tests.{module}" '
+                             f'name="{name}"><failure message="broken"/></testcase></testsuite>')
+        if include_cli_progress:
+            artifact.writestr('cli/gate/pytest.progress.jsonl', json.dumps(
+                {'kind': 'phase', 'node': 'tests/test_a.py::test_one', 'phase': 'setup', 'outcome': 'failed'}))
+    return stream.getvalue()
+
+
+def classify_contract_artifact(raw, targets):
+    sha = 'a' * 40
+    failures, decisions = [], []
+    for step, test in targets:
+        failures.append({'job': 'contracts', 'step': step, 'runner': ['ubuntu'], 'source': f'job/{step}'})
+        decisions.append({'run': '42', 'sha': sha, 'job': 'contracts', 'step': step, 'reviewer': 'independent',
+                          'reason': 'retained review', 'revision': sha, 'source': 'review',
+                          'causes': [{'kind': 'non_code', 'test': test, 'cause': 'race', 'cause_class': 'fixture'}]})
+    row = {'id': '42', 'sha': sha, 'created': '2026-11-21T10:00:00Z', 'first': 'failure', 'failures': failures}
+
+    def api(*_):
+        return {'total_count': 1, 'artifacts': [
+            {'name': 'gate-summaries-contracts-42-1', 'id': 7, 'size_in_bytes': len(raw)}]}
+
+    rows, bound, missing = enrich_other_python(
+        [row], {'repository': 'org/repo', 'decisions': decisions}, api=api, download=lambda *_: raw)
+    return rows[0], bound, missing
+
+
+def test_junit_without_required_progress_stays_unclassified():
+    from agent_orch.quarantine_candidates import candidates
+
+    # The installed contracts artifact held a valid failed CLI JUnit case
+    # without its companion progress member.
+    row, bound, missing = classify_contract_artifact(incomplete_contract_artifact(include_cli_progress=False),
+                                                     [('CLI checks', 'tests.test_a::test_one')])
+    assert bound == {}
+    assert len(missing) == 1
+    assert row['classification'] == 'incomplete'
+    assert [(cause['step'], cause['kind']) for cause in row['causes']] == [('CLI checks', 'unclassified')]
+    assert candidates([row], {'tests.test_a::test_one': 'tests/test_a.py::test_one'}) == {}
+
+
+def test_failed_second_target_cannot_reuse_first_targets_exact_identity():
+    from agent_orch.quarantine_candidates import candidates
+
+    row, bound, missing = classify_contract_artifact(
+        incomplete_contract_artifact(include_cli_progress=True),
+        [('CLI checks', 'tests.test_a::test_one'), ('Shared checks', 'tests.test_b::test_two')])
+    assert bound == {('42', 'contracts', 'CLI checks', 'tests.test_a::test_one'):
+                     {'test': 'tests/test_a.py::test_one', 'phase': 'setup', 'suite': 'cli'}}
+    assert len(missing) == 1
+    assert [(cause['step'], cause['kind']) for cause in row['causes']] == [
+        ('CLI checks', 'non_code'), ('Shared checks', 'unclassified')]
+    assert set(candidates([row], {**bound, 'tests.test_b::test_two': 'tests/test_b.py::test_two'})) == {
+        'tests/test_a.py::test_one'}
