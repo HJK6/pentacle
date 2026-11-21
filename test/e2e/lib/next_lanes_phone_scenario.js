@@ -29,6 +29,28 @@ async function wait(ctx, expression, label) {
   await ctx.session.waitFor(expression, { timeoutMs: ctx.timeoutMs, label });
 }
 
+async function questionListOrder(ctx, expectedQuestionIds) {
+  await H.openQuestionList(ctx);
+  await wait(ctx, `document.querySelectorAll('.next-question-list-item').length === ${expectedQuestionIds.length}
+    && document.querySelector('.questions-popover.next-questions-list:not([hidden])')`,
+    'E7 question list exposes its rendered order');
+  const evidence = await ctx.session.eval(`(() => {
+    const list=document.querySelector('.questions-popover.next-questions-list:not([hidden])');
+    return [...(list?.querySelectorAll('.next-question-list-item') || [])]
+      .map(item => item.dataset.questionId || null);
+  })()`);
+  const expectedIds = new Set(expectedQuestionIds);
+  check(ctx, 'E7 rendered Questions list contains the exact phone question IDs',
+    Array.isArray(evidence) && evidence.length === expectedQuestionIds.length
+      && new Set(evidence).size === expectedIds.size && evidence.every(id => expectedIds.has(id)),
+    { renderedQuestionOrder: evidence, expectedQuestionIds });
+  const clicked = await ctx.session.click('[aria-label^="Questions"]');
+  check(ctx, 'E7 question list closes after reading its rendered order', clicked === true, { clicked });
+  await wait(ctx, '!document.querySelector(\'.questions-popover:not([hidden])\')',
+    'E7 question list closes before lane navigation');
+  return evidence;
+}
+
 function rowSelector(laneId) {
   return `.next-lanes-row-open[data-lane-id=${JSON.stringify(laneId)}]`;
 }
@@ -50,7 +72,7 @@ async function waitForQuestionCard(ctx, acceptedQuestionIds, expectedCount) {
     const card=cards[0];
     const allowed=${JSON.stringify(acceptedQuestionIds)};
     return cards.length === 1 && allowed.includes(card?.dataset.questionId)
-      && (!!card.querySelector('.next-question-form') || !!card.querySelector('.next-question-sent'))
+      && !!card.querySelector('.next-question-form') && !card.querySelector('.next-question-sent')
       && (card.querySelectorAll('.next-question-page').length === (${expectedCount} > 1 ? 2 : 0));
   })()`, `a ready ${expectedCount}-question card is rendered in the lanes route`);
 }
@@ -117,13 +139,16 @@ function assertFullPhoneStage(ctx, label, geometry) {
   const rail = geometry.rail?.rect;
   const card = geometry.card?.rect;
   const scroll = geometry.lanesScroll;
-  const passed = geometry.viewport?.width === PHONE_WIDTH && geometry.viewport?.height === PHONE_HEIGHT
+  const viewportHeight = geometry.viewport?.height;
+  const railHeight = rail?.height;
+  const passed = geometry.viewport?.width === PHONE_WIDTH && viewportHeight === PHONE_HEIGHT
     && geometry.document?.clientWidth === PHONE_WIDTH && geometry.document?.scrollWidth === PHONE_WIDTH
     && geometry.document?.bodyClientWidth === PHONE_WIDTH && geometry.document?.bodyScrollWidth === PHONE_WIDTH
     && geometry.document?.scrollX === 0
-    && near(rail?.left, 0) && near(rail?.top, 0) && near(rail?.width, PHONE_WIDTH) && near(rail?.height, 52)
-    && near(stage?.left, 0) && near(stage?.top, 52) && near(stage?.width, PHONE_WIDTH)
-    && near(stage?.height, PHONE_HEIGHT - 52) && near(stage?.bottom, PHONE_HEIGHT)
+    && Number.isFinite(railHeight) && railHeight > 0
+    && near(rail?.left, 0) && near(rail?.top, 0) && near(rail?.width, PHONE_WIDTH)
+    && near(stage?.left, 0) && near(stage?.top, rail?.bottom) && near(stage?.width, PHONE_WIDTH)
+    && near(stage?.height, viewportHeight - railHeight) && near(stage?.bottom, viewportHeight)
     && geometry.assistant?.hidden === true
     && geometry.card?.hidden === false && geometry.card?.alone === true
     && geometry.questionListSameNode === true
@@ -140,6 +165,10 @@ function questionCardState(ctx) {
     return {
       count:cards.length,id:card?.dataset.questionId || null,
       label:card?.querySelector('.next-question-card-label')?.textContent.trim() || null,
+      mark:card?.querySelector('.next-question-card-mark')?.textContent.trim() || null,
+      about:card?.querySelector('.next-question-about')?.textContent.trim() || null,
+      hasForm:!!card?.querySelector('.next-question-form'),
+      hasSent:!!card?.querySelector('.next-question-sent'),
       tinted:!!card?.classList.contains('is-attention'),
       options:card?.querySelectorAll('.next-question-option').length || 0,
       arrows:card?.querySelectorAll('.next-question-page').length || 0,
@@ -147,7 +176,71 @@ function questionCardState(ctx) {
   })()`);
 }
 
-async function captureScene(ctx, questionId, lane, level, goalId = null, member = null, acceptedQuestionIds = [questionId]) {
+async function verifyPagerLabelsAgainstRenderedOrder(ctx, acceptedQuestionIds, questionOrder, expectedCount, level) {
+  const initial = await questionCardState(ctx);
+  const acceptedIds = new Set(acceptedQuestionIds);
+  const renderedOrder = questionOrder.filter(id => acceptedIds.has(id));
+  check(ctx, `E7 ${level} card IDs are ordered from the rendered Questions list`,
+    renderedOrder.length === expectedCount && new Set(renderedOrder).size === expectedCount
+      && new Set(acceptedQuestionIds).size === expectedCount,
+    { renderedOrder, acceptedQuestionIds, questionOrder });
+  if (expectedCount === 1) {
+    check(ctx, `E7 ${level} single-question card has the exact ready label`,
+      initial.count === 1 && renderedOrder[0] === initial.id
+        && initial.label === 'Needs your answer' && initial.arrows === 0,
+      { initial, renderedOrder, acceptedQuestionIds });
+    return { selectedLabel: initial.label, renderedOrder, observedIds: [initial.id], observedLabels: [initial.label] };
+  }
+
+  const label = /^Question (\d+) of (\d+)$/.exec(initial.label || '');
+  const startPage = renderedOrder.indexOf(initial.id) + 1;
+  const expectedStartLabel = `Question ${startPage} of ${expectedCount}`;
+  check(ctx, `E7 ${level} pager starts on a numbered page in the actual rendered card`,
+    initial.count === 1 && startPage >= 1 && startPage <= expectedCount
+      && Number(label?.[2]) === expectedCount && initial.label === expectedStartLabel
+      && initial.arrows === 2,
+    { initial, renderedOrder, expectedStartLabel, expectedCount });
+
+  const observedIds = [initial.id];
+  const observedLabels = [initial.label];
+  for (let step = 1; step < expectedCount; step += 1) {
+    const previousId = observedIds[observedIds.length - 1];
+    const previousIndex = renderedOrder.indexOf(previousId);
+    const expectedNextId = renderedOrder[(previousIndex + 1) % expectedCount];
+    const expectedPage = renderedOrder.indexOf(expectedNextId) + 1;
+    const clicked = await ctx.session.click('.next-lanes-scroll .next-question-next');
+    check(ctx, `E7 ${level} pager Next click returns success`, clicked === true, { previousId, clicked });
+    await wait(ctx, `document.querySelector('.next-lanes-scroll .next-question-card')?.dataset.questionId !== ${JSON.stringify(previousId)}`,
+      `E7 ${level} pager advances to the next rendered question`);
+    const next = await questionCardState(ctx);
+    const expectedLabel = `Question ${expectedPage} of ${expectedCount}`;
+    check(ctx, `E7 ${level} pager label follows its next rendered question`,
+      next.count === 1 && next.id === expectedNextId && next.label === expectedLabel && next.arrows === 2,
+      { previousId, next, expectedNextId, expectedLabel, renderedOrder });
+    observedIds.push(next.id);
+    observedLabels.push(next.label);
+  }
+
+  const currentId = observedIds[observedIds.length - 1];
+  const clicked = await ctx.session.click('.next-lanes-scroll .next-question-next');
+  check(ctx, `E7 ${level} pager wrap click returns success`, clicked === true, { currentId, clicked });
+  await wait(ctx, `document.querySelector('.next-lanes-scroll .next-question-card')?.dataset.questionId === ${JSON.stringify(initial.id)}`,
+    `E7 ${level} pager wraps to the starting rendered question`);
+  const wrapped = await questionCardState(ctx);
+  check(ctx, `E7 ${level} pager wrap restores the starting question and label`,
+    wrapped.id === initial.id && wrapped.label === expectedStartLabel && wrapped.label === initial.label && wrapped.arrows === 2,
+    { initial, wrapped, expectedStartLabel, renderedOrder });
+
+  const expectedIds = new Set(acceptedQuestionIds);
+  check(ctx, `E7 ${level} pager visits exactly the accepted question IDs in observed DOM order`,
+    expectedIds.size === expectedCount && observedIds.length === expectedCount
+      && new Set(observedIds).size === expectedCount && observedIds.every(id => expectedIds.has(id)),
+    { observedIds, observedLabels, acceptedQuestionIds });
+  return { selectedLabel: initial.label, renderedOrder, observedIds, observedLabels };
+}
+
+async function captureScene(ctx, questionId, lane, level, goalId = null, member = null,
+  acceptedQuestionIds = [questionId], questionOrder = [questionId]) {
   if (level === 'lane') {
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'
       && document.querySelector('.next-lanes-lane-title')?.textContent.trim() === ${JSON.stringify(lane.inventory.title)}
@@ -167,18 +260,29 @@ async function captureScene(ctx, questionId, lane, level, goalId = null, member 
   const expectedCount = level === 'spec' ? 1 : 2;
   await waitForQuestionCard(ctx, acceptedQuestionIds, expectedCount);
   await selectQuestionCard(ctx, questionId, level === 'spec' ? 1 : 2);
+  const pager = await verifyPagerLabelsAgainstRenderedOrder(ctx, acceptedQuestionIds, questionOrder, expectedCount, level);
   const card = await questionCardState(ctx);
   const geometry = await phoneGeometry(ctx);
+  const expectedLabel = level === 'spec' ? 'Needs your answer' : pager.selectedLabel;
+  const expectedAbout = level === 'spec' ? null
+    : level === 'lane' ? `${lane.goals[0].title} · ${member.title}` : member.title;
   check(ctx, `E7 ${level} route has the exact placed tinted question card and resolved read`,
     card.id === questionId && card.count === 1 && card.tinted && card.options === 5
-      && (level === 'spec' ? card.arrows === 0 && card.label === 'Needs your answer'
-        : card.arrows === 2 && /^Question [12] of 2$/.test(card.label || '')),
-    { card, questionId, level, goalId, specId: member?.spec_id });
+      && card.mark === '?' && card.label === expectedLabel
+      && card.about === expectedAbout && card.hasForm === true && card.hasSent === false
+      && (level === 'spec' ? card.arrows === 0 : card.arrows === 2),
+    { card, questionId, level, goalId, specId: member?.spec_id, expectedLabel, expectedAbout, pager });
   assertFullPhoneStage(ctx, `E7 ${level} view fills the available phone stage`, geometry);
   return { card, geometry };
 }
 
 async function phoneScenario(ctx, ownedIds, hooks) {
+  ctx.report.diagnostic('E7 phone touch coverage bound', {
+    viewport: { width: PHONE_WIDTH, height: PHONE_HEIGHT },
+    deviceEmulation: 'mobile:false',
+    touchEventsEmulated: false,
+    touchGesturesExercised: false,
+  });
   const laneId = F.ORDINARY_A_ID;
   const specA = 'spec_gate__next_lanes_ordinary_a_00';
   const specB = 'spec_gate__next_lanes_ordinary_a_01';
@@ -208,19 +312,27 @@ async function phoneScenario(ctx, ownedIds, hooks) {
     && document.querySelector('.next-lanes-row-open[data-lane-id=${JSON.stringify(laneId)}]')`,
     'fixture inventory and question count are rendered');
   const initial = await phoneGeometry(ctx);
+  const initialRailHeight = initial.rail.rect?.height;
   check(ctx, 'E7 phone starts with a full-width top rail, hidden lanes card, and no document overflow',
     initial.viewport?.width === PHONE_WIDTH && initial.viewport?.height === PHONE_HEIGHT
       && near(initial.rail.rect?.left, 0) && near(initial.rail.rect?.top, 0)
-      && near(initial.rail.rect?.width, PHONE_WIDTH) && near(initial.rail.rect?.height, 52)
+      && near(initial.rail.rect?.width, PHONE_WIDTH)
+      && Number.isFinite(initialRailHeight) && initialRailHeight > 0
+      && near(initial.rail.rect?.bottom, initial.stage?.top)
+      && near(initial.stage?.height, initial.viewport.height - initialRailHeight)
+      && near(initial.stage?.bottom, initial.viewport.height)
       && initial.card.hidden === true && initial.document.scrollWidth === PHONE_WIDTH
       && initial.document.bodyScrollWidth === PHONE_WIDTH,
     initial);
+  const questionOrder = await questionListOrder(ctx, [q1.question_id, q2.question_id]);
 
   await ctx.session.click('[aria-label="Lanes"]');
   await wait(ctx, `!document.querySelector('.lanes-card').hidden
     && !!document.querySelector('.next-lanes-row-open[data-lane-id=${JSON.stringify(laneId)}]')`, 'phone lanes card opens');
+  const rootGeometry = await phoneGeometry(ctx);
+  assertFullPhoneStage(ctx, 'E7 all-lanes root view fills the available phone stage', rootGeometry);
   await ctx.session.click(rowSelector(laneId));
-  await captureScene(ctx, q1.question_id, lane, 'lane', null, null, [q1.question_id, q2.question_id]);
+  await captureScene(ctx, q1.question_id, lane, 'lane', null, memberA, [q1.question_id, q2.question_id], questionOrder);
 
   const laneCard = await questionCardState(ctx);
   check(ctx, 'E7 two lane questions use one card with a two-page pager',
@@ -245,7 +357,7 @@ async function phoneScenario(ctx, ownedIds, hooks) {
     && document.querySelector('.next-lanes-member-title[data-spec-id=${JSON.stringify(specA)}]')
     && document.querySelector('.next-lanes-member-title[data-spec-id=${JSON.stringify(specB)}]')`,
     'phone goal route has both exact members and its resolved goal read');
-  await captureScene(ctx, q1.question_id, lane, 'goal', goalId, memberA, [q1.question_id, q2.question_id]);
+  await captureScene(ctx, q1.question_id, lane, 'goal', goalId, memberA, [q1.question_id, q2.question_id], questionOrder);
 
   await ctx.session.click(`.next-lanes-member-title[data-spec-id=${JSON.stringify(specA)}]`);
   await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'spec'
@@ -253,18 +365,18 @@ async function phoneScenario(ctx, ownedIds, hooks) {
     && document.querySelector('.next-lanes-scroll .next-question-card')?.dataset.questionId === ${JSON.stringify(q1.question_id)}
     && ${readExpression(laneId, REVISION, goalId)}`,
     'phone spec route has the exact member and question card after its resolved goal read');
-  await captureScene(ctx, q1.question_id, lane, 'spec', goalId, memberA);
+  await captureScene(ctx, q1.question_id, lane, 'spec', goalId, memberA, [q1.question_id], questionOrder);
 
   await ctx.session.click('.next-lanes-back');
   await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'goal'
     && document.querySelector('.next-lanes-member-title[data-spec-id=${JSON.stringify(specA)}]')
     && ${readExpression(laneId, REVISION, goalId)}`, 'phone Back returns to the loaded goal');
-  await captureScene(ctx, q1.question_id, lane, 'goal', goalId, memberA, [q1.question_id, q2.question_id]);
+  await captureScene(ctx, q1.question_id, lane, 'goal', goalId, memberA, [q1.question_id, q2.question_id], questionOrder);
   await ctx.session.click('.next-lanes-back');
   await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'
     && document.querySelector('.next-lanes-lane-title')?.textContent.trim() === ${JSON.stringify(lane.inventory.title)}
     && ${readExpression(laneId, REVISION)}`, 'phone Back returns to the loaded lane');
-  await captureScene(ctx, q1.question_id, lane, 'lane', null, null, [q1.question_id, q2.question_id]);
+  await captureScene(ctx, q1.question_id, lane, 'lane', null, memberA, [q1.question_id, q2.question_id], questionOrder);
 
   await H.openQuestionList(ctx);
   await wait(ctx, `document.querySelectorAll('.next-question-list-item').length === 2
@@ -286,6 +398,7 @@ async function phoneScenario(ctx, ownedIds, hooks) {
       ids:items.map(item=>item.dataset.questionId),
       forms:items.map(item=>!!item.querySelector('.next-question-form')),
       viewport:{width:innerWidth,height:innerHeight},
+      railHeight:document.querySelector('.rail')?.getBoundingClientRect().height || null,
       document:{clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,
         bodyClientWidth:document.body.clientWidth,bodyScrollWidth:document.body.scrollWidth,scrollX},
       popover:{left:r?.left,top:r?.top,right:r?.right,bottom:r?.bottom,width:popover?.clientWidth,
@@ -302,11 +415,12 @@ async function phoneScenario(ctx, ownedIds, hooks) {
     && listEvidence.listSameNode === true
     && ids.length === 2 && ids.includes(q1.question_id) && ids.includes(q2.question_id)
     && listEvidence.forms.every(Boolean)
+    && Number.isFinite(listEvidence.railHeight) && listEvidence.railHeight > 0
     && listEvidence.viewport?.width === PHONE_WIDTH && listEvidence.viewport?.height === PHONE_HEIGHT
     && listEvidence.document?.clientWidth === PHONE_WIDTH && listEvidence.document?.scrollWidth === PHONE_WIDTH
     && listEvidence.document?.bodyClientWidth === PHONE_WIDTH && listEvidence.document?.bodyScrollWidth === PHONE_WIDTH
     && listEvidence.document?.scrollX === 0
-    && popover?.left >= 0 && popover?.top >= 52 && popover?.right <= PHONE_WIDTH && popover?.bottom <= PHONE_HEIGHT
+    && popover?.left >= 0 && popover?.top >= listEvidence.railHeight && popover?.right <= PHONE_WIDTH && popover?.bottom <= PHONE_HEIGHT
     && popover?.scrollWidth === popover?.width && popover?.scrollHeight > popover?.clientHeight
     && ['auto', 'scroll'].includes(popover?.overflowY) && popover?.scrolled > 0
     && list?.left >= popover?.left && list?.right <= popover?.right && list?.scrollWidth === list?.width;

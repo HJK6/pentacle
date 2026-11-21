@@ -48,6 +48,20 @@ function runDaemonProjector(input: unknown): { projection: any; page: any; goal_
   return JSON.parse(result.stdout) as { projection: any; page: any; goal_page: any };
 }
 
+test('E9 moved destination preview omits the question member while detail retains it', () => {
+  const questionId = 'next_lanes__e9-revision-moved';
+  const { l11B, movedLane, movedSpecId } = F.e9MovedRevisionFixture(questionId);
+  const frame = F.inventoryFrame([l11B, movedLane]);
+  const normalized = applyWorkLanesFrame(emptyWorkLanesInventory(), frame);
+  const destination = normalized.lanes.find(row => row.lane_id === movedLane.inventory.lane_id);
+  assert.ok(destination?.progress);
+  assert.ok(destination.progress.members_total > destination.progress.members.length);
+  assert.equal(destination.progress.members.some(member => member.spec_id === movedSpecId), false);
+  const detailMember = movedLane.members.find((member: any) => member.spec_id === movedSpecId);
+  assert.equal(detailMember.open_questions.first_question_id, questionId);
+  assert.equal(detailMember.goal_id, movedLane.goals[0].goal_id);
+});
+
 function daemonInputs(lane: any, nowIso: string, goalFilter: string) {
   const sessionsByStream: Record<string, any> = {};
   const questionsBySpec: Record<string, any> = {};

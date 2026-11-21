@@ -86,7 +86,7 @@ function seedPendingGoal(python, runtime, epicId, laneId, title) {
     { cwd: SERVICE_DIR, encoding: 'utf8', timeout: 10000 });
 }
 
-async function focusPredecessorThenTab(ctx, targetSelector, predecessorSelector, targetDescription) {
+async function focusPredecessorThenTab(ctx, targetSelector, predecessorSelector, targetDescription, activation = 'Enter') {
   const order = await ctx.session.eval(`(() => {
     const visible = element => {
       const style = getComputedStyle(element);
@@ -124,7 +124,13 @@ async function focusPredecessorThenTab(ctx, targetSelector, predecessorSelector,
     return !!target && document.activeElement === target;
   })()`);
   check(ctx, `Tab reaches ${targetDescription}`, reached, order);
-  await press(ctx, 'Enter', 'Enter', 13);
+  if (activation === 'Space') await press(ctx, ' ', 'Space', 32);
+  else await press(ctx, 'Enter', 'Enter', 13);
+}
+
+async function clickAndCheck(ctx, selector, description) {
+  const result = await ctx.session.click(selector);
+  check(ctx, `${description}: click returns success`, result === true, { selector, result });
 }
 
 async function focusSuccessorThenShiftTab(ctx, targetSelector, successorSelector) {
@@ -360,7 +366,7 @@ async function nextLaneLinks(ctx) {
       };
     })()`);
     check(ctx, 'unique names link to exact lane and goal while shared title stays plain',
-      rendered.exactLaneLink && rendered.exactGoalLink && rendered.ambiguousLinks === 0
+      rendered.links.length === 2 && rendered.exactLaneLink && rendered.exactGoalLink && rendered.ambiguousLinks === 0
         && rendered.prose.includes(`${AMBIGUOUS_TITLE} stays plain.`)
         && rendered.updateCard?.laneId === laneId && rendered.updateCard?.updateId === laneUpdateData.update_id,
       rendered);
@@ -377,13 +383,13 @@ async function nextLaneLinks(ctx) {
       { ok: history?.ok, laneUpdateId: laneUpdate.message_id, proseId: prose.publication.message_id,
         present: history?.ids?.filter(id => [laneUpdate.message_id, prose.publication.message_id].includes(id)) || [] });
 
-    await ctx.session.click(laneSelector);
+    await clickAndCheck(ctx, laneSelector, 'click lane name');
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'`, 'click lane name opens lane');
     check(ctx, 'clicking the lane name opens the exact lane',
       await ctx.session.eval(`document.querySelector('.next-lanes-lane-title')?.textContent === ${json(LANE_TITLE)}`));
     await closeToAllLanes(ctx, 'lane', LANE_TITLE);
 
-    await ctx.session.click(goalSelector);
+    await clickAndCheck(ctx, goalSelector, 'click goal name');
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'goal'`, 'click goal name opens goal');
     check(ctx, 'clicking the unique goal name opens the exact goal',
       await ctx.session.eval(`document.querySelector('.next-lanes-goal-title')?.textContent === ${json(GOAL_TITLE)}`));
@@ -401,13 +407,21 @@ async function nextLaneLinks(ctx) {
       await ctx.session.eval(`document.querySelector('.next-lanes-goal-title')?.textContent === ${json(GOAL_TITLE)}`));
     await closeToAllLanes(ctx, 'goal', LANE_TITLE);
 
+    await focusPredecessorThenTab(ctx, goalSelector, laneSelector, 'unique goal name', 'Space');
+    await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'goal'
+      && document.querySelector('.next-lanes-goal-title')?.textContent === ${json(GOAL_TITLE)}`,
+      'Tab then Space opens the exact goal');
+    check(ctx, 'Tab then Space on the unique goal name opens that exact goal',
+      await ctx.session.eval(`document.querySelector('.next-lanes-goal-title')?.textContent === ${json(GOAL_TITLE)}`));
+    await closeToAllLanes(ctx, 'goal', LANE_TITLE);
+
     await focusSuccessorThenShiftTab(ctx, updateSelector, laneSelector);
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'`, 'Shift+Tab then Enter opens update card lane');
     check(ctx, 'Shift+Tab then Enter on the exact update card opens its lane',
       await ctx.session.eval(`document.querySelector('.next-lanes-lane-title')?.textContent === ${json(LANE_TITLE)}`));
     await closeToAllLanes(ctx, 'lane', LANE_TITLE);
 
-    await ctx.session.click(`${updateSelector}[data-update-id="${laneUpdateData.update_id}"]`);
+    await clickAndCheck(ctx, `${updateSelector}[data-update-id="${laneUpdateData.update_id}"]`, 'click lane update card');
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'`, 'exact update card opens lane');
     check(ctx, 'the exact stored lane-update card opens its own lane',
       await ctx.session.eval(`document.querySelector('.next-lanes-lane-title')?.textContent === ${json(LANE_TITLE)}`),

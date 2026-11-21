@@ -837,6 +837,41 @@ function questionFixture(questionId, specId, { producerStreamId = 'local:web-gat
   };
 }
 
+function staleQuestionPreview(lane, omitSpecId = null) {
+  let source = lane.inventory.members.slice(0, 8);
+  if (omitSpecId && source.some(member => member.spec_id === omitSpecId)) {
+    const retained = new Set(source.filter(member => member.spec_id !== omitSpecId).map(member => member.spec_id));
+    const replacement = lane.members.find(member => member.spec_id !== omitSpecId && !retained.has(member.spec_id));
+    if (!replacement) throw new Error('stale question preview has no stripped inventory replacement member');
+    const fields = ['spec_id', 'goal_id', 'title', 'status', 'terminal', 'seats', 'seats_total',
+      'estimate', 'estimate_exempt', 'ac_checked', 'ac_total', 'worked', 'lead_seat',
+      'source_changed_at', 'status_line', 'status_text', 'next_line', 'next_action_text',
+      'observation', 'open_questions'];
+    const previewMember = Object.fromEntries(fields.filter(key => Object.prototype.hasOwnProperty.call(replacement, key))
+      .map(key => [key, clone(replacement[key])]));
+    source = [...source.filter(member => member.spec_id !== omitSpecId), previewMember];
+  }
+  return { ...lane, inventory: { ...lane.inventory,
+    members: source.map(member => ({ ...member, open_questions: { count: 0, first_question_id: null } })) } };
+}
+
+function e9MovedRevisionFixture(movedQuestionId) {
+  const base = makeL11({ offPreviewQuestionIds: [movedQuestionId] });
+  const movedSpecId = base.questionSpecIds.offPreview;
+  const l11A = staleQuestionPreview(base, movedSpecId);
+  const l11B = makeL11RevisionB({ movedSpecId });
+  const movedLaneId = fixtureLaneId('moved-member');
+  const movedBase = makeOrdinaryLane({ laneId: movedLaneId, title: 'Fixture moved-member lane',
+    revision: REVISION_B, goalTitle: 'Fixture moved goal', memberCount: 8 });
+  const movedMember = l11A.members.find(member => member.spec_id === movedSpecId);
+  const movedLane = staleQuestionPreview(makeOrdinaryLane({
+    laneId: movedLaneId, title: 'Fixture moved-member lane', revision: REVISION_B,
+    goalId: movedBase.goals[0].goal_id, goalTitle: movedBase.goals[0].title,
+    members: [...movedBase.members, { ...movedMember, goal_id: movedBase.goals[0].goal_id }],
+  }), movedSpecId);
+  return { l11A, l11B, movedLane, movedSpecId };
+}
+
 module.exports = {
   INLINE_MEMBERS,
   L11_ID,
@@ -864,4 +899,6 @@ module.exports = {
   makeParkedLane,
   makeQuietLane,
   questionFixture,
+  staleQuestionPreview,
+  e9MovedRevisionFixture,
 };

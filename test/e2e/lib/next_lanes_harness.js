@@ -282,6 +282,11 @@ function laneDetailVersions(lanes) {
   return byLane;
 }
 
+function matchesOptionalGoalId(match, actualGoalId) {
+  if (!Object.prototype.hasOwnProperty.call(match || {}, 'goalId')) return true;
+  return (match.goalId ?? null) === (actualGoalId ?? null);
+}
+
 async function installLaneBridge(ctx, { frame = null, versions = {}, failures = [], holdRules = [] } = {}) {
   await ctx.session.waitFor('!!window.cc && typeof window.__nextLanesFrameSink === "function"', { timeoutMs: ctx.timeoutMs });
   await ctx.session.eval(`(async () => {
@@ -301,6 +306,7 @@ async function installLaneBridge(ctx, { frame = null, versions = {}, failures = 
       captureRefusals: [],
     };
     const pageLaneDetail = ${pageLaneDetail.toString()};
+    const matchesOptionalGoalId = ${matchesOptionalGoalId.toString()};
     function normalizedFrame(frame) {
       const core = window.PentacleChatCore;
       if (!core || typeof core.normalizeWorkLanesInventory !== 'function') throw new Error('production work-lanes normalizer unavailable');
@@ -361,7 +367,7 @@ async function installLaneBridge(ctx, { frame = null, versions = {}, failures = 
     function findPending(match) {
       return control.pending.findIndex(item => (!match?.laneId || item.laneId === match.laneId)
         && (match?.membersLimit == null || Number(item.options.membersLimit) === match.membersLimit)
-        && (!match?.goalId || (item.options.goalId || null) === match.goalId)
+        && matchesOptionalGoalId(match, item.options.goalId)
         && (!match?.revision || item.revision === match.revision));
     }
     function takePending(index) {
@@ -502,9 +508,13 @@ async function installLaneBridge(ctx, { frame = null, versions = {}, failures = 
       if (control.failures.has(laneId)) { call.status = 'failed'; call.error = 'Synthetic lane detail unavailable'; throw new Error(call.error); }
       const rule = control.holdRules.find(item => item.laneId === laneId && item.remaining > 0
         && (item.membersLimit == null || Number(options.membersLimit) === item.membersLimit)
-        && (item.goalId == null || (options.goalId || null) === item.goalId)
+        && matchesOptionalGoalId(item, options.goalId)
         && (item.revision == null || revision === item.revision));
       const reply = replyFor(laneId, options, revision);
+      call.reply = {
+        detail_revision: reply.detail_revision || null,
+        members: (reply.members || []).map(member => ({ spec_id: member.spec_id, goal_id: member.goal_id ?? null })),
+      };
       if (rule) {
         rule.remaining -= 1;
         return new Promise(resolve => control.pending.push({ laneId, options: { ...options }, revision, reply, resolve, call }));
@@ -720,6 +730,7 @@ module.exports = {
   installFrameHook,
   installLaneBridge,
   laneDetailVersions,
+  matchesOptionalGoalId,
   notificationFor,
   openQuestionList,
   questionFixtureToken,
