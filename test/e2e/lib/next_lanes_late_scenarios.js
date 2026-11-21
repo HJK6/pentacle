@@ -752,7 +752,22 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const movedQuestionId = questionIdForKey(movedKey);
   const ordinaryQuestionId = questionIdForKey(ordinaryKey);
   const lateQuestionId = questionIdForKey(lateKey);
-  const parked = makeParkedLane({ questionIds: [parkedQuestionId] });
+  const parkedBase = makeParkedLane({ questionIds: [parkedQuestionId] });
+  const parked = staleQuestionPreview(parkedBase, parkedBase.questionSpecId);
+  const parkedQuestionMember = parked.members.find(member => member.spec_id === parked.questionSpecId);
+  check(report, 'E9(a): parked fixture omits its ninth question member from the zero-count preview while retaining exact detail attribution',
+    parked.members.length === 12
+      && parked.members[8]?.spec_id === parked.questionSpecId
+      && parkedQuestionMember?.open_questions?.count === 1
+      && parkedQuestionMember.open_questions.first_question_id === parkedQuestionId
+      && parked.inventory.activity == null
+      && parked.inventory.members.length === 8
+      && !parked.inventory.members.some(member => member.spec_id === parked.questionSpecId)
+      && parked.inventory.members.every(member => Number(member.open_questions?.count || 0) === 0),
+    { memberCount: parked.members.length, questionSpecId: parked.questionSpecId,
+      detailQuestionMember: parkedQuestionMember, activity: parked.inventory.activity,
+      previewSpecIds: parked.inventory.members.map(member => member.spec_id),
+      previewQuestionCounts: parked.inventory.members.map(member => member.open_questions?.count || 0) });
   const ordinaryBase = makeOrdinaryLane({ laneId: ORDINARY_A_ID, title: 'Fixture ordinary lane' });
   const ordinaryMembers = ordinaryBase.members.map((member, index) => index === 0
     ? { ...member, open_questions: { count: 1, first_question_id: ordinaryQuestionId } }
@@ -1011,15 +1026,6 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
     afterFirstFrame[3]?.ownTitle === 'Synthetic truncated-hidden question'
       && !afterFirstFrame[3].linkTitle && !afterFirstFrame[3].isChatLink && !afterFirstFrame[3].retry,
     afterFirstFrame[3]);
-  check(report, 'E9(a): the parked fixture preview has zero question counts and no activity',
-    parked.members.length === 12 && parked.members[8]?.spec_id === parked.questionSpecId
-      && parked.members[8]?.open_questions?.first_question_id === parkedQuestionId
-      && parked.inventory.activity == null && parked.inventory.members.length === 8
-      && parked.inventory.members.every(member => Number(member.open_questions?.count || 0) === 0)
-      && parked.members.find(member => member.spec_id === parked.questionSpecId)?.open_questions?.count === 1,
-    { memberCount: parked.members.length, questionSpecId: parked.questionSpecId,
-      activity: parked.inventory.activity, previewQuestionCounts: parked.inventory.members.map(member => member.open_questions?.count || 0),
-      detailQuestionMember: parked.members.find(member => member.spec_id === parked.questionSpecId) });
   check(report, 'E9(a): the parked ninth-member question remains its own title while the members read is held',
     afterFirstFrame[0]?.ownTitle === 'Synthetic parked ninth-member question'
       && !afterFirstFrame[0].linkTitle && !afterFirstFrame[0].isChatLink && !afterFirstFrame[0].retry,

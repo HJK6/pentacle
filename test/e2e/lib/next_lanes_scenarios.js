@@ -677,8 +677,9 @@ async function nextQuestionsListRun(ctx, ownedIds, hooks) {
   await ctx.session.click('[aria-label^="Questions"]');
   await wait(ctx, "!!document.querySelector('.next-questions-list')", 'question list reopens');
   await ctx.session.click('.next-lanes-close');
+  await openList(ctx, 103);
   const chatRow = `.next-question-list-item[data-question-id="${chatQ.question_id}"] .next-question-chat-link`;
-  await ctx.session.click(chatRow);
+  check(ctx, 'listed chat heading is available after closing lanes', await ctx.session.click(chatRow));
   await wait(ctx, "!document.querySelector('.card').hidden && document.querySelector('.card .thread-inner').dataset.streamId==='local:web-gate-1'", 'listed chat heading opens its chat');
   check(ctx, 'no-spec listed-chat heading opens that chat', true);
   await openList(ctx, 103);

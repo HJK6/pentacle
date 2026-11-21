@@ -624,13 +624,19 @@ async function fixtureRequestWithPublication(runtime, producerStreamId, message,
     ws.on('close', () => {
       if (!settled) finish(new Error(`isolated publication socket closed before completion: ${requestId}`));
     });
-    ws.on('open', () => ws.send(JSON.stringify({ type: 'hello', client: 'test', subscribe: { all: true } })));
+    ws.on('open', () => ws.send(JSON.stringify({
+      type: 'hello',
+      client: 'test',
+      from_stream_id: producerStreamId,
+      stream_token: token,
+      subscribe: { all: true },
+    })));
     ws.on('message', raw => {
       try {
         const frame = JSON.parse(raw);
         if (frame.type === 'snapshot' && !sent) {
           sent = true;
-          ws.send(JSON.stringify({ ...message, from_stream_id: producerStreamId, stream_token: token }));
+          ws.send(JSON.stringify(message));
         }
         if (frame.type === 'chat.event' && predicate(frame.event)) publication = frame.event;
         if (frame.request_id === requestId) {
