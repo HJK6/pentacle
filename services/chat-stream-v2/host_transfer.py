@@ -267,7 +267,8 @@ class HostTransfer:
                 message['account']=account['alias']
             existing=await self.store.fetch_session(host,name)
             if existing is None:
-                result=await self.server.spawnctl.spawn(message,self.server.local_host)
+                result=await self.server.spawnctl.spawn(message,self.server.local_host,
+                    continuation=(source["provider"], source["effective_model"], source["effective_effort"]))
                 if result.get('type')!='spawn.ok': raise journal.TransferError('transfer_preparation_failed')
             # Spawn may acknowledge admission before the provider is ready. Its
             # existing reservation/outcome remains the only spawn obligation.

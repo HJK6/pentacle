@@ -26,7 +26,8 @@ DEFAULT_SPAWN_QUEUE_TIMEOUT_SECONDS = 180
 SPAWN_DEFAULTS_PATH = Path(__file__).resolve().with_name("spawn_defaults.json")
 # spawn_defaults.json owns model IDs, aliases and intentional omissions.
 # Aliases follow the selected generation; older full IDs remain compatible.
-# Picker availability narrows advertising only, not explicit spawns/handoffs.
+# Picker availability narrows advertising; spawnable=false retires fresh launches.
+# Known tuples remain resolvable for stored-session identity and continuation.
 # Opus stays pinned to the default; Codex ultra remains excluded fleet-wide.
 log = logging.getLogger(__name__)
 _cache_lock = threading.Lock()
@@ -78,6 +79,8 @@ def _config_tuple(provider: str, values: object, model_catalog: dict) -> tuple[s
         canonical = _canonical_model(provider, model, model_catalog)
     except SpawnProfileError as exc:
         raise _config_error(str(exc)) from exc
+    if model_catalog[provider][canonical].get("spawnable") is False:
+        raise _config_error(f"retired model cannot be a default: {provider}/{canonical}")
     if effort not in model_catalog[provider][canonical]["efforts"]:
         raise _config_error(f"unsupported {provider} default tuple: {canonical}/{effort}")
     return canonical, effort
@@ -99,6 +102,11 @@ def _load_spawn_config() -> dict[str, Any]:
     # Deployment-owned per-host limits live beside the shipped policy in
     # ``spawn_defaults.local.json`` (never shipped); host overrides are merged
     # and optional picker availability replaces the shipped map.
+    shipped_models = raw.get("models")
+    retired = {provider: {model: copy.deepcopy(entry) for model, entry in entries.items()
+                          if isinstance(entry, dict) and entry.get("spawnable") is False}
+               for provider, entries in (shipped_models if isinstance(shipped_models, dict) else {}).items()
+               if isinstance(entries, dict)}
     local_path = SPAWN_DEFAULTS_PATH.with_name("spawn_defaults.local.json")
     if local_path.exists():
         try:
@@ -141,6 +149,12 @@ def _load_spawn_config() -> dict[str, Any]:
                 raise _config_error('invalid shipped test_prompt profile')
             raw['profiles']['test_prompt'] = {**shipped_pairs, **pairs}
 
+    # Keep retired identities and aliases even when an account narrows its local
+    # catalog. Shipped retirement cannot be undone or aliased to an active model.
+    for provider, entries in retired.items():
+        current = raw.get("models", {}).get(provider)
+        if isinstance(current, dict):
+            current.update(entries)
     model_catalog = _validate_catalog(raw)
     providers = raw.get("providers")
     if not isinstance(providers, dict) or set(providers) - set(KNOWN_PROVIDERS):
@@ -191,6 +205,8 @@ def _validate_catalog(config):
         for canonical, entry in entries.items():
             if not isinstance(canonical, str) or not canonical.strip() or not isinstance(entry, dict):
                 raise _config_error(f'invalid {provider} model definition')
+            if 'spawnable' in entry and not isinstance(entry['spawnable'], bool):
+                raise _config_error(f'invalid spawnable flag for {provider}/{canonical}')
             aliases, efforts = entry.get('aliases'), entry.get('efforts')
             if (not isinstance(aliases, list) or not aliases
                     or any(not isinstance(a, str) or not a.strip() for a in aliases)
@@ -204,6 +220,8 @@ def _validate_catalog(config):
                     raise _config_error(f'duplicate alias {provider}/{alias}')
                 aliases_seen[alias] = canonical
             normalized[provider][canonical] = {'aliases': tuple(aliases), 'efforts': tuple(efforts)}
+            if entry.get('spawnable') is False:
+                normalized[provider][canonical]['spawnable'] = False
     omitted = config.get('intentionally_unspawnable', {})
     if not isinstance(omitted, dict) or set(omitted) - set(KNOWN_PROVIDERS):
         raise _config_error('invalid intentionally_unspawnable providers')
@@ -362,7 +380,8 @@ def _available_model_ids(config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
     model ids, each a subset of ``MODELS``) narrows the picker to the currently
     launchable set. Absent — the shipped public default — the full ``MODELS``
     catalog is advertised. A missing provider key keeps its full catalog; an
-    empty list hides the provider. Full ``MODELS`` remains launchable.
+    empty list hides the provider. Known retired definitions remain resolvable,
+    but are excluded from fresh admission and advertising.
     ``load_spawn_config`` validates every provided id.
     """
     configured = config.get("available_models")
@@ -373,7 +392,11 @@ def _available_model_ids(config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
         ids = configured.get(provider) if isinstance(configured, dict) else None
         if ids == []:
             continue
-        result[provider] = tuple(ids) if ids is not None else tuple(config["models"][provider])
+        candidates = ids if ids is not None else config["models"][provider]
+        result[provider] = tuple(model for model in candidates
+                                 if config["models"][provider][model].get("spawnable") is not False)
+        if not result[provider]:
+            del result[provider]
     return result
 
 
@@ -489,6 +512,13 @@ def require_spawnable(provider: str, model: str, *, _config=None) -> None:
         raise SpawnProfileError("spawn_model_retired", f"retired model is unavailable for new spawns: {canonical}")
 
 
+def resolve_fresh_spawn(**kwargs) -> dict[str, str]:
+    config = kwargs.pop("_config", None)
+    config = load_spawn_config() if config is None else config
+    resolved = resolve_spawn(**kwargs, _config=config)
+    require_spawnable(resolved["provider"], resolved["model"], _config=config)
+    return resolved
+
 
 def _normalize_handoff_role(value: object) -> str | None:
     if value is None:
@@ -535,6 +565,8 @@ def resolve_handoff(
         effort=effort if effort is not None else source_resolved["effort"],
         host=host, _config=config,
     )
+    if (target_resolved["provider"], target_resolved["model"]) != (source_resolved["provider"], source_resolved["model"]):
+        require_spawnable(target_resolved["provider"], target_resolved["model"], _config=config)
     requested_role = _normalize_handoff_role(role)
     target_role = requested_role if requested_role is not None else normalized_source_role
     source = {
@@ -609,7 +641,9 @@ def catalog() -> dict:
             "host_overrides": config.get("host_overrides", {}),
             "profiles": config.get("profiles", {}),
         },
-        "models": config["models"],
+        "models": {provider: {model: entry for model, entry in entries.items()
+                              if entry.get("spawnable") is not False}
+                   for provider, entries in config["models"].items()},
         "available_models": {
             provider: {model: config["models"][provider][model] for model in model_ids}
             for provider, model_ids in _available_model_ids(config).items()

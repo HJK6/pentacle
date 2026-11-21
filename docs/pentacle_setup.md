@@ -137,7 +137,7 @@ and is git-ignored):
   "schema_version": 1,
   "available_models": {
     "claude": ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-2"],
-    "codex":  ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
+    "codex":  ["gpt-6-luna", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-6.2-astra"]
   }
 }
 ```

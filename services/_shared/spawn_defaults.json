@@ -224,7 +224,8 @@
           "high",
           "xhigh",
           "max"
-        ]
+        ],
+        "spawnable": false
       },
       "gpt-6.1-terra": {
         "aliases": [
@@ -264,7 +265,8 @@
           "high",
           "xhigh",
           "max"
-        ]
+        ],
+        "spawnable": false
       },
       "gpt-6.2-sol": {
         "aliases": [

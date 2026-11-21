@@ -48,7 +48,7 @@ def test_current_pool_cap_refuses_real_spawn_at_selection_or_final_admit(tmp_pat
                 runtime.choose_launch=crossed
             else: await cap_fixture_pool(runtime)
             with pytest.raises(VerbError) as refused:
-                await ctl._spawn_guarded(message('spawn',spec_id=SPEC,provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+                await ctl._spawn_guarded(message('spawn',spec_id=SPEC,provider='codex',account='spare',model='gpt-6.2-sol',effort='high',
                     initial_prompt='native user prompt',objective='Owned final-admission cap drill',idempotency_key='cap-race'), 'localhost')
             assert refused.value.code=='account_pool_cap_reached'
             assert pane.launches==0
@@ -64,7 +64,7 @@ def test_admitted_spawn_replay_at_cap_keeps_one_process_and_original_receipt(tmp
     async def run():
         store,runtime,pane,ctl,surface,message=await fixture(tmp_path)
         try:
-            msg=message('spawn',spec_id=SPEC,provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+            msg=message('spawn',spec_id=SPEC,provider='codex',account='spare',model='gpt-6.2-sol',effort='high',
                 initial_prompt='native user prompt',objective='Owned receipt replay',idempotency_key='cap-replay')
             first=await ctl._spawn_guarded(dict(msg),'localhost')
             await cap_fixture_pool(runtime)
@@ -82,7 +82,7 @@ def test_schedule_materialized_before_cap_checks_current_control_at_fire(tmp_pat
     async def run():
         store,runtime,pane,ctl,surface,message=await fixture(tmp_path)
         try:
-            template=dict(provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+            template=dict(provider='codex',account='spare',model='gpt-6.2-sol',effort='high',
                 spec_ids=[SPEC],initial_prompt='native user prompt',objective='Owned scheduled cap drill')
             if recurring:
                 created=await surface.recurring_create(message('schedule.recurring.create',name='owned-rule',every='daily',
@@ -158,7 +158,7 @@ def test_explicit_schedule_survives_restart_and_refuses_drift(tmp_path, recurrin
     async def run():
         store, runtime, pane, ctl, surface, message = await fixture(tmp_path)
         try:
-            template = {'provider': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high',
+            template = {'provider': 'codex', 'model': 'gpt-6.2-sol', 'effort': 'high',
                 'account': 'spare', 'spec_ids': [SPEC], 'objective': 'Exercise retained account',
                 'initial_prompt': 'native user prompt'}
             if recurring:

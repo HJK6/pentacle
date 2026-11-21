@@ -43,7 +43,7 @@ def test_restore_waits_for_delivered_outcome_and_adopts(tmp_path):
         _spawn_payload_hash = staticmethod(SpawnCtl._spawn_payload_hash)
         def __init__(self):
             self.calls, self.outcomes, self.reservations = [], [], []
-        async def spawn(self, msg, host):
+        async def spawn(self, msg, host, *, continuation=None):
             self.calls.append(msg.copy())
             return {'type': 'spawn.ok'}
         async def spawn_status(self, msg, host):
@@ -106,7 +106,7 @@ class RestoreSpawn:
         self.calls = []
         self.outcomes = []
         self.reservations = []
-    async def spawn(self, msg, host):
+    async def spawn(self, msg, host, *, continuation=None):
         self.calls.append(dict(msg))
         return {'type': 'spawn.ok'}
     async def spawn_status(self, msg, host):

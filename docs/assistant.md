@@ -60,7 +60,7 @@ python3 services/chat-stream-v2/main.py \
 python3 tools/bootstrap_assistant.py \
   --url ws://127.0.0.1:7791 --credential-file "$OPERATOR_CREDENTIAL" \
   --physical-host local --name Zephyr --provider codex \
-  --model gpt-6-sol --effort medium \
+  --model gpt-6.2-sol --effort medium \
   --private-workspace "$PRIVATE_WORKSPACE" \
   --instructions-file "$INSTRUCTIONS_FILE" --dry-run
 ```

@@ -183,6 +183,23 @@ its own `host_overrides` in `services/_shared/spawn_defaults.local.json` next to
 the active policy read-back; handoff policy is colocated in that file but enforced by the
 handoff guard.
 
+The Codex fresh-chat default is `gpt-6-luna` at `max` effort.
+`sol` and `astra` select `gpt-6.2-sol` and `gpt-6.2-astra`. Luna remains the
+low-tier/test model; Terra remains `gpt-6.1-terra` until a successor is available.
+A model entry with `"spawnable": false` remains a known session identity but is
+absent from both catalog model lists and rejected for fresh CLI, daemon and
+scheduled spawns (`spawn_model_retired`). Only `gpt-6.1-sol` and `gpt-6-astra` carry this retirement flag. Stale local availability lists are filtered; local catalog replacements
+cannot re-enable shipped retirees. A retired provider/host/test default is invalid;
+a rejected hot reload retains the last good policy.
+
+Existing seats keep their recorded model. Handoffs can inherit the same retired
+canonical model from their stored source, while changing to a different retired
+model is rejected. Internal transfer and assistant restore callers pass a
+Python-only continuation tuple from their durable record; admission compares the
+canonical provider/model/effort exactly. No network field, schema provenance or
+service-auth label supplies this continuation permission. Model resolution for
+observed identities stays independent of fresh-launch admission.
+
 A non-handoff `agent-orch spawn` (immediate or scheduled) with no `--model` prints one
 stderr line before the RPC naming the tuple it resolved, for example
 `agent-orch spawn: WARNING: no --model given; using the claude default claude-opus-4-8/high. …`.

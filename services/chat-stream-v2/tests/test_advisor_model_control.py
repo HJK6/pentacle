@@ -126,3 +126,15 @@ def test_model_cas_over_authenticated_socket_rejects_stale_and_bad_fields(tmp_pa
             finally:
                 await server.close()
     asyncio.run(run())
+
+
+def test_integrated_policy_rejects_retired_template_target(monkeypatch):
+    async def run():
+        async with session_rig(monkeypatch) as h:
+            current = json.loads(await h.store.get(SHAPE_KEY))
+            current["model"] = "gpt-6.2-astra"
+            await h.store.put(SHAPE_KEY, json.dumps(current))
+            with pytest.raises(ValueError, match="spawn_model_retired"):
+                await change(h, model="gpt-6-astra", expected_model="gpt-6.2-astra")
+            assert json.loads(await h.store.get(SHAPE_KEY)) == current
+    asyncio.run(run())

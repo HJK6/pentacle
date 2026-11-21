@@ -110,7 +110,7 @@ def test_planner_explicit_account_keeps_spec_phase_admission(tmp_path, monkeypat
             await artifact_executor(runtime)
             owner = await store.fetch_session('localhost', 'lead')
             result = await ctl.spawn({
-                'provider': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high', 'account': 'spare',
+                'provider': 'codex', 'model': 'gpt-6.2-sol', 'effort': 'high', 'account': 'spare',
                 'objective': 'Review the assigned spec', 'visibility': 'hidden',
                 'ready_marker': 'READY',
                 'session_name': 'account-spec-review', 'request_id': 'account-spec-spawn',
