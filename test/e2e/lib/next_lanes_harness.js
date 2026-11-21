@@ -630,6 +630,7 @@ async function fixtureRequestWithPublication(runtime, producerStreamId, message,
       from_stream_id: producerStreamId,
       stream_token: token,
       subscribe: { all: true },
+      capabilities: { assistant_composite_v1: true },
     })));
     ws.on('message', raw => {
       try {

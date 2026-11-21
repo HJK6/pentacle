@@ -27,7 +27,11 @@ async function wait(ctx, expression, label) {
 }
 
 async function press(ctx, key, code, windowsVirtualKeyCode) {
-  await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode });
+  const text = key === 'Enter' ? '\r' : key === ' ' ? ' ' : undefined;
+  await ctx.session.send('Input.dispatchKeyEvent', {
+    type: 'keyDown', key, code, windowsVirtualKeyCode,
+    ...(text === undefined ? {} : { text, unmodifiedText: text }),
+  });
   await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode });
 }
 
@@ -123,9 +127,57 @@ async function focusPredecessorThenTab(ctx, targetSelector, predecessorSelector,
   await press(ctx, 'Enter', 'Enter', 13);
 }
 
-async function closeToAllLanes(ctx) {
-  await ctx.session.click('.next-lanes-close');
-  await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'all'`, 'return to All lanes');
+async function focusSuccessorThenShiftTab(ctx, targetSelector, successorSelector) {
+  const order = await ctx.session.eval(`(() => {
+    const visible = element => {
+      const style = getComputedStyle(element);
+      return element.tabIndex >= 0 && !element.disabled && style.display !== 'none'
+        && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+    };
+    const controls = [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')].filter(visible);
+    const ordered = [...controls.filter(element => element.tabIndex > 0)
+      .sort((a,b) => a.tabIndex - b.tabIndex), ...controls.filter(element => element.tabIndex === 0)];
+    const target = document.querySelector(${json(targetSelector)});
+    const successor = document.querySelector(${json(successorSelector)});
+    const index = ordered.indexOf(target);
+    return { targetFound: !!target, successorFound: !!successor,
+      successorIsImmediate: index >= 0 && ordered[index + 1] === successor, targetIndex: index };
+  })()`);
+  check(ctx, 'update card: actual following control is in tab order',
+    order.targetFound && order.successorFound && order.successorIsImmediate, order);
+  const focused = await ctx.session.eval(`(() => {
+    const successor = document.querySelector(${json(successorSelector)});
+    successor?.focus();
+    return !!successor && document.activeElement === successor;
+  })()`);
+  check(ctx, 'update card: focus starts on the following control', focused, order);
+  await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, modifiers: 8 });
+  await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: 8 });
+  await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: 8 });
+  await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16 });
+  const reached = await ctx.session.eval(`document.activeElement === document.querySelector(${json(targetSelector)})`);
+  check(ctx, 'Shift+Tab reaches the exact update card', reached, order);
+  await press(ctx, 'Enter', 'Enter', 13);
+}
+
+async function closeToAllLanes(ctx, startLevel, laneTitle) {
+  const steps = startLevel === 'goal'
+    ? [{ label: laneTitle, level: 'lane' }, { label: 'All lanes', level: 'all' }]
+    : [{ label: 'All lanes', level: 'all' }];
+  for (const step of steps) {
+    const visibleBack = await ctx.session.eval(`(() => {
+      const button = document.querySelector('.next-lanes-back');
+      return !!button && !button.closest('[hidden]') && getComputedStyle(button).visibility !== 'hidden'
+        && button.textContent === ${json(`‹  ${step.label}`)};
+    })()`);
+    if (!visibleBack) throw new Error(`expected visible Back control: ${step.label}`);
+    if (!await ctx.session.click('.next-lanes-back')) throw new Error(`could not click Back: ${step.label}`);
+    await wait(ctx, `(() => {
+      const body = document.querySelector('.next-lanes-scroll');
+      return !!body && !body.closest('[hidden]') && getComputedStyle(body).visibility !== 'hidden'
+        && body.dataset.level === ${json(step.level)};
+    })()`, `visible Back destination: ${step.level}`);
+  }
 }
 
 async function restorePage(ctx, hook, primaryError) {
@@ -329,25 +381,31 @@ async function nextLaneLinks(ctx) {
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'`, 'click lane name opens lane');
     check(ctx, 'clicking the lane name opens the exact lane',
       await ctx.session.eval(`document.querySelector('.next-lanes-lane-title')?.textContent === ${json(LANE_TITLE)}`));
-    await closeToAllLanes(ctx);
+    await closeToAllLanes(ctx, 'lane', LANE_TITLE);
 
     await ctx.session.click(goalSelector);
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'goal'`, 'click goal name opens goal');
     check(ctx, 'clicking the unique goal name opens the exact goal',
       await ctx.session.eval(`document.querySelector('.next-lanes-goal-title')?.textContent === ${json(GOAL_TITLE)}`));
-    await closeToAllLanes(ctx);
+    await closeToAllLanes(ctx, 'goal', LANE_TITLE);
 
     await focusPredecessorThenTab(ctx, laneSelector, updateSelector, 'lane name');
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'`, 'Tab then Enter opens lane');
     check(ctx, 'Tab then Enter on the lane name opens its lane',
       await ctx.session.eval(`document.querySelector('.next-lanes-lane-title')?.textContent === ${json(LANE_TITLE)}`));
-    await closeToAllLanes(ctx);
+    await closeToAllLanes(ctx, 'lane', LANE_TITLE);
 
     await focusPredecessorThenTab(ctx, goalSelector, laneSelector, 'unique goal name');
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'goal'`, 'Tab then Enter opens goal');
     check(ctx, 'Tab then Enter on the unique goal name opens that goal',
       await ctx.session.eval(`document.querySelector('.next-lanes-goal-title')?.textContent === ${json(GOAL_TITLE)}`));
-    await closeToAllLanes(ctx);
+    await closeToAllLanes(ctx, 'goal', LANE_TITLE);
+
+    await focusSuccessorThenShiftTab(ctx, updateSelector, laneSelector);
+    await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'`, 'Shift+Tab then Enter opens update card lane');
+    check(ctx, 'Shift+Tab then Enter on the exact update card opens its lane',
+      await ctx.session.eval(`document.querySelector('.next-lanes-lane-title')?.textContent === ${json(LANE_TITLE)}`));
+    await closeToAllLanes(ctx, 'lane', LANE_TITLE);
 
     await ctx.session.click(`${updateSelector}[data-update-id="${laneUpdateData.update_id}"]`);
     await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'`, 'exact update card opens lane');

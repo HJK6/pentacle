@@ -36,12 +36,14 @@ class FakeWebSocket {
     const frame = JSON.parse(String(raw));
     this.sent.push(frame);
     if (frame.type === 'hello') {
+      this.compositeCapable = frame.capabilities?.assistant_composite_v1 === true;
       queueMicrotask(() => this.emit('message', JSON.stringify({ type: 'snapshot' })));
       return;
     }
     const publication = { source: 'wire-contract', request_id: frame.request_id };
     queueMicrotask(() => {
-      this.emit('message', JSON.stringify({ type: 'chat.event', event: publication }));
+      if (this.compositeCapable) this.emit('message', JSON.stringify({ type: 'chat.event', event: publication }));
+      this.replyDelivered = true;
       this.emit('message', JSON.stringify({ type: `${frame.type}.ok`, request_id: frame.request_id }));
     });
   }
@@ -59,7 +61,7 @@ function loadFixtureRequestWithPublication() {
   return runInNewContext(`(${source.slice(start, end).trim()})`, {
     WebSocket: FakeWebSocket,
     questionFixtureToken: (runtime, producerStreamId) => runtime.fixtureTokens?.[producerStreamId] || null,
-    setTimeout,
+    setTimeout: (callback, ms) => setTimeout(callback, Math.min(ms, 50)),
     clearTimeout,
   });
 }
@@ -90,8 +92,13 @@ test('publication helper authenticates hello and sends closed-schema request unc
 
   for (const message of messages) {
     FakeWebSocket.latest = null;
-    const result = await helper(runtime, producerStreamId, message,
-      event => event?.source === 'wire-contract' && event?.request_id === message.request_id);
+    let result;
+    try {
+      result = await helper(runtime, producerStreamId, message,
+        event => event?.source === 'wire-contract' && event?.request_id === message.request_id);
+    } catch (error) {
+      assert.fail(`publication missing: reply delivered=${FakeWebSocket.latest.replyDelivered === true}, composite capability=${FakeWebSocket.latest.compositeCapable}; ${error.message}`);
+    }
 
     assert.deepEqual(FakeWebSocket.latest.sent[0], {
       type: 'hello',
@@ -99,6 +106,7 @@ test('publication helper authenticates hello and sends closed-schema request unc
       from_stream_id: producerStreamId,
       stream_token: token,
       subscribe: { all: true },
+      capabilities: { assistant_composite_v1: true },
     });
     assert.deepEqual(FakeWebSocket.latest.sent[1], message);
     assert.equal(Object.hasOwn(FakeWebSocket.latest.sent[1], 'from_stream_id'), false);
