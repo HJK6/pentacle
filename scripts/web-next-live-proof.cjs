@@ -21,12 +21,13 @@ function bind() {
 }
 (async () => {
   let browser;
+  let currentPage;
   try {
     bind();
     step("release and listener bound");
     browser = await chromium.launch({ headless: true, ...process.env.CHROME_EXECUTABLE_PATH ? { executablePath: process.env.CHROME_EXECUTABLE_PATH } : { channel: "chrome" }, args: ["--no-sandbox"] });
     for (const width of [1440, 440]) {
-      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      const page = currentPage = await browser.newPage({ viewport: { width, height: 900 } });
       let r = await page.goto(origin + "/", { waitUntil: "domcontentloaded" });
       if (r.status() !== 200) throw Error("root HTTP " + r.status());
       await page.waitForSelector("#sidebar-toggle", { timeout: 3e4 });
@@ -127,12 +128,16 @@ function bind() {
       await page.screenshot({ path: path.join(out, `current-root-${width}.png`) });
       step("current web " + width);
       await page.close();
+      currentPage = null;
     }
     bind();
     results.status = "pass";
     results.finished = (new Date()).toISOString();
     save();
   } catch (e) {
+    if (currentPage && !currentPage.isClosed()) {
+      try { await currentPage.screenshot({ path: path.join(out, "failure.png") }); } catch (_) { /* Preserve the original failure. */ }
+    }
     results.status = "fail";
     results.error = String(e.message || e);
     results.finished = (new Date()).toISOString();
