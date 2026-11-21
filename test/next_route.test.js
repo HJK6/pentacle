@@ -45,7 +45,7 @@ test('next uses the same tailnet identity check as root', async t => {
   t.after(async () => { await host.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${host.port}`;
   for (const route of ['/', '/next', '/next/']) assert.equal((await fetch(base + route, { redirect: 'manual' })).status, 401);
-  const headers = { 'tailscale-user-login':'tester@example.test', 'x-forwarded-proto':'https', 'x-forwarded-for':'100.64.0.10' };
+  const headers = { 'tailscale-user-login':'tester@example.test', 'x-forwarded-proto':'https', 'x-forwarded-for':'fd7a:115c:a1e0::1234:5678' };
   assert.equal((await fetch(base + '/next/', { headers })).status, 200);
   const redir = await fetch(base + '/next', { headers, redirect: 'manual' }); assert.equal(redir.status, 302); assert.equal(redir.headers.get('location'), '/next/');
 });
