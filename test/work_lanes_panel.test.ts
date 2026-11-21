@@ -5,18 +5,80 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import fixture from '../pentacle-chat-core/tests/fixtures/work-lanes-inventory.json';
 import {
-  applyWorkLanesFrame, emptyWorkLanesInventory, workLaneEtaLabel, workLaneTapTarget,
+  applyWorkLanesFrame, emptyWorkLanesInventory, readableLaneRowStatus, workLaneEtaLabel, workLaneTapTarget,
 } from 'pentacle-chat-core';
 import { workLanesStatsText, renderWorkLanesPanelHtml } from '../renderer/work_lanes_panel.js';
+import { mountLanesCard } from '../renderer/next/lanes.js';
 
 const NOW = Date.parse('2026-10-07T19:01:00Z');
 const inventory = applyWorkLanesFrame(emptyWorkLanesInventory(), fixture.inventory_frame);
-const helpers = { tapTarget: workLaneTapTarget, etaLabel: workLaneEtaLabel, nowMs: NOW };
+const helpers = { tapTarget: workLaneTapTarget, etaLabel: workLaneEtaLabel, rowStatus: readableLaneRowStatus, nowMs: NOW };
 
 function mount(html: string) {
   const dom = new JSDOM(`<div id="root">${html}</div>`);
   return dom.window.document;
 }
+
+test('both web rows display daemon activity, lifecycle, lead health and question availability independently', () => {
+  const source = fixture.inventory_frame.lanes.find(lane => lane.lane_id === 'wl-active-0002')!;
+  const closedLead = { ...source.lead!, status: 'closed' as const, presence: { ...source.lead!.presence, online: false } };
+  const question = { spec_id: 'spec_fixture__lane_activity', open_questions: { count: 1, first_question_id: 'fixture-question' } };
+  const cases = [
+    { patch: { activity: 'working', lead: closedLead, members: [question] }, words: ['Working', 'Lead offline'], route: true },
+    { patch: { activity: 'waiting_on_you', lead: closedLead }, words: ['Waiting on you', 'Lead offline'], route: true },
+    { patch: { activity: 'waiting_on_you', lead: closedLead, state: 'blocked', blocker: 'Review window' }, words: ['Waiting on you', 'Blocked', 'Review window', 'Lead offline'], route: true },
+    { patch: { activity: 'working', lead: closedLead, state: 'paused', parked: { at: '2026-10-07', reason: 'Hold fixture' } }, words: ['Parked', 'Working', 'Hold fixture', 'Lead offline'], route: false, hold: true },
+    { patch: { activity: 'waiting_on_you', state: 'paused', lead: null }, words: ['Paused', 'Waiting on you', 'No visible lead'], route: true, hold: true },
+    { patch: { activity: 'waiting_on_dot', external: { label: 'Review relay', working: 0, queued: 1, review: 0, verified_at: '2026-10-07T19:01:00Z' }, lead: null }, words: ['Waiting on Review relay', 'No visible lead'], route: false },
+    { patch: { activity: 'future-state', lead: { ...source.lead, qualifies: false } }, words: ['No visible lead'], route: false },
+  ];
+  for (const entry of cases) {
+    const single = applyWorkLanesFrame(emptyWorkLanesInventory(), {
+      ...fixture.inventory_frame, counts: { ...inventory.counts, open: 1 },
+      lanes: [{ ...source, members: [], ...entry.patch }],
+    });
+    const classic = mount(renderWorkLanesPanelHtml(single, helpers));
+    const dom = new JSDOM('<div id="next"></div>');
+    const next = dom.window.document.getElementById('next')!;
+    const control = mountLanesCard(next, { getState: () => ({ inventory: single }) });
+    next.querySelector<HTMLButtonElement>('.next-lanes-parked-toggle')?.click();
+    const nextRow = next.querySelector('.next-lanes-row-open')!;
+    for (const row of [classic.querySelector('.lane-row')!, nextRow]) {
+      const text = row.textContent!.toLowerCase();
+      for (const word of entry.words) assert(text.includes(word.toLowerCase()), word);
+      if (entry.hold) assert(text.indexOf(entry.words[0].toLowerCase()) < text.indexOf(entry.words[1].toLowerCase()));
+    }
+    const link = classic.querySelector('.lane-question-link');
+    assert.equal(!!link, entry.route);
+    assert.equal(!!nextRow.querySelector('.next-lanes-question-mark'), entry.route);
+    if (link) {
+      assert.equal(link.getAttribute('href'), `/next/?lane=${source.lane_id}`);
+      assert.equal(link.closest('[role="button"]'), null);
+    }
+    control.destroy();
+    next.ownerDocument.defaultView?.close();
+    classic.defaultView?.close();
+  }
+});
+
+test('neither web row describes retained activity, lead health or an actionable wait as current', () => {
+  const source = inventory.lanes[0];
+  const single = { ...inventory, lanes: [{ ...source, activity: 'waiting_on_you' }] };
+  const classic = mount(renderWorkLanesPanelHtml(single, { ...helpers, current: false }));
+  const dom = new JSDOM('<div id="next"></div>');
+  const next = dom.window.document.getElementById('next')!;
+  const control = mountLanesCard(next, { getState: () => ({ inventory: single, current: false }) });
+  for (const row of [classic.querySelector('.lane-row'), next.querySelector('.next-lanes-row-open')]) {
+    assert.match(row!.textContent!, /Connection lost/);
+    assert.match(row!.textContent!, /Last known/);
+    assert.doesNotMatch(row!.textContent!, /Waiting on you|Lead idle|Lead offline|Lead working/);
+  }
+  assert.equal(classic.querySelector('.lane-question-link, .lane-presence'), null);
+  assert.equal(next.querySelector('.next-lanes-question-mark, .next-lanes-row-working'), null);
+  control.destroy();
+  next.ownerDocument.defaultView?.close();
+  classic.defaultView?.close();
+});
 
 test('stats line leads with the open-lane count and keeps the session counts', () => {
   assert.equal(workLanesStatsText(inventory, { sessions: 6, needsAnswer: 1, working: 2, search: '', sourceFiltered: 6 }),

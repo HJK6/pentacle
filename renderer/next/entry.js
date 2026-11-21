@@ -33,6 +33,8 @@ const catalogLoader = createSpawnCatalogLoader(() => cc.chatSpawnCatalog());
 const root = document.getElementById('app');
 const drafts = new Map();
 let laneInventory = core.emptyWorkLanesInventory();
+let laneInventoryCurrent = false;
+let pendingLaneLink = new URLSearchParams(location.search).get('lane');
 const laneReads = createLaneReads({ show: (laneId, options) => cc.workLanesShow(laneId, options) });
 const laneConnection = { stateVersion: null, connected: false, error: null };
 const laneListeners = new Set();
@@ -40,14 +42,30 @@ let lanesControl = null;
 let questionsControl = null;
 const questionNotifications = createQuestionNotifications(() => questionsControl?.update({ notifications: questionNotifications.values() }), { promptList: args => cc.promptList(args) });
 function applyLaneFrame(frame) {
-  if (!frame || (frame.type !== 'work_lanes.inventory' && !frame.work_lanes)) return;
-  // Connection snapshots carry state_version; daemon inventory pushes do not.
-  if (frame.type !== 'work_lanes.inventory' && !applyVersionedConnectionState(laneConnection, { ...frame, connected: state.connected }, () => {})) return;
+  if (!frame) return;
+  if (frame.connected === false) {
+    if (!applyVersionedConnectionState(laneConnection, frame, () => {})) return;
+    laneInventoryCurrent = false;
+    lanesControl?.render();
+    return;
+  }
+  if (frame.type === 'work_lanes.inventory') {
+    if (!laneConnection.connected || recoveryEpoch !== null) return;
+  } else {
+    // Connection snapshots carry state_version; daemon inventory pushes do not.
+    if (frame.connected !== true || !applyVersionedConnectionState(laneConnection, frame, () => {})) return;
+    if (!frame.work_lanes) return;
+  }
   const next = core.applyWorkLanesFrame(laneInventory, frame);
   if (next === laneInventory) return;
   laneInventory = next;
+  laneInventoryCurrent = laneConnection.connected;
   laneReads.updateInventory(next);
   for (const listener of laneListeners) listener(next);
+  if (laneInventoryCurrent && pendingLaneLink && next.lanes.some(lane => lane.lane_id === pendingLaneLink)) {
+    openLaneTarget(pendingLaneLink);
+    pendingLaneLink = null;
+  }
 }
 const state = { selected: null, admittedSession: null, mode: 'thread', layout: layout.createLayoutState(innerWidth), popover: null, hosts: {}, connected: false };
 const icons = {
@@ -227,7 +245,7 @@ questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, ge
   onOpenChat: streamId => { closePopover(); openChat(streamId); } });
 let laneRenderPending = false;
 questionsControl.subscribe(snapshot => { questionsButton.dataset.count = String(snapshot.openCount); questionsButton.setAttribute('aria-label', snapshot.openCount ? `Questions (${snapshot.openCount})` : 'Questions'); if (lanesControl && !laneRenderPending) { laneRenderPending = true; queueMicrotask(() => { laneRenderPending = false; lanesControl?.render(); }); } });
-lanesControl = mountLanesCard(lanesCard, { getState: () => ({ inventory: laneInventory }), reads: laneReads, questions: questionsControl,
+lanesControl = mountLanesCard(lanesCard, { getState: () => ({ inventory: laneInventory, current: laneInventoryCurrent }), reads: laneReads, questions: questionsControl,
   navigation: { onClose: () => { state.layout = layout.shut(state.layout, 'lanes', innerWidth); syncLayout(); } } });
 store.subscribe(() => { const id = assistantSession()?.stream_id; if (id && id !== assistantHistory) { assistantHistory = id; requestHistory(id); } questionsControl.update({ sessions: sessions() }); render(); });
 laneListeners.add(() => { questionsControl.update({ inventory: laneInventory }); lanesControl?.render(); render(); });
@@ -252,6 +270,13 @@ async function loadSnapshot() {
     render();
   } finally { recoveryPending = false; if (recoveryEpoch !== null && readySignals !== signal && cc.webConnectionState?.()?.open) void loadSnapshot().catch(() => {}); }
 }
-cc.onDisconnect?.(({ epoch }) => { recoveryEpoch = null; store.webHostDisconnected?.(epoch); });
+cc.onDisconnect?.(({ epoch }) => {
+  recoveryEpoch = null;
+  laneInventoryCurrent = false;
+  laneConnection.connected = false;
+  laneConnection.stateVersion = null;
+  lanesControl?.render();
+  store.webHostDisconnected?.(epoch);
+});
 cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); });
 syncLayout(); void loadSnapshot().catch(() => render());

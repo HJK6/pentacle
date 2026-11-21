@@ -1,6 +1,6 @@
 # Work lanes in the web renderer
 
-The web renderer shows the daemon's first-class work lanes. The daemon owns lane identity, presented state (`active`, `paused`, `blocked`), count, order and tap target; the renderer only presents them. The wire contract and the shared fixture are in [work-lanes.md](../services/chat-stream-v2/docs/work-lanes.md) and `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json`.
+The web renderer shows the daemon's first-class work lanes. The daemon owns lane identity, aggregate activity, presented state (`active`, `paused`, `blocked`), count, order and tap target. The wire contract and the shared fixture are in [work-lanes.md](../services/chat-stream-v2/docs/work-lanes.md) and `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json`.
 
 ## Lane organization
 
@@ -16,8 +16,12 @@ The sidebar lanes view (the header lane count and the **Lanes (N)** section) is 
 
 ## What the operator sees
 
+The classic sidebar and the Lanes card at `/next/` use the same activity labels. A row can show **Working** or **Waiting on you** with **Lead offline**. Parked or paused rows keep their lifecycle label and show known active work or waits below it. A blocked row keeps its blocker. The Next row opens its lane's existing placed questions. The classic row offers **Open lane questions** separately from its ordinary chat action.
+
+After a connection drops, both views show **Connection lost** and label the retained lifecycle state **Last known**. Current activity, lead health and question routes return after the client receives a fresh connected inventory.
+
 - **Header.** `#stats` leads with the open-lane count: `4 lanes | 6 sessions | 1 need answer | 2 working`. The lane number is the daemon's `counts.open` (active + paused + blocked), never a session count. Until a lane-aware daemon sends its first inventory, the line is the previous session-only line. `done` lanes are never counted or listed.
-- **Lanes (N) section.** Above the session tiers, in the daemon's order (blocked, active, paused; the renderer never reorders). Each row shows the lane title, an owner glyph (◆ operator-started, ◇ FD-managed), the state badge, a presence dot for the linked lead (working, idle, offline, or dashed when no lead qualifies; working means any effectively assigned lane agent or the bound lead's descendants are [busy](seat_busy.md), before preview caps; an FD-managed lane's lead may be a hidden seat, which is never a tap target), the blocker for a blocked lane, the lead's status card, and the ETA. A stale ETA reads `ETA stale`, never `late Xm`.
+- **Lanes (N) section.** Above the session tiers, in the daemon's order (blocked, active, paused; the renderer never reorders). Each row shows the lane title, owner glyph (◆ operator-started, ◇ FD-managed), state badge, aggregate activity and linked-lead presence. The bound lead's presence may reflect its descendants' [busy state](seat_busy.md). An FD-managed lane's lead may be a hidden seat, which is never a tap target. The row also shows the blocker for a blocked lane, the lead's status card, and the ETA. A stale ETA reads `ETA stale`.
   The daemon may present an active lane with reason `lead_lost`; these presented reasons do not change `counts.open`.
 - **Tap.** The row opens the lane's `visible_chat` according to `available`:
   - `open`: the chat opens in a slot through the same path as a sidebar row (a session, or the composite). A chat that is not in this window's roster shows a toast; nothing else opens.
