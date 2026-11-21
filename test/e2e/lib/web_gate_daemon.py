@@ -4,6 +4,7 @@
 Only the registry's storage location is injected; challenge/proof verification
 and command authorization use the production implementation unchanged.
 """
+import asyncio
 import os
 from pathlib import Path
 import runpy
