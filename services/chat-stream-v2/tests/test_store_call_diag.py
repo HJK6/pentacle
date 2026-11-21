@@ -1,11 +1,15 @@
 """Named Store call timing: slow lines, hourly top list and the daily slow alert."""
 from __future__ import annotations
 
+import _thread
 import asyncio
+from concurrent.futures import Future
 import functools
 import json
 import logging
+import re
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,7 +97,7 @@ async def test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line(st
     slow = lines(caplog, "store_call_slow")
     assert [line["name"] for line in slow] == ["slow_client_op", "slow_actor_op", "slow_job_op"]
     for line in slow:
-        assert set(line) == {"name", "queue_ms", "execution_ms"}
+        assert set(line) == {"name", "queue_ms", "execution_ms", "caller"}
         assert line["execution_ms"] >= 50 and line["queue_ms"] >= 0
     assert timing.calls == 2
 
@@ -147,7 +151,9 @@ async def test_unusable_name_is_unnamed_and_lines_carry_no_payload(store, caplog
     secret = "PRIVATE_PAYLOAD_7f3a"
     assert await store.submit(functools.partial(slow_payload_op, payload=secret)) == secret
     await finish_prior_store_calls(store)
-    assert [line["name"] for line in lines(caplog, "store_call_slow")] == ["unnamed"]
+    [line] = lines(caplog, "store_call_slow")
+    assert line["name"] == "unnamed"
+    assert re.fullmatch(r"[A-Za-z0-9._:-]{1,96}", line["caller"])
     assert secret not in caplog.text and "partial" not in caplog.text
 
 
@@ -280,3 +286,124 @@ async def test_alert_path_store_calls_are_logged_but_never_alert(tmp_path, caplo
         s.stop()
     assert [f.episode_id.split(":")[0] for f in facts] == ["slow_client_op"]
     assert [line["name"] for line in lines(caplog, "store_call_slow")] == ["slow_client_op", "slow_job_op"]
+
+
+class _CallerMixin:
+    async def slow_via_mixin(self):
+        return await self.slow_direct()
+
+
+class _CallerStore(_CallerMixin, Store):
+    async def slow_direct(self):
+        return await self.submit(slow_client_op)
+
+
+@pytest.fixture
+def caller_store(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(store_call_diag, "SLOW_LINE_S", 0.05)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    s = _CallerStore(str(tmp_path / "caller.db"))
+    s.start()
+    try:
+        yield s
+    finally:
+        s.stop()
+
+
+async def _logged_slow_calls(store, caplog):
+    await finish_prior_store_calls(store)
+    return lines(caplog, "store_call_slow")
+
+
+@pytest.mark.asyncio
+async def test_caller_direct_await(caller_store, caplog):
+    assert await caller_store.slow_direct() == "client"
+    [line] = await _logged_slow_calls(caller_store, caplog)
+    assert line["caller"] == f"{__name__}.test_caller_direct_await"
+
+
+@pytest.mark.asyncio
+async def test_caller_skips_store_and_mixin(caller_store, caplog):
+    assert await caller_store.slow_via_mixin() == "client"
+    [line] = await _logged_slow_calls(caller_store, caplog)
+    assert line["caller"] == f"{__name__}.test_caller_skips_store_and_mixin"
+
+
+@pytest.mark.asyncio
+async def test_caller_wait_for(caller_store, caplog):
+    assert await asyncio.wait_for(caller_store.slow_direct(), 5) == "client"
+    [line] = await _logged_slow_calls(caller_store, caplog)
+    assert line["caller"] == f"{__name__}.test_caller_wait_for"
+
+
+def test_caller_bare_create_task(caller_store, caplog):
+    # The pytest-asyncio runner is itself an outside frame. Enter asyncio
+    # directly from a C thread bootstrap to exercise a truly bare task.
+    completed = Future()
+
+    async def exercise():
+        try:
+            result = await asyncio.create_task(caller_store.slow_direct())
+            slow = await _logged_slow_calls(caller_store, caplog)
+        except BaseException as exc:
+            completed.set_exception(exc)
+        else:
+            completed.set_result((result, slow))
+
+    _thread.start_new_thread(asyncio.run, (exercise(),))
+    result, [line] = completed.result(timeout=5)
+    assert result == "client"
+    assert line["caller"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_caller_capture_failure_preserves_result_and_exception(caller_store, caplog, monkeypatch):
+    def broken(classes):
+        raise RuntimeError("capture broke")
+
+    monkeypatch.setattr(store_call_diag, "capture_caller", broken)
+    assert await caller_store.slow_direct() == "client"
+    with pytest.raises(LookupError, match="kept"):
+        await caller_store.submit(slow_raising_op)
+    slow = await _logged_slow_calls(caller_store, caplog)
+    assert [line["caller"] for line in slow] == ["unknown", "unknown"]
+
+
+@pytest.mark.asyncio
+async def test_caller_sanitizes_and_truncates(caller_store, caplog):
+    async def café_abcdefghijklmnopqrstuvwxyz_abcdefghijklmnopqrstuvwxyz_abcdefghijklmnopqrstuvwxyz():
+        return await caller_store.slow_direct()
+
+    assert await café_abcdefghijklmnopqrstuvwxyz_abcdefghijklmnopqrstuvwxyz_abcdefghijklmnopqrstuvwxyz() == "client"
+    [line] = await _logged_slow_calls(caller_store, caplog)
+    expected = f"{__name__}.test_caller_sanitizes_and_truncates.locals.caf_" + "_".join(
+        ["abcdefghijklmnopqrstuvwxyz"] * 3
+    )
+    assert line["caller"] == expected[:96]
+    assert len(line["caller"]) == 96
+
+
+def test_caller_does_not_read_frame_thirteen(monkeypatch):
+    reads = []
+
+    class Frame:
+        f_code = SimpleNamespace(co_qualname="Store.submit")
+        f_globals = {"__name__": "store"}
+
+        @property
+        def f_back(self):
+            reads.append(None)
+            return self
+
+    monkeypatch.setattr(store_call_diag, "sys", SimpleNamespace(_getframe=lambda depth: Frame()))
+    assert store_call_diag.capture_caller(frozenset({"Store"})) == "unknown"
+    assert len(reads) == 11
+
+
+def test_caller_does_not_swallow_base_exception(monkeypatch):
+    def interrupt(depth):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(store_call_diag, "sys", SimpleNamespace(_getframe=interrupt))
+    with pytest.raises(KeyboardInterrupt):
+        store_call_diag.capture_caller(frozenset({"Store"}))

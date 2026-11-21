@@ -101,8 +101,15 @@ callable's `__qualname__` reduced to `[A-Za-z0-9._:-]` and 96 characters, or
 `unnamed`. Client, actor-wrapped and internal-job calls are all covered
 (`store_call_diag.py`, thresholds at the top):
 
-- `store_call_slow {"name","queue_ms","execution_ms"}` for each call executing
-  over 250 ms; fast calls write nothing.
+- `store_call_slow {"name","caller","queue_ms","execution_ms"}` for each call
+  executing over 250 ms; fast calls write nothing. The caller walk skips
+  frames whose code qualname starts with a class name from the store's MRO
+  followed by a dot, frames in `store_call_diag`, and frames in `asyncio` or
+  its submodules. It reports the first remaining frame's module and code
+  qualname, reduced to `[A-Za-z0-9._:-]` and 96 characters, or `unknown` if
+  no caller is found in 12 frames or capture fails. A bare task running a
+  store coroutine has no outside caller, but a task started through a wrapper
+  such as `main.run_bounded` names that wrapper rather than `unknown`.
 - `store_call_top {"window_s","top","instrumentation_failures"}` once an hour:
   the five operations with the most execution time, with call counts.
 - A call over 2 s records `daemon_runtime.v1` / `store_call_slow` through the
@@ -110,8 +117,9 @@ callable's `__qualname__` reduced to `[A-Za-z0-9._:-]` and 96 characters, or
   day. The worker schedules it on the event loop and never waits; Store calls
   made by that alert task log but never alert.
 
-Lines and alerts carry names and numbers only. Instrumentation runs after the
-call's outcome is captured, inside one guard; a failure is counted and dropped.
+Lines and alerts carry safe names and numbers only. The caller is captured
+at admission. Worker instrumentation runs after the call's outcome is captured,
+inside one guard; a worker instrumentation failure is counted and dropped.
 
 Portable focused checks are `tests/test_loop_stall_guard.py`, the existing
 logging/adapter/core suites and held-component process tests. Required installed

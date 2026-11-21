@@ -1,11 +1,10 @@
 """Named Store call timing: slow-call lines, an hourly top list and a daily alert.
 
-`Store.submit` names each callable at admission (`admit`); the worker hands the
-name and its existing timestamps to `StoreCallDiag.record` after the call's
-outcome is captured. Lines and alerts carry operation names and numbers only:
-never a repr, argument, payload, id or credential. Nothing here can change a
-call's result, exception or future: every step is guarded, and a failure is
-counted and dropped.
+`Store.submit` captures the operation and caller at admission. The worker
+hands them and its existing timestamps to `StoreCallDiag.record` after the
+call's outcome is captured. Lines and alerts carry safe names and numbers only:
+never a repr, argument, payload, id or credential. Capture failures fall back
+to safe labels; worker instrumentation failures are counted and dropped.
 """
 from __future__ import annotations
 
@@ -15,6 +14,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import re
+import sys
 
 from error_adapters import ErrorFact
 
@@ -28,6 +28,8 @@ SUMMARY_INTERVAL_S = 3600.0
 TOP_N = 5
 NAME_MAX = 96
 UNNAMED = "unnamed"
+UNKNOWN = "unknown"
+CALLER_FRAME_LIMIT = 12
 _UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
 
 #: True inside the alert task: Store calls admitted under it never alert.
@@ -51,6 +53,32 @@ def admit(fn) -> tuple[str, bool]:
     return name, alert_path.get()
 
 
+def capture_caller(store_classes: frozenset[str]) -> str:
+    """Capture a safe outside caller; never retain the frame."""
+    try:
+        frame = sys._getframe(1)
+        for depth in range(CALLER_FRAME_LIMIT):
+            if frame is None:
+                break
+            code = frame.f_code
+            module = frame.f_globals.get("__name__")
+            qualname = code.co_qualname
+            if (qualname.partition(".")[0] in store_classes and "." in qualname
+                    or module == __name__
+                    or module == "asyncio"
+                    or isinstance(module, str) and module.startswith("asyncio.")):
+                if depth == CALLER_FRAME_LIMIT - 1:
+                    break
+                frame = frame.f_back
+                continue
+            if not isinstance(module, str) or not module:
+                return UNKNOWN
+            return _UNSAFE.sub("", f"{module}.{qualname}")[:NAME_MAX] or UNKNOWN
+    except Exception:
+        pass
+    return UNKNOWN
+
+
 def _utc_day() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
@@ -69,7 +97,8 @@ class StoreCallDiag:
         self._alerted: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
 
-    def record(self, name: str, quiet: bool, loop, queued: float, started: float, finished: float) -> None:
+    def record(self, name: str, quiet: bool, loop, queued: float, started: float, finished: float,
+               caller: str = UNKNOWN) -> None:
         try:
             execution = max(0.0, finished - started)
             totals = self._totals.setdefault(name, [0, 0.0])
@@ -77,7 +106,7 @@ class StoreCallDiag:
             totals[1] += execution
             if execution > SLOW_LINE_S:
                 log.info("store_call_slow %s", json.dumps(
-                    {"name": name, "queue_ms": round(max(0.0, started - queued) * 1000, 3),
+                    {"name": name, "caller": caller, "queue_ms": round(max(0.0, started - queued) * 1000, 3),
                      "execution_ms": round(execution * 1000, 3)}, separators=(",", ":")))
                 if execution > ALERT_S and not quiet:
                     self._hand_off(name, loop)

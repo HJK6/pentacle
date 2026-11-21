@@ -1613,6 +1613,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=max_pending)
         self.progress = StoreProgress()
         self.call_diag = store_call_diag.StoreCallDiag()
+        self._caller_store_classes = frozenset(cls.__name__ for cls in type(self).__mro__)
         self._thread: threading.Thread | None = None
         # Serializes the start/stop transition against `submit` so no callable is
         # ever enqueued after the stop sentinel — such a future would never run
@@ -2117,7 +2118,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 item = self._queue.get()
                 if item is None:
                     break
-                fn, fut, loop, queued, timing, name, quiet = item
+                fn, fut, loop, queued, timing, name, quiet, caller = item
                 started = time.monotonic()
                 self.progress.start(started)
                 try:
@@ -2133,7 +2134,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 if timing is not None:
                     loop.call_soon_threadsafe(timing.add, queued, started, finished)
                 loop.call_soon_threadsafe(_set_exception if failed else _set_result, fut, outcome)
-                self.call_diag.record(name, quiet, loop, queued, started, finished)
+                self.call_diag.record(name, quiet, loop, queued, started, finished, caller)
                 # A stop that found the queue full queued no sentinel; once
                 # closing, exit when the queue drains. Checked under the lock so
                 # a concurrent stop's sentinel is either queued or not needed.
@@ -2165,6 +2166,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         run or been drained, then re-raise the cancellation."""
         # Name the caller's operation before any wrapper replaces it.
         name, quiet = store_call_diag.admit(fn)
+        try:
+            caller = store_call_diag.capture_caller(self._caller_store_classes)
+        except Exception:
+            caller = store_call_diag.UNKNOWN
         actor = host_transfer.actor_context.get()
         if actor is not None:
             operation = fn
@@ -2184,7 +2189,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 # Never block the event loop: past the cap fail fast rather than
                 # wait for the worker to drain (QA #8).
                 self.progress.enqueue(self._queue.put_nowait,
-                                      (fn, fut, loop, time.monotonic(), request_timing.get(), name, quiet))
+                                      (fn, fut, loop, time.monotonic(), request_timing.get(), name, quiet, caller))
             except queue.Full as exc:
                 raise RuntimeError("store overloaded: pending write queue is full") from exc
         if settle_on_cancel:
