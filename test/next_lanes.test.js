@@ -220,11 +220,21 @@ test('held road goals outside the preview use complete classes and hidden no-roa
   assert.ok(noRoadModel.stops.every(stop => stop.number === null));
 });
 
-test('redacted live inventory and capped detail retain lane shape with synthetic identities', () => {
+test('redacted live inventory and capped detail retain production-shaped synthetic goal IDs', () => {
   assert.equal(liveLaneFixture.capture.redacted, true);
   assert.match(liveLaneFixture.capture.raw_sha256.inventory, /^[a-f0-9]{64}$/);
   assert.match(liveLaneFixture.capture.raw_sha256.detail, /^[a-f0-9]{64}$/);
   assert.equal(liveLaneFixture.inventory.lanes.length, liveLaneFixture.capture.open_lane_count);
+  const normalizedInventory = applyWorkLanesFrame(emptyWorkLanesInventory(), {
+    type: 'work_lanes.inventory', ...liveLaneFixture.inventory,
+  });
+  assert.equal(normalizedInventory.lanes.length, liveLaneFixture.inventory.lanes.length);
+  for (const rawLane of liveLaneFixture.inventory.lanes) {
+    const normalizedLane = normalizedInventory.lanes.find(item => item.lane_id === rawLane.lane_id);
+    assert.ok(normalizedLane, `normalizer retains ${rawLane.lane_id}`);
+    assert.deepEqual(normalizedLane.goals.map(item => item.goal_id), rawLane.goals.map(item => item.goal_id));
+    assert.deepEqual(normalizedLane.progress.members.map(item => item.goal_id), rawLane.members.map(item => item.goal_id ?? null));
+  }
   const capped = liveLaneFixture.inventory.lanes.filter(item => item.goals_total > item.goals.length);
   assert.equal(capped.length, 1);
   const lane = capped[0];
@@ -237,11 +247,13 @@ test('redacted live inventory and capped detail retain lane shape with synthetic
   assert.equal(detail.members.length, detail.members_total);
 
   const identifiers = [];
+  const goalIds = [];
   const collectIds = value => {
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value)) return value.forEach(collectIds);
     for (const [key, child] of Object.entries(value)) {
-      if (key.endsWith('_id') && typeof child === 'string') identifiers.push(child);
+      if (key === 'goal_id' && typeof child === 'string') goalIds.push(child);
+      else if (key.endsWith('_id') && typeof child === 'string') identifiers.push(child);
       else collectIds(child);
     }
   };
@@ -249,6 +261,16 @@ test('redacted live inventory and capped detail retain lane shape with synthetic
   collectIds(detail);
   assert.ok(identifiers.length > 0);
   assert.ok(identifiers.every(id => id.startsWith('synthetic-')));
+  assert.ok(goalIds.length > 0);
+  assert.ok(goalIds.every(id => /^g_[0-9a-f]{24}$/.test(id)));
+
+  const normalizedDetail = applyWorkLanesFrame(emptyWorkLanesInventory(), {
+    type: 'work_lanes.inventory',
+    lanes: [{ ...lane, ...detail.projection }],
+  }).lanes[0];
+  assert.ok(normalizedDetail);
+  assert.deepEqual(normalizedDetail.goals.map(item => item.goal_id), detail.projection.goals.map(item => item.goal_id));
+  assert.deepEqual(normalizedDetail.progress.members.map(item => item.goal_id), detail.projection.members.map(item => item.goal_id ?? null));
 
   let held = false;
   const reads = readController({ getRead: (laneId, kind) => held && laneId === lane.lane_id
