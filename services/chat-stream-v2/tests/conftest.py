@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 from pathlib import Path
 
@@ -87,6 +88,35 @@ def ruling_spec_root(tmp_path, monkeypatch):
 
 def pytest_configure(config) -> None:
     del config
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items) -> None:
+    """Apply the same exact-test inventory used by the release scorecard."""
+    inventory = SERVICE_DIR.parents[1] / "scripts" / "quarantine.json"
+    try:
+        data = json.loads(inventory.read_text())
+        tests = data["nonblocking_tests"]
+        if (data["version"] != 1 or not isinstance(tests, list)
+                or any(not isinstance(t, str) or not t or "::" not in t for t in tests)
+                or len(set(tests)) != len(tests)):
+            raise ValueError("invalid quarantine inventory")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        config._quarantine_inventory_error = type(exc).__name__
+        print(f"quarantine inventory unavailable: {type(exc).__name__}", file=sys.stderr)
+        return
+    selected = set(tests)
+    for item in items:
+        # The historical decorators remain in source as legacy evidence, but
+        # no longer decide selection once the effective inventory exists.
+        item.own_markers[:] = [mark for mark in item.own_markers if mark.name != 'quarantined']
+        if item.nodeid in selected or 'daemon::' + item.nodeid in selected:
+            item.add_marker(pytest.mark.quarantined)
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    if getattr(session.config, '_quarantine_inventory_error', None) and exitstatus in (0, 5):
+        session.exitstatus = 1
 
 
 @pytest.fixture(autouse=True)

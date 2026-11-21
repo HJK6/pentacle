@@ -10,6 +10,105 @@ const runner = require('../scripts/lib/test-runner');
 const root = path.resolve(__dirname, '..');
 const fixture = name => `test/fixtures/root_runner/${name}`;
 const quiet = { write() {} };
+const blockingFixtures = (_root, files) => ({complete: true, files: Object.fromEntries(files.map(file => [file, {state: 'blocking'}]))});
+const quarantine = (tests, ancestry = {}) => ({version: 1, nonblocking_tests: tests,
+  history: Object.fromEntries(tests.map(id => [require('node:crypto').createHash('sha256').update(id).digest('hex'),
+    {activation: 'test', file: require('node:crypto').createHash('sha256').update(id.split('::')[0]).digest('hex'), parents: ancestry[id] || []}]))});
+
+test('quarantine inventory uses exact escaped names and rejects malformed data', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-proof-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    const inventory = path.join(dir, 'scripts/quarantine.json');
+    fs.writeFileSync(inventory, JSON.stringify(quarantine([
+      'test/one.test.js::name with [literal] chars', 'tests/test_a.py::test_a',
+    ])));
+    const names = runner.quarantineByFile(dir).get('test/one.test.js');
+    assert.deepEqual(names, [{name: 'name with [literal] chars', parents: []}]);
+    fs.writeFileSync(inventory, '{invalid');
+    assert.throws(() => runner.quarantineByFile(dir));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('unreadable quarantine still runs blocking files and leaves the gate incomplete', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-unreadable-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.mkdirSync(path.join(dir, 'test'));
+    fs.writeFileSync(path.join(dir, 'scripts/quarantine.json'), '{broken');
+    fs.writeFileSync(path.join(dir, 'test/case.js'), "require('node:test')('blocking', () => console.log('BLOCKING EXECUTED'));\n");
+    const spawnClean = (cmd, args, config) => { const env = {...config.env}; delete env.NODE_TEST_CONTEXT; return spawn(cmd, args, {...config, env}); };
+    const result = await runner.run(dir, runner.parseArgs(['test/case.js']), {
+      spawn: spawnClean, groupMembers: () => [], admissionQuery: () => ({complete: false}), stdout: quiet, stderr: quiet,
+    });
+    assert.equal(result.exit_code, 1);
+    assert.match(result.files[0].execution.tail, /BLOCKING EXECUTED/);
+    assert.ok(result.runner_errors.includes('quarantine_inventory_unavailable'));
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('quarantined node case runs advisory while unrelated failure remains blocking', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-run-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.mkdirSync(path.join(dir, 'test'));
+    for (const name of ['admission_query.py', 'admission_fingerprint.py', 'admission_inputs.py', 'admission_policy.py'])
+      fs.copyFileSync(path.join(root, 'scripts', name), path.join(dir, 'scripts', name));
+    fs.writeFileSync(path.join(dir, 'scripts/quarantine.json'), JSON.stringify(quarantine(['test/cases.js::intermittent [case]'])));
+    const subject = path.join(dir, 'test/cases.js');
+    const source = "const test = require('node:test'); const assert = require('node:assert/strict');\n" +
+      "test('intermittent [case]', () => assert.fail('advisory failed'));\n";
+    const options = runner.parseArgs(['test/cases.js']);
+    const isolatedSpawn = (command, args, config) => {
+      const env = {...config.env}; delete env.NODE_TEST_CONTEXT;
+      return spawn(command, args, {...config, env});
+    };
+    const run = () => runner.run(dir, options, {spawn: isolatedSpawn, groupMembers: () => [],
+      admissionQuery: () => ({complete: true, files: {'test/cases.js': {state: 'blocking'}}}),
+      stdout: quiet, stderr: quiet});
+    fs.writeFileSync(subject, source + "test('product', () => assert.fail('product failed'));\n");
+    let result = await run();
+    assert.equal(result.exit_code, 1);
+    assert.equal(result.files[0].advisory.exitCode, 1);
+    assert.match(result.files[0].execution.tail, /cases\.js:3/);
+    fs.writeFileSync(subject, source + "test('product', () => {});\n");
+    result = await run();
+    assert.equal(result.exit_code, 0);
+    assert.equal(result.files[0].advisory.exitCode, 1);
+    assert.match(result.files[0].advisory.tail, /cases\.js:2/);
+    const held = await runner.run(dir, options, {spawn: isolatedSpawn, groupMembers: () => [],
+      admissionQuery: () => ({complete: true, files: {'test/cases.js': {state: 'advisory', reason: 'no review'}}}),
+      stdout: quiet, stderr: quiet});
+    assert.equal(held.exit_code, 0);
+    assert.equal(held.files[0].status, 'advisory');
+    assert.equal(held.files[0].execution.exitCode, 1);
+    const unavailable = await runner.run(dir, options, {spawn: isolatedSpawn, groupMembers: () => [],
+      admissionQuery: () => ({complete: false}), stdout: quiet, stderr: quiet});
+    assert.equal(unavailable.exit_code, 1);
+    assert.ok(unavailable.runner_errors.includes('admission_inventory_unavailable'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('nested quarantine runs the exact case advisory and keeps sibling blocking', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-nested-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.mkdirSync(path.join(dir, 'test'));
+    for (const name of ['admission_query.py', 'admission_fingerprint.py', 'admission_inputs.py', 'admission_policy.py'])
+      fs.copyFileSync(path.join(root, 'scripts', name), path.join(dir, 'scripts', name));
+    const id = 'test/cases.js::parent child';
+    fs.writeFileSync(path.join(dir, 'scripts/quarantine.json'), JSON.stringify(quarantine([id], {[id]: ['parent']})));
+    fs.writeFileSync(path.join(dir, 'test/cases.js'), "const test=require('node:test'); const assert=require('node:assert/strict');\n" +
+      "test('parent', async t => { await t.test('child', () => assert.fail('flaky')); await t.test('sibling', () => assert.fail('product')); });\n");
+    const spawnClean = (cmd, args, config) => { const env = {...config.env}; delete env.NODE_TEST_CONTEXT; return spawn(cmd, args, {...config, env}); };
+    const result = await runner.run(dir, runner.parseArgs(['test/cases.js']), {spawn: spawnClean, groupMembers: () => [],
+      admissionQuery: () => ({complete: true, files: {'test/cases.js': {state: 'blocking'}}}), stdout: quiet, stderr: quiet});
+    assert.equal(result.exit_code, 1);
+    assert.equal(result.files[0].execution.exitCode, 1);
+    assert.equal(result.files[0].advisory.exitCode, 1);
+    assert.notEqual(result.files[0].reason, 'advisory_incomplete');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('Darwin group inspector rejects an incomplete row before claiming an empty group', () => {
   const vm = require('node:vm');
@@ -38,7 +137,7 @@ const SHORT = ['--file-timeout-ms', '1500'];
 function invoke(files, flags = [], extraEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-runner-proof-'));
   const summaryPath = path.join(dir, 'summary.json');
-  const env = { ...process.env, ...extraEnv }; delete env.NODE_TEST_CONTEXT;
+  const env = { ...process.env, ...extraEnv, PENTACLE_RUNNER_FIXTURES: '1' }; delete env.NODE_TEST_CONTEXT;
   try {
     const result = spawnSync(process.execPath, [path.join(root, 'scripts/run-tests.js'), '--file-timeout-ms', '5000', '--run-timeout-ms', '20000', '--summary-path', summaryPath, ...flags, ...files], { cwd: root, env, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
     return { ...result, summary: fs.existsSync(summaryPath) ? JSON.parse(fs.readFileSync(summaryPath, 'utf8')) : null, output: (result.stdout || '') + (result.stderr || '') };
@@ -177,7 +276,7 @@ test('scan receipts are bounded and keep the first and latest scans', async () =
 
 test('whole-run deadline also bounds bundling and preserves later not_run files', async () => {
   const child = new EventEmitter(); child.pid = 90001; child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdout.destroy = child.stderr.destroy = child.unref = () => {};
-  const result = await runner.run(root, { patterns: [fixture('build_failed.ts'), fixture('pass.js')], fileTimeoutMs: 5000, runTimeoutMs: 40 }, { spawn: () => child, groupMembers: () => [], signalGroup() {}, stdout: quiet, stderr: quiet });
+  const result = await runner.run(root, { patterns: [fixture('build_failed.ts'), fixture('pass.js')], fileTimeoutMs: 5000, runTimeoutMs: 40 }, { spawn: () => child, groupMembers: () => [], admissionQuery: blockingFixtures, sourceIdentity: () => null, signalGroup() {}, stdout: quiet, stderr: quiet });
   assert.equal(result.exit_code, 1);
   assert.deepEqual(result.files.map(row => row.status), ['timeout', 'not_run']);
   assert.equal(result.files[0].reason, 'typescript_build');
@@ -190,9 +289,12 @@ test('CLI flags override environment; invalid bounds never disable a gate', () =
 });
 
 test('summary-write failure is nonzero despite a passing test', () => {
-  const result = invoke([fixture('pass.js')], ['--summary-path', path.join(os.tmpdir(), 'pentacle-no-such-parent', 'summary.json')]);
-  assert.equal(result.status, 1);
-  assert.match(result.output, /summary write failed/);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-missing-parent-'));
+  try {
+    const result = invoke([fixture('pass.js')], ['--summary-path', path.join(dir, 'absent', 'summary.json')]);
+    assert.equal(result.status, 1);
+    assert.match(result.output, /summary write failed/);
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
 test('microphone fixture owns its WebSocket implementation even without a global', () => {
@@ -230,11 +332,29 @@ test('interruption stops scheduling and cleans the active owned group', async ()
     return child;
   };
   const result = await runner.run(root, { patterns: [fixture('hang.js'), fixture('pass.js')], fileTimeoutMs: 5000, runTimeoutMs: 10000 }, {
-    spawn: fakeSpawn, groupMembers: () => [], signalGroup() {}, abortSignal: controller.signal, stdout: quiet, stderr: quiet,
+    spawn: fakeSpawn, groupMembers: () => [], admissionQuery: blockingFixtures, signalGroup() {}, abortSignal: controller.signal, stdout: quiet, stderr: quiet,
   });
   assert.equal(result.exit_code, 1);
   assert.deepEqual(result.files.map(row => row.status), ['fail', 'not_run']);
   assert.equal(result.files[1].reason, 'runner_interrupted');
+});
+
+test('interrupted unadmitted execution makes the gate incomplete', async () => {
+  const controller = new AbortController();
+  const fakeSpawn = () => {
+    const child = new EventEmitter(); child.pid = 90001;
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.stdout.destroy = child.stderr.destroy = child.unref = () => {};
+    process.nextTick(() => controller.abort());
+    return child;
+  };
+  const result = await runner.run(root, {patterns: [fixture('hang.js')], fileTimeoutMs: 5000, runTimeoutMs: 10000}, {
+    spawn: fakeSpawn, groupMembers: () => [], signalGroup() {}, abortSignal: controller.signal,
+    admissionQuery: (_root, files) => ({complete: true, files: Object.fromEntries(files.map(file => [file, {state: 'advisory'}]))}),
+    stdout: quiet, stderr: quiet,
+  });
+  assert.equal(result.exit_code, 1);
+  assert.equal(result.files[0].reason, 'advisory_incomplete');
 });
 
 test('late exit delivered before the timer callback still counts as timeout', async () => {
@@ -273,7 +393,7 @@ test('owned-directory cleanup failure preserves JSON attribution and fails', asy
   const summaryPath = path.join(dir, 'summary.json');
   try {
     const result = await runner.run(root, { patterns: [fixture('pass.js')], fileTimeoutMs: 5000, runTimeoutMs: 10000, summaryPath }, {
-      stdout: quiet, stderr: quiet,
+      stdout: quiet, stderr: quiet, admissionQuery: blockingFixtures,
       removeOwnedDirectory(directory) { fs.rmSync(directory, { recursive: true, force: true }); throw Object.assign(new Error('synthetic cleanup failure'), { code: 'EACCES' }); },
     });
     assert.equal(result.exit_code, 1);
@@ -287,6 +407,7 @@ test('partial temporary-directory setup is cleaned and every file is attributed'
   let first, calls = 0;
   const result = await runner.run(root, { patterns: [fixture('pass.js')], fileTimeoutMs: 5000, runTimeoutMs: 10000 }, {
     stdout: quiet, stderr: quiet,
+    admissionQuery: () => ({complete: true, files: {[fixture('pass.js')]: {state: 'blocking'}}}),
     makeTemporaryDirectory(prefix) { if (++calls === 2) throw Object.assign(new Error('synthetic setup failure'), { code: 'EACCES' }); first = fs.mkdtempSync(prefix); return first; },
   });
   assert.equal(result.exit_code, 1);

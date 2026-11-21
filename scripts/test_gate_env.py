@@ -519,6 +519,15 @@ class PreparedCache(Tmp):
 
 
 class Classification(Tmp):
+    def test_incomplete_admission_preserves_product_failure(self):
+        summary = self.tmp / 'npm.json'
+        summary.write_text(json.dumps({'runner_errors': ['admission_inventory_unavailable'],
+            'directory_cleanup_errors': [], 'files': [{'file': 'test/a.test.js', 'status': 'fail',
+                                                       'execution': {'exitCode': 1}, 'cleanup': {'status': 'clean'}}]}))
+        outcome, _, secondary = ge.classify_npm(summary, 1, False, False)
+        self.assertEqual(outcome, 'product_failure')
+        self.assertEqual(secondary['admission'], 'incomplete')
+
     def evidence(self, tier):
         path = self.tmp / "e.json"
         path.write_text(json.dumps({"tiers": [tier]}))
@@ -646,6 +655,20 @@ class ProcessStartIdentity(unittest.TestCase):
 
 
 class EntrypointReceipts(Tmp):
+    def test_advisory_files_follow_effective_inventory(self):
+        target = REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-quarantined"]
+        inventory = self.tmp / "scripts/quarantine.json"
+        inventory.parent.mkdir()
+        test_dir = self.tmp / "services/chat-stream-v2/tests"
+        test_dir.mkdir(parents=True)
+        (test_dir / "test_new.py").write_text("")
+        inventory.write_text(json.dumps({"version": 1, "nonblocking_tests": [
+            "tests/test_new.py::test_case", "test/web.test.js::case"]}))
+        self.assertEqual(ge.validate_selection(target, [], self.tmp), ["tests/test_new.py"])
+        inventory.write_text("invalid")
+        with self.assertRaises(ge.SetupFailure):
+            ge.validate_selection(target, [], self.tmp)
+
     """End-to-end through main(): the started receipt precedes everything."""
 
     def setUp(self):
