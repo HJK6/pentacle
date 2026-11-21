@@ -1788,7 +1788,8 @@ def _verify_direct_restoration(service, repo, stamp, boot, runner, runtime=None)
     env = plist.get("EnvironmentVariables", {})
     machines = env.get("PENTACLE_MACHINES_FILE", "")
     policy = coordinated.read_json(env.get("PENTACLE_PROVIDER_ACCOUNT_POLICY", ""))
-    scope = coordinated.host_scope(machines, _declared_release_scope(stamp.get("release_exclusions", [])))
+    scope = coordinated.host_scope(machines, _declared_release_scope(
+        stamp.get("release_exclusions", []), historical=True))
     accounts = runtime.account_snapshot(policy, runtime.database(plist),
         accounts=stamp.get("smoke_accounts"), scope=scope)
     bindings = [b for b in accounts["selected_bindings"] if b["host"] in scope["included_hosts"]]
@@ -1808,10 +1809,14 @@ def _notify_failed_checks(repo, service, sha, checks, runner):
     failed = {name: result for name, result in checks.items() if result.get("outcome") != "passed"}
     if not failed:
         return
+    delivery = failed.get("client_delivery", {})
+    dedup_key = f"release-check:{sha}"
+    if delivery.get("classification") == "delivery_failure" and delivery.get("correlation_id"):
+        dedup_key += ":" + delivery["correlation_id"]
     _checked((_resolve_agent_orch(repo, service), "notify", "--producer", "release-check",
         "--severity", "critical", "--title", "BLOCKER: active release has failed checks",
         "--message", json.dumps({"sha": sha, "checks": failed}, sort_keys=True),
-        "--dedup-key", f"release-check:{sha}"), repo, runner)
+        "--dedup-key", dedup_key), repo, runner)
 
 
 def _release_machines_file(service, repo):
@@ -1820,37 +1825,104 @@ def _release_machines_file(service, repo):
     return str((path if path.is_absolute() else repo / path).resolve()) if value else ""
 
 
-def _declared_release_scope(declarations):
+def _declared_release_scope(declarations, *, historical=False):
     return [{"host": row["host"], "reason": row["reason"],
-             "authority": row["readiness_item"]} for row in declarations]
+             "authority": row["readiness_item"]} for row in declarations
+            if row.get("status") == "active" or (historical and "status" not in row)]
 
 
-def release_exclusions(service, repo):
-    """Read the one installed declaration home; FD removes closed readiness items."""
+def release_exclusions(service, repo, *, now=None):
+    """Evaluate exclusions from the installed catalog at this occurrence."""
     machines = _release_machines_file(service, repo)
     try:
         value = json.loads(Path(machines).read_text()) if machines else {}
     except (OSError, ValueError):
-        # The existing fleet report records a missing or malformed catalog.
-        # Do not add a pre-activation refusal or exclude any host for it.
+        # The fleet check independently records unusable machine configuration.
         return []
     rows = value.get("release_exclusions", []) if isinstance(value, dict) else []
-    if not isinstance(rows, list) or any(not isinstance(row, dict)
-            or set(row) != {"host", "reason", "readiness_item"}
-            or any(not isinstance(row[k], str) or not row[k].strip() for k in row)
-            for row in rows):
-        raise DeployError("release exclusions require host, reason and readiness_item")
-    if rows:
+    if not isinstance(rows, list):
+        return [{"status": "invalid", "validation_error": "exclusions_must_be_a_list"}]
+
+    now = now if now is not None else datetime.now(timezone.utc)
+    legacy_fields = {"host", "reason", "readiness_item"}
+    fields = legacy_fields | {"owner", "starts_at", "expires_at"}
+    decisions = []
+    for row in rows:
+        if not isinstance(row, dict) or any(
+                not isinstance(value, str) or not value.strip() or len(value) > 1024
+                for value in row.values()):
+            decisions.append({"status": "invalid", "validation_error": "invalid_exclusion_fields"})
+            continue
+        record = {key: value for key, value in row.items() if key in fields}
+        if set(row) == legacy_fields:
+            decisions.append({**record, "status": "migration_required"})
+            continue
         try:
-            coordinated.host_scope(machines, _declared_release_scope(rows))
-        except coordinated.Invalid as exc:
-            raise DeployError(str(exc)) from exc
-    return rows
+            if set(row) != fields:
+                raise ValueError("invalid exclusion fields")
+            start, end = (datetime.fromisoformat(row[key].replace("Z", "+00:00"))
+                          for key in ("starts_at", "expires_at"))
+            if start.utcoffset() is None or end.utcoffset() is None or end <= start:
+                raise ValueError("invalid exclusion window")
+        except ValueError:
+            decisions.append({**record, "status": "invalid", "validation_error": "invalid_exclusion_window"})
+            continue
+        status = "pending" if now < start else "expired" if now >= end else "active"
+        decisions.append({**record, "status": status})
+
+    active = _declared_release_scope(decisions)
+    if active:
+        try:
+            coordinated.host_scope(machines, active)
+        except (OSError, ValueError, coordinated.Invalid):
+            return [{**row, "status": "invalid", "validation_error": "invalid_exclusion_scope"}
+                    if row["status"] == "active" else row for row in decisions]
+    return decisions
+
+
+def _client_delivery_cause(service, repo):
+    """The installed catalog can route recurrence to an existing work item."""
+    try:
+        machines = json.loads(Path(_release_machines_file(service, repo)).read_bytes())
+    except (OSError, ValueError):
+        return None
+    item = machines.get("client_delivery_incident") if isinstance(machines, dict) else None
+    return item if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", item) else None
+
+
+def _check_client_delivery(service, repo, sha, pid, process_start, runner):
+    failure = {"outcome": "failed", "classification": "infrastructure", "phase": "precondition",
+               "release_sha": sha, "reason": "client_probe_unavailable"}
+    try:
+        probe = runner((str(_venv_python(repo, service)),
+                        str(repo / V2_SERVICE_PATH / "tools/release_client_delivery.py"),
+                        "--target-sha", sha, "--active-pid", str(pid or 0)), repo)
+        report = _smoke_payload(probe)
+        if report.get("release_sha") != sha:
+            return failure
+        identity = report.get("active_instance") or {}
+        if report.get("phase") != "precondition":
+            if (not process_start or identity.get("pid") != pid or identity.get("sha") != sha
+                    or _process_start(pid, runner) != process_start
+                    or _launchd_state(service.launchd_label, runner).pid != pid):
+                return {**report, **failure, "reason": "active_instance_unconfirmed"}
+            identity["process_start"] = process_start
+        if probe.returncode == 0 and report.get("outcome") == "passed":
+            assertions = report.get("assertions") or {}
+            if (report.get("teardown") == "passed" and all(assertions.get(name) == "passed"
+                    for name in ("subscribe", "publish", "receive", "reconnect", "recover", "merge"))):
+                return report
+        if probe.returncode and report.get("outcome") == "failed":
+            return report
+    except Exception:
+        # The process or transport may contain credentials in its output.
+        return failure
+    return failure
 
 
 def run_post_release_checks(service, repo, sha, stamp, *, runner,
                             prior_log_size=None, prior_pid=None, prior_start=None, boot=None,
-                            fleet_smoke_check=None, no_outgoing_writer=None):
+                            fleet_smoke_check=None, no_outgoing_writer=None, nightly_receipt=None):
     """Shared ordinary/coordinated/nightly reports. Never restarts a service."""
     if boot is None:
         state = _launchd_state(service.launchd_label, runner)
@@ -1871,7 +1943,8 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
             checks["fleet_smoke"] = fleet_smoke_check()
         else:
             machines_file = _release_machines_file(service, repo)
-            declarations = _declared_release_scope(stamp.get("release_exclusions", []))
+            decisions = stamp.get("release_exclusions", [])
+            declarations = _declared_release_scope(decisions)
             accounts = stamp.get("smoke_accounts", [])
             args = tuple(arg for entry in accounts for arg in ("--account", entry))
             if "test_profile" in stamp:
@@ -1888,8 +1961,17 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
             checks["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file,
                 accounts=accounts, test_profile=stamp.get("test_profile"),
                 declared_exclusions=declarations or None)
+            fleet = checks["fleet_smoke"]
+            issues = [row for row in decisions
+                      if row.get("status", "migration_required") in {"invalid", "migration_required"}]
+            if issues:
+                fleet["exclusion_issues"] = issues
+                fleet["full_fleet_acceptance"] = False
+            if issues and fleet["outcome"] == FLEET_SMOKE_PASSED:
+                fleet["outcome"] = FLEET_SMOKE_UNTESTED
     except Exception as exc:
         checks["fleet_smoke"] = {"outcome": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+    active_start = None
     try:
         active_start = _process_start(boot.pid, runner)
         guard = stamp.get("restart_guard") or {}
@@ -1918,11 +2000,19 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
         checks["front_desk"] = report
     except Exception as exc:
         checks["front_desk"] = {"outcome": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+    delivery = _check_client_delivery(service, repo, sha, boot.pid, active_start, runner)
+    delivery["cause_target"] = _client_delivery_cause(service, repo)
+    delivery["receipt"] = str(nightly_receipt or _stamp_path(repo, service))
+    checks["client_delivery"] = delivery
     stamp.update(checks)
     stamp["disposition"] = ("active and checks passed" if all(r.get("outcome") == "passed" for r in checks.values())
                             else "active with failed checks")
+    notifications = dict(checks)
+    if nightly_receipt is not None and delivery.get("classification") == "delivery_failure":
+        # The scheduler's report owns the deduplicated recurrence notification.
+        notifications.pop("client_delivery")
     try:
-        _notify_failed_checks(repo, service, sha, checks, runner)
+        _notify_failed_checks(repo, service, sha, notifications, runner)
     except Exception as exc:
         stamp["blocker_notify_error"] = f"{type(exc).__name__}: {exc}"
     return checks
