@@ -9,6 +9,7 @@ const {
   readableHours,
   readableItemKind,
   readableLaneClass,
+  readableLaneRowStatus,
   readableQueuedLine,
   readableRoad,
   readableSeatCount,
@@ -294,7 +295,7 @@ function readFailure(read) {
   return !!read && read.status === 'failed';
 }
 
-function rootRow(lane, reads, questions, now) {
+function rootRow(lane, reads, questions, now, current) {
   const cappedLane = capped(lane);
   const goalsRead = readForLane(reads, lane, 'goals');
   const membersRead = readForLane(reads, lane, 'members');
@@ -309,13 +310,16 @@ function rootRow(lane, reads, questions, now) {
     || readsForGoals.find(item => readReply(item))
     || readsForGoals[0]
     || null;
+  const status = readableLaneRowStatus(lane, current, attention.hasQuestion);
   return {
     lane,
     laneClass: laneClass(lane),
     age: readableAge(laneClass(lane) === 'paused' ? lane.state_at : lane.progress_at, now),
-    question: attention.hasQuestion,
-    attention: attention.items.map(item => ({ title: item.goal.title, reason: item.reason, goalId: item.goal.goal_id })),
-    more: attention.more,
+    status,
+    current,
+    question: status.questionRoute,
+    attention: current ? attention.items.map(item => ({ title: item.goal.title, reason: item.reason, goalId: item.goal.goal_id })) : [],
+    more: current ? attention.more : null,
     retry: cappedLane && readFailure(read),
     capped: cappedLane,
     goalsHeld: hasFullGoals,
@@ -515,11 +519,11 @@ function specDetailView(lane, route, reads, questions, now) {
   };
 }
 
-function buildLanesViewModel({ inventory, reads, questions = {}, route = { level: 'all' }, now = Date.now(), expanded = new Set() } = {}) {
+function buildLanesViewModel({ inventory, reads, questions = {}, route = { level: 'all' }, now = Date.now(), expanded = new Set(), current = true } = {}) {
   const lanes = inventoryLanes(inventory);
   const currentRoute = route && route.level ? route : { level: 'all' };
   if (currentRoute.level === 'all' || !currentRoute.laneId) {
-    const rows = lanes.map(lane => rootRow(lane, reads, questions, now));
+    const rows = lanes.map(lane => rootRow(lane, reads, questions, now, current));
     const active = rows.filter(row => row.laneClass !== 'parked');
     const parked = rows.filter(row => row.laneClass === 'parked');
     const more = inventory && inventory.truncated
@@ -655,7 +659,8 @@ function appendRetry(doc, parent, retry, laneId, kind, goalId) {
 }
 
 function appendLaneRow(doc, parent, row) {
-  const wrap = el(doc, 'div', `next-lanes-row next-lanes-row-${row.laneClass}`, parent);
+  const rowClass = row.current ? row.laneClass : 'idle';
+  const wrap = el(doc, 'div', `next-lanes-row next-lanes-row-${rowClass}`, parent);
   if (row.capped && !row.goalsHeld) {
     wrap.dataset.goalsReadNeeded = 'true';
     wrap.dataset.laneId = row.lane.lane_id;
@@ -667,7 +672,16 @@ function appendLaneRow(doc, parent, row) {
   const titleLine = el(doc, 'span', 'next-lanes-row-title-line', copy);
   const title = el(doc, 'span', 'next-lanes-row-title', titleLine); title.textContent = row.lane.title;
   if (row.question) { const mark = el(doc, 'span', 'next-lanes-question-mark', titleLine); mark.textContent = '?'; mark.setAttribute('aria-label', 'Needs your answer'); }
-  if (row.age) { const age = el(doc, 'span', 'next-lanes-age', titleLine); age.textContent = row.age; }
+  if (row.current && row.age) { const age = el(doc, 'span', 'next-lanes-age', titleLine); age.textContent = row.age; }
+  const { primary, lifecycle, detail, secondaryActivity, lead } = row.status;
+  const lifecycleFact = !row.current && lifecycle ? `Last known · ${lifecycle}`
+    : lifecycle === 'Blocked' && primary !== 'Blocked' ? 'Blocked' : null;
+  const statusFacts = [lifecycleFact, detail, secondaryActivity, lead?.label].filter(Boolean);
+  const statusLine = el(doc, 'span', 'next-lanes-row-status', copy);
+  statusLine.id = `next-lane-status-${row.lane.lane_id}`;
+  open.setAttribute('aria-describedby', statusLine.id);
+  if (primary) el(doc, 'span', 'next-lanes-activity', statusLine).textContent = primary;
+  if (statusFacts.length) el(doc, 'span', 'next-lanes-row-facts', statusLine).textContent = statusFacts.join(' · ');
   for (const item of row.attention) {
     const reason = typeof item.reason === 'string' ? item.reason : '';
     const tone = reason === 'needs you' ? 'question' : reason === 'blocked' || reason.endsWith(' blocked') ? 'blocked' : 'active';
@@ -862,7 +876,7 @@ function mountLanesCard(root, { getState = () => ({}), reads = {}, questions = {
     const state = typeof getState === 'function' ? getState() : getState;
     const inventory = state && (state.inventory || state.workLanes || state.work_lanes) || state || {};
     const questionSnapshot = questions && typeof questions.getSnapshot === 'function' ? questions.getSnapshot() || {} : questions && questions.snapshot || {};
-    return { inventory, questionSnapshot };
+    return { inventory, questionSnapshot, current: state?.current !== false };
   }
 
   function currentRead(laneId, kind, goalId) {
@@ -980,9 +994,9 @@ function mountLanesCard(root, { getState = () => ({}), reads = {}, questions = {
     if (destroyed) return null;
     const oldKey = routeKey(ui.route);
     if (currentBody) scrollPositions.set(oldKey, currentBody.scrollTop || 0);
-    const { inventory, questionSnapshot } = snapshot();
+    const { inventory, questionSnapshot, current } = snapshot();
     const expanded = ui.expandedSections;
-    const model = buildLanesViewModel({ inventory, reads, questions: questionSnapshot, route: ui.route, now: typeof now === 'function' ? now() : now, expanded });
+    const model = buildLanesViewModel({ inventory, reads, questions: questionSnapshot, route: ui.route, now: typeof now === 'function' ? now() : now, expanded, current });
     const route = readRoute(model);
     model.routeGoalTitle = ui.route.goalTitle;
     model.routeGoalId = ui.route.goalId;

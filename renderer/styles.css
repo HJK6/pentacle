@@ -4463,6 +4463,8 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
   position: relative;
 }
 .lane-row:hover, .lane-row:focus-visible { background: var(--bg3); outline: none; }
+.lane-activity { margin-top: 2px; font-size: 12px; font-weight: 600; }
+.lane-question-link { display: inline-block; margin: 0 14px 7px 17px; color: var(--blue); font-size: 11px; }
 .lane-row[data-lane-state="blocked"] { border-left-color: var(--red); }
 .lane-row[data-lane-state="active"] { border-left-color: var(--green); }
 .lane-row[data-lane-state="paused"] { border-left-color: var(--yellow); }

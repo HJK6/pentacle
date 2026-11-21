@@ -573,6 +573,7 @@ const state = {
   locallyClosedStreamIds: new Set(),
   // Daemon work-lanes projection (pentacle-chat-core workLanes slice); null until a lane-aware daemon sends one.
   workLanes: null,
+  workLanesCurrent: false,
 };
 
 Object.defineProperty(state, 'sessions', {
@@ -2004,10 +2005,12 @@ function workLanesSidebarEnabled() {
 function applyWorkLanesPayload(payload) {
   const core = window.PentacleChatCore;
   if (!payload || !core?.applyWorkLanesFrame) return;
+  if (payload.type === 'work_lanes.inventory' && (!state.chatStream.connected || webChatRecoveryEpoch !== null)) return;
   const base = state.workLanes || core.emptyWorkLanesInventory();
   const next = core.applyWorkLanesFrame(base, payload);
   if (next === base) return;
   state.workLanes = next;
+  state.workLanesCurrent = state.chatStream.connected;
   scheduleSidebarRerender();
 }
 
@@ -2038,6 +2041,7 @@ function applyChatStreamState(data) {
   // there's a stale-UI window where the sidebar still shows live state
   // but the daemon is unreachable.
   if (!applyVersionedConnectionState(state.chatStream, data, setDegradedMode)) return;
+  if (!state.chatStream.connected) state.workLanesCurrent = false;
   if (wasConnected !== state.chatStream.connected) invalidateDashboardCatalog();
   const nextPolicy = data.connected === false ? null : data.hostedDashboardPolicy;
   if (data.connected === false || Object.prototype.hasOwnProperty.call(data, 'hostedDashboardPolicy')) {
@@ -5402,6 +5406,8 @@ function renderSidebar() {
   let html = core?.workLaneTapTarget && workLanesSidebarEnabled() ? renderWorkLanesPanelHtml(state.workLanes, {
     tapTarget: core.workLaneTapTarget,
     etaLabel: core.workLaneEtaLabel,
+    rowStatus: core.readableLaneRowStatus,
+    current: state.workLanesCurrent,
     nowMs: Date.now(),
     renderLeadCard: (leadSession, options) => chatUi.renderStatusCard(leadSession, options),
   }) : '';
@@ -6540,6 +6546,8 @@ async function performWebChatResync(connection) {
 
 window.cc.onDisconnect?.(({ epoch }) => {
   webChatRecoveryEpoch = null;
+  state.workLanesCurrent = false;
+  scheduleSidebarRerender();
   window.PentacleChatStore?.webHostDisconnected?.(epoch);
 });
 window.cc.onReconnect?.(({ epoch }) => {

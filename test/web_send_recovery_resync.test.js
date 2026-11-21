@@ -4,7 +4,9 @@ const app=fs.readFileSync(path.join(__dirname,'../renderer/app.js'),'utf8');
 const flush=()=>new Promise(r=>setImmediate(r));
 function setup(){const handlers={},requests=[],ready=[],snapshots=[],disconnected=[],history=[];let optimisticSends={};let connection={epoch:2,open:true};
 const cc={onChatStreamFrame:f=>handlers.frame=f,onReconnect:f=>handlers.open=f,onDisconnect:f=>handlers.close=f,webConnectionState:()=>connection,getChatStreamState:()=>new Promise((resolve,reject)=>requests.push({resolve,reject})),requestStreamEvents:()=>new Promise(resolve=>history.push(resolve))};
-const context=vm.createContext({window:{cc,PentacleChatStore:{applyFrame:f=>snapshots.push(f),getState:()=>({sessions:[],optimisticSends}),webHostReady:e=>ready.push(e),webHostDisconnected:e=>disconnected.push(e)}},state:{chatStream:{stateVersion:99},slots:[],botSlots:{},slotViewModes:{},slotChatBoundStream:{}},preserveOpenSlotSessionsInSnapshot:s=>s,applyChatStreamState(){},renderLimits(){},restoreSlotsAfterReconnect(){},hydrateOpenDurableQuestions(){},checkForWebUpdate(){},roomMicTurns:null,applyChatStreamPayload(){}});
+const context=vm.createContext({window:{cc,PentacleChatStore:{applyFrame:f=>snapshots.push(f),getState:()=>({sessions:[],optimisticSends}),webHostReady:e=>ready.push(e),webHostDisconnected:e=>disconnected.push(e)}},state:{chatStream:{stateVersion:99},slots:[],botSlots:{},slotViewModes:{},slotChatBoundStream:{}},preserveOpenSlotSessionsInSnapshot:s=>s,applyChatStreamState(){},renderLimits(){},restoreSlotsAfterReconnect(){},hydrateOpenDurableQuestions(){},checkForWebUpdate(){},roomMicTurns:null,applyChatStreamPayload(){},
+  scheduleSidebarRerender() {},
+});
 vm.runInContext(app.slice(app.indexOf('window.cc.onChatStreamFrame((frame)'),app.indexOf('// The /cc websocket reconnected')),context);
 vm.runInContext(app.slice(app.indexOf('let webChatResyncPending = null;'),app.indexOf('// Update-available refresh icon')),context);
 return {handlers,requests,ready,snapshots,disconnected,history,setOptimistic:s=>{optimisticSends=s;},setConnection:c=>{connection=c;}};}
