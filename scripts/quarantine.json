@@ -2,7 +2,6 @@
   "version": 1,
   "nonblocking_tests": [
     "test/web_server.test.js::two concurrent connections keep their local tmux sessions isolated",
-    "tests/test_store_call_diag.py::test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line",
     "tests/test_tmux_observation_delimiter.py::test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentinel[status]"
   ],
   "history": {
