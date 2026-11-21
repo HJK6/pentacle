@@ -133,7 +133,17 @@ def report(args):
         record.update(json.loads(bound_path.read_text()))
     record["item"] = record.get("item", "none")
     errors = []
-    if args.result == "FAIL" and record["item"] == "none":
+    checks = record.get("checks") or {}
+    failed_checks = {name for name, check in checks.items() if check.get("outcome") != "passed"}
+    # The scorecard links this occurrence to the existing delivery incident.
+    # Keep the normal publisher for infrastructure or independent failures.
+    delivery = checks.get("client_delivery", {})
+    delivery_incident = delivery.get("classification") == "delivery_failure"
+    cause_target = delivery.get("cause_target") if delivery_incident else None
+    delivery_only = delivery_incident and failed_checks == {"client_delivery"}
+    if args.result == "FAIL" and record["item"] == "none" and delivery_only:
+        record["item"] = cause_target or "none"
+    if args.result == "FAIL" and record["item"] == "none" and not delivery_only:
         stem = f"pentacle__nightly_{job_name(args.job)}_{signature(args.job, args.row, args.primary_error)}"
         topic = stem.removeprefix("pentacle__")
         try:
@@ -160,8 +170,11 @@ def report(args):
     if args.result != "PASS":
         try:
             if "notification" not in record:
-                response = command_json(args.notify_cmd, "--severity", "critical", "--dedup-key", f"{label}:{day}", "--title", f"{label} {args.result}",
-                                        "--message", f"{args.primary_error} {path} {record['item']}")
+                message = f"{args.primary_error} {path} {record['item']}"
+                if cause_target and cause_target != record["item"]:
+                    message += f". Client delivery recurrence {cause_target}"
+                response = command_json(args.notify_cmd, "--severity", "critical", "--dedup-key", f"{label}:{day}",
+                                        "--title", f"{label} {args.result}", "--message", message)
                 if response.get("type") != "notification.create.ok" or not response.get("notification", {}).get("notification_id"):
                     raise RuntimeError("critical notification was not accepted")
                 record["notification"] = response["notification"]
@@ -214,6 +227,7 @@ def check_release(args, *, deploy_module=None):
         from deploy import deploy as deploy_module
     d = deploy_module
     repo = Path(args.checkout).resolve()
+    path = Path(args.evidence) / "receipt.json"
     record = {"checkout": str(repo)}
     try:
         service = d.SERVICES[args.service]
@@ -223,13 +237,12 @@ def check_release(args, *, deploy_module=None):
         sha = stamp["sha"]
         record["source_sha"] = sha
         record["identity_basis"] = "deployment stamp target; not independent loaded-runtime proof"
-        checks = d.run_post_release_checks(service, repo, sha, stamp, runner=d._run)
+        checks = d.run_post_release_checks(service, repo, sha, stamp, runner=d._run, nightly_receipt=path)
         passed = bool(checks) and all(row.get("outcome") == "passed" for row in checks.values())
         record.update(checks=checks, result="PASS" if passed else "FAIL",
                       primary_error="" if passed else "post-release checks failed")
     except Exception as exc:
         record.update(result="FAIL", primary_error=f"post-release checks: {type(exc).__name__}: {exc}")
-    path = Path(args.evidence) / "receipt.json"
     prior = json.loads(path.read_text()) if path.exists() else {}
     atomic(path, {**prior, **record})
     print(json.dumps(record, sort_keys=True))

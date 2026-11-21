@@ -372,6 +372,7 @@ def test_post_activation_smoke_uses_installed_machine_file(
     tmp_path, monkeypatch, capsys, configuration
 ) -> None:
     """Execute the real smoke configuration in the spawned child; never acquire fleet cells."""
+    monkeypatch.setattr(deploy_mod, "_check_client_delivery", lambda *args: {"outcome": "passed"})
     installed_file = tmp_path / "installed machines.json"
     installed_file.write_text(json.dumps([{"name": "installed", "ssh_target": None}, {"name": "peer", "ssh_target": None}]))
     ambient_file = tmp_path / "ambient.json"
@@ -914,6 +915,7 @@ def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
     tmp_path, monkeypatch, capsys, fleet_state, expected_exit, with_failure,
 ):
     # Do not use _apply: its legacy scan/write stubs would erase this boundary.
+    monkeypatch.setattr(deploy_mod, "_check_client_delivery", lambda *args: {"outcome": "passed"})
     from .test_deploy_fleet_verdict import _rows, _partial_payload
 
     stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)

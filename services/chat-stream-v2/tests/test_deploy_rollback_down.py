@@ -251,6 +251,7 @@ def test_down_basis_records_admission_without_changing_it(guard_case, monkeypatc
 def test_down_rollback_post_boot_attribution(tmp_path, monkeypatch, capsys, case, expected_exit):
     from . import test_deploy_script as fixtures
     module = fixtures.deploy_mod
+    monkeypatch.setattr(module, '_check_client_delivery', lambda *args: {'outcome': 'passed'})
     stdout, stderr = fixtures._u2_log_paths(tmp_path, monkeypatch)
     marker = '' if case == 'missing_marker' else fixtures._u2_boot()
     failure = fixtures._u2_line('force_close') + '\n'

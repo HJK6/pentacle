@@ -1,5 +1,6 @@
 """One installed declaration scopes ordinary/nightly smoke without hiding reds."""
 import copy
+from datetime import datetime, timezone
 import json
 import subprocess
 from pathlib import Path
@@ -10,8 +11,11 @@ from .test_deploy_script import deploy_mod as d, V2_SERVICE, TARGET_SHA
 from .test_deploy_log_guard import isolated_release
 import nightly_journey as nj
 
-DECLARATION = {'host':'optional','reason':'CLI pin mismatch',
-               'readiness_item':'pentacle__fixture_readiness_2026_11'}
+LEGACY_DECLARATION = {'host': 'optional', 'reason': 'CLI pin mismatch',
+                      'readiness_item': 'pentacle__fixture_readiness_2026_11'}
+DECLARATION = {**LEGACY_DECLARATION, 'owner': 'release owner',
+               'starts_at': '2020-01-01T00:00:00Z', 'expires_at': '2099-01-01T00:00:00Z'}
+ACTIVE = {**DECLARATION, 'status': 'active'}
 
 
 def machines(tmp_path, declarations):
@@ -28,9 +32,11 @@ def rows(host, outcome='passed'):
 
 
 @pytest.mark.parametrize('included_outcome', ['passed','failed'])
-@pytest.mark.parametrize('declared', [True, False])
-def test_smoke_scope_preserves_included_failures(tmp_path, monkeypatch, included_outcome, declared):
-    declarations = [DECLARATION] if declared else []
+@pytest.mark.parametrize('decision', [None, 'active', 'expired', 'migration_required'])
+def test_smoke_scope_preserves_included_failures(tmp_path, monkeypatch, included_outcome, decision):
+    catalog_row = LEGACY_DECLARATION if decision == 'migration_required' else DECLARATION
+    declarations = [catalog_row] if decision else []
+    declared = decision == 'active'
     path=machines(tmp_path,declarations);calls=[]
     monkeypatch.setattr(d,'_launchd_environment',lambda _: {'PENTACLE_MACHINES_FILE':str(path)})
     monkeypatch.setattr(d,'_scan_slow_consumer_window',lambda *a,**k:{'outcome':'passed'})
@@ -41,7 +47,9 @@ def test_smoke_scope_preserves_included_failures(tmp_path, monkeypatch, included
         cells = rows('primary', included_outcome) + ([] if declared else rows('optional'))
         payload={'ok':included_outcome=='passed','cells':cells} if any('spawn_fleet_smoke.py' in v for v in argv) else {'outcome':'passed'}
         return subprocess.CompletedProcess(argv,0,json.dumps(payload),'')
-    stamp={'release_exclusions':declarations}
+    now = datetime(2100 if decision == 'expired' else 2026, 1, 1, tzinfo=timezone.utc)
+    decisions = d.release_exclusions(V2_SERVICE, tmp_path, now=now)
+    stamp = {'release_exclusions': decisions}
     result=d.run_post_release_checks(V2_SERVICE,tmp_path,TARGET_SHA,stamp,runner=runner,
         boot=d.BootReadback(d.BOOT_OBSERVED,'fixture',0,99,None))
     smoke=next(c for c in calls if any('spawn_fleet_smoke.py' in v for v in c))
@@ -54,16 +62,20 @@ def test_smoke_scope_preserves_included_failures(tmp_path, monkeypatch, included
     monkeypatch.setenv('PENTACLE_MACHINES_FILE', str(path))
     monkeypatch.setenv('PENTACLE_SMOKE_EXCLUDED_HOSTS', setting.partition('=')[2])
     assert {cell[0] for cell in smoke_plan()['cells']} == ({'primary'} if declared else {'primary', 'optional'})
-    assert result['fleet_smoke']['outcome']==included_outcome
+    expected = 'untested' if decision == 'migration_required' and included_outcome == 'passed' else included_outcome
+    assert result['fleet_smoke']['outcome'] == expected
+    if decision == 'migration_required':
+        assert result['fleet_smoke']['exclusion_issues'] == decisions
+        assert result['fleet_smoke']['full_fleet_acceptance'] is False
     assert len([c for c in result['fleet_smoke']['cells'] if c['outcome']=='SKIPPED_DECLARED']) == (4 if declared else 0)
-    assert stamp['release_exclusions']==declarations
+    assert stamp['release_exclusions'] == ([{**catalog_row, 'status': decision}] if decision else [])
 
 
 def test_ordinary_snapshot_is_independent_of_later_home_change(tmp_path, monkeypatch):
     path=machines(tmp_path,[DECLARATION]);monkeypatch.setattr(d,'_launchd_environment',lambda _: {'PENTACLE_MACHINES_FILE':str(path)})
     snapshot=d.release_exclusions(V2_SERVICE,tmp_path)
     machines(tmp_path,[])
-    assert snapshot==[DECLARATION]
+    assert snapshot==[ACTIVE]
     assert d.release_exclusions(V2_SERVICE,tmp_path)==[]
 
 
@@ -73,14 +85,14 @@ def test_ordinary_stamps_scope_before_activation(isolated_release, tmp_path, mon
     monkeypatch.setattr(module, '_launchd_environment', lambda _: {'PENTACLE_MACHINES_FILE': str(path)})
     kickstart = module._kickstart
     def activation(*args):
-        assert module._read_stamp(repo, service)['release_exclusions'] == [DECLARATION]
+        assert module._read_stamp(repo, service)['release_exclusions'] == [ACTIVE]
         machines(tmp_path, [])
         return kickstart(*args)
     monkeypatch.setattr(module, '_kickstart', activation)
     stamp = activate()
     assert stamp['serving'] is True
-    assert stamp['release_exclusions'] == [DECLARATION]
-    assert module._read_stamp(repo, service)['release_exclusions'] == [DECLARATION]
+    assert stamp['release_exclusions'] == [ACTIVE]
+    assert module._read_stamp(repo, service)['release_exclusions'] == [ACTIVE]
 
 
 def test_nightly_reads_same_home_afresh_without_mutating_runtime_stamp(tmp_path,monkeypatch):
@@ -94,11 +106,13 @@ def test_nightly_reads_same_home_afresh_without_mutating_runtime_stamp(tmp_path,
     monkeypatch.setattr(d,'run_post_release_checks',checks)
     args=SimpleNamespace(checkout=str(tmp_path),evidence=str(tmp_path/'evidence'),service='chat-streamd-v2')
     assert nj.check_release(args,deploy_module=d)==0
-    assert seen[-1]['release_exclusions']==[DECLARATION]
-    assert json.loads((tmp_path/'evidence/receipt.json').read_text())['release_exclusions']==[DECLARATION]
-    machines(tmp_path,[])
-    assert nj.check_release(args,deploy_module=d)==0
-    assert seen[-1]['release_exclusions']==[] and stamp==original
+    assert seen[-1]['release_exclusions']==[ACTIVE]
+    assert json.loads((tmp_path/'evidence/receipt.json').read_text())['release_exclusions']==[ACTIVE]
+    machines(tmp_path, [{**DECLARATION, 'expires_at': '2021-01-01T00:00:00Z'}])
+    assert nj.check_release(args, deploy_module=d) == 0
+    assert seen[-1]['release_exclusions'][0]['status'] == 'expired'
+    assert not d._declared_release_scope(seen[-1]['release_exclusions'])
+    assert stamp == original
 
 
 def test_explicit_rollback_qualifies_only_declared_included_bindings(tmp_path, monkeypatch):
@@ -130,8 +144,23 @@ def test_explicit_rollback_qualifies_only_declared_included_bindings(tmp_path, m
     runtime = SimpleNamespace(database=lambda _: 'fixture-db',
         account_snapshot=lambda *a, **k: {'selected_bindings': bindings},
         restoration_proof=proof)
-    stamp = {'sha': TARGET_SHA, 'release_exclusions': [DECLARATION],
+    stamp = {'sha': TARGET_SHA, 'release_exclusions': [LEGACY_DECLARATION],
              'restored_qualification': {'stamp': witness}}
     assert d._verify_direct_restoration(V2_SERVICE, tmp_path, stamp, None,
         lambda *a: None, runtime=runtime)['outcome'] == 'passed'
     assert seen[0]['included_hosts'] == ['primary']
+
+
+@pytest.mark.parametrize(('declaration', 'at', 'status'), [
+    (DECLARATION, '2019-12-31T23:59:59+00:00', 'pending'),
+    (DECLARATION, '2020-01-01T00:00:00+00:00', 'active'),
+    (DECLARATION, '2098-12-31T23:59:59+00:00', 'active'),
+    (DECLARATION, '2099-01-01T00:00:00+00:00', 'expired'),
+    (LEGACY_DECLARATION, '2026-01-01T00:00:00+00:00', 'migration_required'),
+])
+def test_catalog_classifies_exclusions_and_only_active_rows_select(tmp_path, monkeypatch, declaration, at, status):
+    path = machines(tmp_path, [declaration])
+    monkeypatch.setattr(d, '_launchd_environment', lambda _: {'PENTACLE_MACHINES_FILE': str(path)})
+    decisions = d.release_exclusions(V2_SERVICE, tmp_path, now=datetime.fromisoformat(at))
+    assert decisions == [{**declaration, 'status': status}]
+    assert bool(d._declared_release_scope(decisions)) == (status == 'active')

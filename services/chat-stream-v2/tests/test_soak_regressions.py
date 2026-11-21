@@ -33,6 +33,7 @@ def _declared_release_scope(*args): return []
 def _fleet_smoke_verdict(*args, **kwargs): return {"outcome": "passed"}
 def _process_start(*args): return "fixture"
 def _scan_slow_consumer_window(*args, **kwargs): return {"outcome": "passed"}
+def _check_client_delivery(*args): return {"outcome": "passed"}
 def _notify_failed_checks(*args): pass
 def _run(argv, cwd):
     profile = json.loads((cwd / ".pentacle-deploy/chat-streamd-v2.json").read_text())["test_profile"]

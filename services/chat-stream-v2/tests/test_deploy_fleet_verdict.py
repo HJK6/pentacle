@@ -148,6 +148,7 @@ def test_every_host_cell_and_reason_survives_stamp_and_stdout(tmp_path, monkeypa
 
 
 def test_full_pass_alone_installs_schedule_and_stays_exit_zero(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(deploy_mod, "_check_client_delivery", lambda *args: {"outcome": "passed"})
     payload = {"ok": True, "status": "PASS", "cells": _rows("primary") + _rows("satellite"), "failures": [], "untested": []}
     stamp, schedules = _apply(tmp_path, monkeypatch, payload)
     assert schedules == []  # recurring smoke installer is retired

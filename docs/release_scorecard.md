@@ -102,7 +102,9 @@ A source map has five sections and a nonempty `required_hosts` list.
   to the scorecard cause inventory. A record in `records` names its canonical
   `cause`, `item`, `first_seen` timestamp and stable `occurrences`. A test
   decision also names its exact `test`. IDs use `release/<intent>/1`,
-  `public-checks/<workflow>/1` and `nightly-soak/<UTC slot>`. A recorded
+  `public-checks/<workflow>/1` and `nightly-soak/<UTC slot>`. Link occurrences
+  with `client_delivery.classification=delivery_failure` to the existing
+  client-delivery incident and omit the `test` field. A recorded
   terminal disposition names its `disposition_source`. The reader resolves
   the item and owner in the actual lifecycle, using the published Git revision
   at the cutoff when available. An unavailable item or unmatched required
