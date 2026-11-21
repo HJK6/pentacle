@@ -77,6 +77,64 @@ source file types fail import. Limits are 10,000 files, 512 MiB expanded total,
 JSX are inert originals until the curated preparation/capture process; exported
 instructions, package scripts and editor runtimes are never executed.
 
+## Design boards
+
+Add optional `designs` to the drop to show screens together in Design. Each
+design has a stable project-local `id`, a `title` and ordered `nodes`.
+This board shows the Delivery states and Retry flow. The screen IDs refer to
+entries in the drop's `views`.
+
+```json
+{
+  "id": "delivery",
+  "title": "Delivery states and Retry",
+  "nodes": [
+    {"type":"screen", "view":"prototype", "x":0, "y":0},
+    {"type":"section", "title":"Today", "x":-160, "y":1300, "w":1760, "h":1380},
+    {"type":"screen", "view":"today", "x":0, "y":1600},
+    {"type":"section", "title":"Proposal", "x":1840, "y":-300, "w":6040, "h":2980},
+    {"type":"screen", "view":"sending", "x":2000, "y":0},
+    {"type":"screen", "view":"checking", "x":4140, "y":0},
+    {"type":"screen", "view":"sent", "x":6280, "y":0},
+    {"type":"note", "text":"When delivery cannot be confirmed, offer Retry.", "x":2000, "y":1600, "w":1440},
+    {"type":"screen", "view":"failed", "x":4140, "y":1600},
+    {"type":"screen", "view":"retrying", "x":6280, "y":1600},
+    {"type":"arrow", "from":"sending", "to":"checking", "label":"Wait for a reply"},
+    {"type":"arrow", "from":"checking", "to":"sent", "label":"Delivered"},
+    {"type":"arrow", "from":"checking", "to":"failed", "label":"Could not deliver"},
+    {"type":"arrow", "from":"failed", "to":"retrying", "label":"Choose Retry"},
+    {"type":"arrow", "from":"retrying", "to":"sent", "label":"Delivered"}
+  ]
+}
+```
+
+Screen order in `nodes` controls stepping. A screen inherits the view's title
+unless the node supplies one, and always uses the view's viewport size. Use
+`variant: "prototype"` on a view to mark it as a prototype. Put the prototype
+first, use one section for each part of the flow, label actions with what the
+person does, and keep notes to a sentence or two.
+
+Coordinates and positive dimensions are integer pixels at 100% zoom, bounded
+by 100,000. Notes contain up to 400 characters. Arrows connect two screen IDs
+in the same design. A view goes on at most one board. Give a screen both
+coordinates or omit both. Unplaced screens start after the placed nodes, with
+prototypes first and the rest in rows of four, or five for phone-only rows.
+
+Views left out of explicit boards still appear in Design. Each legacy group
+becomes a board, and views without a group share a board named after the
+project. Derived IDs use `group-` plus the SHA-256 of the exact group name,
+or `ungrouped-` plus the SHA-256 of the project ID. Use explicit IDs when a
+board title should be editable without changing the address. Project, design
+and view IDs form stable addresses. Changing an ID breaks existing links to it.
+
+Check a drop in place before import. The command prints resolved boards and
+warnings for overlapping screens or mixed placed and unplaced screens. An
+invalid board exits nonzero with the affected design and node.
+
+```sh
+node scripts/design-library.cjs board --drop /private/design-drop
+```
+
 ## Prepare and publish
 
 Install the repository development dependencies and Playwright's recording
@@ -200,6 +258,13 @@ revisions are reused only while canonical file identities, sizes and timestamps
 match; canonical changes force verification again. Nested Syncthing temporary
 and conflict copies never become canonical members, and conflicts remain visible.
 Source-relative Copy path is an explicit agent action, never navigation.
+
+The catalog includes resolved `projects[].designs` with a `changed_at` per
+board. The change date tracks board nodes and their screens along the selected
+revision's history. Send the last catalog `ETag` as `If-None-Match` to get a
+bodyless 304 when the catalog is unchanged. The catalog remains private and
+no-store. Prepared documents relay Escape and arrow keys to the dashboard when
+focus is outside editable controls and the prototype has not handled the key.
 
 ```sh
 node --test test/design_library.test.js test/design_library_http.test.js test/ui_review_artifacts.test.js

@@ -14,12 +14,25 @@ async function revision(root, options = {}) {
   const source = path.join(root, 'drop-' + (options.id || 'example')), descriptor = drop(source, options);
   if (options.mediaBytes) {
     descriptor.flows = [{ id: 'media', title: 'Synthetic transport fixture', entry: 'index.html', view_ids: ['home'], viewport: { width: 800, height: 600 }, steps: [{ action: 'assert', name: 'Fixture state', selector: '#state' }] }];
-    L.atomicJson(path.join(source, 'drop.json'), descriptor);
   }
+  options.configure?.(descriptor, path.join(source, 'payload'));
+  L.atomicJson(path.join(source, 'drop.json'), descriptor);
   const imported = L.importDrop({ drop: source, staging: path.join(root, 'staging') });
   const m = await require('../../lib/design_prepare.cjs').prepareRevision(imported.dir);
-  fs.mkdirSync(path.join(imported.dir, 'screenshots')); fs.writeFileSync(path.join(imported.dir, 'screenshots', 'home.png'), PNG);
-  m.views[0].screenshots = [{ name: 'Home', path: 'screenshots/home.png' }]; m.state = 'recorded';
+  if (options.importedAt) m.imported_at = options.importedAt;
+  fs.mkdirSync(path.join(imported.dir, 'screenshots'));
+  for (const view of m.views) {
+    if (options.legacyPreparation && view.prepared) {
+      const file = path.join(imported.dir, view.prepared);
+      const oldHtml = fs.readFileSync(file, 'utf8').replace(/<script data-design-navigation="">[\s\S]*?<\/script>/, '');
+      fs.writeFileSync(file, oldHtml);
+      delete view.prepared_content_sha256;
+    }
+    const shot = `screenshots/${view.id}.png`;
+    fs.writeFileSync(path.join(imported.dir, shot), PNG);
+    view.screenshots = [{ name: view.title, path: shot }];
+  }
+  m.state = 'recorded';
   if (options.mediaBytes) {
     fs.mkdirSync(path.join(imported.dir, 'videos'));
     // Transport fixtures deliberately do not claim encoded recording proof.

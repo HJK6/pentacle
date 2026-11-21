@@ -18,6 +18,9 @@ async function buildDesignGalleryFixture(scratch) {
     const dropRoot = path.join(source, id + '-' + generation), descriptor = drop(dropRoot, { id, html: HTML.replace('Fixture design', 'Fixture generation ' + generation) });
     descriptor.source_revision = 'fixture-' + generation;
     descriptor.views[0].title = generation === 'A' ? 'Retained A' : 'Current B';
+    if (id === 'example') descriptor.designs = [{
+      id: 'fixture-board', title: 'Fixture board', nodes: [{ type: 'screen', view: 'home' }],
+    }];
     descriptor.flows = ['open-back', 'working-question'].map(name => ({ id: name, title: 'Fixture ' + name, entry: 'index.html', view_ids: ['home'], viewport: { width: 800, height: 600 }, steps: [{ action: 'click', name: 'Session', selector: '#session' }, { action: 'assert', name: 'Session visible', selector: '#state', text: 'Session' }] }));
     L.atomicJson(path.join(dropRoot, 'drop.json'), descriptor);
     const imported = L.importDrop({ drop: dropRoot, staging: path.join(source, 'staging') }), m = await P.prepareRevision(imported.dir);
