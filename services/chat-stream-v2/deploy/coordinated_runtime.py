@@ -780,6 +780,10 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             if (not fresh.answered or fresh.pid != pid or fresh.loaded != state.loaded
                     or (pid and self.d._process_start(pid, self.runner) != start)):
                 raise Invalid("admitted daemon identity changed before bootout")
+            if expected_identity.get('sha') is not None:
+                confirmed, _ = self.d._verify_runtime_sha(expected_identity['sha'], pid)
+                if not confirmed:
+                    raise Invalid("admitted daemon SHA changed before bootout")
         if state.loaded:
             self.checked(("launchctl", "bootout", self.d._launchctl_target(self.service.launchd_label)))
         final = self.d._wait_launchd_unloaded(self.service.launchd_label, self.runner, timeout_s=self.d.RELOAD_UNLOAD_WAIT_S)

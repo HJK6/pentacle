@@ -41,10 +41,19 @@ class SyntheticRuntime(o.OrdinaryRuntime):
                 'process':p['process'],'collector':p['collector']}
     def validate(self,bundle):
         p=self.probes();m=bundle['metadata']
-        if p['controller_sha'] != m['controller_sha'] or p['accounts'] != m['accounts']:
+        grant = getattr(self, 'recovery_authorization', None)
+        expected_controller = grant['replacement_controller_sha'] if grant else m['controller_sha']
+        if p['controller_sha'] != expected_controller or p['accounts'] != m['accounts']:
             raise o.c.Invalid('synthetic controller/account/binding drift')
         if p.get('fail_validate'): raise o.c.Invalid('synthetic validation refusal')
-    def stop(self,bundle,now):
+    def compare_process(self, expected, observed):
+        # Legacy synthetic fixtures predate complete launchd census records.
+        if 'launchd_answered' not in expected.get('provenance', {}):
+            if expected != observed: raise o.c.Invalid('synthetic process drift')
+            return {'previous': [], 'observed': [], 'departed_absent': [], 'added_owned': []}
+        return super().compare_process(expected, observed)
+    def stop(self,bundle,now,decision):
+        self.tracked_processes = set()
         self.event('stop')
         p=self.probes()
         if p.get('fail_stop'): raise o.c.Invalid('synthetic stop unproven')
@@ -54,6 +63,8 @@ class SyntheticRuntime(o.OrdinaryRuntime):
         self.save_probes(p);self.runtime.stopped=True
         self.event('stop-proven')
         if p.get('drift_during_stop'): (self.root/'files'/'policy').write_bytes(b'foreign drift')
+    def ensure_stopped(self,bundle):
+        if not self.runtime.stopped: raise o.c.Invalid('synthetic stop not proven')
     def restore_source(self,folder,bundle):
         self.event('source')
         super().restore_source(folder,bundle)
