@@ -1,5 +1,12 @@
 [
   {
+    "command": "reliability score",
+    "argv": ["reliability", "score", "--json"],
+    "handler": "agent_orch.reliability_score.command",
+    "network_entry": null,
+    "not_applicable": "receipt reader without daemon RPC"
+  },
+  {
     "command": "start",
     "argv": [
       "start"

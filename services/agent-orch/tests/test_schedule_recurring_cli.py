@@ -43,7 +43,7 @@ def run(argv: list[str]) -> int:
 
 ADD = [
     "add", "--name", "Nightly retro", "--every", "daily", "--at-time", "02:00", "--provider", "codex",
-    "--model", "gpt-5.6-sol", "--effort", "high", "--spec-id", "spec_example__recurring",
+    "--model", "gpt-6.2-sol", "--effort", "high", "--spec-id", "spec_example__recurring",
     "--objective", "Nightly retro", "--initial-prompt", "Run the retro.",
 ]
 
@@ -57,7 +57,7 @@ def test_add_sends_the_resolved_template_with_default_parent_and_no_tz(calls, ca
     assert payload["parent"] == "assistant" and payload["self_close_on_completion"] is True
     assert payload["spec_id"] == "spec_example__recurring"
     assert payload["initial_prompt"] == "Run the retro."
-    assert (payload["requested_provider"], payload["requested_model"]) == ("codex", "gpt-5.6-sol")
+    assert (payload["requested_provider"], payload["requested_model"]) == ("codex", "gpt-6.2-sol")
     assert payload["from_stream_id"] == "hosta:leader" and payload["request_id"]
     assert json.loads(capsys.readouterr().out)["recurring"]["recurring_id"] == RULE["recurring_id"]
 

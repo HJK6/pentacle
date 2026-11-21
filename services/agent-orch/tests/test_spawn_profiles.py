@@ -70,7 +70,8 @@ def test_luna_is_spawnable_across_all_supported_efforts() -> None:
 
 def test_sol61_catalog_aliases_and_explicit_sol60_policy() -> None:
     assert spawn_profiles.CATALOG_VERSION == "spawn-catalog-v2"
-    assert catalog()["models"]["codex"]["gpt-6.1-sol"] == {
+    assert spawn_profiles.models()["codex"]["gpt-6.1-sol"] == {
+        "spawnable": False,
         "aliases": ("gpt-6.1-sol", "sol-6.1"),
         "efforts": ("low", "medium", "high", "xhigh", "max"),
     }
@@ -85,7 +86,7 @@ def test_sol61_catalog_aliases_and_explicit_sol60_policy() -> None:
             )
             assert validated["model"] == "gpt-6.1-sol"
     assert resolve_spawn(provider="codex", model="sol")["model"] == "gpt-6.2-sol"
-    assert catalog()["models"]["codex"]["gpt-6-sol"]["aliases"] == ("gpt-6-sol",)
+    assert spawn_profiles.models()["codex"]["gpt-6-sol"]["aliases"] == ("gpt-6-sol",)
     assert resolve_spawn(provider="codex", model="gpt-6-sol")["model"] == "gpt-6-sol"
     assert spawn_profiles.INTENTIONALLY_UNSPAWNABLE["codex"] == frozenset({"gpt-5.4", "gpt-5.5"})
 
@@ -103,8 +104,9 @@ def test_all_codex_models_are_spawnable_at_max_effort() -> None:
 
 
 def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
-    astra = catalog()["models"]["codex"]["gpt-6-astra"]
+    astra = spawn_profiles.models()["codex"]["gpt-6-astra"]
     assert astra == {
+        "spawnable": False,
         "aliases": ("gpt-6-astra", "astra-6"),
         "efforts": ("low", "medium", "high", "xhigh", "max"),
     }
@@ -487,7 +489,7 @@ def test_available_models_defaults_to_the_full_public_catalog() -> None:
     available = result["available_models"]
     assert available == result["models"]
     assert set(available["claude"]) == set(spawn_profiles.MODELS["claude"])
-    assert set(available["codex"]) == set(spawn_profiles.MODELS["codex"])
+    assert set(available["codex"]) == {m for m, entry in spawn_profiles.MODELS["codex"].items() if entry.get("spawnable") is not False}
 
 
 def test_available_models_installation_config_narrows_the_picker_only(monkeypatch, tmp_path) -> None:
@@ -607,11 +609,11 @@ def installation_config(monkeypatch, tmp_path):
 def test_local_empty_list_hides_provider_only_from_advertised_models(installation_config, hidden):
     result = installation_config({hidden: []})
     assert set(result["available_models"]) == set(spawn_profiles.MODELS) - {hidden}
-    assert result["models"] == spawn_profiles.MODELS
+    assert result["models"] == {p: {m: e for m, e in rows.items() if e.get("spawnable") is not False} for p, rows in spawn_profiles.MODELS.items()}
     assert hidden in result["profiles"]["desktop_manual"]
     assert hidden in result["spawn_defaults"]["providers"]
     for provider, models in result["available_models"].items():
-        assert models == spawn_profiles.MODELS[provider]  # missing key means full
+        assert models == result["models"][provider]  # missing key means all active models
     model, definition = next(iter(spawn_profiles.MODELS[hidden].items()))
     effort = definition["efforts"][0]
     assert resolve_spawn(provider=hidden, model=model, effort=effort)["model"] == model
@@ -764,7 +766,8 @@ def test_sol_and_astra_aliases_point_at_6_2():
             assert resolve_spawn(provider='codex', model=alias)['model'] == 'gpt-6.2-'+name
     for alias, canonical in (('gpt-6.1-sol','gpt-6.1-sol'),('sol-6.1','gpt-6.1-sol'),('gpt-6-astra','gpt-6-astra'),('astra-6','gpt-6-astra')):
         assert resolve_spawn(provider='codex',model=alias)['model'] == canonical
-    assert catalog()['models'] == spawn_profiles.models()
+    assert catalog()['models']['claude'] == spawn_profiles.models()['claude']
+    assert 'gpt-6.1-sol' not in catalog()['models']['codex']
     assert isinstance(spawn_profiles.models()['codex']['gpt-6.2-sol']['aliases'], tuple)
 
 
@@ -798,11 +801,11 @@ def test_invalid_reload_keeps_last_good(reload_config, caplog, case):
 def test_local_models_replace_provider_catalog(reload_config):
     config,path,write = reload_config
     old = spawn_profiles.models()
-    write(dict(schema_version=1, models={'codex':{'gpt-6-luna':dict(aliases=['gpt-6-luna','local-luna'],efforts=['low','max'])}}),path.with_name('spawn_defaults.local.json'))
+    write(dict(schema_version=1, models={'codex':{'gpt-6.2-sol':dict(aliases=['gpt-6.2-sol','local-sol'],efforts=['low','max']), 'gpt-6-luna':dict(aliases=['gpt-6-luna'],efforts=['low','max'])}}),path.with_name('spawn_defaults.local.json'))
     current = spawn_profiles.models()
-    assert set(current['codex']) == {'gpt-6-luna'}
+    assert {m for m, entry in current['codex'].items() if entry.get('spawnable') is not False} == {'gpt-6.2-sol', 'gpt-6-luna'}
     assert current['claude'] == old['claude']
-    assert resolve_spawn(provider='codex',model='local-luna')['model'] == 'gpt-6-luna'
+    assert resolve_spawn(provider='codex',model='local-sol')['model'] == 'gpt-6.2-sol'
     with pytest.raises(SpawnProfileError): resolve_spawn(provider='codex',model='sol')
 
 

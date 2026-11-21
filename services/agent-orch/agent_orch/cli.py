@@ -98,6 +98,7 @@ from _shared.spawn_profiles import (
     HANDOFF_TUPLE_FIELDS,
     SpawnProfileError,
     resolve_handoff,
+    resolve_fresh_spawn,
     resolve_spawn,
 )
 
@@ -867,7 +868,7 @@ def schedule_recurring_add(args: argparse.Namespace) -> int:
         print("agent-orch schedule recurring add: validation failed: weekly requires --days", file=sys.stderr)
         return 2
     try:
-        resolved_spawn = resolve_spawn(provider=args.provider, model=args.model, effort=args.effort, host=host)
+        resolved_spawn = resolve_fresh_spawn(provider=args.provider, model=args.model, effort=args.effort, host=host)
     except SpawnProfileError as exc:
         print(f"agent-orch schedule recurring add: validation failed: {exc.code}: {exc}", file=sys.stderr)
         return 2
@@ -1270,7 +1271,7 @@ def spawn(args: argparse.Namespace) -> int:
                         file=sys.stderr,
                     )
         else:
-            resolved_spawn = resolve_spawn(provider=provider, model=model, effort=effort, host=host)
+            resolved_spawn = resolve_fresh_spawn(provider=provider, model=model, effort=effort, host=host)
             if model is None:
                 print(
                     "agent-orch spawn: WARNING: no --model given; using the "
@@ -6335,6 +6336,8 @@ def build_parser() -> argparse.ArgumentParser:
     work_lane_cli.add_parser(subparsers)
     work_lane_cli.add_work_parser(subparsers)
     screen_cli.add_parser(subparsers)
+    from . import reliability_score
+    reliability_score.add_parser(subparsers)
     external_work_cli.add_parser(subparsers)
     prompt_parser = subparsers.add_parser("prompt")
     prompt_sub = prompt_parser.add_subparsers(dest="prompt_command", required=True)

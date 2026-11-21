@@ -105,7 +105,7 @@ def test_disconnected_native_failure_notifies_parent_durably(monkeypatch, caplog
             ctl=SpawnCtl(store,sessions,tmux=tmux,submission_proof=Proof())
             ctl._resolve_launch=_resolved_native_codex
             await sessions.open(HOST,'parent',objective='Receive child failure')
-            task=asyncio.create_task(ctl.spawn({'schema':'SpawnRequestV2','provider':'codex','model':'gpt-6-sol',
+            task=asyncio.create_task(ctl.spawn({'schema':'SpawnRequestV2','provider':'codex','model':'gpt-6.2-sol',
                 'effort':'high','initial_prompt':TEXT,'session_name':'failed','request_id':'failure-key',
                 'parent_stream_id':HOST+':parent','objective':'Probe disconnected native failure'},HOST))
             await task

@@ -732,7 +732,7 @@ class AssistantLaneRulings:
         from spawnctl import front_desk_commission, front_desk_exemption
         from store import effective_assignment, normalize_spec_ids
         from sessions import VerbError
-        from _shared.spawn_profiles import SpawnProfileError, resolve_spawn, validate_v2
+        from _shared.spawn_profiles import SpawnProfileError, require_spawnable, resolve_spawn, validate_v2
         composite = self._composite()
         auth = msg.get("_auth_context") or {}
         key = str(msg.get("idempotency_key") or msg.get("request_id") or "")
@@ -817,8 +817,10 @@ class AssistantLaneRulings:
                     else:
                         resolve_spawn(provider=provider, model=message.get("model"), effort=message.get("effort"),
                                       host=target.split(":", 1)[0], legacy=True)
+                    if not message.get("handoff") and provider and message.get("model"):
+                        require_spawnable(provider, message["model"])
                 except SpawnProfileError as exc:
-                    field = {"spawn_model_unsupported": "model", "spawn_provider_unavailable": "provider",
+                    field = {"spawn_model_unsupported": "model", "spawn_model_retired": "model", "spawn_provider_unavailable": "provider",
                              "spawn_effort_unsupported": "effort", "spawn_pair_unsupported": "effort",
                              "spawn_schema_unsupported": "schema", "spawn_profile_unknown": "spawn_profile",
                              "spawn_catalog_version_conflict": "catalog_version"}.get(exc.code, "provider_tuple")

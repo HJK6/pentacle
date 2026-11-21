@@ -68,7 +68,8 @@ class FakeSpawnctl:
         self.outcomes: list[dict] = []
         self.reservations: list[dict] = []
 
-    async def spawn(self, msg, host):
+    async def spawn(self, msg, host, *, continuation=None):
+        assert continuation == (msg["provider"], msg["model"], msg["effort"])
         self.sent.append(dict(msg))
         key = msg["idempotency_key"]
         generation = ar.service_session_generation(msg)

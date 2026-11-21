@@ -93,7 +93,12 @@ def test_local_visibility_round_trips_through_client_projections(monkeypatch, tm
             result = reply(client)
             visible = expected & {'claude', 'codex'} if client == 'pentacle-mobile' else expected
             assert set(result['available_models']) == visible
-            assert result['models'] == spawn_profiles.MODELS
+            known = spawn_profiles.MODELS
+            public = {provider: dict(models) for provider, models in known.items()}
+            for retired in ('gpt-6.1-sol', 'gpt-6-astra'):
+                assert retired in known['codex']  # existing seat identities survive
+                public['codex'].pop(retired)
+            assert result['models'] == public
             assert set(result['profiles']['desktop_manual']) == set(policy['providers'])
     finally:
         spawn_profiles.load_spawn_config.cache_clear()

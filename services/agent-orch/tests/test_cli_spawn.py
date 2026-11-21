@@ -360,12 +360,12 @@ def test_spawn_payload_includes_codex_model_and_effort(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(cli, "fetch_snapshot", lambda *_args, **_kwargs: {"agent_orch_daemon_capabilities": {"flags": ["codex_model_override"]}})
     args = _spawn_args(tmp_path)
     args.provider = "codex"
-    args.model = "gpt-5.6-sol"
+    args.model = "gpt-6.2-sol"
     args.effort = "high"
 
     assert cli.spawn(args) == 0
     _printed_json(capsys)
-    assert captured["payload"]["model"] == "gpt-5.6-sol"
+    assert captured["payload"]["model"] == "gpt-6.2-sol"
     assert captured["payload"]["effort"] == "high"
 
 
@@ -377,11 +377,11 @@ def test_codex_model_override_is_resolved_client_side(monkeypatch, tmp_path: Pat
         return {"type": "spawn.ok", "session": {"stream_id": "hostc:codex-child"}}
     monkeypatch.setattr(cli, "spawn_once", fake_send)
     args = _spawn_args(tmp_path)
-    args.model = "gpt-5.6-sol"
+    args.model = "gpt-6.2-sol"
 
     assert cli.spawn(args) == 0
     capsys.readouterr()
-    assert captured["payload"]["model"] == "gpt-5.6-sol"
+    assert captured["payload"]["model"] == "gpt-6.2-sol"
 
 
 def test_spawn_rejects_model_for_unsupported_provider(tmp_path: Path, capsys) -> None:
