@@ -8,7 +8,7 @@ c=ro('sessions'); keys=['event_push.target_sha','event_push.target_sha.previous'
 pin={k:raw.get(k) for k in keys[:2]}; now=time.time()
 hosts=[]
 for host in args.satellite:
- v=json.loads(raw.get('event_push.runtime.'+host,'{}')); hosts.append(dict(host=host,**{k:v.get(k) for k in ['sha','pid','observed_at','observed_at_epoch']},age_seconds=now-v.get('observed_at_epoch',0),version_admitted=v.get('sha')==pin[keys[0]]))
+ v=json.loads(raw.get('event_push.runtime.'+host,'{}')); hosts.append(dict(host=host,**{k:v.get(k) for k in ['sha','pid','admitted','observed_at','observed_at_epoch','last_seen_at_epoch']},age_seconds=now-v.get('observed_at_epoch',0),version_admitted=v.get('sha')==pin[keys[0]]))
 n=ro('notifications');rows=n.execute("select notification_id,state,error_context,firing_count,last_fired_at from notifications where json_extract(error_context,'$.code')='pin_drift' order by notification_id").fetchall(); n.close()
 facts=[]
 for nid,state,ctx,count,last in rows:
