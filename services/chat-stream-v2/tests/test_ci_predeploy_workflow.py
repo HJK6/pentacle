@@ -21,7 +21,7 @@ PROFILE = CONFIG['profiles']['pentacle']
 def _step():
     workflow = yaml.safe_load(PREDEPLOY.read_text())
     expected = {'frontend': {'npm-test'}, 'web': {'web-gate'},
-                'daemon-unit': {'v2-unit-ci-shard', 'v2-quarantined'}, 'daemon': {'v2-smoke'},
+                'daemon-unit': {'v2-unit-ci-shard'}, 'daemon': {'v2-smoke'},
                 'contracts': {'cli-pytest', 'shared-pytest'}}
     jobs = workflow['jobs']
     assert set(jobs) == set(expected) | {'checks'}
@@ -46,7 +46,7 @@ def _step():
 
 def _invocations(step):
     commands = [shlex.split(line) for line in step['run'].splitlines() if 'scripts/gate_env.py' in line]
-    assert len(commands) == 5
+    assert len(commands) == 4
     assert all(argv[:3] == ['python3', 'scripts/gate_env.py', 'run'] for argv in commands)
     assert all(argv[argv.index('--profile') + 1] == 'pentacle' for argv in commands)
     return {argv[argv.index('--target') + 1]: argv for argv in commands}
@@ -73,24 +73,27 @@ def _trace(name, argv, tmp_path, *, scratch=None, workspace=None, evidence=None)
 def test_predeploy_runs_only_the_v2_gate_and_agent_orch_suite(tmp_path):
     _, step = _step()
     invocations = _invocations(step)
-    assert set(invocations) == {'v2-unit-ci-shard', 'v2-quarantined', 'v2-smoke', 'cli-pytest', 'shared-pytest'}
+    assert set(invocations) == {'v2-unit-ci-shard', 'v2-smoke', 'cli-pytest', 'shared-pytest'}
     shard, command, _, shard_env, _ = _trace('v2-unit-ci-shard', invocations['v2-unit-ci-shard'], tmp_path)
     assert shard['kind'] == 'run_gate' and shard['gate'] == 'unit' and shard['shardable'] is True
     assert command[-4:] == ['--shard-index', '0', '--shard-count', '6']
     assert '--unit-workers' not in command
     assert not any('SHARD' in key or key == 'PYTEST_ADDOPTS' for key in shard_env)
-    advisory, command, _, advisory_env, _ = _trace('v2-quarantined', invocations['v2-quarantined'], tmp_path)
-    assert advisory['kind'] == 'pytest_files'
-    assert advisory_env['PYTEST_ADDOPTS'] == '-m quarantined'
-    assert command[3:5] == ['tests/test_store_call_diag.py', 'tests/test_tmux_observation_delimiter.py']
-    purpose = invocations['v2-quarantined'].index('--purpose')
-    assert invocations['v2-quarantined'][purpose + 1] == 'diagnostic'
-    for name, service in [('cli-pytest','agent-orch'), ('shared-pytest','_shared')]:
+    smoke, command, _, smoke_env, _ = _trace('v2-smoke', invocations['v2-smoke'], tmp_path)
+    assert smoke['kind'] == 'run_gate' and smoke['gate'] == 'smoke'
+    assert str(ROOT / 'services/chat-stream-v2/tools/run_gate.py') in command
+    assert 'PYTEST_ADDOPTS' not in smoke_env
+    for name in ('v2-unit-ci-shard', 'v2-smoke'):
+        argv = invocations[name]
+        assert argv[argv.index('--purpose') + 1] == 'acceptance'
+    for name, service, suite in [('cli-pytest','agent-orch','cli'), ('shared-pytest','_shared','shared')]:
         argv = invocations[name]
         assert argv[argv.index('--select')+1] == 'tests'
         target, command, result, _, _ = _trace(name, argv, tmp_path)
         assert target['select']['root'] == 'services/' + service
-        assert command[1:4] == ['-m','pytest','tests']
+        assert command[1] == str(ROOT / 'scripts/admission_pytest.py')
+        assert command[command.index('--suite') + 1] == suite
+        assert command[command.index('--') + 1:] == ['tests']
         assert result['cwd'] == ROOT / 'services' / service
     workflow = PREDEPLOY.read_text()
     assert 'services/chat-stream/tests' not in workflow
@@ -143,8 +146,9 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
         success_patterns.extend(selected)
     success_included = lambda p: any(fnmatch.fnmatch(str(p), pattern) for pattern in success_patterns)
     for required in ('daemon-unit/daemon/gate/v2-unit-evidence.json', 'daemon-unit/daemon/gate/unit.junit.xml',
-                     'daemon-unit/daemon/gate/unit.progress.jsonl', 'daemon/smoke/gate/v2-smoke-evidence.json',
-                     'daemon/smoke/gate/smoke.junit.xml', 'daemon/smoke/gate/smoke.progress.jsonl'):
+                     'daemon-unit/daemon/gate/unit.progress.jsonl', 'daemon-unit/daemon/gate/unit-advisory.junit.xml',
+                     'daemon/smoke/gate/v2-smoke-evidence.json', 'daemon/smoke/gate/smoke.junit.xml',
+                     'daemon/smoke/gate/smoke.progress.jsonl'):
         assert success_included(root / required), required
     for required in ['daemon/daemon/gate/unit.log','daemon-unit/daemon/gate/unit.junit.xml',
                      'daemon/daemon/attempts/a/0001-started.json','daemon/attempt-manifest.json','web/web/gate/web/verdict.json',

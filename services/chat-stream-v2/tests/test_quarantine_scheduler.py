@@ -32,16 +32,24 @@ def test_advisory_receipt_requires_each_exact_case_to_execute(tmp_path):
     assert not _advisory_observed(receipt, expected)
 
 
-def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, monkeypatch):
+@pytest.mark.parametrize('tier', ['unit', 'smoke'])
+@pytest.mark.parametrize('blocking_failure', [False, True])
+def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, monkeypatch, tier, blocking_failure):
     monkeypatch.delenv('TMUX', raising=False)
     scripts = tmp_path/'scripts'
     scripts.mkdir()
-    case = 'tests/test_a.py::test_flaky'
-    digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+    prefix = 'tests/smoke' if tier == 'smoke' else 'tests'
+    classname = prefix.replace('/', '.')
+    case = f'{prefix}/test_a.py::test_flaky'
+    held = f'{prefix}/test_b.py::test_new'
+
+    def digest(value):
+        return hashlib.sha256(value.encode()).hexdigest()
+
     (scripts/'quarantine.json').write_text(json.dumps({
         'version': 1, 'nonblocking_tests': [case],
         'history': {digest(case): {
-            'activation': 'fixture', 'file': digest('tests/test_a.py'), 'parents': [],
+            'activation': 'fixture', 'file': digest(f'{prefix}/test_a.py'), 'parents': [],
         }},
     }))
     git = ['git', '-C', str(tmp_path)]
@@ -51,22 +59,31 @@ def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, mo
                     'commit', '-qm', 'Accepted quarantine'], check=True)
     subprocess.run([*git, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], check=True)
     monkeypatch.setattr(run_gate, 'REPO_ROOT', tmp_path)
-    monkeypatch.setattr(run_gate, '_classify', lambda **_: (None, []))
-    monkeypatch.setattr(run_gate, 'summarize_progress', lambda _: {})
+    monkeypatch.setattr(run_gate, 'summarize_progress', lambda _: {'present': True, 'complete': True})
     monkeypatch.setattr(run_gate, '_TERMINATION_REQUESTED', False)
+    monkeypatch.setattr(run_gate.shutil, 'which', lambda _: '/fixture/tmux')
+    monkeypatch.setattr(run_gate, '_preflight', lambda *_: (0, False))
+
     def fake(command, *, env, log_path, timeout, advisory=False):
         junit = next(x.split('=', 1)[1] for x in command if x.startswith('--junitxml='))
         if advisory:
             Path(junit).write_text('<testsuite tests="2" failures="1" errors="0" skipped="0">'
-                                   '<testcase classname="tests.test_a" name="test_flaky"><failure/></testcase>'
-                                   '<testcase classname="tests.test_b" name="test_new"/></testsuite>')
+                                   f'<testcase classname="{classname}.test_a" name="test_flaky"><failure/></testcase>'
+                                   f'<testcase classname="{classname}.test_b" name="test_new"/></testsuite>')
             return 1, False
-        Path(junit).write_text('<testsuite tests="1" failures="0" errors="0" skipped="0"/>')
+        Path(junit).write_text(f'<testsuite tests="1" failures="{int(blocking_failure)}" errors="0" skipped="0"/>')
         manifest = next(x.split('=', 1)[1] for x in command if x.startswith('--admission-manifest='))
-        Path(manifest).write_text(json.dumps({'complete': True, 'held': [{'id': 'tests/test_b.py::test_new'}]}))
-        return 0, False
+        Path(manifest).write_text(json.dumps({'complete': True, 'held': [{'id': held}]}))
+        return int(blocking_failure), False
+
     monkeypatch.setattr(run_gate, '_run_process', fake)
-    result = run_gate._run_tier('unit', tmp_path, 10, basetemp=tmp_path/'temp', manifest=tmp_path/'owner')
-    assert result['passed'] is True
-    assert result['advisory']['returncode'] == 1
-    assert result['advisory']['counts']['tests'] == 2
+    result = run_gate._run_tier(tier, tmp_path, 10, basetemp=tmp_path/'temp', manifest=tmp_path/'owner')
+    assert result['passed'] is not blocking_failure
+    assert result['reason'] == ('test_failures' if blocking_failure else None)
+    advisory = result['advisory']
+    assert advisory['command'][1:7] == [
+        '-m', 'pytest', f'{prefix}/test_a.py', f'{prefix}/test_b.py', '-m', 'quarantined or admission_hold',
+    ]
+    assert Path(advisory['junit']).name == f'{tier}-advisory.junit.xml'
+    assert advisory['returncode'] == 1
+    assert advisory['counts']['tests'] == 2
