@@ -4,7 +4,7 @@ function isolated(run) { return async ctx => { try { await run(ctx); } finally {
 async function visit(ctx, width = 1440) {
   await ctx.session.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
   await ctx.session.send('Page.navigate', { url: ctx.url + 'next/' });
-  await ctx.session.waitFor("!!window.cc && !!window.PentacleChatStore && document.querySelectorAll('.rail-button').length === 4", { timeoutMs: ctx.timeoutMs });
+  await ctx.session.waitFor("!!window.cc && !!window.PentacleChatStore && document.querySelectorAll('.rail-button').length === 6", { timeoutMs: ctx.timeoutMs });
   await ctx.session.eval("document.documentElement.dataset.theme='dark'; localStorage.setItem('pentacle.next.theme','dark'); true");
   await ctx.session.waitFor("window.cc.getChatStreamState().then(s => s.connected === true && (s.sessions || []).length > 0)", { timeoutMs: ctx.timeoutMs });
 }
@@ -12,8 +12,34 @@ async function homeRail(ctx) {
   const { session, report } = ctx;
   for (const width of [1440, 1010, 440]) {
     await visit(ctx, width);
-    const info = await session.eval(`({names:Array.from(document.querySelectorAll('.rail-button')).map(x=>x.getAttribute('aria-label')), text:document.querySelector('.rail').innerText, input:!!document.querySelector('.rail input'), overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth, assistant:document.querySelector('.pane .thread-inner').dataset.streamId, lit:document.querySelector('.rail .brand').classList.contains('on'), chatLit:document.querySelector('[aria-label=Chats]').classList.contains('on')})`);
-    report.ok(`rail has four icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(['Assistant Fixture','Chats','Limits and machines','Settings']) && !info.text.trim() && !info.input && !info.overflow && info.assistant === 'local:web-gate-assistant' && info.lit && !info.chatLit, info);
+    const expectedCount = await session.eval(`(async () => {
+      const reply = await window.cc.promptList({ open: true });
+      if (!reply?.ok || !Array.isArray(reply.questions)) throw new Error('home rail open-question read failed');
+      const open = reply.questions.filter(question => question.state === 'open');
+      if (open.some(question => !question.question_id)) throw new Error('open question has no ID');
+      return new Set(open.map(question => question.question_id)).size;
+    })()`);
+    const expectedLabel = expectedCount ? `Questions (${expectedCount})` : 'Questions';
+    const expectedNames = ['Assistant Fixture', 'Lanes', 'Chats', expectedLabel, 'Limits and machines', 'Settings'];
+    await session.waitFor(`document.querySelectorAll('.rail-button')[3]?.dataset.count === ${JSON.stringify(String(expectedCount))}`,
+      { timeoutMs: ctx.timeoutMs, label: `home rail hydrates the daemon's ${expectedCount} open questions at ${width}` });
+    const info = await session.eval(`(() => {
+      const rail = document.querySelector('.rail');
+      const buttons = [...rail.querySelectorAll('.rail-button')];
+      return {
+        names: buttons.map(button => button.getAttribute('aria-label')),
+        counts: buttons.filter(button => button.hasAttribute('data-count')).map(button => [button.getAttribute('aria-label'), button.dataset.count]),
+        text: rail.innerText, input: !!rail.querySelector('input'),
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        assistant: document.querySelector('.pane .thread-inner').dataset.streamId,
+        lit: rail.querySelector('.brand').classList.contains('on'),
+        chatLit: rail.querySelector('[aria-label=Chats]').classList.contains('on'),
+      };
+    })()`);
+    report.ok(`rail has six icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(expectedNames)
+      && JSON.stringify(info.counts) === JSON.stringify([[expectedLabel, String(expectedCount)]])
+      && !info.text.trim() && !info.input && !info.overflow && info.assistant === 'local:web-gate-assistant' && info.lit && !info.chatLit,
+      { ...info, expectedCount });
     if (width === 1440) await session.screenshot(path.join(report.dir, 'next-home.png'));
     if (width === 440) await session.screenshot(path.join(report.dir, 'next-phone-home.png'));
   }
@@ -212,6 +238,62 @@ async function narrowPhone(ctx) {
   await session.send('Emulation.clearDeviceMetricsOverride');
 }
 module.exports.narrowPhone=isolated(narrowPhone);
+async function lanesQuestions(ctx) {
+  const { session, report } = ctx;
+  const fixture = require('../../../pentacle-chat-core/tests/fixtures/work-lanes-inventory.json').goals_v1;
+  const lane = fixture.inventory_frame.lanes[0];
+  const member = { ...fixture.show_projection.members[0], title:'Fixture release spec' };
+  lane.members[0].title = member.title;
+  const notice = { notification_id:'next-fixture-notice', producer:'agent_question.v1', state:'open', title:'Fixture decision', body:'Choose an answer', actions:[{kind:'yes_no'}], question:{question_id:'next-fixture-question',state:'open',producer_stream_id:'local:web-gate-1',spec_id:member.spec_id,response_mode:'single_choice',options:[{label:'Keep',value:'keep'},{label:'Change',value:'change'}]} };
+  const capture = await session.send('Page.addScriptToEvaluateOnNewDocument', { source:`(() => { const Native=window.WebSocket; window.WebSocket=class extends Native { constructor(...args) { super(...args); window.__fixtureSocket=this; } }; })()` });
+  try {
+    await visit(ctx);
+    await session.eval(`(() => {
+      const lane=${JSON.stringify(lane)}, projection=${JSON.stringify(fixture.show_projection)}, member=${JSON.stringify(member)};
+      window.cc.workLanesShow=async (_lane, options={}) => ({type:'work_lanes.show.ok',lane:{lane_id:lane.lane_id,members:[member.spec_id]},projection:{...projection,lane_id:lane.lane_id,members:[member],members_total:1,members_next:null,...(options.goalId?{selected_goal:lane.goals.find(g=>g.goal_id===options.goalId)}:{})},members:[member],members_total:1,members_next:null,detail_revision:lane.detail_revision});
+      window.__fixtureAnswers=[];
+      window.cc.notificationResolve=async (...args)=>{window.__fixtureAnswers.push(args);return {ok:true};};
+      window.cc.promptList=async()=>({ok:true,questions:window.__fixtureAnswers.length?[{question_id:'next-fixture-question',state:'answered',answered_at:'2026-11-21T00:00:00Z',answer:{selections:['keep']},envelope:{spec_id:member.spec_id,options:[{label:'Keep',value:'keep'}]}}]:[]});
+      const emit=frame=>window.__fixtureSocket.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({event:'chat-stream:frame',args:[frame]})}));
+      emit(${JSON.stringify(fixture.inventory_frame)}); emit({type:'notification',notification:${JSON.stringify(notice)}}); return true;
+    })()`);
+    await session.waitFor("document.querySelector('.next-lanes-row-title')?.textContent==='Mobile release' && document.querySelector('[data-count=\"1\"]')", { timeoutMs:ctx.timeoutMs });
+    report.ok('an unversioned lane push reaches the card and one question reaches the rail', await session.eval("document.querySelector('.next-lanes-row-title').textContent==='Mobile release' && document.querySelector('[data-count=\"1\"]')!==null"));
+    report.ok('desktop lanes card keeps the mock width', await session.eval("Math.abs(document.querySelector('.lanes-card').getBoundingClientRect().width-344)<2"));
+    await session.screenshot(path.join(report.dir,'next-lanes-fixture.png'));
+    await session.click('.next-lanes-row-open'); await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level==='lane' && !!document.querySelector('.next-lanes-stop-open')", {timeoutMs:ctx.timeoutMs});
+    await session.screenshot(path.join(report.dir,'next-lane-fixture.png'));
+    await session.click('.next-lanes-stop-open'); await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level==='goal'", {timeoutMs:ctx.timeoutMs});
+    await session.screenshot(path.join(report.dir,'next-goal-fixture.png'));
+    await session.click('.next-lanes-back'); await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level==='lane'", {timeoutMs:ctx.timeoutMs});
+    await session.click('.next-lanes-back'); await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level==='all'", {timeoutMs:ctx.timeoutMs});
+    report.ok('back navigation returns from goal to lane and all lanes', true);
+    await session.click('.next-lanes-close');
+    await session.click('[aria-label="Questions (1)"]');
+    report.ok('question list identifies its lane and goal', await session.eval("document.querySelector('.next-question-heading-link')?.textContent.includes('Mobile release') && document.querySelector('.next-question-heading-link')?.textContent.includes('Finish fixture 0')"));
+    await session.screenshot(path.join(report.dir,'next-questions-fixture.png'));
+    await session.click('.next-question-heading-link');
+    await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level==='spec'", { timeoutMs:ctx.timeoutMs });
+    report.ok('question heading reopens lanes at its spec and question card', await session.eval("!document.querySelector('.lanes-card').hidden && !!document.querySelector('.next-question-card')"));
+    report.ok('spec back control names its goal', await session.eval("document.querySelector('.next-lanes-back')?.textContent.includes('Finish fixture 0')"));
+    await session.screenshot(path.join(report.dir,'next-spec-fixture.png'));
+    await session.send('Emulation.setDeviceMetricsOverride', {width:440,height:956,deviceScaleFactor:1,mobile:false});
+    await session.waitFor("window.innerWidth===440 && document.querySelector('.pane').hidden", {timeoutMs:ctx.timeoutMs});
+    report.ok('phone spec occupies the stage without horizontal overflow', await session.eval("!document.querySelector('.lanes-card').hidden && document.querySelector('.pane').hidden && document.documentElement.scrollWidth===document.documentElement.clientWidth"));
+    await session.screenshot(path.join(report.dir,'next-phone-spec-fixture.png'));
+    await session.click('.next-question-card .next-question-option');
+    await session.click('.next-question-card .next-question-send');
+    await session.waitFor("document.querySelector('.next-question-card')?.textContent.includes('Answer sent')", {timeoutMs:ctx.timeoutMs});
+    report.ok('one answer is sent and the receipt lowers the rail count', await session.eval("window.__fixtureAnswers.length===1 && window.__fixtureAnswers[0][2].selections[0]==='keep' && document.querySelector('[aria-label=Questions]')?.dataset.count==='0'"));
+    await session.screenshot(path.join(report.dir,'next-answered-fixture.png'));
+    await session.waitFor("document.querySelector('.next-lanes-scroll')?.textContent.includes('You said') && document.querySelector('.next-lanes-scroll')?.textContent.includes('Keep')", {timeoutMs:ctx.timeoutMs});
+    report.ok('spec reads the stored answer back', await session.eval("document.querySelector('.next-lanes-scroll').textContent.includes('You said')"));
+    await session.click('.next-lanes-back'); await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level==='goal'", {timeoutMs:ctx.timeoutMs});
+    await session.click('.next-lanes-member-title'); await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level==='spec' && document.querySelector('.next-lanes-scroll').textContent.includes('You said')", {timeoutMs:ctx.timeoutMs});
+    report.ok('returning to the spec retains its stored answer', await session.eval("document.querySelector('.next-lanes-scroll').textContent.includes('Keep') && window.__fixtureAnswers.length===1"));
+  } finally { await session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier:capture.identifier }); }
+}
+module.exports.lanesQuestions=isolated(lanesQuestions);
 async function scrollAndFocus(ctx) {
   const {session,report}=ctx;
   for (const width of [1440,440]) {

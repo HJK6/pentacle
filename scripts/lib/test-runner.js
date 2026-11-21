@@ -186,7 +186,7 @@ function discover(repoRoot, patterns) {
   }).sort();
 }
 
-function groupMembers(pgid) {
+function groupMembers(pgid, timeoutMs = 250) {
   if (process.platform === 'linux') {
     const members = [];
     for (const name of fs.readdirSync('/proc')) {
@@ -203,7 +203,7 @@ function groupMembers(pgid) {
     // Exact owned group filter. Bounded and injectable for unit tests; never a
     // process-name match or an SSH/daemon query.
     let output;
-    try { output = execFileSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: 250, maxBuffer: 4 * 1024 * 1024 }); }
+    try { output = execFileSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: Math.min(250, timeoutMs), maxBuffer: 4 * 1024 * 1024 }); }
     catch (error) { throw new Error(`owned process inspection unavailable (${error.code || error.name})`); }
     const lines = output.trim().split('\n').filter(line => line.trim());
     if (!output.trim()) throw new Error('owned process inspection unavailable (incomplete ps output)');

@@ -1,4 +1,5 @@
 const { bindComposerMic, createBrowserRecorder, uploadVoiceBlob } = require('./web_voice');
+const { durableQuestionNotificationId, durableQuestionOptionBModel, mergeDurableQuestionNotification } = require('./durable_question_model');
 const { createQuestionVoiceBar } = require('./question_voice_bar');
 /* global Terminal, FitAddon */
 
@@ -604,9 +605,6 @@ function notificationRecordFromPayload(payload) {
   return payload.producer || payload.question ? payload : null;
 }
 
-function durableQuestionNotificationId(notification) {
-  return String(notification?.notification_id || notification?.id || '').trim();
-}
 
 function durableQuestionStreamId(notification) {
   return String(
@@ -681,10 +679,8 @@ function indexDurableQuestionNotification(notification) {
   const id = durableQuestionNotificationId(notification);
   if (!id) return false;
   const previous = state.durableQuestionNotificationsById[id];
-  const merged = { ...previous, ...notification, question: { ...previous?.question, ...notification.question } };
-  if (merged.producer !== 'agent_question.v1' || !durableQuestionStreamId(merged)) return false;
-  // A stale open inventory cannot resurrect an already resolved identity.
-  if (previous && !isOpenDurableQuestionNotification(previous) && isOpenDurableQuestionNotification(merged)) return false;
+  const merged = mergeDurableQuestionNotification(previous, notification);
+  if (!merged) return false;
   state.durableQuestionNotificationsById[id] = merged;
   state.questionMutationGen = (state.questionMutationGen || 0) + 1;
   (state.questionMutations ||= new Map()).set(id, state.questionMutationGen);
@@ -899,32 +895,6 @@ function hydrateOpenDurableQuestions() {
   }).catch(() => {});
 }
 
-function durableQuestionOptionBModel(notification) {
-  const question = notification?.question || {};
-  let options = Array.isArray(question.options) ? question.options : [];
-  if (!options.length && question.response_mode === 'ack') {
-    options = [{ label: 'Acknowledge', value: 'ack' }];
-  }
-  const allowCustom = question.allow_custom === true || question.allowCustom === true;
-  return {
-    ...question,
-    free_text: question.response_mode === 'free_text' || allowCustom,
-    _unavailable: Array.isArray(question.questions) && question.questions.length > 0,
-    question_key: question.question_id || durableQuestionNotificationId(notification),
-    header: notification?.title || 'Question',
-    prompt: notification?.body || '',
-    multiSelect: question.response_mode === 'multi_choice',
-    customText: allowCustom && question.response_mode !== 'free_text',
-    options: options.map((opt, index) => ({
-      index: index + 1,
-      label: opt?.label || String(opt?.value ?? `Option ${index + 1}`),
-      value: Object.prototype.hasOwnProperty.call(opt || {}, 'value')
-        ? opt.value
-        : (opt?.label || String(index + 1)),
-      description: typeof opt?.description === 'string' ? opt.description : undefined,
-    })),
-  };
-}
 
 function questionModelSignature(model) {
   // Hydration metadata (answer/state/timestamps) does not change an open form.

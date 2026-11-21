@@ -403,6 +403,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
 
     promptList: (args) => call('chat-stream:prompt-list', args || null),
     notificationList: (args) => call('chat-stream:notification-list', args || null),
+    workLanesShow: (laneId, options) => call('chat-stream:work-lanes-show', laneId, options || {}),
     notificationResolve: (notificationId, actionKind, options) => call('chat-stream:notification-resolve', {
       notificationId,
       actionKind,
