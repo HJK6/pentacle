@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -30,14 +31,39 @@ function quarantineByFile(repoRoot, accepted) {
   return result;
 }
 
-function stopOwnedTmux(home, env) {
+function socketHasNoListener(socket) {
+  return new Promise(resolve => {
+    const connection = net.createConnection({path: socket});
+    const finish = stopped => {
+      clearTimeout(timer);
+      connection.destroy();
+      resolve(stopped);
+    };
+    const timer = setTimeout(() => finish(false), 500);
+    connection.once('connect', () => finish(false));
+    connection.once('error', error => finish(['ECONNREFUSED', 'ENOENT'].includes(error.code)));
+  });
+}
+
+async function stopOwnedTmux(home, env) {
   if (typeof process.getuid !== 'function') return;
-  const socketDir = path.join(home, `tmux-${process.getuid()}`);
-  if (!fs.existsSync(socketDir)) return;
+  const uid = process.getuid();
+  const socketDir = path.join(home, `tmux-${uid}`);
+  const directory = fs.lstatSync(socketDir, {throwIfNoEntry: false});
+  if (!directory) return;
+  if (!directory.isDirectory() || directory.uid !== uid) throw new Error('unexpected private tmux directory');
   for (const name of fs.readdirSync(socketDir)) {
     const socket = path.join(socketDir, name);
-    if (!fs.lstatSync(socket).isSocket()) throw new Error('unexpected private tmux entry');
-    execFileSync('tmux', ['-S', socket, 'kill-server'], { env, stdio: 'ignore', timeout: 5000 });
+    const entry = fs.lstatSync(socket, {throwIfNoEntry: false});
+    if (!entry) continue;
+    if (!entry.isSocket() || entry.uid !== uid) throw new Error('unexpected private tmux entry');
+    try {
+      execFileSync('tmux', ['-S', socket, 'kill-server'], {env, stdio: 'ignore', timeout: 5000});
+    } catch (error) {
+      if (!await socketHasNoListener(socket)) throw error;
+      const current = fs.lstatSync(socket, {throwIfNoEntry: false});
+      if (current && (current.ino !== entry.ino || current.dev !== entry.dev)) throw error;
+    }
   }
 }
 
@@ -447,7 +473,7 @@ async function run(repoRoot, options, injected = {}) {
     process.removeListener('SIGINT', onINT); process.removeListener('SIGTERM', onTERM);
     let tmuxClean = true;
     if (testHome && env) {
-      try { stopOwnedTmux(testHome, env); }
+      try { await stopOwnedTmux(testHome, env); }
       catch (error) { tmuxClean = false; summary.directory_cleanup_errors.push({ kind: 'tmux', error: error.code || error.name }); }
     }
     for (const [kind, directory] of [['test_home', testHome], ['bundle_output', outDir]]) {

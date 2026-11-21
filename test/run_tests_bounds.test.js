@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync, spawn } = require('node:child_process');
@@ -253,6 +254,53 @@ test('blocking JUnit rejects a sibling that disappears or is skipped after disco
       assert.equal(result.exit_code, 1, outcome);
     }
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
+for (const live of [false, true]) test(`private tmux cleanup ${live ? 'preserves a live socket on failure' : 'removes a proved dead socket'}`, {
+  skip: typeof process.getuid !== 'function' && 'requires Unix sockets',
+}, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-tmux-cleanup-'));
+  const home = fs.mkdtempSync('/tmp/pentacle-tmux-cleanup-home-');
+  const originalPath = process.env.PATH;
+  const file = 'test/probe.js';
+  let listener;
+  try {
+    const socketDir = path.join(home, `tmux-${process.getuid()}`);
+    const socket = path.join(socketDir, 'default');
+    fs.mkdirSync(socketDir);
+    fs.mkdirSync(path.join(dir, 'test'));
+    fs.mkdirSync(path.join(dir, 'bin'));
+    fs.writeFileSync(path.join(dir, file), "require('node:test')('blocking', () => {});\n");
+    fs.writeFileSync(path.join(dir, 'bin/tmux'), '#!/bin/sh\nexit 1\n', {mode: 0o755});
+    if (live) {
+      listener = net.createServer(connection => connection.destroy());
+      await new Promise((resolve, reject) => {
+        listener.once('error', reject);
+        listener.listen(socket, resolve);
+      });
+    } else {
+      const python = process.env.PENTACLE_PYTHON || 'python3';
+      const bind = spawnSync(python, ['-c',
+        'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()', socket]);
+      assert.equal(bind.status, 0, String(bind.stderr));
+    }
+    process.env.PATH = path.join(dir, 'bin') + path.delimiter + originalPath;
+    const result = await runner.run(dir, runner.parseArgs([file]), {
+      spawn: spawnClean, stdout: quiet, stderr: quiet,
+      admissionQuery: blockingFixtures,
+      makeTemporaryDirectory(prefix) {
+        return prefix.startsWith('/tmp/pentacle-test-home-') ? home : fs.mkdtempSync(prefix);
+      },
+    });
+    assert.equal(result.files[0].status, 'pass');
+    assert.equal(result.exit_code, Number(live));
+    assert.equal(fs.existsSync(home), live);
+  } finally {
+    process.env.PATH = originalPath;
+    if (listener?.listening) await new Promise(resolve => listener.close(resolve));
+    fs.rmSync(home, {recursive: true, force: true});
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
 });
 
 test('Darwin group inspector rejects an incomplete row before claiming an empty group', () => {
