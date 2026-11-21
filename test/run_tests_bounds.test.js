@@ -11,6 +11,11 @@ const root = path.resolve(__dirname, '..');
 const fixture = name => `test/fixtures/root_runner/${name}`;
 const quiet = { write() {} };
 const blockingFixtures = (_root, files) => ({complete: true, files: Object.fromEntries(files.map(file => [file, {state: 'blocking'}]))});
+const spawnClean = (command, args, config) => {
+  const env = {...config.env};
+  delete env.NODE_TEST_CONTEXT;
+  return spawn(command, args, {...config, env});
+};
 const quarantine = (tests, ancestry = {}) => ({version: 1, nonblocking_tests: tests,
   history: Object.fromEntries(tests.map(id => [require('node:crypto').createHash('sha256').update(id).digest('hex'),
     {activation: 'test', file: require('node:crypto').createHash('sha256').update(id.split('::')[0]).digest('hex'), parents: ancestry[id] || []}]))});
@@ -24,7 +29,7 @@ test('quarantine inventory uses exact escaped names and rejects malformed data',
       'test/one.test.js::name with [literal] chars', 'tests/test_a.py::test_a',
     ])));
     const names = runner.quarantineByFile(dir).get('test/one.test.js');
-    assert.deepEqual(names, [{name: 'name with [literal] chars', parents: []}]);
+    assert.deepEqual(names, [{name: 'name with [literal] chars', parents: [], activation: 'test'}]);
     fs.writeFileSync(inventory, '{invalid');
     assert.throws(() => runner.quarantineByFile(dir));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -143,6 +148,102 @@ test('nested quarantine runs the exact case advisory and keeps sibling blocking'
     assert.equal(blocking.absent, true);
     assert.deepEqual(blocking.observed, ['other child', 'parent sibling']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the live JavaScript quarantine seed is unique and only it is removed from blocking JUnit', {
+  skip: spawnSync('tmux', ['-V']).status !== 0 && 'tmux is not installed',
+}, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-seed-'));
+  try {
+    const file = 'test/web_server.test.js';
+    const id = file + '::two concurrent connections keep their local tmux sessions isolated';
+    // Keep this private socket live until the runner owns its teardown.
+    // Otherwise tmux can leave a dead socket after the last web case exits.
+    function spawnWithTmux(command, args, config) {
+      const owned = spawnSync('tmux', ['has-session', '-t', '=quarantine-seed-owner'], {env: config.env});
+      if (owned.status !== 0) {
+        const started = spawnSync('tmux', ['new-session', '-d', '-s', 'quarantine-seed-owner'], {env: config.env});
+        assert.equal(started.status, 0, String(started.stderr));
+      }
+      return spawnClean(command, args, config);
+    }
+    const result = await runner.run(root, runner.parseArgs(['--summary-path', path.join(dir, 'summary.json'), file]), {
+      spawn: spawnWithTmux, stdout: quiet, stderr: quiet,
+      admissionQuery: () => ({...blockingFixtures(root, [file]), quarantine: quarantine([id])}),
+      quarantineAlert() { assert.fail('the live seed must have a unique selector'); },
+    });
+    assert.equal(result.exit_code, 0, JSON.stringify({reason: result.files[0].reason,
+      runnerErrors: result.runner_errors, cleanupErrors: result.directory_cleanup_errors}));
+    const row = result.files[0];
+    const selected = id.split('::')[1];
+    assert.match(fs.readFileSync(row.discovery.junit, 'utf8'), new RegExp(selected));
+    assert.doesNotMatch(fs.readFileSync(row.junit, 'utf8'), new RegExp(selected));
+    assert.match(fs.readFileSync(row.advisory.junit, 'utf8'), new RegExp(selected));
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('a top-level and nested name collision keeps both cases blocking', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-collision-'));
+  try {
+    const file = 'test/cases.js';
+    const id = file + '::collision';
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.mkdirSync(path.join(dir, 'test'));
+    for (const name of ['admission_query.py', 'admission_fingerprint.py', 'admission_inputs.py', 'admission_policy.py'])
+      fs.copyFileSync(path.join(root, 'scripts', name), path.join(dir, 'scripts', name));
+    fs.writeFileSync(path.join(dir, file), `
+      const test = require('node:test');
+      test('collision', () => {});
+      test('parent', async t => {
+        await t.test('collision', () => { throw Error('collateral product failure'); });
+        await t.test('sibling', () => {});
+      });
+    `);
+    const alerts = [];
+    const result = await runner.run(dir, runner.parseArgs(['--summary-path', path.join(dir, 'summary.json'), file]), {
+      spawn: spawnClean, stdout: quiet, stderr: quiet,
+      admissionQuery: () => ({...blockingFixtures(dir, [file]), quarantine: quarantine([id])}),
+      quarantineAlert(testId, activation) { alerts.push([testId, activation]); return true; },
+    });
+    assert.deepEqual(alerts, [[id, 'test']]);
+    assert.equal(result.exit_code, 1);
+    const row = result.files[0];
+    assert.equal(row.execution.exitCode, 1);
+    assert.equal(row.advisory, undefined);
+    const junit = fs.readFileSync(row.junit, 'utf8');
+    assert.match(junit, /collateral product failure/);
+    assert.equal((junit.match(/<testcase name="collision"/g) || []).length, 2);
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('blocking JUnit rejects a sibling that disappears or is skipped after discovery', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-reconcile-'));
+  try {
+    const file = 'test/cases.js';
+    const id = file + '::quarantined';
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.mkdirSync(path.join(dir, 'test'));
+    for (const name of ['admission_query.py', 'admission_fingerprint.py', 'admission_inputs.py', 'admission_policy.py'])
+      fs.copyFileSync(path.join(root, 'scripts', name), path.join(dir, 'scripts', name));
+    for (const outcome of ['missing', 'skipped']) {
+      fs.writeFileSync(path.join(dir, file), `
+        const test = require('node:test');
+        const filtered = process.execArgv.some(arg => arg.startsWith('--test-skip-pattern='));
+        test('quarantined', () => {});
+        if (!filtered || ${JSON.stringify(outcome)} === 'skipped')
+          test('sibling', {skip: filtered}, () => {});
+        test('always runs', () => {});
+      `);
+      const result = await runner.run(dir, runner.parseArgs([file]), {
+        spawn: spawnClean, stdout: quiet, stderr: quiet,
+        admissionQuery: () => ({...blockingFixtures(dir, [file]), quarantine: quarantine([id])}),
+        quarantineAlert() { assert.fail('unfiltered discovery has unique cases'); },
+      });
+      assert.equal(result.files[0].execution.exitCode, 0, outcome);
+      assert.equal(result.files[0].reason, 'blocking_quarantine_incomplete', outcome);
+      assert.equal(result.exit_code, 1, outcome);
+    }
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
 test('Darwin group inspector rejects an incomplete row before claiming an empty group', () => {

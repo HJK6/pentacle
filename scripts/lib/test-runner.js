@@ -22,9 +22,10 @@ function quarantineByFile(repoRoot, accepted) {
     if (!file.startsWith('test/') || !/\.(js|ts)$/.test(file)) continue;
     if (!name) throw new Error('invalid quarantined test identity');
     const history = data.history?.[crypto.createHash('sha256').update(id).digest('hex')];
-    if (!history || !Array.isArray(history.parents) || history.parents.some(parent => typeof parent !== 'string' || !parent) ||
+    if (!history || typeof history.activation !== 'string' || !history.activation ||
+        !Array.isArray(history.parents) || history.parents.some(parent => typeof parent !== 'string' || !parent) ||
         (history.parents.length && !name.startsWith(history.parents.join(' ') + ' '))) throw new Error('invalid quarantined test ancestry');
-    result.set(file, [...(result.get(file) || []), {name, parents: history.parents}]);
+    result.set(file, [...(result.get(file) || []), {name, parents: history.parents, activation: history.activation}]);
   }
   return result;
 }
@@ -64,11 +65,44 @@ function verifyAdvisory(repoRoot, junit, expected, timeoutMs) {
 function verifyBlocking(repoRoot, junit, expected, timeoutMs) {
   try {
     const output = execFileSync(process.env.PENTACLE_PYTHON || 'python3', [path.join(repoRoot, 'scripts/admission_query.py')], {
-      input: JSON.stringify({operation: 'verify_junit', path: junit, expected}), encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
+      input: JSON.stringify({operation: 'reconcile_junit', path: junit, expected}), encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
     });
     const result = JSON.parse(output);
-    return result.complete === true && result.absent === true;
+    return result.complete === true && result.matches === true;
   } catch { return false; }
+}
+
+function quarantineAlert(id, activation, timeoutMs) {
+  const key = crypto.createHash('sha256').update(JSON.stringify([id, activation])).digest('hex');
+  const env = {...process.env};
+  for (const name of ['AGENT_ORCH_STREAM_TOKEN', 'AGENT_ORCH_STREAM_TOKEN_FILE', 'AGENT_ORCH_STREAM_ID',
+    'AGENT_ORCH_INTERNAL_LEADER_STREAM_ID', 'PENTACLE_STREAM_ID', 'TMUX', 'TMUX_PANE',
+    'PENTACLE_WORK_REPORT_READER_TOKEN']) delete env[name];
+  try {
+    execFileSync('agent-orch', ['notify', '--producer', 'flaky-test-quarantine', '--severity', 'warning',
+      '--title', 'JavaScript quarantine selector is ambiguous',
+      '--message', id + ' stays blocking. Discovery could not establish a unique skip for activation ' + activation + '.',
+      '--dedup-key', 'flaky-test-quarantine-selector:' + key],
+    {env, stdio: 'ignore', timeout: Math.min(30000, timeoutMs)});
+    return true;
+  } catch { return false; }
+}
+
+function discoveredCases(receipt, execution) {
+  if (execution.cleanup.status !== 'clean' || execution.aborted || execution.timedOut ||
+      ![0, 1].includes(execution.exitCode)) return [];
+  try {
+    const cases = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+    if (!cases.every(item => item.names.length && !item.skipped &&
+        [null, 'testCodeFailure', 'subtestsFailed'].includes(item.failure))) return [];
+    return cases;
+  } catch { return []; }
+}
+
+// Node 22 matches the own name and each ancestor, and also the full name of
+// each node in that chain. Match the same strings before applying any skip.
+function selectorMatches(pattern, names) {
+  return names.some((part, index) => pattern.test(part) || pattern.test(names.slice(0, index + 1).join(' ').trim()));
 }
 
 function sourceIdentity(repoRoot, timeoutMs) {
@@ -262,7 +296,7 @@ async function operation(command, args, { repoRoot, env, deadline, fileDeadline,
 }
 
 async function run(repoRoot, options, injected = {}) {
-  const deps = { spawn, groupMembers, admissionQuery, verifyAdvisory, verifyBlocking, sourceIdentity, makeTemporaryDirectory: prefix => fs.mkdtempSync(prefix), removeOwnedDirectory: directory => fs.rmSync(directory, { recursive: true, force: true }), signalGroup: (pgid, signal) => process.kill(-pgid, signal), now: () => performance.now(), sleep, stdout: process.stdout, stderr: process.stderr, ...injected };
+  const deps = { spawn, groupMembers, admissionQuery, verifyAdvisory, verifyBlocking, quarantineAlert, sourceIdentity, makeTemporaryDirectory: prefix => fs.mkdtempSync(prefix), removeOwnedDirectory: directory => fs.rmSync(directory, { recursive: true, force: true }), signalGroup: (pgid, signal) => process.kill(-pgid, signal), now: () => performance.now(), sleep, stdout: process.stdout, stderr: process.stderr, ...injected };
   const controller = new AbortController();
   deps.abortSignal = deps.abortSignal || controller.signal;
   const interrupt = signal => controller.abort(signal);
@@ -324,7 +358,8 @@ async function run(repoRoot, options, injected = {}) {
       const testArgs = ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout',
                         '--test-reporter=junit', `--test-reporter-destination=${junit}`];
       row.junit = junit;
-      const quarantined = quarantinedTests.get(path.relative(repoRoot, path.resolve(repoRoot, file)));
+      const relativeFile = path.relative(repoRoot, path.resolve(repoRoot, file));
+      const requested = quarantinedTests.get(relativeFile);
       const admissionRow = admission.complete ? admission.files[file] : null;
       if (admission.complete && (!admissionRow || !['blocking', 'advisory'].includes(admissionRow.state))) {
         row.status = 'fail'; row.reason = 'admission_result_missing'; continue;
@@ -339,14 +374,48 @@ async function run(repoRoot, options, injected = {}) {
         continue;
       }
       const escape = name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const quarantinePattern = quarantined && quarantined.map(item => escape(item.name)).join('|');
-      if (quarantined) testArgs.push(`--test-skip-pattern=^(?:${quarantinePattern})$`);
-      const result = await operation(process.execPath, [...testArgs, target], context, deps, limits);
+      const remaining = () => Math.floor(Math.min(deadline, fileDeadline) - deps.now());
+      const quarantined = [];
+      let discovered = [], unfiltered;
+      if (requested) {
+        const discoveryJunit = path.join(junitDir, key + '-discovery.xml');
+        const receipt = path.join(outDir, `${index}-discovery.json`);
+        const reporter = path.join(__dirname, 'test-case-reporter.js');
+        unfiltered = await operation(process.execPath, [
+          ...testArgs.slice(0, -1), `--test-reporter-destination=${discoveryJunit}`,
+          `--test-reporter=${reporter}`, `--test-reporter-destination=${receipt}`, target,
+        ], {...context, label: file + ' discovery'}, deps, limits);
+        row.discovery = {...unfiltered, junit: discoveryJunit};
+        discovered = discoveredCases(receipt, unfiltered);
+        if (discovered.length && (remaining() <= 0 ||
+            !deps.verifyBlocking(repoRoot, discoveryJunit, discovered.map(item => item.names), remaining()))) discovered = [];
+        for (const item of requested) {
+          const pattern = new RegExp(`^(?:${escape(item.name)})$`);
+          const matches = discovered.filter(test => selectorMatches(pattern, test.names));
+          const ownName = item.name.slice(item.parents.length ? item.parents.join(' ').length + 1 : 0);
+          if (matches.length === 1 && JSON.stringify(matches[0].names) === JSON.stringify([...item.parents, ownName])) {
+            quarantined.push({...item, discovered: matches[0]});
+            continue;
+          }
+          const id = relativeFile + '::' + item.name;
+          deps.stderr.write(`QUARANTINE BLOCKING ${id}: skip uniqueness unproven\n`);
+          if (remaining() <= 0 || !deps.quarantineAlert(id, item.activation, remaining())) {
+            summary.runner_errors.push('quarantine_selector_alert_unavailable');
+          }
+        }
+        if (!quarantined.length) row.junit = discoveryJunit;
+      }
+      if (quarantined.length) testArgs.push(`--test-skip-pattern=^(?:${quarantined.map(item => escape(item.name)).join('|')})$`);
+      const result = unfiltered && !quarantined.length ? unfiltered :
+        await operation(process.execPath, [...testArgs, target], context, deps, limits);
       Object.assign(row, { status: result.timedOut ? 'timeout' : (!result.aborted && result.exitCode === 0 && result.cleanup.status === 'clean' ? 'pass' : 'fail'), execution: result, cleanup: result.cleanup, duration_ms: Math.round(deps.now() - fileStart) });
-      if (quarantined) {
-        const blockingVerifyMs = Math.floor(Math.min(deadline, fileDeadline) - deps.now());
-        if (blockingVerifyMs <= 0 || !deps.verifyBlocking(repoRoot, junit, quarantined.map(item => item.name), blockingVerifyMs)) {
+      if (quarantined.length) {
+        const selected = new Set(quarantined.map(item => item.discovered));
+        const blocking = discovered.filter(item => !selected.has(item));
+        if (remaining() <= 0 || !deps.verifyBlocking(repoRoot, junit, blocking.map(item => item.names), remaining())) {
           row.status = 'fail'; row.reason = 'blocking_quarantine_incomplete';
+        } else if (blocking.some(item => item.failure === 'testCodeFailure')) {
+          row.status = 'fail'; row.reason = 'blocking_failure_during_discovery';
         }
         for (const item of quarantined) deps.stderr.write(`ADVISORY ${file}::${item.name}\n`);
         const advisoryJunit = path.join(junitDir, key + '-advisory.xml');

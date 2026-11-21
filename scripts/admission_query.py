@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
@@ -47,11 +48,37 @@ def verify_junit(path, expected):
             'absent': all(name not in found for name in expected), 'observed': sorted(found)}
 
 
+def reconcile_junit(path, expected):
+    if not isinstance(expected, list) or any(
+            not isinstance(case, list) or not case or any(not isinstance(name, str) for name in case)
+            for case in expected):
+        raise ValueError('invalid discovered identities')
+    root = ET.parse(path).getroot()
+    if root.tag != 'testsuites':
+        raise ValueError('invalid Node JUnit root')
+    observed = Counter()
+
+    def walk(element, parents):
+        for child in element:
+            if child.tag in ('testcase', 'testsuite'):
+                names = (*parents, child.attrib['name'])
+                if child.find('skipped') is not None:
+                    raise ValueError('unexpected skipped Node case')
+                observed[names] += 1
+                if child.tag == 'testsuite':
+                    walk(child, names)
+
+    walk(root, ())
+    return {'complete': True, 'matches': observed == Counter(map(tuple, expected))}
+
+
 def main():
     try:
         request = json.load(sys.stdin)
         if request.get('operation') == 'verify_junit':
             result = verify_junit(request['path'], request['expected'])
+        elif request.get('operation') == 'reconcile_junit':
+            result = reconcile_junit(request['path'], request['expected'])
         else:
             result = query(Path(request['root']), request['files'], request['platform'])
     except (OSError, ValueError, TypeError, KeyError, ET.ParseError) as exc:

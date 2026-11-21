@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -34,7 +36,20 @@ def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, mo
     monkeypatch.delenv('TMUX', raising=False)
     scripts = tmp_path/'scripts'
     scripts.mkdir()
-    (scripts/'quarantine.json').write_text(json.dumps({'version': 1, 'nonblocking_tests': ['tests/test_a.py::test_flaky']}))
+    case = 'tests/test_a.py::test_flaky'
+    digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+    (scripts/'quarantine.json').write_text(json.dumps({
+        'version': 1, 'nonblocking_tests': [case],
+        'history': {digest(case): {
+            'activation': 'fixture', 'file': digest('tests/test_a.py'), 'parents': [],
+        }},
+    }))
+    git = ['git', '-C', str(tmp_path)]
+    subprocess.run([*git, 'init', '-q'], check=True)
+    subprocess.run([*git, 'add', 'scripts/quarantine.json'], check=True)
+    subprocess.run([*git, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+                    'commit', '-qm', 'Accepted quarantine'], check=True)
+    subprocess.run([*git, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], check=True)
     monkeypatch.setattr(run_gate, 'REPO_ROOT', tmp_path)
     monkeypatch.setattr(run_gate, '_classify', lambda **_: (None, []))
     monkeypatch.setattr(run_gate, 'summarize_progress', lambda _: {})
