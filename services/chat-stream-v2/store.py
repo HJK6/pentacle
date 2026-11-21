@@ -4435,7 +4435,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
         return await self.submit(_op)
 
-    async def put_tell_delivery(self, tell_id: str, envelope: dict[str, Any]) -> int:
+    async def put_tell_delivery(self, tell_id: str, envelope: dict[str, Any], *, tracking_target=None) -> int:
         """Remember a tell delivery envelope so a retry replays it instead of
         injecting again, and return its ledger row id — the row's `rowid`, which
         `tell.ok` surfaces as v1's `ledger_row_id` (QA #10). The id is stamped
@@ -4494,7 +4494,14 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.commit()
             return row_id
 
-        row_id = await self.submit(_op)
+        def prepare_tracking(conn):
+            from work_item_tracking import check_input
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                check_input(conn, tell_id, *tracking_target)
+                return _op(conn)
+
+        row_id = await self.submit(prepare_tracking if tracking_target is not None else _op)
         return row_id
 
     async def promote_tell_delivery(

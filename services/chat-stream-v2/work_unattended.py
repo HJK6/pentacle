@@ -24,7 +24,7 @@ def _epoch(stamp):
         return None
 
 
-def unattended_work_conn(conn, *, now: float | None = None) -> dict:
+def unattended_work_conn(conn, *, now: float | None = None, spec_id: str | None = None) -> dict:
     from work_owed import disposition_spec_ids_conn
     state = _state_conn(conn)
     attendance = attendance_conn(conn)
@@ -34,7 +34,9 @@ def unattended_work_conn(conn, *, now: float | None = None) -> dict:
                              "WHERE work_state IS NOT NULL AND work_state!='done'"):
         referenced.update(membership.get(lane[0], []))
     items, omitted = [], []
-    for raw in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations ORDER BY spec_id"):
+    selected = " WHERE spec_id=?" if spec_id is not None else ""
+    for raw in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations" + selected + " ORDER BY spec_id",
+                            (spec_id,) if spec_id is not None else ()):
         record = _observed_record(json.loads(raw[1]), state)
         member = record["member"]
         observation = member.get("observation") or {}

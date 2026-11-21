@@ -163,7 +163,12 @@ class WorkLaneEpisodesStoreMixin:
                 # write and the pending drain below stay unconditional.
                 open_episode_lanes = {r[0] for r in conn.execute(
                     "SELECT DISTINCT lane_id FROM v2_work_lane_episodes WHERE cleared_at IS NULL")}
-                for lane in work_lane_rows_conn(conn, include_done=True, external_config=getattr(self, "external_work_config", None)):
+                import work_item_tracking as tracking
+                lanes = work_lane_rows_conn(conn, include_done=True, external_config=getattr(self, "external_work_config", None))
+                per_item = tracking.activate(conn, stamp)
+                if per_item:
+                    tracking.reconcile(conn, lanes, stamp, getattr(self, "tracking_repeat_seconds", tracking.REPEAT_SECONDS))
+                for lane in lanes:
                     conn.execute("UPDATE v2_assistant_composite_lanes SET lead_reported_done=? WHERE lane_id=?",
                                  (lane["_lead_reported_done"], lane["lane_id"]))
                     if lane["work_state"] == "done" and lane["lane_id"] not in open_episode_lanes:
@@ -172,7 +177,7 @@ class WorkLaneEpisodesStoreMixin:
                     for kind, condition in (("completed", facts["completion_pending"]), ("stale", facts["stale"]),
                                             ("estimate_missing", lane_estimate_missing(lane)),
                                             ("lead_lost", lane_lead_lost(lane)),
-                                            ("status_behind", lane_status_behind(lane, stamp))):
+                                            ("status_behind", False if per_item else lane_status_behind(lane, stamp))):
                         current = conn.execute("SELECT * FROM v2_work_lane_episodes "
                                                "WHERE lane_id=? AND kind=? AND cleared_at IS NULL",
                                                (lane["lane_id"], kind)).fetchone()
@@ -197,7 +202,7 @@ class WorkLaneEpisodesStoreMixin:
                                           json.dumps(fact_data, sort_keys=True, separators=(",", ":"))))
                 # A clear is silent but does not discard an unhanded opening.
                 pending = [dict(r) for r in conn.execute("SELECT episode_id,fact_json FROM v2_work_lane_episodes "
-                           "WHERE emitted_ref IS NULL ORDER BY lane_id,kind,sequence")]
+                           "WHERE emitted_ref IS NULL AND (?=0 OR kind!='status_behind') ORDER BY lane_id,kind,sequence", (per_item,))]
                 conn.commit()
                 return pending
             except BaseException:
