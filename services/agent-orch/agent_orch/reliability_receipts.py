@@ -65,14 +65,16 @@ def coverage(checks, hosts):
     return missing
 
 
-def nightly_slots(settings, as_of):
+def nightly_slots(settings, as_of, *, since=None):
     zone = ZoneInfo(settings["timezone"])
     clock = time.fromisoformat(settings["local_time"])
     day = as_of.astimezone(zone).date()
     if datetime.combine(day, clock, zone) > as_of:
         day -= timedelta(days=1)
-    return [datetime.combine(day - timedelta(days=offset), clock, zone).astimezone(UTC)
-            for offset in reversed(range(7))]
+    days = 7 if since is None else max(0, (day - since.astimezone(zone).date()).days + 1)
+    slots = [datetime.combine(day - timedelta(days=offset), clock, zone).astimezone(UTC)
+             for offset in reversed(range(days))]
+    return slots if since is None else [slot for slot in slots if slot >= since]
 
 
 def scheduled_starts(settings, root):
@@ -88,14 +90,14 @@ def scheduled_starts(settings, root):
     by_minute = {}
     with Path(job["StandardOutPath"]).open(errors="replace") as log:
         for line in log:
-            m = re.fullmatch(r"=== nightly-soak start (\S+) run=(\S+)\n?", line)
+            m = re.fullmatch(r"=== nightly-soak (?:scheduled )?start (\S+) run=(\S+)\n?", line)
             if m and Path(m[2]).parent == root:
                 started = instant(m[1])
                 by_minute.setdefault(stamp(started.replace(second=0, microsecond=0)), []).append(Path(m[2]).name)
     return by_minute
 
 
-def nights(settings, as_of, hosts, activations=()):
+def nights(settings, as_of, hosts, activations=(), *, since=None):
     # Older runner receipts have no occurrence ID. A reviewed scheduler binding
     # names the exact original directory, digest and released SHA for that slot.
     bindings = dict(settings.get("bindings", {}))
@@ -104,7 +106,7 @@ def nights(settings, as_of, hosts, activations=()):
     root = Path(settings["root"])
     starts = scheduled_starts(settings, root)
     result = []
-    for due in nightly_slots(settings, as_of):
+    for due in nightly_slots(settings, as_of, since=since):
         slot = stamp(due)
         row = dict(id=slot, created=slot, result="missing", historical=None, missing=[],
                    cause="missing scheduled first receipt", source=str(root), exclusions=[])
@@ -137,7 +139,9 @@ def nights(settings, as_of, hosts, activations=()):
                     for x in receipt.get("release_exclusions", [])])
                 row["missing"] = coverage(receipt.get("checks", {}), hosts)
                 if hist in {"FAIL", "BLOCKED", "SKIPPED"}:
-                    row.update(result="failed", cause="scheduled first receipt " + hist)
+                    row.update(result="failed", cause="scheduled first receipt " + hist,
+                               failure_checks=failed_checks(receipt.get("checks", {})),
+                               work_item=receipt.get("item"), observed_at=receipt.get("finalized_at"))
                 elif hist == "PASS" and receipt.get("finished") is True:
                     passed = not row["missing"]
                     row.update(result="passed" if passed else "incomplete",
@@ -149,6 +153,16 @@ def nights(settings, as_of, hosts, activations=()):
         result.append(row)
     return result
 
+
+
+def failed_checks(checks):
+    failed = {}
+    for name in ("client_delivery", "front_desk", "slow_consumer", "fleet_smoke"):
+        check = checks.get(name)
+        if isinstance(check, dict) and check.get("outcome") != "passed":
+            failed[name] = {key: check[key] for key in ("classification", "cause_target", "phase",
+                                                        "reason", "correlation_id") if key in check}
+    return failed
 
 def release_attempt(entry, sha, prior, hosts):
     source = entry["path"]
@@ -179,7 +193,22 @@ def release_attempt(entry, sha, prior, hosts):
                 raise ValueError("refusal identity mismatch")
             return {**result, "historical": "refused_before_activation", "result": "failed",
                     "cause": "refused before activation"}
-        if entry["type"] == "journal":
+        if entry["type"] == "ordinary_forward":
+            if (doc["target_sha"], doc["prior_sha"]) != (sha, prior):
+                raise ValueError("ordinary forward identity mismatch")
+            if doc["result"] == "refused":
+                result.update(historical="refused_before_activation", result="failed",
+                              cause="refused before activation")
+                return result
+            if doc["result"] != "complete":
+                return {**result, "pending": doc["result"] == "pending"}
+            result["observed_at"] = doc.get("completed_at")
+            checks = doc["stamp"]
+            active = checks.get("serving") is True
+            historical = checks["disposition"]
+            failed = historical in ("active with failed checks", "target not active, prior restored",
+                                    "target not active, restore unproven")
+        elif entry["type"] == "journal":
             receipt = checked(entry.get("receipt_copy") or doc["receipt"], entry.get("receipt_digest"))
             intent = receipt["intent"]
             if (intent["target_sha"] != sha or intent["prior_sha"] != prior
@@ -187,8 +216,20 @@ def release_attempt(entry, sha, prior, hosts):
                     or doc["transaction_id"] != entry["transaction"]
                     or doc["receipt_sha256"] != receipt["receipt_sha256"]):
                 raise ValueError("journal identity mismatch")
-            checks = doc.get("result") or {}
+            if doc.get("first_forward_at"):
+                sealed = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+                canonical = json.dumps(sealed, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+                if hashlib.sha256(canonical).hexdigest() != receipt["receipt_sha256"]:
+                    raise ValueError("coordinated receipt seal mismatch")
+            if doc.get("first_forward_refused") is True:
+                return {**result, "historical": "refused_before_activation", "result": "failed",
+                        "cause": "coordinated release refused before activation"}
+            checks = doc.get("result") or doc.get("partial_result") or {}
+            result["observed_at"] = doc.get("forward_result_at")
             active = doc["phase"] == "committed" and (doc.get("postimage") or {}).get("sha") == sha
+            if (doc.get("first_forward_at") and doc["phase"] not in ("rolled_back", "recovery_required")
+                    and not doc.get("post_checks_recorded") and not doc.get("forward_failure")):
+                return {**result, "pending": True}
             historical = checks.get("outcome")
             failed = bool(doc.get("forward_failure")) or doc["phase"] in {"rolled_back", "recovery_required"}
             result["transaction"] = intent["transaction_id"]
@@ -208,7 +249,8 @@ def release_attempt(entry, sha, prior, hosts):
         result["missing"] = coverage(checks, hosts)
         result["exclusions"] = [x.get("host") for x in doc.get("release_exclusions", [])]
         if failed or historical in ("failed", "active with failed checks"):
-            result.update(result="failed", cause="first deployment or installed checks failed")
+            result.update(result="failed", cause="first deployment or installed checks failed",
+                          failure_checks=failed_checks(checks))
         elif active and historical in ("passed", "active and checks passed"):
             result.update(result="incomplete" if result["missing"] else "passed",
                           cause="required installed assertions missing or failed" if result["missing"] else None)
@@ -228,6 +270,7 @@ def runtime_history(runtime):
 def live_intents(settings):
     entries = [dict(e, attempts=list(e.get("attempts", []))) for e in settings.get("intents", [])]
     by_pair = {(e["sha"], e["prior_sha"]): e for e in entries if e["kind"] == "ordinary"}
+    automatic = []
     for feed in settings.get("attempt_sources", []):
         root = Path(feed["root"])
         if not root.is_dir():
@@ -235,6 +278,13 @@ def live_intents(settings):
         for path in sorted(root.glob(feed["pattern"])):
             # A refused invocation may never appear in either Git or a stamp.
             # Join by actual target and prior SHA; copies are not new releases.
+            if feed["type"] == "ordinary_forward":
+                doc = read(path)
+                sha, prior = doc["target_sha"], doc["prior_sha"]
+                if sha != prior and all(re.fullmatch(r"[a-f0-9]{40}", v) for v in (sha, prior)):
+                    automatic.append((instant(doc["created_at"]), str(path), sha, prior,
+                                      {"type": "ordinary_forward", "path": str(path)}))
+                continue
             if feed["type"] == "refusal":
                 doc = read(path)
                 if doc.get("outcome") != "refused_before_activation":
@@ -280,6 +330,36 @@ def live_intents(settings):
             else:
                 attempt = dict(type="refusal", attempt=number, path=str(path))
             row["attempts"].append(attempt)
+    if settings.get("coordinated_root"):
+        root = Path(settings["coordinated_root"])
+        if not root.is_dir():
+            raise FileNotFoundError("coordinated invocation source unavailable")
+        for path in root.glob("*/journal.json"):
+            doc = read(path)
+            when = doc.get("first_forward_at")
+            if not when:
+                continue
+            receipt = read(doc["receipt"])
+            intent = receipt["intent"]
+            sha, prior = intent["target_sha"], intent["prior_sha"]
+            if sha != prior:
+                automatic.append((instant(when), str(path), sha, prior,
+                                  dict(type="journal", path=str(path), transaction=doc["transaction_id"])))
+    for when, path, sha, prior, attempt in sorted(automatic):
+        row = by_pair.get((sha, prior))
+        if row is None:
+            row = dict(id=sha + "/" + prior, sha=sha, prior_sha=prior, source=path,
+                       created=stamp(when), kind="ordinary", attempts=[])
+            entries.append(row)
+            by_pair[(sha, prior)] = row
+        if any(a["path"] == path for a in row["attempts"]):
+            continue
+        # Explicit attempts are retained with their original number. An
+        # independent uncovered invocation preceding those facts requires a review.
+        if instant(row["created"]) > when.replace(microsecond=0):
+            row["kind"] = "unknown"
+        number = max((a["attempt"] for a in row["attempts"]), default=0) + 1
+        row["attempts"].append(dict(attempt, attempt=number, created=stamp(when)))
     if "runtime" not in settings:
         return entries
     runtime = Path(settings["runtime"])
@@ -303,18 +383,20 @@ def live_intents(settings):
     return entries
 
 
-def releases(settings, as_of, hosts):
+def releases(settings, as_of, hosts, *, since=None):
     rows, excluded = [], []
     seen = set()
     for entry in sorted(live_intents(settings), key=lambda x: (instant(x["created"]), x["id"])):
-        if instant(entry["created"]) > as_of:
+        if instant(entry["created"]) > as_of or (since is not None and instant(entry["created"]) < since):
             continue
         if entry["id"] in seen:
             raise ValueError("duplicate release intent")
         seen.add(entry["id"])
-        row = {k: entry[k] for k in ("id", "created", "sha", "prior_sha", "source")}
+        row = {k: entry[k] for k in ("id", "sha", "prior_sha", "source")}
+        row["created"] = stamp(instant(entry["created"]))
         if entry.get("last_activation") and instant(entry["last_activation"]["created"]) <= as_of:
-            row["last_activation"] = entry["last_activation"]
+            latest = entry["last_activation"]
+            row["last_activation"] = {**latest, "created": stamp(instant(latest["created"]))}
         if entry["kind"] in ("rehearsal", "same_ref_restart", "historical_exclusion") and entry.get("reason"):
             excluded.append({**row, "reason": entry["reason"]})
             continue
@@ -328,4 +410,4 @@ def releases(settings, as_of, hosts):
         if entry["kind"] != "ordinary":
             row["cause"] = "unresolved forward-release intent"
         rows.append(row)
-    return rows[-10:], excluded
+    return (rows[-10:] if since is None else rows), excluded

@@ -7,6 +7,13 @@
     "not_applicable": "receipt reader without daemon RPC"
   },
   {
+    "command": "reliability reconcile",
+    "argv": ["reliability", "reconcile", "--config", "/fixture/scorecard-writer.json"],
+    "handler": "agent_orch.reliability_run.command",
+    "network_entry": null,
+    "not_applicable": "work publisher and notification subprocesses"
+  },
+  {
     "command": "start",
     "argv": [
       "start"

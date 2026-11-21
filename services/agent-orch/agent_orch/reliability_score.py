@@ -15,11 +15,11 @@ from .reliability_receipts import instant, nights, read, releases, runtime_histo
 from .reliability_work import weekly, work_state
 
 
-def condition(numerator, denominator, size, meets, issues, bounds, sources, reason):
+def condition(numerator, denominator, size, meets, issues, bounds, sources, reason, *, decisive_failure=False):
     missing = list(dict.fromkeys(issues))
     if size is not None and denominator != size:
         missing.append(f"need {size} observations, found {denominator}")
-    state = "incomplete" if missing else "pass" if meets else "fail"
+    state = "fail" if decisive_failure else "incomplete" if missing else "pass" if meets else "fail"
     return dict(passed=state == "pass", status=state, numerator=numerator, denominator=denominator,
                 reason=reason, missing=missing, bounds=bounds, sources=sources)
 
@@ -36,9 +36,10 @@ def load_rows(cfg, as_of):
     return hosted.live(cfg["repository"], stamp(as_of))
 
 
-def hosted_score(settings, as_of):
+def hosted_score(settings, as_of, *, since=None):
     issues = []
-    rows = load_rows(settings, as_of)
+    rows = load_rows(settings, as_of) if since is None or settings.get("snapshot") else (
+        hosted.live(settings["repository"], stamp(as_of), since=stamp(since)))
     if settings.get("snapshot") and instant(settings["complete_through"]) < as_of:
         issues.append("hosted snapshot predates as-of")
     decisions = {}
@@ -60,7 +61,8 @@ def hosted_score(settings, as_of):
             if row["id"] in unique and row != unique[row["id"]]:
                 raise ValueError("conflicting observations for workflow ID")
             unique[row["id"]] = row
-    sample = sorted(unique.values(), key=lambda r: (instant(r["created"]), int(r["id"])))[-100:]
+    sample = sorted(unique.values(), key=lambda r: (instant(r["created"]), int(r["id"])))
+    sample = sample[-100:] if since is None else [r for r in sample if instant(r["created"]) >= since]
     for row in sample:
         original = retained.get(row["id"])
         if original and original.get("review_category"):
@@ -85,7 +87,8 @@ def hosted_score(settings, as_of):
     counts = Counter(r["classification"] for r in sample)
     sources = [settings.get("snapshot") or f"{settings['repository']}/actions/workflows/{hosted.WORKFLOW}"]
     score = condition(counts["false_red"], len(sample), 100, counts["false_red"] <= 1, issues, bounds(sample),
-                      sources, f"{counts['false_red']} confirmed false reds, allowance 1")
+                      sources, f"{counts['false_red']} confirmed false reds, allowance 1",
+                      decisive_failure=counts["false_red"] > 1)
     score["first_attempt_counts"] = dict(Counter(r["first"] or "missing" for r in sample))
     return score, sample
 
@@ -212,7 +215,8 @@ def report(config, as_of):
                 result["diagnostics"]["speed"].append(measured)
     except errors:
         result["diagnostics"]["speed"] = {"missing": "invalid timing sample"}
-    causes = {r["cause"]: r for r in result["observations"].get("work", {}).get("rows", [])}
+    causes = {key: r for r in result["observations"].get("work", {}).get("rows", [])
+              for key in (r["cause"], *r.get("aliases", []))}
     for r in result["observations"].get("hosted", []):
         if r["classification"] == "incomplete" and not r["causes"]:
             r["causes"].append(dict(kind="unclassified", cause="first attempt " + str(r["first"]), evidence=r["source"]))
@@ -223,9 +227,15 @@ def report(config, as_of):
         for r in result["observations"].get(surface, []):
             if r["result"] != "passed":
                 link = causes.get(r["cause"], {})
+                if not link:
+                    linked = [value for value in result["observations"].get("work", {}).get("rows", [])
+                              if r["occurrence"] in value.get("occurrences", [])]
+                    r["work_items"] = [dict(cause=value["cause"], item=value["item"], owner=value.get("owner"))
+                                       for value in linked]
+                    link = linked[0] if len(linked) == 1 else {}
                 r.update(owner=link.get("owner") or config.get("triage_owner", "release triage"), item=link.get("item"))
     states = {s["status"] for s in conditions.values()}
-    result["status"] = "incomplete" if "incomplete" in states else "fail" if "fail" in states else "pass"
+    result["status"] = "fail" if "fail" in states else "incomplete" if "incomplete" in states else "pass"
     return result
 
 
@@ -273,10 +283,12 @@ def command(args):
 
 def add_parser(parent):
     group = parent.add_parser("reliability", help="Inspect release reliability")
-    score = group.add_subparsers(dest="reliability_command", required=True).add_parser(
-        "score", help="Read the five rolling closure conditions")
+    subcommands = group.add_subparsers(dest="reliability_command", required=True)
+    score = subcommands.add_parser("score", help="Read the five rolling closure conditions")
     score.add_argument("--sources", default=os.environ.get("PENTACLE_RELIABILITY_SOURCES",
                        "~/.pentacle/reliability/sources.json"), help="Local receipt-source configuration")
     score.add_argument("--as-of", help="UTC cutoff (ISO 8601 with timezone)")
     score.add_argument("--json", action="store_true", help="Emit the structured projection")
     score.set_defaults(func=command)
+    from . import reliability_run
+    reliability_run.add_parser(subcommands)

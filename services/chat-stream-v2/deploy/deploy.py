@@ -2373,11 +2373,23 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
                 if prepare_only:
                     return transaction.prepare(coordinated_plan, coordinated_receipt)
                 return transaction.apply(coordinated_plan, coordinated_receipt, **qualification_args)
-            return _deploy_ordinary(service, release_checkout=repo, ref=ref, rollback=rollback,
-                gate_evidence=gate_evidence, deployer_stream_id=deployer_stream_id,
-                skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
-                boot_wait_seconds=boot_wait_seconds, smoke_accounts=smoke_accounts,
-                read_timing_receipt=read_timing_receipt, ordinary_recovery_bundle=ordinary_recovery_bundle, runner=runner)
+            recording = (service.name == "chat-streamd-v2" and not rollback and not skip_kickstart
+                         and os.environ.get("PENTACLE_RELEASE_ATTEMPT_RECORDS"))
+            forward = _ForwardReceipt(recording) if recording else None
+            try:
+                result = _deploy_ordinary(service, release_checkout=repo, ref=ref, rollback=rollback,
+                    gate_evidence=gate_evidence, deployer_stream_id=deployer_stream_id,
+                    skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
+                    boot_wait_seconds=boot_wait_seconds, smoke_accounts=smoke_accounts,
+                    read_timing_receipt=read_timing_receipt, ordinary_recovery_bundle=ordinary_recovery_bundle,
+                    **({"forward_receipt": forward} if forward else {}), runner=runner)
+            except (DeployError, coordinated.Invalid):
+                if forward:
+                    forward.complete(None)
+                raise
+            if forward:
+                forward.complete(result)
+            return result
     except (coordinated.Invalid, OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as exc:
         raise DeployError(str(exc)) from exc
 
@@ -2415,6 +2427,42 @@ def _write_test_profile(repo, service, profile):
     return path
 
 
+class _ForwardReceipt:
+    """Retain ordinary forward outcomes independently of the rotating stamp."""
+
+    def __init__(self, root):
+        self.root = Path(root).expanduser()
+        self.path = None
+
+    def bind(self, prior, target):
+        if prior == target:
+            return
+        self.path = self.root / (uuid.uuid4().hex + ".json")
+        self.value = {"target_sha": target, "prior_sha": prior, "result": "pending",
+                      "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+        self.save()
+
+    def complete(self, stamp):
+        if self.path is None:
+            return
+        self.value["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if stamp is None:
+            self.value["result"] = "refused"
+        else:
+            self.value["result"] = "complete"
+            names = ("disposition", "serving", "client_delivery", "front_desk", "slow_consumer", "fleet_smoke")
+            self.value["stamp"] = {name: stamp[name] for name in names if name in stamp}
+        self.save()
+
+    def save(self):
+        try:
+            coordinated.private_directory(self.root)
+            coordinated.atomic_json(self.path, self.value)
+        except (OSError, ValueError, coordinated.Invalid) as exc:
+            # Evidence loss cannot change activation or rollback authority.
+            print(f"scorecard forward receipt unavailable: {type(exc).__name__}", file=sys.stderr)
+
+
 def _deploy_ordinary(
     service: ServiceConfig,
     *,
@@ -2429,6 +2477,7 @@ def _deploy_ordinary(
     smoke_accounts: Sequence[str] | None = None,
     read_timing_receipt: Path | None = None,
     ordinary_recovery_bundle: Path | None = None,
+    forward_receipt: _ForwardReceipt | None = None,
     runner: Runner,
 ) -> dict[str, object]:
     repo = release_checkout.expanduser().resolve()
@@ -2453,6 +2502,8 @@ def _deploy_ordinary(
         _checked(("git", "fetch", "origin", fetch_ref), repo, runner)
         sha = _resolve_sha(repo, deploy_ref, runner)
     _verify_origin_reachable(repo, sha, runner)
+    if forward_receipt is not None:
+        forward_receipt.bind(prior_sha, sha)
     helper_identity_equal = _code_identity_at(repo, prior_sha, runner) == _code_identity_at(repo, sha, runner)
     ancestry = coordinated.ordinary_guard(repo, prior_stamp, rollback=rollback, helper_identity_equal=helper_identity_equal)
     if not helper_identity_equal:

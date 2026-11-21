@@ -7,6 +7,7 @@ imports code from the daemon checkout it switches.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import copy
 import fcntl
 import hashlib
@@ -393,23 +394,27 @@ class Transaction:
         if (file_digest(private_file(intent_path)) != receipt["intent_sha256"]
                 or validate_intent(intent_path) != receipt["intent"]):
             raise Invalid("intent changed after preparation")
+        first_forward = "first_forward_at" not in journal
+        if first_forward:
+            journal["first_forward_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             self.adapter.revalidate(receipt, forward=True)
-        except HelperProofFailure as exc:
-            # Diagnostic only: keep prepared phase, original refusal and the
-            # existing no-stop/no-retry behavior, even if journaling fails.
-            journal["helper_proof_failure"] = {"type": type(exc).__name__, "reason": str(exc)}
+            # Persist these readbacks with the phase before stopping anything.
+            before = self.adapter.current(receipt)
+            if "prior_scope" in receipt:
+                self.adapter.check_first_qualification_authorization()
+            journal["before_stop"] = before
+            journal["stop_provenance"] = self.adapter.provenance(receipt)
+        except Exception as exc:
+            if first_forward:
+                journal["first_forward_refused"] = True
+            if isinstance(exc, HelperProofFailure):
+                journal["helper_proof_failure"] = {"type": type(exc).__name__, "reason": str(exc)}
             try:
                 atomic_json(self.root / journal["transaction_id"] / "journal.json", journal)
             except OSError:
-                pass
+                pass  # Diagnostics cannot replace a refusal or change admission.
             raise
-        # This readback is persisted before the stop: recovery does not need RPC.
-        before = self.adapter.current(receipt)
-        if "prior_scope" in receipt:
-            self.adapter.check_first_qualification_authorization()
-        journal["before_stop"] = before
-        journal["stop_provenance"] = self.adapter.provenance(receipt)
         self.phase(journal, "stopping")
         try:
             bootstrap = receipt["intent"].get("first_qualification")
@@ -437,6 +442,7 @@ class Transaction:
         except Exception as exc:
             # Never replace the original failure with a successful recovery.
             journal["forward_failure"] = {"type": type(exc).__name__, "reason": str(exc)}
+            journal["forward_result_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             try:
                 self.phase(journal, journal["phase"])
             except Exception as journal_exc:
@@ -473,7 +479,8 @@ class Transaction:
             current = self.adapter.current(receipt)
             if "stamp" in postimage.get("files", {}):
                 postimage["files"]["stamp"] = current["files"]["stamp"]
-            self.phase(journal, "committed", postimage=postimage)
+            self.phase(journal, "committed", postimage=postimage, post_checks_recorded=True,
+                       forward_result_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         except Exception as exc:
             journal["journal_failure"] = type(exc).__name__
             journal["result"]["outcome"] = "failed"

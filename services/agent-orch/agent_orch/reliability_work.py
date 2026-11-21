@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 import re
 import subprocess
@@ -53,6 +53,11 @@ def item(root, item_id, view=None):
                 updated=fields["updated_at"].strip("'\""))
 
 
+
+def updated_after(value, as_of):
+    return (instant(value) > as_of if ('T' in value or ' ' in value)
+            else date.fromisoformat(value) > as_of.date())
+
 def covered(data, now, name):
     if not data.get("complete_through") or instant(data["complete_through"]) < now:
         return [name + " census not reconciled through as-of"]
@@ -73,10 +78,12 @@ def work_state(settings, now):
     for record in register["records"]:
         if instant(record["first_seen"]) > now:
             continue
+        if record.get("merged_at") and instant(record["merged_at"]) <= now:
+            continue
         row = dict(record)
         try:
             row.update(item(root, row["item"], view))
-            if row["updated"] > now.date().isoformat():
+            if updated_after(row["updated"], now):
                 raise ValueError("current lifecycle is newer than as-of: " + row["item"])
             terminal = row["status"] in ("completed", "deprecated")
             if terminal:
@@ -142,12 +149,14 @@ def weekly(history, now):
     for entry in history.get("events", []):
         if instant(entry["at"]) > now:
             continue
-        key = (entry["id"], entry["kind"], entry.get("test"), canonical(entry.get("class"), aliases))
-        if key in events and events[key]["at"] != entry["at"]:
+        key = (entry["id"], entry["kind"], entry.get("test"))
+        if key in events and instant(events[key]["at"]) != instant(entry["at"]):
             raise ValueError("conflicting occurrence history")
         events[key] = entry
-        if key[3]:
-            seen[key[3]] = min(instant(entry["at"]), seen.get(key[3], now))
+    for entry in events.values():
+        cause_class = canonical(entry.get("class"), aliases)
+        if cause_class:
+            seen[cause_class] = min(instant(entry["at"]), seen.get(cause_class, now))
     ordered = sorted(events.values(), key=lambda e: (instant(e["at"]), e["id"]))
     rows = []
     earliest = min([monday-timedelta(weeks=2), *(instant(e["at"]) for e in ordered)])
@@ -184,7 +193,9 @@ def weekly(history, now):
         counts = Counter(canonical(e["class"], aliases) for e in matched)
         dominant = sorted(k for k, n in counts.items() if n == max(counts.values())) if counts else []
         existing = history.get("reviews", {}).get(key)
-        review = dict(id=key, status="recorded" if existing else "due", dominant_classes=dominant,
-                      existing_review=existing)
+        assigned = history.get("review_assignments", {}).get(key)
+        state = "recorded" if existing else "assigned" if assigned else "due"
+        review = dict(id=key, status=state, dominant_classes=dominant,
+                      existing_review=existing, assigned_item=assigned)
     return dict(weeks=rows, review_signals=signals, review=review, prior_comparable_week=prior["start"],
                 reason=None if rows[-1]["complete"] else "incomplete historical decision and class census")

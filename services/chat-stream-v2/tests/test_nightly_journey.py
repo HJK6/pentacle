@@ -285,3 +285,28 @@ def test_both_seasonal_schedules_fit_and_old_times_fail(window):
         instant = datetime(2026, 7, 15, hour, minute, tzinfo=ZoneInfo("America/Chicago")).astimezone(timezone.utc)
         alter(window, valid_until=instant.date().isoformat())
         assert sa.admit(window, "nightly-soak", 2400, instant) == "BLOCKED:outside_window"
+
+
+def test_nightly_publishes_original_receipt_before_reconciling_work(tmp_path, monkeypatch):
+    receipt = tmp_path / 'receipt.json'
+    receipt.write_text(json.dumps({'source_sha': 'a' * 40}))
+    writer_config = tmp_path / 'writer.json'
+    item = 'pentacle__fixture'
+    calls = []
+
+    def reconcile(argv, **kwargs):
+        calls.append(argv)
+        saved = json.loads(receipt.read_text())
+        assert saved['result'] == 'FAIL' and saved['job'] == 'nightly-soak'
+        assert saved['finalized_at'].endswith('Z')
+        return SimpleNamespace(returncode=0, stdout=json.dumps({
+            'links': {str(receipt): [item]}, 'handled_sources': [str(receipt)]}))
+
+    monkeypatch.setattr(nj.subprocess, 'run', reconcile)
+    monkeypatch.setattr(nj, 'deliver_report', lambda record, path, rpc: None)
+    assert nj.main(['report', '--job', 'nightly-soak', '--evidence', str(tmp_path), '--result', 'FAIL',
+                    '--scorecard-writer', str(writer_config)]) == 0
+    assert calls == [['agent-orch', 'reliability', 'reconcile', '--config', str(writer_config),
+                      '--surface', 'nightly']]
+    saved = json.loads(receipt.read_text())
+    assert saved['item'] == item and saved['scorecard_items'] == [item]

@@ -23,22 +23,15 @@ def sweep(sources, *, ledger_path, state_path, adapter, now=None, restorations=N
     register = read(work['register'])
     existing = {record.get('test') for record in register.get('records', []) if record.get('test')}
     _, rows = hosted_score(hosted, now)
-    rows, node_bindings, node_missing = enrich_node(rows, hosted, api=reliability_hosted.api,
-                                                     download=reliability_hosted.download)
-    rows, other_bindings, other_missing = enrich_other_python(rows, hosted, api=reliability_hosted.api,
-                                                               download=reliability_hosted.download)
-    raw_bindings = {**node_bindings, **other_bindings}
+    rows, raw_bindings, notes = enrich_rows(rows, hosted)
     binding = reviewed_bindings(rows, raw_bindings, hosted.get('signatures', []))
     non_code_keys = {(str(row.get('id')), cause.get('job'), cause.get('step'), cause.get('test'))
                      for row in rows for cause in row.get('causes', []) if cause.get('kind') == 'non_code'}
     for key in (raw_bindings.keys() - binding.keys()) & non_code_keys:
         adapter.alert(_key('unreviewed-signature', key),
                       'Quarantine signature or fixture phase needs review: ' + str(key[0]))
-    for value in binding.values():
-        suite = value.get('suite', 'daemon')
-        if suite != 'javascript' and (suite != 'daemon' or value['test'] not in existing):
-            value['test'] = suite + '::' + value['test']
-    for note in [*node_missing, *other_missing]:
+    qualify_bindings(binding, existing)
+    for note in notes:
         adapter.alert(_key('identity', note), 'Quarantine identity needs triage: ' + note)
     for row in rows:
         for cause in row.get('causes', []):
@@ -66,6 +59,21 @@ def sweep(sources, *, ledger_path, state_path, adapter, now=None, restorations=N
                     del merged[test]
     return reconcile(state_path, merged, selected, adapter, restorations=restorations)
 
+
+
+def enrich_rows(rows, hosted):
+    rows, node, node_missing = enrich_node(rows, hosted, api=reliability_hosted.api,
+                                           download=reliability_hosted.download)
+    rows, python, python_missing = enrich_other_python(rows, hosted, api=reliability_hosted.api,
+                                                        download=reliability_hosted.download)
+    return rows, {**node, **python}, [*node_missing, *python_missing]
+
+
+def qualify_bindings(binding, existing):
+    for value in binding.values():
+        suite = value.get('suite', 'daemon')
+        if suite != 'javascript' and (suite != 'daemon' or value['test'] not in existing):
+            value['test'] = suite + '::' + value['test']
 
 def load_sources(path):
     path = Path(path).expanduser()

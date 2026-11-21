@@ -38,9 +38,9 @@ class ProductionAdapter:
         value = json.dumps([test, decision], ensure_ascii=False, separators=(',', ':')).encode()
         return 'flaky-test-quarantine:' + hashlib.sha256(value).hexdigest()
 
-    def _notify(self, key, title, message, severity='warning'):
+    def _notify(self, key, title, message, severity='warning', *, producer='flaky-test-quarantine'):
         env = {name: os.environ[name] for name in _NOTIFY_ENV if name in os.environ}
-        proc = subprocess.run([self.agent_orch, 'notify', '--producer', 'flaky-test-quarantine',
+        proc = subprocess.run([self.agent_orch, 'notify', '--producer', producer,
                                '--severity', severity, '--title', title, '--message', message,
                                '--dedup-key', key], env=env, capture_output=True, text=True,
                               timeout=30, check=False)
@@ -88,6 +88,9 @@ class ProductionAdapter:
     def alert(self, key, message):
         self._notify('flaky-test-quarantine-alert:' + hashlib.sha256(key.encode()).hexdigest(),
                      'Flaky test quarantine needs attention', message)
+
+    def scorecard_alert(self, key, message):
+        self._notify(key, 'Scorecard work needs front desk triage', message, producer='release-scorecard')
 
     def verify_restoration(self, test, restoration):
         valid = bool(self.restoration_verifier and self.restoration_verifier(test, restoration))

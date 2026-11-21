@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -54,6 +55,7 @@ def main(argv=None):
     parser.add_argument('--config', required=True)
     args = parser.parse_args(argv)
     config = {}
+    quarantine_exit = 0
     try:
         config = json.loads(Path(args.config).read_text())
         run(config)
@@ -69,9 +71,25 @@ def main(argv=None):
             print('Quarantine sweep and its notification are incomplete', file=sys.stderr)
         else:
             print('Quarantine sweep incomplete', file=sys.stderr)
-        return 2
-    print('Quarantine sweep complete')
-    return 0
+        quarantine_exit = 2
+    writer = config.get('scorecard_writer')
+    if writer:
+        from .reliability_run import run as reconcile_work
+        try:
+            result = reconcile_work(load_sources(writer), datetime.now(timezone.utc))
+        except Exception as exc:
+            result = {'status': 'incomplete', 'issues': [{'alert': 'unconfirmed', 'error': type(exc).__name__}]}
+        if any(issue['alert'] == 'unconfirmed' for issue in result['issues']):
+            try:
+                adapter = ProductionAdapter(None, checker='/dev/null', packet_root='/tmp',
+                                            agent_orch=config.get('agent_orch', 'agent-orch'))
+                adapter.scorecard_alert(_key('scorecard-worker', writer), 'Scorecard reconciliation is incomplete.')
+            except Exception:
+                print('Scorecard reconciliation and its notification are incomplete', file=sys.stderr)
+                return 2
+    if not quarantine_exit:
+        print('Quarantine sweep complete')
+    return quarantine_exit
 
 
 if __name__ == '__main__':

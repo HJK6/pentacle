@@ -124,3 +124,56 @@ A source map has five sections and a nonempty `required_hosts` list.
   Compare the two completed UTC weeks. A positive flat or rising signal calls
   for one owner review in the existing item. The current partial week is
   labeled separately. These diagnostics do not add closure conditions.
+
+## Reconcile work from durable results
+
+`agent-orch reliability reconcile --config /absolute/path/to/writer.json`
+reads the same first-attempt evidence and publishes work. It exits 0 when
+the selected sources and required writes reconcile, or 2 with pending
+occurrences and bounded issue categories. `--surface releases|hosted|nightly`
+selects one source. A historical `--as-of` belongs in a disposable namespace
+with its own register and work root. Use the score command for a read-only view.
+
+Set `sources` to the scorecard source map and `memory_root` to its work
+publisher's repository. The publisher checks current revisions and reads
+back attachments. Set `start_at` to the earliest replay boundary still
+covered by retained results, `owner` to front desk triage, and `epic` and
+`machine` to the goal and host used for new items. `owners` maps a cause to
+its component owner. `existing_items` maps known causes to existing item
+IDs. The optional `agent_orch` path selects the installed notification CLI.
+Set `delivery_item` to the existing proactive-note incident and
+`requesting_stream_id` to the attributed lifecycle writer. A bound delivery
+failure can reactivate that item after its recorded closure.
+
+Use `scorecard_writer` in the existing quarantine worker configuration to
+point to the writer file. Set this option only on the designated publisher host. The daemon
+continues replaying after a score closes. The nightly report uses the same reconciler when its local launch
+configuration exports `PENTACLE_RELIABILITY_WRITER_CONFIG`. Every attempt
+uses its original scheduled slot. A missing slot waits for the receipt
+deadline, which defaults to 75 minutes from its due time and can be set
+with `nightly_receipt_grace_seconds`. A late or ad-hoc run cannot qualify
+as the original scheduled start.
+
+The release source map can name `coordinated_root`, the existing
+controller transaction directory for the runtime checkout. The journal
+records the first validated forward invocation and its result even when
+a later invocation on that transaction succeeds. Ordinary forward
+deploys retain their first invocation and outcome when the controller
+sets `PENTACLE_RELEASE_ATTEMPT_RECORDS` to a private directory. Add that
+directory to `releases.attempt_sources` with `pattern: "*.json"` and type
+`ordinary_forward`. Only ordinary forward invocations targeting a different SHA produce
+these receipts. The deployment controller keeps control of activation.
+
+The cause register journals unresolved source occurrences before
+requesting publisher changes. The same lock serializes it with quarantine
+decisions. Stable publisher request IDs and occurrence markers make a
+lost reply or concurrent duplicate safe to replay. Publisher failures
+leave pending work and send one deduplicated triage alert. A verified
+alias in `cause_aliases` names its canonical `cause`, `reviewer`,
+`revision` and `evidence`. Superseding an existing provisional item also
+requires a publisher-qualified `closure_report` for the superseded item.
+The writer attaches prior observations to the canonical item before
+moving the duplicate. A test quarantine continues to use its existing
+decision and restoration contract. Repeated classes attach one preventive
+action to an existing owner. The original reviewed history and coverage
+declarations remain inputs to the score.

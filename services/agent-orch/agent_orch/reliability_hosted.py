@@ -12,6 +12,7 @@ from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 
 from . import reliability_artifacts as artifacts
+from .reliability_receipts import instant, stamp
 
 SUCCESS = "success"
 WORKFLOW = "predeploy-tests.yml"
@@ -38,12 +39,14 @@ def first_attempt(repo, run):
     rid = run["id"]
     attempt = int(run["run_attempt"])
     href = f"https://github.com/{repo}/actions/runs/{rid}"
-    row = dict(id=rid, sha=run["head_sha"], created=run["created_at"], source=href,
+    row = dict(id=rid, sha=run["head_sha"], created=stamp(instant(run["created_at"])), source=href,
                attempt=attempt, latest=run.get("conclusion"), first=None, failures=[])
     base = f"actions/runs/{rid}/attempts/1"
     try:
         first = api(repo, base) if attempt > 1 else run
-        row.update(first=first.get("conclusion") or first["status"], finished=first.get("updated_at"))
+        finished = first.get("updated_at")
+        row.update(first=first.get("conclusion") or first["status"],
+                   finished=stamp(instant(finished)) if finished else None)
         if row["first"] != "failure":
             return row
         jobs = api(repo, base + "/jobs?per_page=100")
@@ -94,25 +97,30 @@ def first_attempt(repo, run):
     return row
 
 
-def live(repo, cutoff):
+def live(repo, cutoff, *, since=None):
     if not re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+", repo):
         raise ValueError("invalid GitHub repository")
-    route = f"actions/workflows/{WORKFLOW}/runs?per_page=100&created=%3C%3D{cutoff}"
+    created = f"{since}..{cutoff}" if since else f"%3C%3D{cutoff}"
+    route = f"actions/workflows/{WORKFLOW}/runs?per_page=100&created={created}"
     # GitHub paginates newest first. Include a boundary tie even on the next page.
     page, runs = 1, {}
     while True:
-        data = api(repo, route + f"&page={page}")["workflow_runs"]
+        response = api(repo, route + f"&page={page}")
+        if since is not None and response.get("total_count", 0) > 1000:
+            raise ValueError("hosted replay range exceeds the searchable workflow census")
+        data = response["workflow_runs"]
         for run in data:
             if run["name"] != "Public checks":
                 raise ValueError("unexpected workflow scope")
             runs[run["id"]] = run
         newest = sorted(runs.values(), key=lambda r: (r["created_at"], r["id"]), reverse=True)
-        if len(data) < 100 or (len(newest) > 100 and newest[-1]["created_at"] < newest[99]["created_at"]):
+        if len(data) < 100 or (since is None and len(newest) > 100 and newest[-1]["created_at"] < newest[99]["created_at"]):
             break
         page += 1
     with ThreadPoolExecutor(max_workers=4) as pool:
-        rows = list(pool.map(lambda run: first_attempt(repo, run), newest[:100]))
-    green = next((r for r in rows if r["first"] == SUCCESS and r.get("finished") and r["finished"] <= cutoff), None)
+        rows = list(pool.map(lambda run: first_attempt(repo, run), newest if since else newest[:100]))
+    green = next((r for r in rows if r["first"] == SUCCESS and r.get("finished")
+                  and instant(r["finished"]) <= instant(cutoff)), None) if since is None else None
     if green:
         route = f"actions/runs/{green['id']}/attempts/1/jobs?per_page=100"
         try:
@@ -140,7 +148,7 @@ def retained(csv_path, runs_path, repo):
         first = run["conclusion"] if attempt == 1 else None
         if original:
             first = SUCCESS if original["classification"] == "first_attempt_pass" else "failure"
-        row = dict(id=rid, sha=run["headSha"], created=run["createdAt"], attempt=attempt,
+        row = dict(id=rid, sha=run["headSha"], created=stamp(instant(run["createdAt"])), attempt=attempt,
                    source=f"https://github.com/{repo}/actions/runs/{rid}", first=first,
                    latest=run["conclusion"], failures=[])
         if original:

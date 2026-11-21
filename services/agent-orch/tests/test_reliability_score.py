@@ -237,9 +237,36 @@ def test_inert_command_three_exit_states(sources, tmp_path, capsys):
     assert cli.main(args+["--json"]) == 1
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["status"] == "fail"
     Path(sources["hosted"]["snapshot"]).unlink()
-    assert cli.main(args+["--json"]) == 2
+    assert cli.main(args+["--json"]) == 1
     assert json.loads(capsys.readouterr().out)["conditions"]["false_reds"]["status"] == "incomplete"
 
+
+
+def test_decisive_false_reds_preserve_missing_night(sources, tmp_path, capsys):
+    hosted = Path(sources["hosted"]["snapshot"])
+    rows = json.loads(hosted.read_text())
+    for row in rows[:2]:
+        row.update(first="failure", failures=[pkg()])
+    write(hosted, rows)
+    del sources["nightly"]["bindings"][next(iter(sources["nightly"]["bindings"]))]
+    config = write(tmp_path / "mixed.json", sources)
+    args = ["reliability", "score", "--sources", config, "--as-of", stamp(NOW), "--json"]
+    assert cli.main(args) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["conditions"]["false_reds"]["status"] == "fail"
+    assert result["conditions"]["scheduled_nights"]["status"] == "incomplete"
+
+    write(hosted, rows[2:])
+    assert cli.main(args) == 2
+
+
+def test_weekly_reclassification_keeps_one_evidence_identity():
+    at = "2026-03-10T08:00:00Z"
+    events = [dict(id="same", kind="class", at=at, **{"class": cls})
+              for cls in ("timing", "fixture")]
+    week = weekly({"events": events}, NOW)["weeks"][-2]
+    assert week["evidence_count"] == 1
+    assert week["classes"] == ["fixture"]
 
 def test_weekly_dedup_aliases_and_partial_week():
     h = dict(from_inception=True, complete_through=stamp(NOW), class_aliases={"legacy":"fixture"}, events=[])
@@ -322,3 +349,25 @@ def test_ambiguous_intents_and_rehearsals(sources):
     assert state["observations"]["excluded_releases"][0]["id"] == "0"
     assert state["observations"]["releases"][0]["result"] == "incomplete"
     assert state["conditions"]["first_try_releases"]["passed"] is False
+
+
+
+def test_release_timestamp_is_normalized_to_z(sources):
+    entry = sources["releases"]["intents"][0]
+    entry["created"] = entry["created"].replace("Z", "+00:00")
+    result = report(sources, NOW)
+    assert result["observations"]["releases"][0]["created"].endswith("Z")
+
+
+def test_lifecycle_timestamp_compares_same_day_instants(sources):
+    work = sources["work"]
+    name = "pentacle__clock_case"
+    path = Path(make_work(Path(work["work_root"]), name))
+    change_json(work["register"], records=[dict(cause="clock", item=name, first_seen="2026-03-01T00:00:00Z")])
+    before = path.read_text().replace("2026-03-01", "2026-03-18T05:59:00-06:00")
+    path.write_text(before)
+    assert report(sources, NOW)["conditions"]["open_failure_items"]["numerator"] == 1
+    path.write_text(before.replace("05:59", "06:01"))
+    state = report(sources, NOW)["conditions"]["open_failure_items"]
+    assert state["status"] == "incomplete"
+    assert "current lifecycle is newer than as-of: " + name in state["missing"]
