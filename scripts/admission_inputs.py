@@ -13,6 +13,11 @@ INVENTORY = 'scripts/test-admission-inventory.json'
 RECORDS = 'scripts/test-admission-records.json'
 QUARANTINE = 'scripts/quarantine.json'
 HEX = re.compile(r'^[a-f0-9]{64}$')
+ROLLOUT_SEEDS = (
+    'test/web_server.test.js::two concurrent connections keep their local tmux sessions isolated',
+    'tests/test_store_call_diag.py::test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line',
+    'tests/test_tmux_observation_delimiter.py::test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentinel[status]',
+)
 
 
 def _git(root, *args):
@@ -59,11 +64,45 @@ def _history(data):
     return active, history
 
 
-def load_inputs(repo):
-    root = Path(repo).resolve()
+def _base(root):
     base = _git(root, 'merge-base', 'HEAD', 'refs/remotes/origin/main').decode().strip()
     if not re.fullmatch(r'[a-f0-9]{40}', base):
         raise ValueError('accepted Git base invalid')
+    return base
+
+
+def load_quarantine(repo, base=None):
+    """Use accepted-base exclusions; candidate additions are never effective."""
+    import sys
+    root = Path(repo).resolve()
+    current = _parse((root / QUARANTINE).read_bytes(), 'quarantine inventory')
+    current_active, _ = _history(current)
+    base = base or _base(root)
+    prior_raw = _file(root, base, QUARANTINE)
+    if prior_raw is None:
+        try:
+            subprocess.run(['git', '-C', str(root), 'merge-base', '--is-ancestor', ROLLOUT_BASE, base],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError('rollout quarantine base unavailable') from exc
+        history = {}
+        for test in ROLLOUT_SEEDS:
+            history[hashlib.sha256(test.encode()).hexdigest()] = {
+                'activation': 'seed-pr606',
+                'file': hashlib.sha256(test.split('::', 1)[0].encode()).hexdigest(), 'parents': []}
+        accepted = {'version': 1, 'nonblocking_tests': list(ROLLOUT_SEEDS), 'history': history}
+    else:
+        accepted = _parse(prior_raw, 'accepted quarantine inventory')
+        _history(accepted)
+    pending = sorted(set(current_active) - set(accepted['nonblocking_tests']))
+    for test in pending:
+        print('QUARANTINE PENDING, NOT ON BASE: ' + test, file=sys.stderr, flush=True)
+    return {**accepted, 'pending': pending}
+
+
+def load_inputs(repo):
+    root = Path(repo).resolve()
+    base = _base(root)
     raw_inventory = _file(root, base, INVENTORY)
     rollout = raw_inventory is None
     if raw_inventory is None:
@@ -88,16 +127,4 @@ def load_inputs(repo):
         records = records_data.get('records')
         if not isinstance(records, dict):
             raise ValueError('admission attestations invalid')
-    current = _parse((root / QUARANTINE).read_bytes(), 'quarantine inventory')
-    active, history = _history(current)
-    prior_raw = _file(root, base, QUARANTINE)
-    if prior_raw is not None:
-        previous = _parse(prior_raw, 'accepted quarantine inventory')
-        old_active, old_history = _history(previous)
-        if any(key not in history for key in old_history):
-            raise ValueError('quarantine history was removed')
-        old_keys = {hashlib.sha256(test.encode()).hexdigest() for test in old_active}
-        new_keys = {hashlib.sha256(test.encode()).hexdigest() for test in active}
-        if any(history[key] != old_history[key] for key in old_keys & new_keys):
-            raise ValueError('active quarantine history was rewritten')
-    return legacy, records, current
+    return legacy, records, load_quarantine(root, base)

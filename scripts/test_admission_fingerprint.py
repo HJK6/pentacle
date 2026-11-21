@@ -24,6 +24,20 @@ def test_fixture_change_only_invalidates_its_dependents_and_selector_change_does
     assert python_fingerprint(root, 'tests/test_a.py::test_two') == two
 
 
+def test_daemon_selector_session_hook_does_not_change_fingerprint(tmp_path):
+    root = tmp_path/'chat-stream-v2'
+    tests = root/'tests'
+    tests.mkdir(parents=True)
+    conf = tests/'conftest.py'
+    conf.write_text('def pytest_configure(config):\n    pass\n')
+    (tests/'test_a.py').write_text('def test_one():\n    assert True\n')
+    before = python_fingerprint(root, 'tests/test_a.py::test_one')
+    conf.write_text(conf.read_text() + '\ndef pytest_sessionfinish(session, exitstatus):\n    pass\n')
+    assert python_fingerprint(root, 'tests/test_a.py::test_one') == before
+    conf.write_text(conf.read_text() + '\ndef pytest_runtest_setup(item):\n    pass\n')
+    assert python_fingerprint(root, 'tests/test_a.py::test_one') != before
+
+
 def test_param_case_identity_is_bound_and_missing_test_is_not_grandfathered(tmp_path):
     tests = tmp_path / 'tests'
     tests.mkdir()

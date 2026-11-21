@@ -476,7 +476,8 @@ def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path
     if not select:
         if target.get("quarantine_defaults"):
             try:
-                data = json.loads((checkout / "scripts/quarantine.json").read_text())
+                from admission_inputs import load_quarantine
+                data = load_quarantine(checkout)
                 tests = data["nonblocking_tests"]
                 if (data["version"] != 1 or not isinstance(tests, list)
                         or any(not isinstance(t, str) or not t or "::" not in t for t in tests)

@@ -358,7 +358,10 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             admission_state = json.loads(admission_manifest.read_text())
             if admission_state.get('complete') is not True or not isinstance(admission_state.get('held'), list):
                 raise ValueError('admission inventory incomplete')
-            data = json.loads((REPO_ROOT / 'scripts/quarantine.json').read_text())
+            if str(REPO_ROOT / 'scripts') not in sys.path:
+                sys.path.insert(0, str(REPO_ROOT / 'scripts'))
+            from admission_inputs import load_quarantine
+            data = load_quarantine(REPO_ROOT)
             tests = data['nonblocking_tests']
             if (data['version'] != 1 or not isinstance(tests, list)
                     or any(not isinstance(t, str) or '::' not in t for t in tests)

@@ -56,6 +56,8 @@ def verify_changed(previous, proposed, get_report, fingerprint_at_target, load_m
                 or manifest['records'].get(key) != manifest_entry(row)):
             raise Refusal('attestation missing from reviewed evidence manifest')
         report = get_report(row['qa_report_id'])
+        if not isinstance(report, dict):
+            raise Unavailable('QA report reader returned invalid data')
         if report.get('type') != 'work.report.get.ok':
             if report.get('error_code') == 'not_found':
                 raise Refusal('QA report not found')
@@ -102,6 +104,8 @@ def _report(report_id, command):
         response = json.loads(proc.stdout)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise Unavailable('QA report reader unavailable') from exc
+    if not isinstance(response, dict):
+        raise Unavailable('QA report reader returned invalid data')
     if proc.returncode and response.get('error_code') != 'not_found':
         raise Unavailable('QA report reader unavailable')
     return response
@@ -145,6 +149,9 @@ def check(root, base, tip, command='agent-orch'):
             except (OSError, ValueError, SyntaxError) as exc:
                 raise Refusal('test or fixture missing at QA target') from exc
         def load_manifest(path):
+            names = _git(root, 'ls-tree', '-r', '--name-only', tip, '--', path).decode().splitlines()
+            if path not in names:
+                raise Refusal('admission evidence manifest missing')
             size = int(_git(root, 'cat-file', '-s', tip + ':' + path))
             if size > 1_000_000:
                 raise Refusal('admission evidence manifest too large')
@@ -164,7 +171,7 @@ def main(argv=None):
     except Refusal as exc:
         print(json.dumps({'status': 'refuse', 'reason': str(exc)}))
         return 1
-    except (Unavailable, OSError, ValueError, TypeError, KeyError) as exc:
+    except Exception as exc:
         print(json.dumps({'status': 'error', 'reason': type(exc).__name__}))
         return 2
     print(json.dumps({'status': 'accept', 'base': args.base, 'tip': args.tip}))

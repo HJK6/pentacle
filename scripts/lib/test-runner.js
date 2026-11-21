@@ -10,8 +10,8 @@ const DEFAULTS = Object.freeze({ fileTimeoutMs: 60000, runTimeoutMs: 900000, ter
 const TAIL_BYTES = 65536;
 const FORWARD_BYTES = 1048576;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function quarantineByFile(repoRoot) {
-  const data = JSON.parse(fs.readFileSync(path.join(repoRoot, 'scripts/quarantine.json'), 'utf8'));
+function quarantineByFile(repoRoot, accepted) {
+  const data = accepted || JSON.parse(fs.readFileSync(path.join(repoRoot, 'scripts/quarantine.json'), 'utf8'));
   const tests = data && data.nonblocking_tests;
   if (data?.version !== 1 || !Array.isArray(tests) || tests.some(t => typeof t !== 'string' || !t || !t.includes('::')) || new Set(tests).size !== tests.length) {
     throw new Error('invalid quarantine inventory');
@@ -47,7 +47,7 @@ function admissionQuery(repoRoot, files, timeoutMs = 60000) {
       maxBuffer: 8 * 1024 * 1024,
     });
     const value = JSON.parse(output);
-    return value.complete === true && value.files && typeof value.files === 'object' ? value : {complete: false};
+    return value.complete === true && value.files && typeof value.files === 'object' && value.quarantine && typeof value.quarantine === 'object' ? value : {complete: false};
   } catch { return {complete: false}; }
 }
 
@@ -58,6 +58,16 @@ function verifyAdvisory(repoRoot, junit, expected, timeoutMs) {
     });
     const result = JSON.parse(output);
     return result.complete === true && result.executed === true;
+  } catch { return false; }
+}
+
+function verifyBlocking(repoRoot, junit, expected, timeoutMs) {
+  try {
+    const output = execFileSync(process.env.PENTACLE_PYTHON || 'python3', [path.join(repoRoot, 'scripts/admission_query.py')], {
+      input: JSON.stringify({operation: 'verify_junit', path: junit, expected}), encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
+    });
+    const result = JSON.parse(output);
+    return result.complete === true && result.absent === true;
   } catch { return false; }
 }
 
@@ -252,10 +262,7 @@ async function operation(command, args, { repoRoot, env, deadline, fileDeadline,
 }
 
 async function run(repoRoot, options, injected = {}) {
-  let quarantinedTests, quarantineError = false;
-  try { quarantinedTests = quarantineByFile(repoRoot); }
-  catch { quarantinedTests = new Map(); quarantineError = true; }
-  const deps = { spawn, groupMembers, admissionQuery, verifyAdvisory, sourceIdentity, makeTemporaryDirectory: prefix => fs.mkdtempSync(prefix), removeOwnedDirectory: directory => fs.rmSync(directory, { recursive: true, force: true }), signalGroup: (pgid, signal) => process.kill(-pgid, signal), now: () => performance.now(), sleep, stdout: process.stdout, stderr: process.stderr, ...injected };
+  const deps = { spawn, groupMembers, admissionQuery, verifyAdvisory, verifyBlocking, sourceIdentity, makeTemporaryDirectory: prefix => fs.mkdtempSync(prefix), removeOwnedDirectory: directory => fs.rmSync(directory, { recursive: true, force: true }), signalGroup: (pgid, signal) => process.kill(-pgid, signal), now: () => performance.now(), sleep, stdout: process.stdout, stderr: process.stderr, ...injected };
   const controller = new AbortController();
   deps.abortSignal = deps.abortSignal || controller.signal;
   const interrupt = signal => controller.abort(signal);
@@ -265,11 +272,19 @@ async function run(repoRoot, options, injected = {}) {
   const entries = discover(repoRoot, options.patterns);
   const fixtureOnly = process.env.PENTACLE_RUNNER_FIXTURES === '1' && entries.length > 0 &&
     entries.every(file => file.startsWith('test/fixtures/') && !file.includes('..'));
-  const admission = quarantineError ? {complete: false} : fixtureOnly ? {complete: true, files: Object.fromEntries(entries.map(file => [file, {state: 'blocking'}]))} : deps.admissionQuery(repoRoot, entries, Math.min(60000, Math.max(1, deadline - deps.now())));
+  let admission = fixtureOnly ? {complete: true, files: Object.fromEntries(entries.map(file => [file, {state: 'blocking'}])), quarantine: {version: 1, nonblocking_tests: [], history: {}}} : deps.admissionQuery(repoRoot, entries, Math.min(60000, Math.max(1, deadline - deps.now())));
+  let quarantinedTests = new Map(), quarantineError = !admission.complete;
+  if (admission.complete) {
+    try { quarantinedTests = quarantineByFile(repoRoot, admission.quarantine || {version: 1, nonblocking_tests: [], history: {}}); }
+    catch { admission = {complete: false}; quarantineError = true; }
+  }
   if (!entries.length) throw new Error('no tests matched');
   const summary = { version: 1, repo_root: path.resolve(repoRoot), source_before: deps.sourceIdentity(repoRoot, Math.min(1000, Math.max(1, deadline - deps.now()))), files: [], discovered: entries, file_timeout_ms: limits.fileTimeoutMs, run_timeout_ms: limits.runTimeoutMs, cleanup_allowance_ms: limits.termGraceMs + limits.killGraceMs, duration_ms: 0, exit_code: 1, runner_errors: [], directory_cleanup_errors: [] };
   if (!admission.complete) summary.runner_errors.push('admission_inventory_unavailable');
   if (quarantineError) summary.runner_errors.push('quarantine_inventory_unavailable');
+  if (admission.complete && Array.isArray(admission.quarantine?.pending)) {
+    for (const test of admission.quarantine.pending) deps.stderr.write(`QUARANTINE PENDING, NOT ON BASE: ${test}\n`);
+  }
   const cacheRoot = path.join(repoRoot, 'node_modules', '.cache');
   let outDir, testHome, env;
   process.on('SIGINT', onINT); process.on('SIGTERM', onTERM);
@@ -329,6 +344,10 @@ async function run(repoRoot, options, injected = {}) {
       const result = await operation(process.execPath, [...testArgs, target], context, deps, limits);
       Object.assign(row, { status: result.timedOut ? 'timeout' : (!result.aborted && result.exitCode === 0 && result.cleanup.status === 'clean' ? 'pass' : 'fail'), execution: result, cleanup: result.cleanup, duration_ms: Math.round(deps.now() - fileStart) });
       if (quarantined) {
+        const blockingVerifyMs = Math.floor(Math.min(deadline, fileDeadline) - deps.now());
+        if (blockingVerifyMs <= 0 || !deps.verifyBlocking(repoRoot, junit, quarantined.map(item => item.name), blockingVerifyMs)) {
+          row.status = 'fail'; row.reason = 'blocking_quarantine_incomplete';
+        }
         for (const item of quarantined) deps.stderr.write(`ADVISORY ${file}::${item.name}\n`);
         const advisoryJunit = path.join(junitDir, key + '-advisory.xml');
         try { fs.unlinkSync(advisoryJunit); } catch (error) { if (error.code !== 'ENOENT') throw error; }

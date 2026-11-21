@@ -8,6 +8,7 @@ injected runners); no real permission is weakened.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import signal
@@ -662,8 +663,19 @@ class EntrypointReceipts(Tmp):
         test_dir = self.tmp / "services/chat-stream-v2/tests"
         test_dir.mkdir(parents=True)
         (test_dir / "test_new.py").write_text("")
-        inventory.write_text(json.dumps({"version": 1, "nonblocking_tests": [
-            "tests/test_new.py::test_case", "test/web.test.js::case"]}))
+        ids = ["tests/test_new.py::test_case", "test/web.test.js::case"]
+        history = {hashlib.sha256(test.encode()).hexdigest(): {
+            'activation': 'accepted', 'parents': [],
+            'file': hashlib.sha256(test.split('::', 1)[0].encode()).hexdigest()} for test in ids}
+        inventory.write_text(json.dumps({"version": 1, "nonblocking_tests": ids, 'history': history}))
+        def git(*args):
+            subprocess.run(['git', '-C', str(self.tmp), *args], check=True, capture_output=True)
+        git('init', '-q')
+        git('config', 'user.name', 'fixture')
+        git('config', 'user.email', 'fixture@example.test')
+        git('add', '.')
+        git('commit', '-qm', 'accepted base')
+        git('update-ref', 'refs/remotes/origin/main', 'HEAD')
         self.assertEqual(ge.validate_selection(target, [], self.tmp), ["tests/test_new.py"])
         inventory.write_text("invalid")
         with self.assertRaises(ge.SetupFailure):

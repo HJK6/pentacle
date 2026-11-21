@@ -93,15 +93,18 @@ def pytest_configure(config) -> None:
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items) -> None:
     """Apply the same exact-test inventory used by the release scorecard."""
-    inventory = SERVICE_DIR.parents[1] / "scripts" / "quarantine.json"
     try:
-        data = json.loads(inventory.read_text())
+        scripts = str(SERVICE_DIR.parents[1] / 'scripts')
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        from admission_inputs import load_quarantine
+        data = load_quarantine(SERVICE_DIR.parents[1])
         tests = data["nonblocking_tests"]
         if (data["version"] != 1 or not isinstance(tests, list)
                 or any(not isinstance(t, str) or not t or "::" not in t for t in tests)
                 or len(set(tests)) != len(tests)):
             raise ValueError("invalid quarantine inventory")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
         config._quarantine_inventory_error = type(exc).__name__
         print(f"quarantine inventory unavailable: {type(exc).__name__}", file=sys.stderr)
         return

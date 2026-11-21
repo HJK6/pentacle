@@ -76,7 +76,8 @@ def main(argv=None):
         manifest = json.loads(Path(args.manifest).read_text())
         if manifest.get('complete') is not True or not isinstance(manifest.get('held'), list):
             raise ValueError('admission inventory incomplete')
-        quarantine = json.loads((root/'scripts/quarantine.json').read_text())
+        from admission_inputs import load_quarantine
+        quarantine = load_quarantine(root)
         prefix = args.suite + '::'
         selected_files = {Path(value.split('::', 1)[0]).as_posix() for value in selection}
         def selected(node):

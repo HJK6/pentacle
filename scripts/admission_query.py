@@ -26,7 +26,7 @@ def query(root, files, platform):
         except (OSError, ValueError, SyntaxError):
             state, reason = 'advisory', 'test or fixture fingerprint unavailable'
         result[file] = {'state': state, 'reason': reason}
-    return {'complete': True, 'files': result}
+    return {'complete': True, 'files': result, 'quarantine': quarantine}
 
 
 def verify_junit(path, expected):
@@ -43,7 +43,8 @@ def verify_junit(path, expected):
             if child.tag in ('testsuites', 'testsuite', 'testcase'):
                 walk(child, parents)
     walk(root, [])
-    return {'complete': True, 'executed': all(name in found for name in expected)}
+    return {'complete': True, 'executed': all(name in found for name in expected),
+            'absent': all(name not in found for name in expected), 'observed': sorted(found)}
 
 
 def main():

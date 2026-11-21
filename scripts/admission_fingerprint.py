@@ -173,7 +173,9 @@ def python_fingerprint(suite_root, node_id):
                         if target.id == 'pytestmark':
                             parts[prefix + ':pytestmark'] = _source(mod_text, node)
                             marked.update(_mark_fixtures(node))
-            if mod_path.name == 'conftest.py' and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith('pytest_') and node.name != 'pytest_collection_modifyitems':
+            selector_hook = (root.name == 'chat-stream-v2' and mod_path == root / 'tests/conftest.py'
+                             and node.name == 'pytest_sessionfinish') if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else False
+            if mod_path.name == 'conftest.py' and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith('pytest_') and node.name != 'pytest_collection_modifyitems' and not selector_hook:
                 parts[prefix + ':' + node.name] = _source(mod_text, node)
             if mod_path == source and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in ('setup_module', 'teardown_module', 'setup_function', 'teardown_function'):
                 parts[prefix + ':xunit:' + node.name] = _source(mod_text, node)

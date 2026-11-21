@@ -47,6 +47,35 @@ test('unreadable quarantine still runs blocking files and leaves the gate incomp
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
+test('candidate-only JavaScript quarantine stays blocking until base publication', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-base-'));
+  const git = (...args) => require('node:child_process').execFileSync('git', ['-C', dir, ...args], {stdio: 'ignore'});
+  try {
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.mkdirSync(path.join(dir, 'test'));
+    for (const name of ['admission_query.py', 'admission_fingerprint.py', 'admission_inputs.py', 'admission_policy.py'])
+      fs.copyFileSync(path.join(root, 'scripts', name), path.join(dir, 'scripts', name));
+    fs.writeFileSync(path.join(dir, 'test/cases.js'), "const t=require('node:test'); t('product failure', () => {throw Error('must block')});\n");
+    const py = "import sys;sys.path.insert(0,sys.argv[1]+'/scripts');from admission_fingerprint import javascript_fingerprint;print(javascript_fingerprint(sys.argv[1],'test/cases.js'))";
+    const fingerprint = require('node:child_process').execFileSync('python3', ['-c', py, dir], {encoding: 'utf8'}).trim();
+    const key = require('node:crypto').createHash('sha256').update('javascript\0test/cases.js').digest('hex');
+    fs.writeFileSync(path.join(dir, 'scripts/test-admission-inventory.json'), JSON.stringify({version: 1,
+      base_sha: 'f3a76f479e14a390cd3d61234e1fd6e8a7d228d1', python: {}, javascript: {[key]: fingerprint}}));
+    fs.writeFileSync(path.join(dir, 'scripts/test-admission-records.json'), JSON.stringify({version: 1, records: {}}));
+    fs.writeFileSync(path.join(dir, 'scripts/quarantine.json'), JSON.stringify(quarantine([])));
+    git('init', '-q'); git('config', 'user.name', 'fixture'); git('config', 'user.email', 'fixture@example.test');
+    git('add', '.'); git('commit', '-qm', 'base'); git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    fs.writeFileSync(path.join(dir, 'scripts/quarantine.json'), JSON.stringify(quarantine(['test/cases.js::product failure'])));
+    const output = {text: '', write(s) { this.text += s; }};
+    const spawnClean = (cmd, args, config) => { const env = {...config.env}; delete env.NODE_TEST_CONTEXT; return spawn(cmd, args, {...config, env}); };
+    const result = await runner.run(dir, runner.parseArgs(['test/cases.js']), {spawn: spawnClean, groupMembers: () => [], stdout: quiet, stderr: output});
+    assert.equal(result.exit_code, 1);
+    assert.equal(result.files[0].status, 'fail');
+    assert.match(result.files[0].execution.tail, /must block/);
+    assert.match(output.text, /PENDING, NOT ON BASE/);
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
 test('quarantined node case runs advisory while unrelated failure remains blocking', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-quarantine-run-'));
   try {
@@ -64,7 +93,7 @@ test('quarantined node case runs advisory while unrelated failure remains blocki
       return spawn(command, args, {...config, env});
     };
     const run = () => runner.run(dir, options, {spawn: isolatedSpawn, groupMembers: () => [],
-      admissionQuery: () => ({complete: true, files: {'test/cases.js': {state: 'blocking'}}}),
+      admissionQuery: () => ({complete: true, quarantine: quarantine(['test/cases.js::intermittent [case]']), files: {'test/cases.js': {state: 'blocking'}}}),
       stdout: quiet, stderr: quiet});
     fs.writeFileSync(subject, source + "test('product', () => assert.fail('product failed'));\n");
     let result = await run();
@@ -77,7 +106,7 @@ test('quarantined node case runs advisory while unrelated failure remains blocki
     assert.equal(result.files[0].advisory.exitCode, 1);
     assert.match(result.files[0].advisory.tail, /cases\.js:2/);
     const held = await runner.run(dir, options, {spawn: isolatedSpawn, groupMembers: () => [],
-      admissionQuery: () => ({complete: true, files: {'test/cases.js': {state: 'advisory', reason: 'no review'}}}),
+      admissionQuery: () => ({complete: true, quarantine: quarantine(['test/cases.js::intermittent [case]']), files: {'test/cases.js': {state: 'advisory', reason: 'no review'}}}),
       stdout: quiet, stderr: quiet});
     assert.equal(held.exit_code, 0);
     assert.equal(held.files[0].status, 'advisory');
@@ -99,14 +128,20 @@ test('nested quarantine runs the exact case advisory and keeps sibling blocking'
     const id = 'test/cases.js::parent child';
     fs.writeFileSync(path.join(dir, 'scripts/quarantine.json'), JSON.stringify(quarantine([id], {[id]: ['parent']})));
     fs.writeFileSync(path.join(dir, 'test/cases.js'), "const test=require('node:test'); const assert=require('node:assert/strict');\n" +
-      "test('parent', async t => { await t.test('child', () => assert.fail('flaky')); await t.test('sibling', () => assert.fail('product')); });\n");
+      "test('parent', async t => { await t.test('child', () => assert.fail('flaky')); await t.test('sibling', () => assert.fail('product')); });\n" +
+      "test('other', async t => { await t.test('child', () => {}); });\n");
     const spawnClean = (cmd, args, config) => { const env = {...config.env}; delete env.NODE_TEST_CONTEXT; return spawn(cmd, args, {...config, env}); };
-    const result = await runner.run(dir, runner.parseArgs(['test/cases.js']), {spawn: spawnClean, groupMembers: () => [],
-      admissionQuery: () => ({complete: true, files: {'test/cases.js': {state: 'blocking'}}}), stdout: quiet, stderr: quiet});
+    const result = await runner.run(dir, runner.parseArgs(['--summary-path', path.join(dir, 'summary.json'), 'test/cases.js']), {spawn: spawnClean, groupMembers: () => [],
+      admissionQuery: () => ({complete: true, quarantine: quarantine([id], {[id]: ['parent']}), files: {'test/cases.js': {state: 'blocking'}}}), stdout: quiet, stderr: quiet});
     assert.equal(result.exit_code, 1);
     assert.equal(result.files[0].execution.exitCode, 1);
     assert.equal(result.files[0].advisory.exitCode, 1);
     assert.notEqual(result.files[0].reason, 'advisory_incomplete');
+    const receipt = spawnSync('python3', [path.join(dir, 'scripts/admission_query.py')], {encoding: 'utf8',
+      input: JSON.stringify({operation: 'verify_junit', path: result.files[0].junit, expected: ['parent child']})});
+    const blocking = JSON.parse(receipt.stdout);
+    assert.equal(blocking.absent, true);
+    assert.deepEqual(blocking.observed, ['other child', 'parent sibling']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

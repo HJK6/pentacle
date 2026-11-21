@@ -1,7 +1,8 @@
 # Test admission and quarantine
 
 The blocking selectors use `scripts/quarantine.json` as the effective quarantine
-list. A quarantine names one exact case. Python identities use the suite prefix
+list from the accepted Git base. Candidate additions are reported as pending and
+have no effect until the relay publishes them on main. A quarantine names one exact case. Python identities use the suite prefix
 for new entries (`daemon::`, `cli::`, or `shared::`); the original unprefixed
 daemon entries remain valid. JavaScript identities are a test file, `::`, and
 the exact Node test name. The associated history records an activation identity
@@ -76,3 +77,14 @@ attestation, and `2` reports unavailable Git or QA evidence. The checker reads
 the exact reviewed target source, the evidence-manifest digest, and the
 independently commissioned report. A refused or unavailable check cannot
 publish an attestation.
+
+For any relay bundle that adds quarantine entries, also run the checker from
+the accepted installation with the private scorecard register and work root:
+
+```
+python3 scripts/quarantine_addition_check.py --root <checkout> --base <base-sha> --tip <candidate-sha> --register <private-register> --work-root <private-work-root>
+```
+
+Exit `0` accepts, `1` refuses an addition without one open owned decision and
+two distinct first-attempt occurrence links, and `2` means the Git or private
+decision evidence is unavailable. A refusal or error blocks the relay.

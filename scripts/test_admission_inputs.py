@@ -50,6 +50,23 @@ def test_missing_or_malformed_inventory_is_incomplete(tmp_path):
         load_inputs(tmp_path)
 
 
+def test_candidate_quarantine_addition_is_pending_until_it_is_on_base(tmp_path, capsys):
+    scripts = make_repo(tmp_path)
+    test = 'daemon::tests/test_case.py::test_blocking'
+    key = __import__('hashlib').sha256(test.encode()).hexdigest()
+    file_key = __import__('hashlib').sha256(b'tests/test_case.py').hexdigest()
+    data = {'version': 1, 'nonblocking_tests': [test],
+            'history': {key: {'activation': 'candidate', 'file': file_key, 'parents': []}}}
+    (scripts/'quarantine.json').write_text(json.dumps(data))
+    assert load_inputs(tmp_path)[2]['nonblocking_tests'] == []
+    assert 'PENDING, NOT ON BASE' in capsys.readouterr().err
+    git(tmp_path, 'add', '.')
+    git(tmp_path, 'commit', '-m', 'candidate')
+    assert load_inputs(tmp_path)[2]['nonblocking_tests'] == []
+    git(tmp_path, 'update-ref', 'refs/remotes/origin/main', git(tmp_path, 'rev-parse', 'HEAD'))
+    assert load_inputs(tmp_path)[2]['nonblocking_tests'] == [test]
+
+
 def test_javascript_file_is_held_after_fixture_change(tmp_path):
     scripts = make_repo(tmp_path)
     tests = tmp_path/'test'

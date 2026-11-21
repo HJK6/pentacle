@@ -72,6 +72,20 @@ def test_unreadable_inventory_preserves_blocking_execution_and_fails_incomplete(
     assert manifest['complete'] is False
 
 
+def test_candidate_quarantine_cannot_remove_a_blocking_case(tmp_path):
+    suite = make_fixture(tmp_path, legacy_fail=True)
+    test = 'daemon::tests/test_cases.py::test_legacy'
+    key = hashlib.sha256(test.encode()).hexdigest()
+    file = hashlib.sha256(b'tests/test_cases.py').hexdigest()
+    (tmp_path/'scripts/quarantine.json').write_text(json.dumps({'version': 1, 'nonblocking_tests': [test],
+        'history': {key: {'activation': 'candidate', 'file': file, 'parents': []}}}))
+    proc, manifest = invoke(tmp_path, suite, 'not admission_hold and not quarantined')
+    assert proc.returncode == 1
+    assert 'test_legacy' in proc.stdout
+    assert [row['id'] for row in manifest['held']] == ['tests/test_cases.py::test_new']
+    assert 'PENDING, NOT ON BASE' in proc.stderr
+
+
 def test_real_wrapper_keeps_new_failure_advisory_and_legacy_failure_blocking(tmp_path):
     for failing in (False, True):
         root = tmp_path / ('bad' if failing else 'good')

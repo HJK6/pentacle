@@ -55,6 +55,8 @@ def test_unavailable_report_is_error_and_unchanged_record_is_not_requeried():
         raise Unavailable('service unavailable')
     with pytest.raises(Unavailable):
         verify_changed({}, {key: row}, unavailable, lambda _: row['fingerprint'], lambda _: raw)
+    with pytest.raises(Unavailable):
+        verify_changed({}, {key: row}, lambda _: [], lambda _: row['fingerprint'], lambda _: raw)
     verify_changed({key: copy.deepcopy(row)}, {key: row}, unavailable, lambda _: row['fingerprint'], lambda _: raw)
 
 
@@ -93,6 +95,13 @@ def test_relay_checker_reads_exact_target_source_and_report(tmp_path):
     git('commit', '-m', 'admission')
     tip = git('rev-parse', 'HEAD')
     check(repo, base, tip, str(fake))
+    git('rm', row['evidence_manifest'])
+    git('commit', '-m', 'remove evidence')
+    assert main(['--root', str(repo), '--base', base, '--tip', git('rev-parse', 'HEAD'), '--agent-orch', str(fake)]) == 1
+    evidence_path.parent.mkdir(exist_ok=True)
+    evidence_path.write_bytes(raw)
+    git('add', '.')
+    git('commit', '-m', 'restore evidence')
     row['passing_sha256'] = 'e'*64
     records.write_text(json.dumps({'version': 1, 'records': {identity(row['suite'], row['test_id']): row}}))
     git('add', '.')
@@ -110,4 +119,8 @@ def test_exit_contract_distinguishes_refusal_and_unavailable(monkeypatch, tmp_pa
     monkeypatch.setattr('admission_attestation_check.check', refuse)
     assert main(args) == 1
     monkeypatch.setattr('admission_attestation_check.check', unavailable)
+    assert main(args) == 2
+    def unexpected(*_args):
+        raise AttributeError('malformed service response')
+    monkeypatch.setattr('admission_attestation_check.check', unexpected)
     assert main(args) == 2
