@@ -305,8 +305,6 @@ A stale startup receipt never reactivates an older generation.
 
 A healthy generation can be independently enrolled with an alongside, pinned
 native executable and then imported with `agent-orch account upgrade`. Ordinary
-A Claude status response with `loggedIn: false` and exit code 0 or 1 is a native authentication failure. Other status failures retain their typed outcome.
-
 `relogin` still requires a native authentication failure. Upgrade never starts
 login, retries authorization, changes the saved default or rewrites existing
 session bindings. The current authenticated front desk must own the operation.
@@ -499,6 +497,8 @@ host/provider/account generation unavailable and records a typed fact through
 the existing error-alert path. Alert delivery follows the existing configured
 alert policy. Other independently enrolled hosts and accounts remain usable.
 Quota, capacity and transport failures do not trigger login or an alternate spawn.
+A Claude status response with `loggedIn: false` and exit code 0 or 1 is a native
+authentication failure. Other status failures retain their typed outcome.
 A successful usage read alone cannot clear an unavailable login.
 
 The front desk can request targeted repair when ready:
