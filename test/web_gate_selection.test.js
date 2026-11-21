@@ -252,6 +252,29 @@ test('owned Chrome stop requires child exit and group absence within each existi
     assert.equal(out.trace.find(row => row.signal === 'SIGKILL').at, 100);
     assert.equal(out.elapsed, 120);
   });
+  for (const leaderAlreadyExited of [false, true]) {
+    const timing = leaderAlreadyExited ? 'exits before stop' : 'exits on TERM';
+    await t.test(`accessible group with a TERM-resistant helper when the leader ${timing}`, async () => {
+      let helperAlive = true;
+      const out = await run(({ later, exit }) => {
+        if (leaderAlreadyExited) exit();
+        return { kill(signal) {
+          if (signal === 'SIGTERM' && !leaderAlreadyExited) later(exit, 20);
+          if (signal === 'SIGKILL') helperAlive = false;
+          if (signal === 0 && !helperAlive) return absent();
+          return true;
+        } };
+      });
+      const signals = out.trace.filter(row => typeof row.signal === 'string');
+      assert.deepEqual(signals.map(({ signal, at, childExited }) => [signal, at, childExited]),
+        [['SIGTERM', 0, leaderAlreadyExited], ['SIGKILL', 100, true]]);
+      assert.equal(helperAlive, false);
+      assert.equal(out.error, undefined);
+      assert.equal(out.result.exited, true);
+      assert.equal(out.result.forced, true);
+      assert.equal(out.trace.at(-1).signal, 0);
+    });
+  }
   await t.test('leader exit still requires a separate whole-group absence observation', async () => {
     const out = await run(({ now, later, exit }) => ({ kill(signal) {
       if (signal === 'SIGTERM') later(exit, 20);

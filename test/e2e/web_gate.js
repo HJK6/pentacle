@@ -218,17 +218,17 @@ function stopOwnedGroup(proc, graceMs = 3000) {
   return ownedGroupStops.get(proc);
 }
 
-// After a denied probe or signal, only read-only observations can finish this stop.
+// A helper can outlive its leader in the owned group. A denied probe or signal
+// makes all later checks read-only, even if the group becomes accessible again.
 async function stopGroup(proc, graceMs) {
   const pgid = proc.pid;
   const inspection = [];
-  const canSignal = () => !inspection.length && proc.exitCode === null && proc.signalCode === null;
   let deadline = Date.now() + graceMs;
   let forced = false;
   let alive = groupAlive(pgid, deadline, inspection);
   for (const signal of ['SIGTERM', 'SIGKILL']) {
     if (!alive) break;
-    if (canSignal()) {
+    if (!inspection.length) {
       if (signal === 'SIGKILL') {
         forced = true;
         deadline = Date.now() + graceMs;
@@ -241,7 +241,7 @@ async function stopGroup(proc, graceMs) {
       if (!inspection.length) await onceExit(proc, Math.max(0, deadline - Date.now()));
     }
     alive = !await groupEmpty(pgid, deadline, inspection);
-    if (alive && !canSignal()) {
+    if (alive && inspection.length) {
       throw cleanupFailure(`owned process group ${pgid} still present at cleanup deadline`, inspection);
     }
   }
