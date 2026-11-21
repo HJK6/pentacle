@@ -12,8 +12,8 @@ async function homeRail(ctx) {
   const { session, report } = ctx;
   for (const width of [1440, 1010, 440]) {
     await visit(ctx, width);
-    const info = await session.eval(`({names:Array.from(document.querySelectorAll('.rail-button')).map(x=>x.getAttribute('aria-label')), text:document.querySelector('.rail').innerText, input:!!document.querySelector('.rail input'), overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth, assistant:document.querySelector('.pane .thread-inner').dataset.streamId})`);
-    report.ok(`rail has four icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(['Assistant Fixture','Chats','Limits and machines','Settings']) && !info.text.trim() && !info.input && !info.overflow && info.assistant === 'local:web-gate-assistant', info);
+    const info = await session.eval(`({names:Array.from(document.querySelectorAll('.rail-button')).map(x=>x.getAttribute('aria-label')), text:document.querySelector('.rail').innerText, input:!!document.querySelector('.rail input'), overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth, assistant:document.querySelector('.pane .thread-inner').dataset.streamId, lit:document.querySelector('.rail .brand').classList.contains('on'), chatLit:document.querySelector('[aria-label=Chats]').classList.contains('on')})`);
+    report.ok(`rail has four icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(['Assistant Fixture','Chats','Limits and machines','Settings']) && !info.text.trim() && !info.input && !info.overflow && info.assistant === 'local:web-gate-assistant' && info.lit && !info.chatLit, info);
     if (width === 1440) await session.screenshot(path.join(report.dir, 'next-home.png'));
     if (width === 440) await session.screenshot(path.join(report.dir, 'next-phone-home.png'));
   }
@@ -22,10 +22,13 @@ async function homeRail(ctx) {
 async function chatCard(ctx) {
   const { session, report } = ctx; await visit(ctx);
   await session.click('[aria-label="Chats"]');
+  report.ok('open chats popover lights its rail control', await session.eval("document.querySelector('[aria-label=Chats]').classList.contains('open')"));
   await session.waitFor(`!!document.querySelector('.popover [data-stream-id="local:web-gate-1"]')`, { timeoutMs: ctx.timeoutMs });
   await session.click('.popover [data-stream-id="local:web-gate-1"]');
   await session.waitFor("!document.querySelector('.card').hidden && document.querySelector('.card-title').textContent.length>0", { timeoutMs: ctx.timeoutMs });
   report.ok('opening a seeded chat displays its card beside Assistant', await session.eval("!document.querySelector('.card').hidden && !document.querySelector('.pane').hidden"));
+  report.ok('the visible chat lights the chats control', await session.eval("document.querySelector('[aria-label=Chats]').classList.contains('on')"));
+  report.ok('the two chat panes share the stage evenly', await session.eval("Math.abs(document.querySelector('.pane').getBoundingClientRect().width-document.querySelector('.card').getBoundingClientRect().width)<20"));
   await session.click('[aria-label="Full screen"]'); report.ok('full screen hides Assistant', await session.eval("document.querySelector('.pane').hidden"));
   await session.screenshot(path.join(report.dir, 'next-full.png'));
   await session.send('Input.dispatchKeyEvent', { type:'keyDown', key:'Escape', code:'Escape' });
@@ -37,6 +40,7 @@ async function chatCard(ctx) {
   await session.screenshot(path.join(report.dir, 'next-chat.png'));
   await session.click('[aria-label="Close"]'); report.ok('closing the card returns to Assistant', await session.eval("document.querySelector('.card').hidden && !document.querySelector('.pane').hidden"));
   await session.click('[aria-label="Chats"]'); report.ok('closing the card leaves the session in the list', await session.eval("!!document.querySelector('.popover [data-stream-id=\"local:web-gate-survivor\"]')"));
+  report.ok('closing the card does not close its daemon session', await session.eval("window.cc.getChatStreamState().then(s=>(s.sessions||[]).some(x=>x.stream_id==='local:web-gate-survivor' && x.status!=='closed' && !x.closed_at))"));
 }
 module.exports = { homeRail: isolated(homeRail), chatCard: isolated(chatCard) };
 async function newChat(ctx) {
@@ -48,9 +52,11 @@ async function newChat(ctx) {
   })()`);
   await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]');
   await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs });
+  report.ok('provider tiles show catalog counts and Start is disabled', await session.eval("document.querySelector('[data-testid=\"set-provider-claude\"]').textContent.includes('1 model') && document.querySelector('[data-testid=\"set-provider-codex\"]').textContent.includes('1 model') && document.querySelector('[data-testid=\"start-chat\"]').disabled"));
   await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
+  report.ok('account displays its username and enables Start', await session.eval("document.querySelector('[data-testid=\"set-account-ours\"]').textContent==='fixture' && !document.querySelector('[data-testid=\"start-chat\"]').disabled"));
   await session.click('[data-testid="start-chat"]'); await session.waitFor("document.querySelector('.start-error')?.textContent === 'Fixture refusal'", { timeoutMs: ctx.timeoutMs });
-  report.ok('a resolved refusal retains the form and displays its reason', await session.eval("!!document.querySelector('[data-testid=\"start-chat\"]') && window.__nextRequests.length === 1"));
+  report.ok('a resolved refusal retains the choices and displays its reason', await session.eval("document.querySelector('[data-testid=\"set-provider-claude\"]').getAttribute('aria-checked')==='true' && document.querySelector('[data-testid=\"set-model-fixture-model\"]').getAttribute('aria-checked')==='true' && document.querySelector('[data-testid=\"set-account-ours\"]').getAttribute('aria-checked')==='true' && window.__nextRequests.length === 1"));
   await session.eval(`window.__nextReply={ok:true,type:'spawn.ok',state:'queued',streamId:'local:not-listed',stream_id:'local:not-listed',request_id:'fixture',spawn_request_id:'fixture',queue_handle:'fixture'}; true`);
   await session.click('[data-testid="start-chat"]'); await session.waitFor("document.querySelector('[data-testid=\"start-chat\"]')?.textContent === 'Starting'", { timeoutMs: ctx.timeoutMs });
   await session.eval("document.querySelector('[data-testid=\"start-chat\"]').click(),true");
@@ -64,20 +70,22 @@ async function newChat(ctx) {
   await session.waitFor("!document.querySelector('.card').hidden && !!document.querySelector('.card [data-next-composer]')", { timeoutMs: ctx.timeoutMs });
   report.ok('an admitted listed session opens its ordinary chat and is recorded', await session.eval("window.__pentacleNextAdmitted.includes('local:web-gate-1') && !!document.querySelector('.card [aria-label=\"Terminal\"]')"));
   await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]'); await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
-  await session.eval(`window.__nextReply={ok:true,streamId:'local:next-empty',session:{stream_id:'local:next-empty',session_name:'next-empty',host:'local',provider:'claude',title:'New fixture chat',state:'ready'}}; true`);
-  await session.click('[data-testid="start-chat"]'); await session.waitFor("window.__pentacleNextAdmitted.includes('local:next-empty') && !!document.querySelector('.card [data-next-composer]')",{timeoutMs:ctx.timeoutMs});
-  report.ok('an ordinary ready reply opens the empty session and records its ID',await session.eval("document.querySelector('.card-title').textContent==='New fixture chat' && !document.querySelector('.card .thread-inner .slot-chat-row') && !document.querySelector('.new-chat-host:not([hidden])')"));
+  await session.eval(`window.__nextReply={ok:true,streamId:'local:web-gate-empty',session:{...window.PentacleChatStore.getState().sessions.find(s=>s.stream_id==='local:web-gate-empty'),state:'ready'}}; true`);
+  await session.click('[data-testid="start-chat"]'); await session.waitFor("window.__pentacleNextAdmitted.includes('local:web-gate-empty') && !!document.querySelector('.card [data-next-composer]')",{timeoutMs:ctx.timeoutMs});
+  report.ok('an ordinary ready reply opens the empty session and records its ID',await session.eval("!!document.querySelector('.card-title').textContent && !document.querySelector('.card .thread-inner .slot-chat-row') && !document.querySelector('.new-chat-host:not([hidden])')"));
 }
 module.exports.newChat = isolated(newChat);
 async function limitsSettings(ctx) {
   const { session, report } = ctx; await visit(ctx);
   await session.click('[aria-label="Limits and machines"]');
-  report.ok('limits popover opens with usage rows', await session.eval("!document.querySelector('.popover').hidden && document.querySelector('.popover').textContent.includes('Claude')"));
+  report.ok('limits popover opens with usage rows and lights its control', await session.eval("!document.querySelector('.popover').hidden && document.querySelector('.popover').textContent.includes('Claude') && document.querySelector('[aria-label=\"Limits and machines\"]').classList.contains('open')"));
+  await session.waitFor("document.querySelector('.popover').textContent.includes('fixture-machine')", { timeoutMs: ctx.timeoutMs });
+  report.ok('machine CPU, RAM and disk figures use the snapshot', await session.eval("(() => {const text=document.querySelector('.popover').textContent;return text.includes('CPU 24%')&&text.includes('RAM 25%')&&text.includes('Disk 40%')})()"));
   await session.send('Input.dispatchKeyEvent', { type:'keyDown', key:'Escape', code:'Escape' });
   report.ok('Escape closes the popover', await session.eval("document.querySelector('.popover').hidden"));
   await session.click('[aria-label="Limits and machines"]'); await session.click('.stage');
   report.ok('clicking away closes the popover', await session.eval("document.querySelector('.popover').hidden"));
-  await session.click('[aria-label="Settings"]'); await session.screenshot(path.join(report.dir, 'next-settings.png')); await session.click('[aria-label="light"]');
+  await session.click('[aria-label="Settings"]'); report.ok('settings presents three tiles and the selected theme', await session.eval("document.querySelector('.theme-heading').textContent==='Theme' && document.querySelectorAll('.theme-choice').length===3 && document.querySelector('[aria-label=dark]').getAttribute('aria-pressed')==='true'")); await session.screenshot(path.join(report.dir, 'next-settings.png')); await session.click('[aria-label="light"]');
   const light = await session.eval("getComputedStyle(document.body).backgroundColor");
   await session.click('[aria-label="cosmic"]');
   const cosmic = await session.eval("(() => {const label=document.createElement('span');label.className='status-age';document.body.append(label);const result={bg:getComputedStyle(document.body).backgroundColor,title:getComputedStyle(document.querySelector('.card-title')).fontFamily,body:getComputedStyle(document.body).fontFamily,label:getComputedStyle(label).fontFamily,lit:getComputedStyle(document.querySelector('.rail-button.on')).color,idle:getComputedStyle(document.querySelector('[aria-label=Chats]')).color};label.remove();return result})()");
@@ -127,9 +135,10 @@ async function terminalStatus(ctx) {
     await session.eval("window.cc.writePty(0, 'NEXT_TERMINAL_PROOF\\r'), true");
     await session.waitFor("document.querySelector('.terminal').textContent.includes('NEXT_TERMINAL_PROOF')", { timeoutMs:ctx.timeoutMs });
     report.ok('the new card displays a real tmux terminal', true);
+    report.ok('terminal is inset and the composer is hidden', await session.eval("document.querySelector('.card .composer-host').hidden && getComputedStyle(document.querySelector('.terminal')).borderRadius === '14px' && parseFloat(getComputedStyle(document.querySelector('.terminal')).marginLeft) === 12"));
     await session.screenshot(path.join(report.dir, 'next-terminal.png'));
     await session.click('.card [aria-label="Status"]');
-    report.ok('status replaces terminal and retains composer', await session.eval("!document.querySelector('.status').hidden && document.querySelector('.terminal').hidden && document.querySelector('.status').textContent.includes('Fixture goal') && document.querySelector('.status').textContent.includes('Fixture update') && !!document.querySelector('.card [data-next-composer]')"));
+    report.ok('status replaces terminal and retains composer', await session.eval("!document.querySelector('.status').hidden && document.querySelector('.terminal').hidden && document.querySelector('.status').textContent.includes('Fixture goal') && document.querySelector('.status').textContent.includes('Fixture update') && document.querySelector('.status').textContent.includes('Step 2 of 2') && document.querySelector('.status').textContent.includes('updated') && document.querySelectorAll('.status li').length===2 && !!document.querySelector('.card [data-next-composer]')"));
     await session.screenshot(path.join(report.dir, 'next-status.png'));
     await session.send('Emulation.setDeviceMetricsOverride', { width:440, height:956, deviceScaleFactor:1, mobile:false }); await session.screenshot(path.join(report.dir, 'next-phone-status.png'));
     await session.click('.card [aria-label="Close"]');
@@ -146,10 +155,11 @@ async function voice(ctx) {
     await cdp.sleep(1350);
     const sample=await session.eval("({bars:[...document.querySelectorAll('.card [data-next-voice-bars] .next-voice-bar')].map(x=>x.style.height),time:document.querySelector('.card [data-next-voice-time]').textContent})");
     report.ok('live waveform varies and timer advances',sample.bars.length>1&&sample.bars.length<=110&&new Set(sample.bars).size>1&&sample.time!=='0:00',sample);
+    await cdp.sleep(7000); report.ok('live waveform retains at most 110 bars', await session.eval("document.querySelectorAll('.card [data-next-voice-bars] .next-voice-bar').length===110"));
     await session.click('.card [data-next-voice-cancel]'); report.ok('cancel discards the take',await session.eval("!document.querySelector('.card [data-next-voice-pending]') && window.__nextVoice.sends.length===0"));
     await session.send('Runtime.evaluate',{expression:"document.querySelector('.card [data-next-mic]').click()",userGesture:true}); await session.waitFor("!!document.querySelector('.card [data-next-voice-bars]')",{timeoutMs:ctx.timeoutMs}); await cdp.sleep(1100);
     await session.click('.card [data-next-voice-send]'); await session.waitFor("!!document.querySelector('[data-next-voice-pending]') && !!window.__nextVoice.release",{timeoutMs:ctx.timeoutMs});
-    report.ok('sending take shows 22 bars and Sending',await session.eval("document.querySelector('[data-next-voice-pending]').textContent.includes('Sending') && document.querySelectorAll('[data-next-voice-pending] [data-next-voice-bar]').length === 22"));
+    report.ok('sending take shows 22 bars, duration and Sending',await session.eval("document.querySelector('[data-next-voice-pending]').textContent.includes('Sending') && document.querySelectorAll('[data-next-voice-pending] [data-next-voice-bar]').length === 22 && document.querySelector('[data-next-voice-duration]').textContent !== '0:00'"));
     require('fs').writeFileSync(path.join(ctx.runtime.fixtureScratch, 'asr-release'), 'release');
     await session.eval('window.__nextVoice.release(),true'); await session.waitFor("window.__nextVoice.sends.length===1",{timeoutMs:ctx.timeoutMs});
     report.ok('transcribed voice reaches the shared send bridge',await session.eval("window.__nextVoice.sends[0].text.includes('Hermetic server transcript')"));
@@ -166,7 +176,7 @@ async function narrowPhone(ctx) {
     await visit(ctx,width); await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
     const result=await session.eval("({overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,assistant:!document.querySelector('.pane').hidden,full:getComputedStyle(document.querySelector('.fullscreen')).display})");
     report.ok(`chat layout fits at ${width}`,!result.overflow && (width>599 || (!result.assistant&&result.full==='none')),result);
-    if(width===440){await session.screenshot(path.join(report.dir, 'next-phone-chat.png'));await session.click('[aria-label="Chats"]');await session.screenshot(path.join(report.dir, 'next-phone-chats.png'));await session.click('.popover [data-stream-id="local:web-gate-survivor"]');await session.click('.card [aria-label="Close"]');report.ok('phone closes newest card to Assistant',await session.eval("!document.querySelector('.pane').hidden && document.querySelector('.card').hidden"));}
+    if(width===440){await session.screenshot(path.join(report.dir, 'next-phone-chat.png'));await session.click('[aria-label="Chats"]');await session.screenshot(path.join(report.dir, 'next-phone-chats.png'));await session.click('.popover [data-stream-id="local:web-gate-survivor"]');await session.click('.card [aria-label="Close"]');report.ok('phone closes newest card to Assistant',await session.eval("!document.querySelector('.pane').hidden && document.querySelector('.card').hidden"));await session.click('[aria-label="Chats"]');await session.click('.popover [data-stream-id="local:web-gate-1"]');await session.click('.rail .brand');report.ok('phone logo returns to the assistant',await session.eval("!document.querySelector('.pane').hidden && document.querySelector('.card').hidden"));}
   }
   await session.send('Emulation.clearDeviceMetricsOverride');
 }

@@ -1,12 +1,4 @@
-/* Pentacle web layout proposal, revision 12. Hand-written design mock; not product code.
-   Assistant is the page. Everything opened beside him is a rounded card set into it.
-
-   Palette and type are tokens, set once per theme below; no rule further down names a colour or a typeface.
-   Three themes: dark (the default), light, and cosmic, which takes its colours and typefaces from Pentacle mobile
-   (mobile Colors.ts tokens as mirrored in the Mockups lanes design: ink, panel, green, the yellow attention colour,
-   Rajdhani and JetBrains Mono). In cosmic the condensed face is kept for titles and accents; messages and other
-   running text use the plain body face, which reads better at length. A theme's tokens are also set on its swatch (.sw-*), so the settings preview is
-   drawn from the same values. */
+/* Theme tokens shared by the new web views and their settings swatches. */
 @font-face{font-family:Rajdhani;src:url('fonts/Rajdhani_500Medium.woff2') format('woff2');font-weight:500;font-display:block}
 @font-face{font-family:Rajdhani;src:url('fonts/Rajdhani_700Bold.woff2') format('woff2');font-weight:700;font-display:block}
 @font-face{font-family:'JetBrains Mono';src:url('fonts/JetBrainsMono_400Regular.woff2') format('woff2');font-weight:400;font-display:block}
@@ -65,3 +57,5 @@ html[data-theme=cosmic],.sw-cosmic{
 .status-age,.slabel,.next-voice-time,.next-voice-pending-caption{font:400 12px var(--label);letter-spacing:var(--label-track);text-transform:var(--label-case)}
 .slot-chat-send-status{color:var(--faint);font-size:12px;text-align:right}.slot-chat-send-retry,.slot-chat-send-now{color:var(--accent);margin-left:6px}
 .rail-meters{display:flex;align-items:flex-end;gap:3px;height:16px}.rail-meters i{display:block;width:4px;border-radius:2px;background:currentColor}
+.terminal{margin:0 12px 12px;border-radius:14px;overflow:hidden}.theme-heading{font-size:12.5px;color:var(--faint);padding:4px 7px 8px}.themes{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.popover .theme-choice{width:100%;padding:5px;border-radius:12px;text-align:center;color:var(--dim);font:400 12.5px var(--display)}.popover .theme-choice.on{box-shadow:inset 0 0 0 1.5px var(--accent);color:var(--text)}.theme-preview{height:54px;width:100%;display:grid;place-items:center;border-radius:9px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);margin-bottom:7px}.theme-mini{width:82%;height:80%;display:flex;align-items:center;gap:5px;padding:8px;border-radius:8px;background:var(--surface);box-shadow:inset 0 0 0 1px var(--edge)}.theme-mini i{width:7px;height:7px;border-radius:50%;background:var(--accent)}.theme-mini b{height:4px;flex:1;border-radius:4px;background:var(--dim)}
+.slot-chat-file-attachment{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:8px 10px;margin:6px 0;border-radius:10px;background:var(--raised)}.slot-chat-file-type,.slot-chat-file-status{color:var(--dim);font-size:12px}.slot-chat-v3-answers{color:var(--dim);font-size:13px}.slot-chat-v3-answers summary{cursor:pointer}.slot-chat-v3-answer-entry{padding:8px 0;border-bottom:1px solid var(--line)}.slot-chat-row.is-user{padding-bottom:6px}

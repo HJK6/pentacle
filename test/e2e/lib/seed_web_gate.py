@@ -176,7 +176,7 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
                             'producer_generation': producer['session_generation']}
                 Path(db).parent.joinpath('voice-answers-fixture.json').write_text(json.dumps(manifest))
         appended = 0
-        transcript = TRANSCRIPT + (MARKDOWN_PREVIEW if session == 'web-gate-second-host' else [])
+        transcript = [] if session == 'web-gate-empty' else TRANSCRIPT + (MARKDOWN_PREVIEW if session == 'web-gate-second-host' else [])
         if stream_id == SEAM_STREAM:
             transcript = [('ASSIST_TEXT', SEAM_TEXT), ('TOOL_RESULT', 'Synthetic tool completed')]
             Path(db).parent.joinpath('client-seam-fixture.json').write_text(json.dumps({

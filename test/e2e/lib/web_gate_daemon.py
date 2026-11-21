@@ -136,6 +136,17 @@ else:
         transcribe.Transcriber._call_backend = fixture_call_backend
     # END ASR FIXTURE
 
+    # Stable machine figures for the next-view limits journey. Preserve any
+    # real fixture entries and supply one isolated local host when absent.
+    import server as fixture_server
+    original_stats_snapshot = fixture_server.Server.host_stats_snapshot
+    def fixture_stats_snapshot(self):
+        from datetime import datetime, timezone
+        return {'fixture-machine': {'cpu_usage_pct': 24, 'memory_used_bytes': 25,
+                          'memory_total_bytes': 100, 'disk_used_bytes': 40,
+                          'disk_total_bytes': 100, 'sampled_at': datetime.now(timezone.utc).isoformat()}, **original_stats_snapshot(self)}
+    fixture_server.Server.host_stats_snapshot = fixture_stats_snapshot
+
     operator_auth.OperatorCredentialRegistry = FixtureRegistry
 
     # The existing isolated daemon owns this synthetic input driver. It calls

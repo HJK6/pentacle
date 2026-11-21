@@ -8,5 +8,8 @@ test('next stylesheet keeps colour and typeface literals in its theme tokens', (
   const marker = '/* Theme tokens end here. */';
   assert.ok(css.includes(marker));
   const rules = css.split(marker)[1].replace(/\/\*[\s\S]*?\*\//g, '');
-  assert.doesNotMatch(rules, /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?)\s*\(|font-family\s*:/i);
+  for (const [, property, value] of rules.matchAll(/(?:^|[;{])\s*([\w-]+)\s*:\s*([^;{}]*)/g)) {
+    assert.doesNotMatch(value, /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?)\s*\(|\b(?:black|white|transparent|red|green|blue)\b/i, property);
+    if (/^font(?:-family)?$/.test(property)) assert.doesNotMatch(value, /\b(?:Arial|Roboto|Rajdhani|JetBrains|monospace|sans-serif|serif)\b/i, property);
+  }
 });
