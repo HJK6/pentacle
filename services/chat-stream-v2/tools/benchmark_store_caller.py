@@ -1,7 +1,7 @@
 """Compare uncached Store caller capture with an empty function.
 
 Run with the service interpreter: python tools/benchmark_store_caller.py
-Reports local measurements; the review owner runs the criterion 1 gate on Thoth.
+Reports local measurements; the review owner runs the criterion 1 gate on the deployment host.
 """
 from __future__ import annotations
 
