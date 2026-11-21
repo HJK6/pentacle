@@ -7,6 +7,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const L = require('../lib/design_library.cjs');
 const P = require('../lib/design_prepare.cjs');
+const { DESIGN_FRAME_NAME } = require('../lib/design_frame.cjs');
 const fixture = require('./fixtures/design_library.cjs');
 function scratch(t) { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gallery-unit-')); t.after(() => fs.rmSync(root, { recursive: true, force: true })); return root; }
 
@@ -117,4 +118,184 @@ test('a declared missing image is indexed as an incomplete draft and never selec
   const imported = L.importDrop({ drop: source, staging: path.join(root, 'staging') }); const prepared = await P.prepareRevision(imported.dir);
   assert.equal(prepared.views[0].compatibility.status, 'incomplete'); assert.match(prepared.views[0].compatibility.reason, /missing\.png/);
   L.finalize(imported.dir); assert.equal(L.publishRevision({ dir: imported.dir, library }).current, false); assert.equal(L.createLibraryReader(library).selected('example').manifest.revision_id, current.manifest.revision_id);
+});
+
+test('boards resolve placed and loose screens while preserving the author’s step order', t => {
+  const root = scratch(t), descriptor = fixture.drop(path.join(root, 'drop'));
+  const view = descriptor.views[0];
+  descriptor.views.push(
+    { ...view, id: 'prototype', title: 'Prototype', variant: 'prototype' },
+    { ...view, id: 'detail', title: 'Details', viewport: { width: 390, height: 844 } }
+  );
+  descriptor.designs = [{ id: 'journey', title: 'Journey', nodes: [
+    { type: 'screen', view: 'home', x: -200, y: 50, title: 'Beginning' },
+    { type: 'section', title: 'Start', x: -300, y: 0, w: 1000, h: 720 },
+    { type: 'screen', view: 'detail' },
+    { type: 'arrow', from: 'home', to: 'detail', label: 'Continue' },
+    { type: 'note', text: 'Choose an option.', x: 0, y: 740, w: 400 },
+    { type: 'screen', view: 'prototype' },
+  ] }];
+  const actual = L.inventory(path.join(root, 'drop/payload'));
+  L.validateDrop(descriptor, actual);
+  const [design] = L.resolveDesigns(descriptor);
+  assert.equal(design.id, 'journey');
+  const screens = design.nodes.filter(node => node.type === 'screen');
+  assert.deepEqual(screens.map(node => node.view), ['home', 'detail', 'prototype']);
+  assert.deepEqual(screens.map(({ x, y, w, h, title }) => ({ x, y, w, h, title })), [
+    { x: -200, y: 50, w: 800, h: 600, title: 'Beginning' },
+    { x: 0, y: 2460, w: 390, h: 844, title: 'Details' },
+    { x: 0, y: 1480, w: 800, h: 600, title: 'Prototype' },
+  ]);
+  assert.deepEqual(design.nodes.find(node => node.type === 'arrow'), descriptor.designs[0].nodes[3]);
+  assert.equal(descriptor.designs[0].nodes[2].x, undefined);
+});
+
+test('derived boards have stable IDs across legacy names and mixed explicit boards', t => {
+  const root = scratch(t), descriptor = fixture.drop(path.join(root, 'drop'));
+  const view = descriptor.views[0];
+  const groups = ['Example', 'a b', 'a-b', '!!!', 'x'.repeat(120), 'É'];
+  descriptor.views.push(...groups.map((group, index) => ({ ...view, id: 'v-' + index, group })));
+  descriptor.views.push(
+    { ...view, id: 'flow', group: 'a b', variant: 'flow-02' },
+    { ...view, id: 'proto', group: 'a b', variant: 'prototype' },
+    { ...view, id: 'other-flow', group: 'a b', variant: 'flow-01' }
+  );
+  const actual = L.inventory(path.join(root, 'drop/payload'));
+  const initial = L.resolveDesigns(descriptor);
+  assert.equal(initial.length, groups.length + 1);
+  assert.equal(new Set(initial.map(design => design.id)).size, initial.length);
+  assert.ok(initial.every(design => L.ID.test(design.id)));
+  assert.equal(initial.filter(design => design.title === 'Example').length, 2);
+  const space = initial.find(design => design.title === 'a b');
+  assert.equal(space.id, 'group-' + L.sha256('a b'));
+  assert.deepEqual(space.nodes.map(node => node.view), ['proto', 'other-flow', 'flow', 'v-1']);
+  descriptor.designs = [{ id: 'explicit', title: 'Explicit', nodes: [{ type: 'screen', view: 'v-0' }] }];
+  L.validateDrop(descriptor, actual);
+  const mixed = L.resolveDesigns(descriptor);
+  assert.ok(mixed.some(design => design.id === 'explicit'));
+  assert.equal(mixed.find(design => design.title === 'a b').id, space.id);
+  assert.equal(mixed.filter(design => design.title === 'Example').length, 1);
+  descriptor.designs[0].id = 'group-' + L.sha256('Example');
+  assert.throws(() => L.validateDrop(descriptor, actual), /group-.*Example/);
+});
+
+test('invalid boards identify the design and node', t => {
+  const root = scratch(t), descriptor = fixture.drop(path.join(root, 'drop'));
+  descriptor.designs = [{ id: 'journey', title: 'Journey', nodes: [{ type: 'screen', view: 'home' }] }];
+  const actual = L.inventory(path.join(root, 'drop/payload'));
+  for (const [node, message] of [
+    [{ type: 'video' }, /journey.*node 2.*type/],
+    [{ type: 'screen', view: 'flow-only' }, /journey.*node 2.*unknown view/],
+    [{ type: 'screen', view: 'home' }, /journey.*node 2.*repeated view/],
+    [{ type: 'note', text: 'x'.repeat(401), x: 0, y: 0, w: 10 }, /journey.*node 2.*text/],
+    [{ type: 'section', title: 'Part', x: 100001, y: 0, w: 10, h: 10 }, /journey.*node 2.*position/],
+    [{ type: 'arrow', from: 'home', to: 'unknown' }, /journey.*node 2.*ends/],
+  ]) {
+    const copy = structuredClone(descriptor);
+    copy.designs[0].nodes.push(node);
+    assert.throws(() => L.validateDrop(copy, actual), message);
+  }
+  const first = descriptor.designs[0].nodes[0];
+  first.x = 1;
+  assert.throws(() => L.validateDrop(descriptor, actual), /journey.*node 1.*both/);
+  delete first.x;
+  descriptor.designs.push({ ...descriptor.designs[0], nodes: [] });
+  assert.throws(() => L.validateDrop(descriptor, actual), /journey.*duplicate design id/);
+});
+
+test('phone-only loose frames occupy rows of five', () => {
+  const descriptor = { project_id: 'example', title: 'Example', views: Array.from({ length: 6 }, (_, index) => ({
+    id: 'v-' + index, title: 'Screen ' + index, viewport: { width: 390, height: 844 }, surface: 'mobile',
+  })) };
+  const [design] = L.resolveDesigns(descriptor);
+  assert.deepEqual(design.nodes.map(({ x, y }) => [x, y]), [[0, 0], [650, 0], [1300, 0], [1950, 0], [2600, 0], [0, 1164]]);
+});
+
+test('board command checks overlapping and mixed layout without publishing', async t => {
+  const root = scratch(t), drop = path.join(root, 'drop'), descriptor = fixture.drop(drop);
+  descriptor.views.push(...['second', 'third'].map(id => ({ ...descriptor.views[0], id })));
+  descriptor.designs = [{ id: 'journey', title: 'Journey', nodes: [
+    { type: 'screen', view: 'home', x: 0, y: 0 },
+    { type: 'screen', view: 'second', x: 1, y: 1 },
+    { type: 'screen', view: 'third' },
+  ] }];
+  L.atomicJson(path.join(drop, 'drop.json'), descriptor);
+  const { run } = require('../scripts/design-library.cjs');
+  const result = await run(['board', '--drop', drop]);
+  assert.ok(result.warnings.some(message => /home.*second.*overlap/.test(message)));
+  assert.ok(result.warnings.some(message => /third.*unplaced/.test(message)));
+  assert.equal(result.designs[0].id, 'journey');
+  delete descriptor.designs;
+  L.atomicJson(path.join(drop, 'drop.json'), descriptor);
+  assert.equal((await run(['board', '--drop', drop])).warnings.length, 0);
+});
+
+test('the prepared keys shim only forwards navigation outside editable controls', async t => {
+  const root = scratch(t);
+  fs.writeFileSync(path.join(root, 'index.html'), '<button id="canvas">Screen</button><input id="editor"><div id="note" contenteditable><span id="inside">Note</span></div>');
+  const result = await P.prepareDocument({ sourceRoot: root, entry: 'index.html' });
+  const { JSDOM } = require('jsdom');
+  const posted = [];
+  const dom = new JSDOM(result.html, {
+    runScripts: 'dangerously',
+    beforeParse(window) {
+      window.name = DESIGN_FRAME_NAME;
+      window.parent = { postMessage: (...args) => posted.push(args) };
+    },
+  });
+  t.after(() => dom.window.close());
+  const { window } = dom;
+  function key(id, value, options = {}) {
+    const event = new window.KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true, ...options });
+    window.document.querySelector('#' + id).dispatchEvent(event);
+    return event.defaultPrevented;
+  }
+  assert.equal(key('canvas', 'ArrowRight'), true);
+  assert.equal(key('canvas', 'Escape'), true);
+  assert.equal(key('editor', 'ArrowLeft'), false);
+  assert.equal(key('inside', 'ArrowDown'), false);
+  assert.equal(key('canvas', 'A'), false);
+  assert.equal(key('canvas', 'Escape', { isComposing: true }), false);
+  assert.equal(key('canvas', 'ArrowLeft', { altKey: true }), false);
+  assert.deepEqual(posted, [['ArrowRight', '*'], ['Escape', '*']]);
+});
+
+test('stored revisions recheck board structure and board-only edits change the input identity', async t => {
+  const root = scratch(t), drop = path.join(root, 'drop');
+  const descriptor = fixture.drop(drop);
+  descriptor.designs = [{ id: 'example-board', title: 'Board', nodes: [{ type: 'screen', view: 'home' }] }];
+  L.atomicJson(path.join(drop, 'drop.json'), descriptor);
+  const options = { drop, staging: path.join(root, 'staging') };
+  const first = L.importDrop(options);
+  descriptor.designs[0].nodes[0].x = 100;
+  descriptor.designs[0].nodes[0].y = 200;
+  L.atomicJson(path.join(drop, 'drop.json'), descriptor);
+  const second = L.importDrop(options);
+  assert.notEqual(first.input_id, second.input_id);
+  const recorded = await fixture.revision(path.join(root, 'recorded'), {
+    configure: (source) => { source.designs = descriptor.designs; },
+  });
+  const file = path.join(recorded.dir, 'manifest.json');
+  const invalid = L.readJson(file);
+  invalid.provenance.designs[0].nodes.push({ type: 'arrow', from: 'home', to: 'unknown' });
+  invalid.revision_id = L.revisionIdentity(invalid);
+  L.atomicJson(file, invalid);
+  assert.throws(() => L.verifyRevision(recorded.dir), /example-board.*node 2.*ends/);
+});
+
+test('an unnamed legacy gallery frame keeps ordinary key behavior', async t => {
+  const root = scratch(t);
+  fs.writeFileSync(path.join(root, 'index.html'), '<main>Scrollable prototype</main>');
+  const { html } = await P.prepareDocument({ sourceRoot: root, entry: 'index.html' });
+  const { JSDOM } = require('jsdom');
+  const forwarded = [];
+  const { window } = new JSDOM(html, {
+    runScripts: 'dangerously',
+    beforeParse(frame) { frame.parent = { postMessage: (...args) => forwarded.push(args) }; },
+  });
+  t.after(() => window.close());
+  const key = new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+  window.document.querySelector('main').dispatchEvent(key);
+  assert.equal(key.defaultPrevented, false);
+  assert.deepEqual(forwarded, []);
 });

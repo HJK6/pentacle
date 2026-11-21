@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { createLibraryReader, contained, fileState, ID, HASH } = require('../lib/design_library.cjs');
+const { createLibraryReader, contained, fileState, ID, HASH, sha256 } = require('../lib/design_library.cjs');
 
 function publicItem(item, kind) {
   const out = { id: item.id, title: item.title, kind, entry: item.entry, surface: item.surface || item.screen || '', variant: item.variant || '', group: item.group || '', viewport: item.viewport, approval_ref: item.approval_ref || null, compatibility: item.compatibility, generated: item.generated || null, screenshots: item.screenshots || [], video: item.video || null, prototype: !!item.prepared };
@@ -13,9 +13,22 @@ function publicManifest(m) {
 }
 function createDesignRoutes({ libraryRoot } = {}) {
   const reader = createLibraryReader(libraryRoot);
-  const json = (res, status, value, head = false) => {
+  const json = (res, status, value, head = false, ifNoneMatch) => {
     const body = Buffer.from(JSON.stringify(value));
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }).end(head ? undefined : body);
+    const headers = { 'content-type': 'application/json; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
+    if (ifNoneMatch !== undefined) {
+      const etag = '"' + sha256(body) + '"';
+      headers.etag = etag;
+      headers['cache-control'] = 'private, no-store';
+      if (ifNoneMatch.split(',').some(value => {
+        const validator = value.trim();
+        return validator === '*' || validator === etag || validator === 'W/' + etag;
+      })) {
+        res.writeHead(304, { etag, 'cache-control': headers['cache-control'] }).end();
+        return;
+      }
+    }
+    res.writeHead(status, headers).end(head ? undefined : body);
   };
   function handle(req, res, urlPath) {
     if (urlPath !== '/api/designs' && !urlPath.startsWith('/api/designs/') && !urlPath.startsWith('/design-media/')) return false;
@@ -24,7 +37,7 @@ function createDesignRoutes({ libraryRoot } = {}) {
     try {
       if (urlPath === '/api/designs') {
         const catalog = reader.catalog();
-        json(res, 200, { ...catalog, projects: catalog.projects.map(p => ({ ...p, manifest: p.manifest ? publicManifest(p.manifest) : null })) }, head); return true;
+        json(res, 200, { ...catalog, projects: catalog.projects.map(p => ({ ...p, manifest: p.manifest ? publicManifest(p.manifest) : null })) }, head, req.headers['if-none-match'] ?? ''); return true;
       }
       const isMedia = urlPath.startsWith('/design-media/');
       const rest = urlPath.slice(isMedia ? '/design-media/'.length : '/api/designs/'.length);

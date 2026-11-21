@@ -60,3 +60,57 @@ test('large media HEAD and tiny ranges avoid whole-file buffering and repeated f
   assert.deepEqual(reads, [], 'large media must use bounded hashing and ranged file streams, including cold discovery');
   assert.equal(verificationBytes, 0, 'unchanged, previously verified media must not be fully rehashed for HEAD or seeking');
 });
+
+test('catalog resolves boards, tracks selected lineage and revalidates with an authenticated ETag', async t => {
+  function configure(color, sourceRevision) {
+    return (descriptor, payload) => {
+      const view = descriptor.views[0];
+      fs.writeFileSync(path.join(payload, 'index.html'), '<link rel="stylesheet" href="color.css"><h1>A</h1>');
+      fs.writeFileSync(path.join(payload, 'color.css'), `body{color:${color}}`);
+      fs.writeFileSync(path.join(payload, 'b.html'), '<h1>B</h1>');
+      descriptor.source_revision = sourceRevision;
+      descriptor.files = L.inventory(payload);
+      descriptor.views.push({ ...view, id: 'second', title: 'Second', entry: 'b.html' });
+      descriptor.designs = [
+        { id: 'design-a', title: 'A', nodes: [{ type: 'screen', view: 'home' }] },
+        { id: 'design-b', title: 'B', nodes: [{ type: 'screen', view: 'second', x: 10, y: 20 }] },
+      ];
+    };
+  }
+  const dates = ['2026-01-01T10:00:00Z', '2026-01-02T10:00:00Z', '2026-01-03T10:00:00Z'];
+  const h = await start(t, 'token', { configure: configure('red', 'a'), importedAt: dates[0], legacyPreparation: true });
+  const url = h.url + '/api/designs';
+  const get = tag => fetch(url, { headers: tag ? { ...h.headers, 'If-None-Match': tag } : h.headers });
+  const initial = await get();
+  const originalTag = initial.headers.get('etag');
+  assert.match(originalTag, /^"[a-f0-9]{64}"$/);
+  const original = (await initial.json()).projects[0];
+  assert.deepEqual(original.designs.map(({ id, changed_at }) => [id, changed_at]), [['design-a', dates[0]], ['design-b', dates[0]]]);
+  assert.deepEqual(original.designs[1].nodes[0], {
+    type: 'screen', view: 'second', x: 10, y: 20, title: 'Second', w: 800, h: 600,
+  });
+  const unchanged = await get('W/' + originalTag);
+  assert.equal(unchanged.status, 304);
+  assert.equal(await unchanged.text(), '');
+  assert.equal((await fetch(url, { headers: { 'If-None-Match': originalTag }, redirect: 'manual' })).status, 401);
+
+  const b = await revision(path.join(h.root, 'b'), { configure: configure('green', 'b'), importedAt: dates[1] });
+  L.publishRevision({ dir: b.dir, library: h.library });
+  const afterPublish = await get(originalTag);
+  assert.equal(afterPublish.status, 200);
+  const nextTag = afterPublish.headers.get('etag');
+  assert.notEqual(nextTag, originalTag);
+  assert.deepEqual((await afterPublish.json()).projects[0].designs.map(design => design.changed_at), [dates[1], dates[0]]);
+
+  const c = await revision(path.join(h.root, 'c'), { configure: configure('green', 'c'), importedAt: dates[2] });
+  L.publishRevision({ dir: c.dir, library: h.library });
+  const afterThird = await get(nextTag);
+  assert.equal(afterThird.status, 200);
+  assert.deepEqual((await afterThird.json()).projects[0].designs.map(design => design.changed_at), [dates[1], dates[0]]);
+  L.rollback({ library: h.library, project: 'example', revision: h.r.manifest.revision_id });
+  const afterRollback = await get(afterThird.headers.get('etag'));
+  assert.equal(afterRollback.status, 200);
+  const restored = (await afterRollback.json()).projects[0];
+  assert.equal(restored.revision_id, original.revision_id);
+  assert.deepEqual(restored.designs.map(design => design.changed_at), [dates[0], dates[0]]);
+});

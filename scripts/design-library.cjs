@@ -21,6 +21,13 @@ async function run(argv) {
     const result = library.importDrop({ drop: need('drop'), staging: need('staging'), dependencies: o.dependencies ? library.readJson(need('dependencies')) : {}, library: o.library ? need('library') : null });
     return { dir: result.dir, input_id: result.input_id };
   }
+  if (command === 'board') {
+    const drop = need('drop');
+    const descriptor = library.readJson(library.contained(drop, 'drop.json'));
+    library.validateDrop(descriptor, library.inventory(library.contained(drop, 'payload')));
+    const designs = library.resolveDesigns(descriptor);
+    return { designs, warnings: library.boardWarnings(descriptor, designs) };
+  }
   if (command === 'prepare') return { state: (await require('../lib/design_prepare.cjs').prepareRevision(need('dir'))).state };
   if (command === 'record') {
     let dir;
@@ -73,7 +80,7 @@ async function run(argv) {
     return library.publishRevision({ dir: imported.dir, library: root });
   }
   if (command === 'rollback') return library.rollback({ library: need('library'), project: o.project, revision: o.revision });
-  throw new Error('usage: design-library.cjs import|prepare|record|verify|publish|rollback --name value; see docs/design-library.md');
+  throw new Error('usage: design-library.cjs import|board|prepare|record|verify|publish|rollback --name value; see docs/design-library.md');
 }
 if (require.main === module) run(process.argv.slice(2)).then(result => console.log(JSON.stringify(result))).catch(error => { console.error(error.message); process.exitCode = 1; });
 module.exports = { parse, run };
