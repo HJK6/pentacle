@@ -12,8 +12,34 @@ async function homeRail(ctx) {
   const { session, report } = ctx;
   for (const width of [1440, 1010, 440]) {
     await visit(ctx, width);
-    const info = await session.eval(`({names:Array.from(document.querySelectorAll('.rail-button')).map(x=>x.getAttribute('aria-label')), text:document.querySelector('.rail').innerText, input:!!document.querySelector('.rail input'), overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth, assistant:document.querySelector('.pane .thread-inner').dataset.streamId, lit:document.querySelector('.rail .brand').classList.contains('on'), chatLit:document.querySelector('[aria-label=Chats]').classList.contains('on')})`);
-    report.ok(`rail has six icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(['Assistant Fixture','Lanes','Chats','Questions','Limits and machines','Settings']) && !info.text.trim() && !info.input && !info.overflow && info.assistant === 'local:web-gate-assistant' && info.lit && !info.chatLit, info);
+    const expectedCount = await session.eval(`(async () => {
+      const reply = await window.cc.promptList({ open: true });
+      if (!reply?.ok || !Array.isArray(reply.questions)) throw new Error('home rail open-question read failed');
+      const open = reply.questions.filter(question => question.state === 'open');
+      if (open.some(question => !question.question_id)) throw new Error('open question has no ID');
+      return new Set(open.map(question => question.question_id)).size;
+    })()`);
+    const expectedLabel = expectedCount ? `Questions (${expectedCount})` : 'Questions';
+    const expectedNames = ['Assistant Fixture', 'Lanes', 'Chats', expectedLabel, 'Limits and machines', 'Settings'];
+    await session.waitFor(`document.querySelectorAll('.rail-button')[3]?.dataset.count === ${JSON.stringify(String(expectedCount))}`,
+      { timeoutMs: ctx.timeoutMs, label: `home rail hydrates the daemon's ${expectedCount} open questions at ${width}` });
+    const info = await session.eval(`(() => {
+      const rail = document.querySelector('.rail');
+      const buttons = [...rail.querySelectorAll('.rail-button')];
+      return {
+        names: buttons.map(button => button.getAttribute('aria-label')),
+        counts: buttons.filter(button => button.hasAttribute('data-count')).map(button => [button.getAttribute('aria-label'), button.dataset.count]),
+        text: rail.innerText, input: !!rail.querySelector('input'),
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        assistant: document.querySelector('.pane .thread-inner').dataset.streamId,
+        lit: rail.querySelector('.brand').classList.contains('on'),
+        chatLit: rail.querySelector('[aria-label=Chats]').classList.contains('on'),
+      };
+    })()`);
+    report.ok(`rail has six icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(expectedNames)
+      && JSON.stringify(info.counts) === JSON.stringify([[expectedLabel, String(expectedCount)]])
+      && !info.text.trim() && !info.input && !info.overflow && info.assistant === 'local:web-gate-assistant' && info.lit && !info.chatLit,
+      { ...info, expectedCount });
     if (width === 1440) await session.screenshot(path.join(report.dir, 'next-home.png'));
     if (width === 440) await session.screenshot(path.join(report.dir, 'next-phone-home.png'));
   }

@@ -1,5 +1,6 @@
 'use strict';
 const { fixtureRequest } = require('./closed_chat_scenario');
+const { cleanupQuestions, questionFixtureToken, UNLISTED_PRODUCER } = require('./next_lanes_harness');
 const { reportChecks } = require('./web_voice_scenario');
 const { reloadDashboardPage } = require('./dashboard_scenario');
 
@@ -108,10 +109,10 @@ const reloadAfterScenario = ({ session, cdp }) => reloadDashboardPage({ session,
 // window.cc and the real host + daemon. Never run this against --profile.
 async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
   if (!fixture || !runtime.fixtureTokens) { report.note('web-voice-answers excluded: requires the isolated composite fixture'); return; }
-  const surface = 'local:web-gate-assistant'; const producer = 'local:web-gate-voice-producer';
+  const surface = 'local:web-gate-assistant'; const producer = UNLISTED_PRODUCER;
   // The seeder derives a distinct producer credential from the scratch fixture
   // token; the daemon resolves exactly one stream per token hash.
-  const authority = { ...runtime, fixtureTokens: { ...runtime.fixtureTokens, [producer]: require('node:crypto').createHash('sha256').update(`voice-producer:${runtime.fixtureTokens[fixture.streamId]}`).digest('hex') } };
+  const authority = { ...runtime, fixtureTokens: { ...runtime.fixtureTokens, [producer]: questionFixtureToken(runtime, producer) } };
   const json = JSON.stringify;
   const ui = () => session.eval(`(${readQuestionVoiceDom.toString()})(document, ${json(surface)})`);
   const events = () => session.eval(`(async () => {
@@ -143,18 +144,20 @@ async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
     await session.click(`.desktop-question-dot[aria-label="Question ${index}"]`);
     await session.waitFor(`document.querySelector('.desktop-question-dot[aria-label="Question ${index}"]')?.classList.contains('is-active')`);
   };
+  const ids = [], notificationIds = [];
   let installed = false; const errors = [];
   try {
     await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'");
     await session.waitFor('window.cc.getChatStreamState().then(s => s.connected === true)');
-    const ids = [], notificationIds = [];
     for (let index = 1; index <= 3; index++) {
       const questionId = `web-voice-answer-${index}`;
+      // A create can commit before its reply reaches this scenario.
+      ids.push(questionId);
       const asked = await fixtureRequest(authority, producer, { type: 'prompt.ask', envelope: { schema_version: 1, question_id: questionId,
         title: `Synthetic question ${index}`, body: `Describe synthetic answer ${index}`, dedup_key: questionId, producer_stream_id: producer,
         response_mode: 'free_text', allow_custom: true, options: [] }, actions: [] });
       report.ok(`isolated bound producer asks durable question ${index}`, asked.ok === true, asked.error || asked.question);
-      ids.push(questionId); notificationIds.push(asked.question.notification_id);
+      notificationIds.push(asked.question.notification_id);
     }
     await openDeck();
     await session.eval(`(() => {
@@ -236,8 +239,14 @@ async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
       try { await session.eval(`(async () => { await (${controller})?.cancel(); window.__voiceAnswersGate.restore(); })()`); }
       catch (error) { errors.push(error); }
     }
-    // A reload removes only this scenario's synthetic UI state and any failed
-    // optimistic row; all durable fixture questions/events remain daemon-owned.
+    try {
+      const terminal = await cleanupQuestions({ runtime: authority, fixture: { streamId: producer } }, ids, report);
+      const confirmed = notificationIds.every((notificationId, index) => terminal.some(row =>
+        row.questionId === ids[index] && row.notificationId === notificationId));
+      report.ok('voice fixture retires every admitted question with terminal producer readback', confirmed,
+        { producer, attempted: ids, terminal });
+    }
+    catch (error) { errors.push(error); }
     try { await reloadAfterScenario({ session, cdp }); }
     catch (error) { errors.push(error); }
   }

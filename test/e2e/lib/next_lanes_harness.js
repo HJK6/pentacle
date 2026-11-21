@@ -685,32 +685,41 @@ async function openQuestionList(ctx) {
 
 async function cleanupQuestions(ctx, ownedIds, report) {
   const errors = [];
+  const terminal = [];
   const owners = QUESTION_OWNERS.get(ownedIds) || new Map();
   for (const questionId of [...new Set(ownedIds || [])]) {
     const streamId = owners.get(questionId) || ctx.fixture?.streamId || PRODUCER;
     const token = questionFixtureToken(ctx.runtime || {}, streamId);
     const authority = token ? { ...ctx.runtime, fixtureTokens: { ...(ctx.runtime.fixtureTokens || {}), [streamId]: token } } : ctx.runtime;
     try {
-      let status = await fixtureRequest(authority, streamId, { type: 'prompt.status', question_id: questionId });
-      if (status?.error_code === 'question_not_found') continue;
-      if (status?.ok !== true || status.question?.question_id !== questionId
-        || status.question?.producer_stream_id !== streamId) throw new Error(`synthetic question status mismatch: ${questionId}`);
-      if (status.question.state === 'open') {
+      const readOwned = async () => {
+        const status = await fixtureRequest(authority, streamId, { type: 'prompt.status', question_id: questionId });
+        if (status?.ok === false && status.error_code === 'question_not_found') return null;
+        if (status?.ok !== true || status.type !== 'prompt.status.ok' || status.question?.question_id !== questionId
+          || status.question.producer_stream_id !== streamId) throw new Error(`synthetic question status mismatch: ${questionId}`);
+        return status.question;
+      };
+      let question = await readOwned();
+      if (!question) continue;
+      if (question.state === 'open') {
         const cancelled = await fixtureRequest(authority, streamId, { type: 'prompt.cancel', question_id: questionId });
         if (cancelled?.ok !== true && cancelled?.error_code !== 'question_terminal_state') {
           throw new Error(`synthetic question cleanup cancel failed: ${questionId}`);
         }
-        status = await fixtureRequest(authority, streamId, { type: 'prompt.status', question_id: questionId });
+        question = await readOwned();
       }
-      if (!['answered', 'consumed', 'dismissed', 'expired'].includes(status.question?.state)) {
-        throw new Error(`synthetic question remained open: ${questionId}`);
+      if (!['answered', 'consumed', 'dismissed', 'expired'].includes(question?.state)) {
+        throw new Error(`synthetic question lacks terminal readback: ${questionId}`);
       }
+      terminal.push({ questionId, notificationId: question.notification_id, state: question.state });
     } catch (error) { errors.push(error); }
   }
   if (errors.length) {
-    report?.note?.(`next-lanes fixture cleanup failed: ${errors.map(error => error.message).join('; ')}`);
-    throw new AggregateError(errors, 'next-lanes isolated fixture cleanup failed');
+    const message = `question fixture cleanup failed: ${errors.map(error => error.message).join('; ')}`;
+    report?.note?.(message);
+    throw new AggregateError(errors, message);
   }
+  return terminal;
 }
 
 async function cleanupHook(ctx, hook) {
