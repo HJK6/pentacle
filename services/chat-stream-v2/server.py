@@ -857,6 +857,8 @@ class Server:
                                  for name, limits in _ADMISSION_LIMITS.items()}
         self._admission_diag_key = uuid.uuid4().bytes
         self._client_identities: dict[Any, str] = {}
+        self._contact_proof_clients: set[Any] = set()
+        self._contact_proof_consumed: set[Any] = set()
         self._consent_sent: dict[Any, dict[str, str]] = {}
         # Per-client hello.subscribe state drives projection of broadcasts and
         # snapshot/list/history reads. Defaults are top-level-only.
@@ -1043,6 +1045,7 @@ class Server:
             "assistant.operation": self._on_assistant_operation,
             "work.unattended": self._on_work_unattended,
             "work.report.get": self._on_work_report_get,
+            "contact.dispatch.proof": self._on_contact_dispatch_proof,
             "work.owed": self._on_work_owed,
             "work_lanes.list": self._on_work_lanes_list,
             "work_lanes.show": self._on_work_lanes_show,
@@ -2059,6 +2062,8 @@ class Server:
         self._diag_snapshot(websocket)
         self._clients.discard(websocket)
         self._client_identities.pop(websocket, None)
+        self._contact_proof_clients.discard(websocket)
+        self._contact_proof_consumed.discard(websocket)
         self._consent_sent.pop(websocket, None)
         self._client_include_subagents.pop(websocket, None)
         self._client_opened_by_host_ids.pop(websocket, None)
@@ -2400,6 +2405,19 @@ class Server:
 
         verb = str(msg.get("type") or "")
         request_id = msg.get("request_id")
+        if websocket is not None:
+            first_proof_hello = (verb == "hello" and msg.get("client") == "fast-contact-proof-v1"
+                                 and websocket not in self._client_identities
+                                 and websocket not in self._contact_proof_clients)
+            if first_proof_hello:
+                self._contact_proof_clients.add(websocket)
+            if websocket in self._contact_proof_clients:
+                if not first_proof_hello and verb != "contact.dispatch.proof":
+                    return [self._auth_error_frame(verb, request_id, "contact_proof_only")]
+                if verb == "contact.dispatch.proof":
+                    if websocket in self._contact_proof_consumed:
+                        return [self._auth_error_frame(verb, request_id, "contact_proof_consumed")]
+                    self._contact_proof_consumed.add(websocket)
         caller = self._client_identities.get(websocket) if websocket is not None else None
         if verb == "hello" and websocket is not None:
             client = str(msg.get("client") or "").strip()
@@ -2524,6 +2542,8 @@ class Server:
                     return [self._auth_error_frame(
                         verb, request_id, "system_producer_payload_invalid"
                     )]
+            if verb == "contact.dispatch.proof" and websocket not in self._contact_proof_clients:
+                return [self._auth_error_frame(verb, request_id, "contact_proof_only")]
             if handler is None:
                 return [self._unsupported(verb, request_id, caller=caller)]
             auth = dispatch_msg["_auth_context"]
@@ -3491,7 +3511,7 @@ class Server:
     def _frame_for_client(
         self, websocket: Any, frame_type: str, payload: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if websocket in self._operator_rejected:
+        if websocket in self._operator_rejected or websocket in self._contact_proof_clients:
             return None
         if not (self._is_loopback_client(websocket)
                 or self._operator_authenticated(websocket)
@@ -3772,6 +3792,9 @@ class Server:
     async def _on_hello_inner(self, msg: dict[str, Any], *, refresh: bool = False) -> list[dict[str, Any]]:
         """Apply hello.subscribe before constructing the connection's frames."""
         subscribe = msg.get("subscribe") if isinstance(msg.get("subscribe"), dict) else {}
+        websocket = msg.get("_client_websocket")
+        if websocket in self._contact_proof_clients and (subscribe.get("snapshot") is not False or subscribe.get("mode") != "rpc"):
+            return [{"type": "hello.error", "error_code": "contact_proof_only"}]
         try:
             opened_by_host_ids = self._optional_string_list(
                 subscribe.get("opened_by_host_ids"), "opened_by_host_ids",
@@ -5499,6 +5522,52 @@ class Server:
             broadcast=self.broadcast,
             recent_limit=RECENT_LIMIT,
         )
+
+    async def _on_contact_dispatch_proof(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Return only operator-dispatch proof to the current authenticated FD."""
+        auth = msg.get("_auth_context") or {}
+        composite = self._composites().get(ASSISTANT_ALIAS)
+        config = getattr(composite, "config", None)
+        if not (auth.get("token_verified") and config is not None and getattr(composite, "enabled", False)
+                and getattr(config, "direct_primary", False)
+                and auth.get("stream_id") == config.direct_primary_stream_id
+                and auth.get("session_generation") == config.direct_primary_generation):
+            raise VerbError("contact_proof_forbidden", "current front desk required")
+        if set(msg) - {"type", "request_id", "dispatch_id", "input_id", "_auth_context"}:
+            raise VerbError("bad_request", "unexpected proof fields")
+        dispatch, input_id = msg.get("dispatch_id"), msg.get("input_id")
+        if not (isinstance(dispatch, str) and re.fullmatch(r"assistant-direct-[0-9a-f]{32}", dispatch)
+                and isinstance(input_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", input_id)):
+            raise VerbError("bad_request", "invalid dispatch identity")
+        row = await self.store.find_assistant_composite_route_by_dispatch(dispatch)
+        if not (row and row.get("stream_id") == config.stream_id and row.get("input_identity") == input_id
+                and row.get("routing_state") == "resolved" and row.get("delivery_state") == "landed"
+                and row.get("route_target") == auth.get("stream_id")
+                and row.get("route_target_generation") == auth.get("session_generation")
+                and re.fullmatch(r"operator:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", str(row.get("actor_stream_id") or ""))
+                and isinstance(row.get("body"), str)):
+            raise VerbError("contact_proof_not_found", "operator dispatch not found")
+        try:
+            route = json.loads(row.get("route_json") or "{}")
+        except (TypeError, ValueError):
+            raise VerbError("contact_proof_not_found", "operator dispatch not found") from None
+        if not isinstance(route, dict) or route.get("desk_dispatch") or route.get("admission_mode") != "direct_primary":
+            raise VerbError("contact_proof_not_found", "operator dispatch not found")
+        try:
+            attachments = json.loads(row.get("attachments_json") or "[]")
+            if not isinstance(attachments, list):
+                raise ValueError("invalid attachments")
+            canonical = json.dumps({"body": row["body"], "attachments": attachments,
+                                    "reply_to_message_id": row.get("reply_to_message_id"),
+                                    "reply_to_question_id": row.get("reply_to_question_id")},
+                                   sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        except (ValueError, TypeError):
+            raise VerbError("contact_proof_not_found", "operator dispatch not found") from None
+        if not hmac.compare_digest(str(row.get("payload_digest") or ""), hashlib.sha256(canonical.encode()).hexdigest()):
+            raise VerbError("contact_proof_not_found", "operator dispatch not found")
+        return {"type": "contact.dispatch.proof.ok", "dispatch_id": dispatch, "input_id": input_id,
+                "operator": True, "text_sha256": hashlib.sha256(row["body"].encode("utf-8")).hexdigest(),
+                "created_at": row.get("created_at")}
 
     async def _on_send_receipt_get(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Read the one highest-rowid durable receipt visible to this client."""
