@@ -14,6 +14,7 @@ const {
   waitForQuestion,
 } = require('./next_lanes_harness');
 const { fixtureRequest } = require('./closed_chat_scenario');
+const { revisionRequestsCoalesce } = require('./next_lanes_revision_contract');
 const {
   L11_ID,
   L65_ID,
@@ -93,7 +94,7 @@ async function revealGoalMemberRows(session) {
 async function laneCallEvidence(session, laneId) {
   return session.eval(`window.__nextLanes.calls
     .filter(call => call.laneId === ${JSON.stringify(laneId)})
-    .map(call => ({ revision: call.revision, membersLimit: Number(call.options.membersLimit),
+    .map(call => ({ laneId: call.laneId, revision: call.revision, membersLimit: Number(call.options.membersLimit),
       goalId: call.options.goalId || null, membersAfter: call.options.membersAfter || null }))`);
 }
 
@@ -591,14 +592,16 @@ async function runDataRecovery(ctx, { ownedIds, hooks }) {
       && rootNoRoadAfterGoals.more === '+1 more',
     { rootNoRoadAfterGoals, noRoadQuestionGoal, noRoadFirstBlockedGoal });
 
-  await ctx.cdp.sleep(1100);
+  const callsBeforeFlush = await session.eval('window.__nextLanes.calls.length');
+  await session.eval('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const callsAfterFlush = await session.eval('window.__nextLanes.calls.length');
   const afterWaitPreview = await questionEvidence(session, ids[0]);
   const afterWaitOffPreview = await questionEvidence(session, ids[1]);
-  check(report, 'E8: waiting does not invent an L11 or chat heading while reads remain failed',
-    afterWaitPreview?.ownTitle === 'Synthetic preview question' && !afterWaitPreview.linkTitle && afterWaitPreview.retry
+  check(report, 'E8: a rendered checkpoint does not invent headings or issue extra reads while reads remain failed',
+    callsAfterFlush === callsBeforeFlush && afterWaitPreview?.ownTitle === 'Synthetic preview question' && !afterWaitPreview.linkTitle && afterWaitPreview.retry
       && afterWaitOffPreview?.ownTitle === 'Synthetic off-preview question' && !afterWaitOffPreview.linkTitle && afterWaitOffPreview.retry
       && !afterWaitPreview.isChatLink && !afterWaitOffPreview.isChatLink,
-    { afterWaitPreview, afterWaitOffPreview });
+    { afterWaitPreview, afterWaitOffPreview, callsBeforeFlush, callsAfterFlush });
 
   const noLaneSelector = questionSelector(ids[2]);
   await session.click(`${noLaneSelector} .next-question-option`);
@@ -1103,7 +1106,6 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const frameBReceipt = await emitInventory(session, frameB);
   await session.waitFor(`window.__nextLanes.calls.some(call => call.laneId === ${JSON.stringify(L11_ID)} && Number(call.options.membersLimit) === 32 && call.revision === ${JSON.stringify(REVISION_B)})`, { timeoutMs: ctx.timeoutMs });
   await session.waitFor(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 32)`, { timeoutMs: ctx.timeoutMs });
-  await session.waitFor(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 1)`, { timeoutMs: ctx.timeoutMs });
   await session.waitFor(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(MOVED_LANE_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 32)`, { timeoutMs: ctx.timeoutMs });
   await session.waitFor(`(() => {
     const row=document.querySelector('.next-lanes-row-open[data-lane-id=${JSON.stringify(L11_ID)}]')?.closest('.next-lanes-row');
@@ -1118,7 +1120,8 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const movedLaneQuestionMember = movedLane.members.find(member => member.spec_id === movedSpecId);
   const movedLanePreviewAtB = normalizedLane(evidenceAtB, MOVED_LANE_ID)?.progress?.members || [];
   const callsAtB = await session.eval(`window.__nextLanes.calls.filter(call => call.laneId === ${JSON.stringify(L11_ID)} && Number(call.options.membersLimit) === 32).map(call => call.revision)`);
-  const goalCallsAtB = (await laneCallEvidence(session, L11_ID)).filter(call => call.membersLimit === 1);
+  const allCallsAtB = await laneCallEvidence(session, L11_ID);
+  const goalCallsAtB = allCallsAtB.filter(call => call.membersLimit === 1);
   const bGoalsById = new Map(l11B.goals.map(goal => [goal.goal_id, goal]));
   const firstAGoal = l11A.goals[0];
   const secondAGoal = l11A.goals[1];
@@ -1131,7 +1134,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
       && movedBeforeStaleRelease?.ownTitle === 'Synthetic revision-moved question'
       && !movedBeforeStaleRelease.isChatLink && !movedBeforeStaleRelease.retry
       && callsAtB.includes(REVISION_A) && callsAtB.includes(REVISION_B)
-      && goalCallsAtB.some(call => call.revision === REVISION_B)
+      && revisionRequestsCoalesce(allCallsAtB, L11_ID, REVISION_A, REVISION_B)
       && frameBReceipt.accepted === true && evidenceAtB.frameSequence === frameBReceipt.frameSequence
       && normalizedB?.detail_revision === REVISION_B
       && (evidenceAtB.acceptedFrames || []).some(item => item.frameSequence === frameBReceipt.frameSequence
@@ -1178,7 +1181,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
       && destinationPendingBeforeStaleRelease
       && await session.eval(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_A)} && Number(item.options.membersLimit) === 32)
         && window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 32)
-        && window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 1)`),
+        && !window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 1)`),
     { frameSequence: evidenceBeforeStaleRelease.frameSequence, renderFrame: evidenceBeforeStaleRelease.renderFrame,
       callsBeforeStaleRelease, destinationPendingBeforeStaleRelease, rootAtB });
 
@@ -1236,33 +1239,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   await session.click('.next-lanes-back');
   await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level === 'all'", { timeoutMs: ctx.timeoutMs });
 
-  const bGoalsRelease = await session.eval(`window.__nextLanesReleaseMatchingAndFlush({ laneId: ${JSON.stringify(L11_ID)}, membersLimit: 1, revision: ${JSON.stringify(REVISION_B)} })`);
-  check(report, 'E9(d): a separately held B goals-only page is released at revision B while the B members page stays held',
-    bGoalsRelease?.released === true && bGoalsRelease.status === 'resolved'
-      && bGoalsRelease.laneId === L11_ID
-      && bGoalsRelease.requestedRevision === REVISION_B && bGoalsRelease.answeredRevision === REVISION_B
-      && bGoalsRelease.frameProcessed === true && bGoalsRelease.frameSequence === frameBReceipt.frameSequence
-      && bGoalsRelease.frameSequenceBefore === frameBReceipt.frameSequence
-      && bGoalsRelease.frameSequenceAfter === frameBReceipt.frameSequence
-      && bGoalsRelease.renderFrame > staleRelease.renderFrame
-      && await session.eval(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 32)`),
-    bGoalsRelease);
-  await session.waitFor(`(() => {
-    const row=document.querySelector('.next-lanes-row-open[data-lane-id=${JSON.stringify(L11_ID)}]')?.closest('.next-lanes-row');
-    const lines=[...(row?.querySelectorAll('.next-lanes-attention')||[])].map(line=>({
-      title:line.querySelector('.next-lanes-attention-goal')?.textContent||'',
-      reason:line.querySelector('.next-lanes-attention-reason')?.textContent||'',
-    }));
-    return lines.length === 2 && lines[0].title === 'Fixture goal 2' && lines[1].title === 'Fixture goal 1'
-      && lines.every(line => line.reason.includes('blocked'));
-  })()`, { timeoutMs: ctx.timeoutMs });
-  const rootAfterBGoals = await laneRootEvidence(session, L11_ID);
   const expectedBRootIds = ['Fixture goal 2', 'Fixture goal 1'].map(title => l11B.goals.find(goal => goal.title === title)?.goal_id);
-  const bGoalsRootIds = rootAfterBGoals?.attention.map(line => l11B.goals.find(goal => goal.title === line.title)?.goal_id) || [];
-  check(report, 'E9(d): after the separate B goals read, root attention follows the exact B goal IDs and order',
-    bGoalsRootIds.join('|') === expectedBRootIds.join('|')
-      && await session.eval(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(L11_ID)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 32)`),
-    { rootAfterBGoals, expectedBRootIds, bGoalsRootIds, bGoalsRelease });
 
   const bRelease = await session.eval(`window.__nextLanesReleaseMatchingAndFlush({ laneId: ${JSON.stringify(L11_ID)}, membersLimit: 32, revision: ${JSON.stringify(REVISION_B)} })`);
   check(report, 'E9(d): the B members reply is separately released and rendered at revision B without injecting another frame',
@@ -1286,7 +1263,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const rootAfterBRead = await laneRootEvidence(session, L11_ID);
   const actualBRootIds = rootAfterBRead?.attention.map(line => l11B.goals.find(goal => goal.title === line.title)?.goal_id) || [];
   const evidenceAfterBRead = await laneBridgeEvidence(session);
-  check(report, 'E9(d): the held B members read retains the exact B root goal IDs after the goals-only read',
+  check(report, 'E9(d): the held B members read supplies the exact B root goal IDs after release',
     actualBRootIds.join('|') === expectedBRootIds.join('|')
       && rootAfterBRead.attention.every(line => line.reason.includes('blocked'))
       && evidenceAfterBRead.frameSequence === frameBReceipt.frameSequence

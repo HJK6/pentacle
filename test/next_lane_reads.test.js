@@ -233,6 +233,30 @@ test('an in-flight reply for a superseded frame is discarded and re-read at once
   assert.deepEqual(state.reply.members.map(item => item.spec_id), ['spec_fixture__new']);
 });
 
+test('a goals demand coalesces into the restarted in-flight B members read', async () => {
+  const requests = [];
+  const reads = createLaneReads({ show: (laneId, options) => {
+    const item = deferred();
+    requests.push({ laneId, options, ...item });
+    return item.promise;
+  } });
+  reads.updateInventory(inventory(lane(REV_A)));
+  const members = reads.requestMembers(LANE_ID);
+  reads.updateInventory(inventory(lane(REV_B)));
+  const goals = reads.requestGoals(LANE_ID);
+  assert.deepEqual(requests.map(row => row.options), [{ membersLimit: 32 }, { membersLimit: 32 }]);
+  assert.equal(reads.getRead(LANE_ID, 'goals').status, 'loading');
+  requests[0].resolve(reply({ revision: REV_A, goals: [{goal_id: 'old'}] }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.getRead(LANE_ID, 'goals').reply, null);
+  requests[1].resolve(reply({ revision: REV_B, goals: [{ goal_id: GOAL_ID, title: 'Fixture goal' }] }));
+  const [membersResult, goalsResult] = await Promise.all([members, goals]);
+  assert.equal(membersResult.detailRevision, REV_B);
+  assert.equal(goalsResult.detailRevision, REV_B);
+  assert.strictEqual(reads.getRead(LANE_ID, 'goals').reply, membersResult.reply);
+  assert.equal(requests.length, 2);
+});
+
 test('a mismatched reply waits hidden for its exact frame; any other frame restarts the read', async () => {
   const calls = [];
   const reads = createLaneReads({ show: async () => {
