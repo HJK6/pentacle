@@ -378,17 +378,15 @@ async function run(repoRoot, options, injected = {}) {
       const quarantined = [];
       let discovered = [], unfiltered;
       if (requested) {
-        const discoveryJunit = path.join(junitDir, key + '-discovery.xml');
         const receipt = path.join(outDir, `${index}-discovery.json`);
         const reporter = path.join(__dirname, 'test-case-reporter.js');
         unfiltered = await operation(process.execPath, [
-          ...testArgs.slice(0, -1), `--test-reporter-destination=${discoveryJunit}`,
-          `--test-reporter=${reporter}`, `--test-reporter-destination=${receipt}`, target,
+          ...testArgs, `--test-reporter=${reporter}`, `--test-reporter-destination=${receipt}`, target,
         ], {...context, label: file + ' discovery'}, deps, limits);
-        row.discovery = {...unfiltered, junit: discoveryJunit};
+        row.discovery = {...unfiltered, junit};
         discovered = discoveredCases(receipt, unfiltered);
         if (discovered.length && (remaining() <= 0 ||
-            !deps.verifyBlocking(repoRoot, discoveryJunit, discovered.map(item => item.names), remaining()))) discovered = [];
+            !deps.verifyBlocking(repoRoot, junit, discovered.map(item => item.names), remaining()))) discovered = [];
         for (const item of requested) {
           const pattern = new RegExp(`^(?:${escape(item.name)})$`);
           const matches = discovered.filter(test => selectorMatches(pattern, test.names));
@@ -403,7 +401,10 @@ async function run(repoRoot, options, injected = {}) {
             summary.runner_errors.push('quarantine_selector_alert_unavailable');
           }
         }
-        if (!quarantined.length) row.junit = discoveryJunit;
+        if (quarantined.length) {
+          row.discovery.junit = path.join(junitDir, key + '-discovery.xml');
+          fs.renameSync(junit, row.discovery.junit);
+        }
       }
       if (quarantined.length) testArgs.push(`--test-skip-pattern=^(?:${quarantined.map(item => escape(item.name)).join('|')})$`);
       const result = unfiltered && !quarantined.length ? unfiltered :

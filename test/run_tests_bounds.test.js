@@ -210,6 +210,8 @@ test('a top-level and nested name collision keeps both cases blocking', async ()
     const row = result.files[0];
     assert.equal(row.execution.exitCode, 1);
     assert.equal(row.advisory, undefined);
+    const junitKey = require('node:crypto').createHash('sha256').update(file).digest('hex');
+    assert.equal(path.basename(row.junit), junitKey + '.xml');
     const junit = fs.readFileSync(row.junit, 'utf8');
     assert.match(junit, /collateral product failure/);
     assert.equal((junit.match(/<testcase name="collision"/g) || []).length, 2);
