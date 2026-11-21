@@ -305,6 +305,8 @@ A stale startup receipt never reactivates an older generation.
 
 A healthy generation can be independently enrolled with an alongside, pinned
 native executable and then imported with `agent-orch account upgrade`. Ordinary
+A Claude status response with `loggedIn: false` and exit code 0 or 1 is a native authentication failure. Other status failures retain their typed outcome.
+
 `relogin` still requires a native authentication failure. Upgrade never starts
 login, retries authorization, changes the saved default or rewrites existing
 session bindings. The current authenticated front desk must own the operation.
