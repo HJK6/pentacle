@@ -147,6 +147,24 @@ else:
                           'disk_total_bytes': 100, 'sampled_at': datetime.now(timezone.utc).isoformat()}, **original_stats_snapshot(self)}
     fixture_server.Server.host_stats_snapshot = fixture_stats_snapshot
 
+    # Read-only catalog and account fixtures travel through the real daemon RPC
+    # and host bridge; spawn itself remains the browser boundary stand-in.
+    import uiverbs
+    import account_runtime
+    uiverbs.spawn_catalog = lambda: {
+        'catalog_version': 'fixture',
+        'profiles': {'desktop_manual': {'claude': ['fixture-model', 'low'], 'codex': ['fixture-codex', 'low']}},
+        'models': {'claude': {'fixture-model': {'efforts': ['low']}}, 'codex': {'fixture-codex': {'efforts': ['low']}}},
+    }
+    original_account_operation = account_runtime.AccountRuntime.operation
+    async def fixture_account_operation(self, message):
+        auth = message.get('_auth_context') or {}
+        if message.get('action', 'status') == 'status' and auth.get('operator_authenticated') is True:
+            return {'type': 'account.ok', 'accounts': [{'host': 'local', 'provider': 'claude', 'alias': 'ours',
+                    'username': 'fixture@example.test', 'active': True, 'enabled': True, 'health': 'healthy'}], 'defaults': []}
+        return await original_account_operation(self, message)
+    account_runtime.AccountRuntime.operation = fixture_account_operation
+
     operator_auth.OperatorCredentialRegistry = FixtureRegistry
 
     # The existing isolated daemon owns this synthetic input driver. It calls

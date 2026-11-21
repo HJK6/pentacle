@@ -47,7 +47,6 @@ async function newChat(ctx) {
   const { session, report } = ctx; await visit(ctx);
   await session.eval(`(() => {
     window.__nextRequests=[]; window.__pentacleNextAdmitted=[]; window.__nextReply={ok:false,error:'Fixture refusal'};
-    window.cc.chatSpawnCatalog=async()=>({ok:true,catalog:{catalog_version:'fixture',profiles:{desktop_manual:{claude:['fixture-model','low'],codex:['fixture-codex','low']}},models:{claude:{'fixture-model':{efforts:['low']}},codex:{'fixture-codex':{efforts:['low']}}},account_status:{accounts:[{host:'local',provider:'claude',alias:'ours',username:'fixture@example.test',active:true,enabled:true,health:'healthy'}]}}});
     window.cc.chatSpawnV2=async req=>{window.__nextRequests.push(req);const reply=window.__nextReply;if(reply.ok&&reply.streamId)window.__pentacleNextAdmitted.push(reply.streamId);return reply}; return true;
   })()`);
   await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]');
