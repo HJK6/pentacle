@@ -44,6 +44,7 @@ NOTICE_KIND_ASSISTANT_LANE_RULING = "assistant_lane_ruling_request"
 NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT = "assistant_lane_ruling_result"
 # Object identity cannot be supplied by a JSON wire caller.
 ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
+TRACKING_INPUT_TOKEN = object()
 
 _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_FD_TURN_BUDGET,
@@ -56,7 +57,7 @@ _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_TREE_IDLE,
     NOTICE_KIND_LANE_DIGEST,
     NOTICE_KIND_EXTERNAL_WORK_DUE,
-    "owed_due",
+    "owed_due", "work_item_tracking",
     NOTICE_KIND_NOTIFICATION_ANSWER,
     NOTICE_KIND_STATUS_CARD,
     NOTICE_KIND_STATUS_CARD_COMBINED,
@@ -376,6 +377,11 @@ class OutboundNoticeQueue:
             if kind == NOTICE_KIND_LANE_DIGEST or metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
+            if kind == "work_item_tracking":
+                message["_tracking_input_token"] = TRACKING_INPUT_TOKEN
+                from front_desk_digest import WAKE_TOKEN
+                message["_front_desk_wake_token"] = WAKE_TOKEN
+                message["_notification_answer_generation"] = metadata["root_generation"]
             if kind == "dispatch_no_reply":
                 from front_desk_digest import WAKE_TOKEN
                 message["_front_desk_wake_token"] = WAKE_TOKEN
@@ -430,6 +436,8 @@ class OutboundNoticeQueue:
                 await self.store.fail_outbound_notice(str(row['notice_id']),owner=self.owner,error=code,
                     next_attempt_at=time.time()+NOTICE_INTERVAL_S,next_action='wait for fresh autonomous evidence',count_attempt=False)
                 return "retry"
+            if kind == "work_item_tracking":
+                return await self._retry(row, reason, "recheck the item, current front desk and original tell receipt")
             if code in _TERMINAL_CODES:
                 await self._terminal(row, reason, "inspect the terminal notice reason and recipient lifecycle")
                 return "terminal"
@@ -453,6 +461,7 @@ class OutboundNoticeQueue:
                 and reply.get("proof_state") == "row_missing"
                 and self._past_proof_floor(row)
                 and not self._pending_digest(row)
+                and kind != "work_item_tracking"
             ):
                 await self._terminal(
                     row,
@@ -494,7 +503,11 @@ class OutboundNoticeQueue:
         authoritative_negative: bool = False, digest_readback: bool = True,
     ) -> str:
         attempts = max(1, int(row.get("attempts") or 1))
-        if attempts >= self.config.max_attempts:
+        if row.get("kind") == "work_item_tracking":
+            # Keep one intent through an extended outage. The generation-fenced
+            # transport checks existing proof before any input.
+            attempts = min(attempts, 6)
+        elif attempts >= self.config.max_attempts:
             if (digest_readback and row.get('kind') == NOTICE_KIND_LANE_DIGEST and proof_pending
                     and self._past_proof_floor(row)):
                 from digest_delivery_proof import reconcile

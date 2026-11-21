@@ -867,10 +867,19 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
         return count
     from work_unattended import unattended_work_conn, unattended_signature
     from work_owed import owed_dispositions_conn
-    unattended = unattended_work_conn(conn, now=now)
-    owed = owed_dispositions_conn(conn, now=now, root_binding=(root_sid, root_gen))
-    facts = _json({"lanes": digest_lanes, "unattended_work": unattended_signature(unattended),
-                   "owed_dispositions": owed})
+    from work_item_tracking import active
+    sections = {}
+    facts = {"lanes": digest_lanes}
+    owes = False
+    if not active(conn):
+        unattended = unattended_work_conn(conn, now=now)
+        owed = owed_dispositions_conn(conn, now=now, root_binding=(root_sid, root_gen))
+        facts.update(unattended_work=unattended_signature(unattended), owed_dispositions=owed)
+        sections["unattended_work"] = {**{k: v for k, v in unattended.items() if k != "omitted"},
+                                       "items": unattended["items"][:8]}
+        sections["owed_dispositions"] = {**owed, "items": owed["items"][:8]}
+        owes = bool(owed["total"])
+    facts = _json(facts)
     digest = hashlib.sha256(facts.encode()).hexdigest()
     sequence = state["sequence"]
     # Equality refers to the last durable enqueue, not provider delivery. A
@@ -885,18 +894,16 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
     pending = conn.execute("SELECT 1 FROM v2_outbound_notices WHERE kind='lane_digest' "
         "AND recipient_stream_id=? AND delivered_at IS NULL AND terminal_at IS NULL "
         "AND json_extract(metadata,'$.root_generation')=? LIMIT 1", (root_sid, root_gen)).fetchone()
-    if owed["total"] and pending:
+    if owes and pending:
         conn.execute("UPDATE v2_fleet_digest_state SET next_due=? WHERE root=? AND root_generation=?",
                      (now + digest_s, root_sid, root_gen))
         return count
-    if digest != state["last_hash"] or recover or owed["total"]:
+    if digest != state["last_hash"] or recover or owes:
         sequence += 1
         nid = _id("lane_digest", epochs["lane_digest"], root_sid, root_gen, sequence)
         body = build_message_envelope(
             "lane_digest", notice_id=nid, lanes=render_lanes,
-            unattended_work={**{key: value for key, value in unattended.items() if key != "omitted"},
-                             "items": unattended["items"][:8]},
-            owed_dispositions={**owed, "items": owed["items"][:8]},
+            **sections,
             evaluated_at=_stamp(now),
         )
         _insert_outbound_notice_conn(
