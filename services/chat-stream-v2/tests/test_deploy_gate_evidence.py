@@ -336,6 +336,34 @@ def test_coordinated_deploy_hands_the_receipt_to_the_transaction_runtime(tmp_pat
     assert seen == [timing, timing, None]
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+@pytest.mark.parametrize("authorized", [False, True])
+def test_coordinated_deploy_forwards_only_an_explicit_first_qualification_go(tmp_path, monkeypatch, rollback, authorized):
+    from deploy import coordinated, coordinated_runtime
+    import deploy.deploy as module
+
+    class Transaction:
+        def __init__(self, _adapter, _root):
+            pass
+
+        def apply(self, _plan, _receipt, **kwargs):
+            return kwargs
+
+        def rollback(self, _receipt, *, authorization, go_tell_id, **kwargs):
+            assert authorization is None and go_tell_id is None
+            return kwargs
+
+    monkeypatch.setattr(coordinated, "Transaction", Transaction)
+    monkeypatch.setattr(coordinated_runtime, "Runtime", lambda *args, **kwargs: None)
+    repo = tmp_path / "release"
+    repo.mkdir()
+    go = tmp_path / "qualification-go.json" if authorized else None
+    result = module.deploy(module.SERVICES["chat-streamd-v2"], release_checkout=repo,
+        ref="origin/main", rollback=rollback, coordinated_plan=None if rollback else tmp_path / "intent.json",
+        coordinated_receipt=tmp_path / "receipt.json", first_qualification_go=go, runner=module._run)
+    assert result == ({"first_qualification_go": go} if authorized else {})
+
+
 def test_one_slow_sample_under_a_passing_median_is_admitted(tmp_path):
     """Version 2 certifies warmed median execution, not the tail or a cold first read."""
     payload = read_timing_receipt()

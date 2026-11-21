@@ -36,7 +36,8 @@ PROVENANCE_FIELDS = {'version', 'kind', 'sha', 'prior_sha', 'receipt', 'receipt_
 def qualification_stamp(stamp):
     """Retain the exact forward payload and bounded provenance, not recursive history."""
     result = {k: copy.deepcopy(stamp[k]) for k in (*QUALIFICATION_FIELDS,
-              'coordinated_receipt', 'receipt_sha256', 'ordinary_provenance', 'prior_sha') if k in stamp}
+              'coordinated_receipt', 'receipt_sha256', 'ordinary_provenance', 'prior_sha',
+              'coordinated_phase', 'first_qualification') if k in stamp}
     prior = stamp.get('prior_qualification')
     if isinstance(prior, dict) and isinstance(prior.get('stamp'), dict):
         result['prior_qualification'] = {'sha': prior.get('sha'), 'stamp': {
@@ -166,6 +167,9 @@ def _qualified_prior(stamp, sha, bindings):
                 if ('prior_qualification' in stamp or receipt.get('intent', {}).get('target_sha') != sha
                         or seal != stamp.get('receipt_sha256')):
                     raise Invalid('prior production receipt reference invalid')
+                if "first_qualification" in receipt["intent"]:
+                    from deploy.first_qualification import check_committed_stamp
+                    check_committed_stamp(stamp, receipt)
                 reference.update(receipt=stamp['coordinated_receipt'], receipt_sha256=seal)
         except Invalid as exc:
             raise Invalid('prior production receipt reference invalid') from exc

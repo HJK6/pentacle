@@ -4902,6 +4902,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         self, host: str, session_name: str, *, idempotency_key: str,
         request_payload_hash: str, ttl_s: float, request_id: str = "",
         nonce: str = "", owner_instance_id: str = "", refuse_if_held: bool = False,
+        qualification_message: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically resolve a keyed spawn in ONE single-writer op — closing the
         lookup-then-reserve race that let concurrent / re-fired same-key spawns
@@ -4921,6 +4922,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         idempotency_key = str(idempotency_key or "").strip()
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            if qualification_message is not None:
+                conn.execute("BEGIN IMMEDIATE")
             now = time.time()
             if idempotency_key:
                 outcome = _row(conn.execute(
@@ -4952,7 +4955,18 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             # serialized txn that would otherwise claim it (QA cycle-3 astra-[3]);
             # the already-admitted-key replay resolved above is unaffected, so an
             # interrupted caller's retry still gets its seat during a deploy hold.
-            if _initial_admission_paused(conn) or (refuse_if_held and _admission_held(conn, host, now)):
+            qualification = None
+            if qualification_message is not None:
+                import qualification_admission
+                qualification = qualification_admission.active_cell(conn, qualification_message, now)
+                if (qualification is None or qualification_message["host"] != host
+                        or qualification_message["request_id"] != request_id
+                        or qualification_message["idempotency_key"] != idempotency_key
+                        or qualification_message["session_name"] != session_name):
+                    conn.commit()
+                    return {"status": "frozen"}
+            if _initial_admission_paused(conn) or (refuse_if_held and _admission_held(conn, host, now)
+                                                   and qualification is None):
                 conn.commit()
                 return {"status": "frozen"}
             # No prior claim for this key (or keyless): reserve exactly as
@@ -4979,6 +4993,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             except sqlite3.IntegrityError:
                 conn.commit()
                 return {"status": "unavailable"}
+            if qualification is not None:
+                qualification_admission.claim(conn, qualification, qualification_message)
             conn.commit()
             return {"status": "claimed"}
 

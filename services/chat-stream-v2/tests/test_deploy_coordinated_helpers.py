@@ -1418,3 +1418,320 @@ def test_prepare_fetches_missing_target_before_reachability(runtime_preparation)
     folder = root / 'fetch-check'; folder.mkdir(mode=0o700)
     with pytest.raises(c.Invalid, match='stop before fixture staging'):
         runtime.prepare(intent, folder)
+
+
+def test_prepare_refuses_new_satellite_binding_against_declared_skip_prior(runtime_preparation, monkeypatch):
+    """The real prepare path cannot treat an old declared skip as a pass."""
+    runtime, fixture, intent, root = runtime_preparation
+    c.atomic_json(Path(intent['machines_file']), [
+        {'name': 'fixture', 'ssh_target': None},
+        {'name': 'satellite', 'ssh_target': 'satellite', 'smoke_optional': True},
+    ])
+    stamp = runtime.d._read_stamp(fixture.repo, runtime.service)
+    stamp['fleet_smoke']['skipped'] = [{'host': 'satellite'}]
+    stamp['fleet_smoke']['cells'].extend({
+        'host': 'satellite', 'provider': provider, 'prompt_mode': mode,
+        'outcome': 'SKIPPED_DECLARED', 'authority': 'fd:fixture', 'reason': 'not qualified',
+    } for provider in ('claude', 'codex') for mode in ('prompted', 'promptless'))
+    runtime.d._write_stamp(fixture.repo, runtime.service, stamp)
+    original_snapshot = runtime.account_snapshot
+    def snapshot(*args, **kwargs):
+        result = original_snapshot(*args, **kwargs)
+        for binding in list(result['selected_bindings']):
+            result['selected_bindings'].append({**binding, 'host': 'satellite'})
+        return result
+    monkeypatch.setattr(runtime, 'account_snapshot', snapshot)
+    folder = root / 'satellite-preparation'; folder.mkdir(mode=0o700)
+    with pytest.raises(c.Invalid, match='prior production qualification does not cover selected binding'):
+        runtime.prepare(intent, folder)
+    assert not list(folder.iterdir())
+
+
+@pytest.fixture
+def first_qualification_transition(runtime_preparation, monkeypatch):
+    """Real receipt, Git/archive, catalog, account store and transaction with disposable host counterparts."""
+    from dataclasses import replace
+    import time
+    from account_store import AccountStore
+    from deploy import restoration
+    import qualification_admission
+    from provider_accounts import Binding
+    from provider_cli_artifact import platform_key
+
+    runtime, fixture, intent, root = runtime_preparation
+    config = c.read_json(fixture.b.config)
+    database = config["database"]
+    policy = c.read_json(fixture.policy)
+    old_scope = ["primary", "secondary"]
+    bindings = []
+    for name in [*old_scope, "satellite"]:
+        original = root / name / "old" / "services/chat-stream-v2/provider_account_host.py"
+        original.parent.mkdir(parents=True)
+        original.write_text(f"# original executor for {name}\n")
+        policy["executors"][name] = {"python": sys.executable, "script": str(original)}
+        bindings.extend(replace(Binding(**raw), host=name, alias="ours") for raw in config["bindings"])
+    installer = runtime.installer
+    archive = root / "installed-prior"
+    archive.mkdir()
+    manifest = installer._archive(fixture.repo, fixture.prior, archive,
+                                  provider_cli_pin=config["pin"])
+    target = installer.Target("primary", "localhost", str(root / "primary" / ".pentacle-account-helpers"), True)
+    release = installer.stage_helper_source(target, archive, fixture.prior, manifest)
+    policy["executors"]["primary"]["script"] = release + "/app/services/chat-stream-v2/provider_account_host.py"
+    c.atomic_json(fixture.policy, policy)
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        accounts = AccountStore(conn, policy)
+        for binding in bindings:
+            accounts.register(binding)
+            accounts.set_default(host=binding.host, provider=binding.provider, alias=binding.alias)
+    exclusion = {"host": "satellite", "authority": "fd:readiness", "reason": "first qualification pending"}
+    machines = Path(intent["machines_file"])
+    catalog = {"machines": [{"name": "primary", "ssh_target": None},
+        {"name": "secondary", "ssh_target": "disposable-secondary"},
+        {"name": "satellite", "ssh_target": "disposable-satellite", "smoke_optional": True}],
+        "release_exclusions": [{"host": "satellite", "readiness_item": exclusion["authority"],
+            "reason": exclusion["reason"], "owner": "fd", "starts_at": "2020-01-01T00:00:00Z",
+            "expires_at": "2020-02-01T00:00:00Z"}], "retained_field": "preserved"}
+    c.atomic_json(machines, catalog)
+    machines.chmod(0o640)
+    postimage = private_json(root / "approved-catalog.json", {**catalog, "release_exclusions": []})
+    old_receipt = root / "accepted-prior-receipt.json"
+    prior = c.seal_receipt({"schema": c.RECEIPT_SCHEMA, "receipt_path": str(old_receipt),
+        "intent": {"target_sha": fixture.prior, "excluded_hosts": [exclusion]},
+        "scope": c.host_scope(machines, [exclusion]), "source": {"target": {"manifest": manifest}}})
+    c.atomic_json(old_receipt, prior)
+    stamp = runtime.d._read_stamp(fixture.repo, runtime.service)
+    stamp.update(coordinated_phase="committed", coordinated_receipt=str(old_receipt),
+                 receipt_sha256=prior["receipt_sha256"])
+    stamp["fleet_smoke"] = {"outcome": "passed", "skipped": _rows("satellite"),
+        "cells": [{**row, "account_binding": b.public()} for b in bindings if b.host != "satellite"
+                  for row in _rows(b.host) if row["provider"] == b.provider]
+                + [{**row, **exclusion, "outcome": "SKIPPED_DECLARED"} for row in _rows("satellite")]}
+    runtime.d._write_stamp(fixture.repo, runtime.service, stamp)
+    stamp_path = runtime.d._stamp_path(fixture.repo, runtime.service)
+    intent["smoke_accounts"] = ["claude=ours", "codex=ours"]
+    intent["first_qualification"] = {
+        "prior_exclusion": exclusion, "prior_stamp_sha256": c.file_digest(stamp_path),
+        "catalog_sha256": c.file_digest(machines), "fd_gate_reference": "fd:prepare",
+        "expected_live": {"sha": fixture.prior, "pid": 111, "birth": "counterpart-start"},
+        "expires_at": "2099-01-01T00:00:00Z",
+        "catalog_change": {"postimage": str(postimage), "sha256": c.file_digest(postimage),
+                           "fd_gate_reference": "fd:catalog"},
+    }
+    stage, verify = installer.stage_helper_source, installer.verify_helper_source
+    monkeypatch.setattr(installer, "stage_helper_source",
+                        lambda t, *args, **kwargs: stage(replace(t, local=True), *args, **kwargs))
+    monkeypatch.setattr(installer, "verify_helper_source",
+                        lambda t, *args, **kwargs: verify(replace(t, local=True), *args, **kwargs))
+    runtime, fixture, plan, receipt_path, running, lifecycle = _concrete_counterparts(runtime_preparation, monkeypatch)
+    monkeypatch.setattr(qualification_admission, "os", SimpleNamespace(getpid=lambda: running["pid"]))
+
+    def pin_proof(binding, pin, identity):
+        platform = platform_key()
+        return {"outcome": "ok", "binding_key": binding.key, "platform": platform,
+                "artifact": pin["providers"][binding.provider]["artifacts"][platform],
+                "pin_revision": pin["revision"], "pin_digest": c.digest(pin), "code_identity": identity}
+
+    def helper_proof(helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False,
+                     test_profile=False, native_readiness=False):
+        host = helper["target"]["name"]
+        if verify_release:
+            installer.verify_helper_source(installer.Target(**helper["target"]), sha, manifest)
+        if host == "satellite":
+            assert sha != fixture.prior
+        if native_readiness:
+            assert host == "satellite" and test_profile and sha == fixture.target
+        closure = {"identity": identity, "python": helper["python"]}
+        if test_profile:
+            from _shared.spawn_profiles import resolve_test_profile
+            closure["test_profile"] = resolve_test_profile()
+        if closure_only:
+            return closure
+        return {"closure": closure, "artifacts": [pin_proof(Binding(**b), accounts["pin"], identity)
+                    for b in accounts["selected_bindings"] if b["host"] == host]}
+
+    runtime.helper_proof = helper_proof
+    control = {"failure": None}
+    def client_check(*args):
+        return {"outcome": "failed" if control["failure"] == "delivery" else "passed"}
+    monkeypatch.setattr(deploy_mod, "_check_client_delivery", client_check)
+
+    def dispatch(selected):
+        sha = fixture.git("rev-parse", "HEAD")
+        sealed = c.load_receipt(receipt_path)
+        direction = "prior" if sha == fixture.prior else "target"
+        identity = sealed["source"][direction]["code_identity"]
+        with sqlite3.connect(database) as conn:
+            for raw in selected:
+                binding = Binding(**raw)
+                proof = pin_proof(binding, config["pin"], identity)
+                conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",
+                    ("provider_cli.verified:" + binding.key, json.dumps({"proof": proof, "verified_at": time.time()})))
+
+    def no_input(selected, path, **kwargs):
+        assert {b["host"] for b in selected} == set(old_scope)
+        dispatch(selected)
+        return {"outcome": "passed", "cells": [
+            {**b, "outcome": "passed", "cleanup": "passed", "session_generation": "disposable"} for b in selected]}
+
+    monkeypatch.setattr(restoration, "verify_no_input", no_input)
+    base_runner = runtime.runner
+    def run(argv, cwd):
+        if "--first-qualification-keys" not in argv:
+            return base_runner(argv, cwd)
+        assert fixture.git("rev-parse", "HEAD") == fixture.target
+        assert machines.read_bytes() == postimage.read_bytes()
+        sealed = c.load_receipt(receipt_path)
+        assert c.read_json(fixture.policy)["executors"]["satellite"]["script"] == sealed["source"]["target"]["helpers"]["satellite"]["script"]
+        assert "fleet_smoke" not in runtime.d._read_stamp(fixture.repo, runtime.service)
+        if control["failure"] == "interrupt":
+            raise KeyboardInterrupt
+        with sqlite3.connect(database) as conn:
+            for key, cell in sealed["qualification_cells"].items():
+                request = {**cell["request"], "request_id": f"claim-{key}",
+                           "_auth_context": {"operator_authenticated": True}}
+                state = qualification_admission.active_cell(conn, request, time.time())
+                assert state is not None
+                assert qualification_admission.active_cell(conn, {**request, "initial_prompt": "unrelated"}, time.time()) is None
+                qualification_admission.claim(conn, state, request)
+        selected = sealed["accounts"]["selected_bindings"]
+        dispatch(selected)
+        profile = sealed["source"]["target"]["smoke_plan"]["test_profile"]
+        from _shared.spawn_profiles import test_prompt_tuple
+        rows = []
+        for raw in selected:
+            for row in _rows(raw["host"]):
+                if row["provider"] != raw["provider"]:
+                    continue
+                model, effort = test_prompt_tuple(row["provider"], profile)
+                binding = Binding(**raw).public()
+                if raw["host"] == "satellite" and control["failure"] == "generation":
+                    binding["generation"] = "other-generation"
+                row.update(account="ours", account_binding=binding, model=model, effort=effort, test_profile=profile,
+                    tuple_evidence={"requested_model": model, "requested_effort": effort,
+                                    "effective_model": model, "effective_effort": effort})
+                rows.append(row)
+        if control["failure"] == "cell":
+            next(r for r in rows if r["host"] == "satellite")["outcome"] = "failed"
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"ok": True, "status": "PASS", "cells": rows}), "")
+    runtime.runner = run
+    return SimpleNamespace(runtime=runtime, fixture=fixture, plan=plan, path=receipt_path, running=running,
+        lifecycle=lifecycle, control=control, stamp=stamp_path, machines=machines, database=database,
+        captures={p: (p.read_bytes(), p.stat().st_mode) for p in (stamp_path, machines, fixture.policy,
+            runtime.d._launchd_plist_path(runtime.service.launchd_label), runtime.d._usage_collector_plist_path())})
+
+
+def _qualification_go(run, receipt, operation):
+    values = {k: receipt["intent"][k] for k in ("transaction_id", "controller_sha", "prior_sha", "target_sha")}
+    return private_json(Path(receipt["transaction_directory"]) / f"{operation}-go.json", {
+        **values, "receipt_sha256": receipt["receipt_sha256"], "operation": operation,
+        "go_tell_id": f"fd:{operation}", "expires_at": "2099-01-01T00:00:00Z",
+        "expected_live": {"sha": run.fixture.git("rev-parse", "HEAD"),
+                          "pid": run.running["pid"], "birth": "counterpart-start"},
+    })
+
+
+@pytest.mark.parametrize("failure", [None, "cell", "generation", "delivery", "interrupt"])
+def test_first_qualification_transition_uses_distinct_scopes_and_restores_preimages(first_qualification_transition, failure):
+    from deploy import first_qualification, restoration
+    run = first_qualification_transition
+    run.control["failure"] = failure
+    with c.transaction_lock(run.runtime.repo) as folder:
+        tx = c.Transaction(run.runtime, folder)
+        tx.prepare(run.plan, run.path)
+        receipt, _ = tx.load(run.path)
+        assert set(receipt["source"]["prior"]["helpers"]) == {"primary", "secondary"}
+        assert set(receipt["source"]["prior"]["original_helpers"]) == {"primary", "secondary"}
+        assert set(receipt["source"]["target"]["helpers"]) == {"primary", "secondary", "satellite"}
+        assert all((path.read_bytes(), path.stat().st_mode) == expected for path, expected in run.captures.items())
+        assert first_qualification.read_runtime_admission(run.database, "satellite") == (None, None)
+        with pytest.raises(c.Invalid, match="separate FD operation"):
+            tx.apply(run.plan, run.path)
+        assert not run.lifecycle
+        go = _qualification_go(run, receipt, "apply")
+        if failure == "interrupt":
+            with pytest.raises(KeyboardInterrupt):
+                tx.apply(run.plan, run.path, first_qualification_go=go)
+            assert tx.load(run.path)[1]["phase"] == "verifying"
+        else:
+            result = tx.apply(run.plan, run.path, first_qualification_go=go)
+            if failure is None:
+                assert result["phase"] == "committed" and result["full_fleet_acceptance"]
+                stamp = run.runtime.d._read_stamp(run.fixture.repo, run.runtime.service)
+                assert stamp["first_qualification"]["runtime"]["pid"] == run.running["pid"]
+                assert restoration.qualified_prior(stamp, run.fixture.target, receipt["accounts"]["selected_bindings"])
+                assert first_qualification.read_runtime_admission(run.database, "satellite") == (None, None)
+                retained = restoration.qualification_stamp(stamp)
+                assert restoration.qualified_prior(retained, run.fixture.target, receipt["accounts"]["selected_bindings"])
+                retained["first_qualification"]["runtime"]["pid"] += 1
+                with pytest.raises(c.Invalid, match="prior production receipt reference"):
+                    restoration.qualified_prior(retained, run.fixture.target, receipt["accounts"]["selected_bindings"])
+                _prepare_following_ordinary_intent(run, receipt)
+            else:
+                assert result["phase"] == "recovery_required" and result["outcome"] == "failed"
+                assert run.lifecycle == ["stop", "bootstrap"]
+                assert "fleet_smoke" not in run.runtime.d._read_stamp(run.fixture.repo, run.runtime.service)
+                assert first_qualification.read_runtime_admission(run.database, "satellite")[1]["phase"] == "failed"
+                assert (Path(receipt["transaction_directory"]) / "first-fleet-result.json").exists()
+        with pytest.raises(c.Invalid, match="separate FD operation"):
+            tx.rollback(run.path)
+        rollback = tx.rollback(run.path, first_qualification_go=_qualification_go(run, receipt, "rollback"))
+        assert rollback["phase"] == "rolled_back" and rollback["outcome"] == "passed"
+        assert rollback["verification"]["restoration"]["included_hosts"] == ["primary", "secondary"]
+        assert run.fixture.git("rev-parse", "HEAD") == run.fixture.prior
+        assert run.lifecycle == ["stop", "bootstrap", "stop", "bootstrap"]
+        assert all((path.read_bytes(), path.stat().st_mode) == expected for path, expected in run.captures.items())
+        hold, state = first_qualification.read_runtime_admission(run.database, "satellite")
+        assert first_qualification.owned_hold(hold, state) and state["phase"] == "rollback"
+        assert tx.rollback(run.path)["phase"] == "rolled_back"
+
+
+def _prepare_following_ordinary_intent(run, qualified_receipt):
+    """Consume the actual new stamp through the ordinary coordinated preparation path."""
+    runtime, fixture = run.runtime, run.fixture
+    fixture.git("commit", "--allow-empty", "-qm", "unchanged helper release")
+    target = fixture.git("rev-parse", "HEAD")
+    fixture.git("update-ref", "refs/remotes/origin/main", target)
+    fixture.git("checkout", "-q", "--detach", fixture.target)
+    intent = dict(qualified_receipt["intent"])
+    del intent["first_qualification"]
+    folder = Path(qualified_receipt["transaction_directory"]) / "normal-next"
+    folder.mkdir(mode=0o700)
+    target_gate = c.read_json(intent["gate_evidence"])
+    target_gate.update(sha=target, source={**target_gate["source"], "sha_before": target, "sha_after": target})
+    intent.update(transaction_id="next-normal-release", prior_sha=fixture.target, target_sha=target,
+                  gate_evidence=str(private_json(folder / "gate.json", target_gate)),
+                  prior_gate_evidence=intent["gate_evidence"])
+    timing = runtime.read_timing_receipt
+    runtime.read_timing_receipt = private_json(folder / "timing.json", read_timing_receipt(target))
+    try:
+        prepared = runtime.prepare(intent, folder)
+    finally:
+        runtime.read_timing_receipt = timing
+    assert "prior_scope" not in prepared
+    assert prepared["source"]["prior"]["code_identity"] == prepared["source"]["target"]["code_identity"]
+    assert set(prepared["source"]["prior"]["original_helpers"]) == {"primary", "secondary", "satellite"}
+
+
+@pytest.mark.parametrize("drift", ["catalog", "mode", "process", "stamp"])
+def test_first_qualification_refuses_drift_before_stop(first_qualification_transition, drift):
+    run = first_qualification_transition
+    with c.transaction_lock(run.runtime.repo) as folder:
+        tx = c.Transaction(run.runtime, folder)
+        tx.prepare(run.plan, run.path)
+        receipt, _ = tx.load(run.path)
+        go = _qualification_go(run, receipt, "apply")
+        if drift == "catalog":
+            run.machines.write_bytes(run.machines.read_bytes() + b" ")
+        elif drift == "mode":
+            run.machines.chmod(0o644)
+        elif drift == "process":
+            run.running["pid"] += 1
+        else:
+            run.stamp.write_bytes(run.stamp.read_bytes() + b" ")
+        with pytest.raises(c.Invalid):
+            tx.apply(run.plan, run.path, first_qualification_go=go)
+        assert tx.load(run.path)[1]["phase"] == "prepared"
+        assert run.fixture.git("rev-parse", "HEAD") == run.fixture.prior
+        assert not run.lifecycle
