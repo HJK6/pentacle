@@ -1,7 +1,7 @@
 """run_gate keeps the original failure, its reporting/cleanup facts and the last node.
 
 Each case runs the real runner and progress plugin against a disposable tiny suite
-through a small driver that only redirects the subject command and git readback.
+and its own accepted admission and quarantine metadata.
 """
 
 from __future__ import annotations
@@ -22,15 +22,47 @@ from tools import run_gate
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 DRIVER = r'''
-import json, os, sys
+import ast, json, os, subprocess, sys
 from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text())
-sys.path.insert(0, config["service_dir"])
-os.environ["PYTHONPATH"] = config["service_dir"]
+service_dir = Path(config["service_dir"])
+scripts = service_dir.parents[1] / "scripts"
+sys.path[:0] = [str(service_dir), str(scripts)]
+os.environ["PYTHONPATH"] = os.pathsep.join([str(service_dir), str(scripts)])
+from admission_fingerprint import python_fingerprint
+from admission_inputs import ROLLOUT_BASE
+from admission_policy import identity
 from tools import run_gate
 
 suite = Path(config["suite"])
+repo = suite.parents[1]
+metadata = repo / "scripts"
+metadata.mkdir()
+(metadata / "gate-env.json").write_bytes((scripts / "gate-env.json").read_bytes())
+source = suite / "test_synthetic.py"
+fingerprints = {}
+for function in ast.parse(source.read_text()).body:
+    if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and function.name.startswith("test_"):
+        node = source.name + "::" + function.name
+        fingerprints[identity("daemon", node)] = python_fingerprint(suite, node)
+platform = "darwin" if sys.platform == "darwin" else "linux"
+for name, data in [
+    ("test-admission-inventory.json", {"version": 1, "base_sha": ROLLOUT_BASE,
+     "python": {"daemon": {platform: fingerprints}}, "javascript": {}}),
+    ("test-admission-records.json", {"version": 1, "records": {}}),
+    ("quarantine.json", {"version": 1, "history": {}, "nonblocking_tests": []}),
+]:
+    (metadata / name).write_text(json.dumps(data))
+
+git = ["git", "-C", str(repo)]
+subprocess.run([*git, "init", "-q"], check=True)
+subprocess.run([*git, "add", "scripts"], check=True)
+subprocess.run([*git, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                "commit", "-qm", "Accepted fixture metadata"], check=True)
+subprocess.run([*git, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+
 run_gate.SERVICE_DIR = suite
+run_gate.REPO_ROOT = repo
 run_gate._tier_command = lambda tier, junit, basetemp: [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider",
                                                          f"--junitxml={junit}", "--basetemp", str(basetemp / tier)]
 run_gate._sha = lambda: "c" * 40
@@ -74,8 +106,8 @@ PASSING = "def test_ok():\n    pass\n"
 
 
 def _prepare(tmp_path: Path, source: str, *, argv: list[str], **config) -> tuple[list[str], Path, dict]:
-    suite, evidence = tmp_path / "suite", tmp_path / "evidence"
-    suite.mkdir()
+    suite, evidence = tmp_path / "repo/services/chat-stream-v2", tmp_path / "evidence"
+    suite.mkdir(parents=True)
     (suite / "pytest.ini").write_text("[pytest]\ntimeout = 3\ntimeout_method = thread\n", encoding="utf-8")
     (suite / "test_synthetic.py").write_text(source, encoding="utf-8")
     (tmp_path / "driver.py").write_text(DRIVER, encoding="utf-8")

@@ -29,6 +29,7 @@ for (const failing of [false, true]) {
         USERPROFILE: parentHome,
         PENTACLE_RUNTIME_DIR: inheritedRuntime,
         PENTACLE_MARKER_PROBE_FAIL: failing ? '1' : '0',
+        PENTACLE_RUNNER_FIXTURES: '1',
       };
       // Node marks a test-file process with this private recursion guard.
       // The nested runner is the subject of this test, not a nested test file.
