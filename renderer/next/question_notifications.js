@@ -50,9 +50,11 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
       if (!reply || reply.ok === false || !Array.isArray(reply.questions)) throw new Error('Question identity read failed');
       const existing = new Set([...records.values()].map(questionId));
       const listed = new Set();
+      let incomplete = false;
       for (const item of reply.questions) {
         const id = item?.question_id;
-        if (!id || item.state !== 'open') continue;
+        if (item?.state !== 'open') continue;
+        if (!id) { incomplete = true; continue; }
         listed.add(id);
         identities.set(id, item.spec_id || item.envelope?.spec_id || null);
         // prompt.list is the complete open set; notification.list is capped.
@@ -61,6 +63,7 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
         const envelope = item.envelope;
         const notificationId = item.notification_id;
         const producer = item.producer_stream_id || envelope?.producer_stream_id;
+        if (!existing.has(id) && (!notificationId || !producer || !envelope)) incomplete = true;
         if (!existing.has(id) && notificationId && producer && envelope
             && !terminalNotifications.has(notificationId) && !terminalQuestions.has(id)) {
           add({ notification_id: notificationId, producer: 'agent_question.v1', state: 'open',
@@ -70,6 +73,7 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
           existing.add(id);
         }
       }
+      readFailed = incomplete;
       // A current open-list response can retire older open notifications, but
       // must not remove a notification received while that read was in flight.
       for (const [notificationId, record] of records) {
