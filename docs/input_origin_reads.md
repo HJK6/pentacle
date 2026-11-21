@@ -65,6 +65,24 @@ conditions are unchanged. Both notice projection reads use the additive index
 on `v2_outbound_notices(recipient_stream_id)`; old code can ignore this index
 after a source rollback.
 
+## Read-scoped operator-dispatch membership
+
+Inventory and event pages share one lazy operator-dispatch lookup in their
+existing Store read snapshot. For each target and current generation,
+including an empty range, the lookup uses the hot route target/generation
+index and SQLite's existing resolved/direct-primary filter and wire
+extraction. An exact text hit still takes precedence over delivery proof.
+The retained-occurrence checks use the same membership set; neither
+archive-only routes nor a stale generation gain dispatch authority.
+Direct callers that need the dispatch ID still use the original SQL.
+
+The lookup keeps at most 4,096 source rows (including duplicates), 8 MiB of
+UTF-8 wire and range-key bytes, and 4,096 range entries across the read.
+Over-limit ranges, unsupported text/SQLite values, and load failures fall
+back to the original SQL, including its own error and short-circuit
+behavior. A failed materialization is not retried for that range in the
+same read. No memberships or fallback markers survive the snapshot.
+
 ## Regression evidence
 
 `tests/test_read_projection_deliveries.py` drives real Store inventory and

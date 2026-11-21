@@ -7021,7 +7021,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     def _history_deliveries(self, conn, shared):
         """Called only on the Store thread, inside the reader's savepoint."""
-        return conn.delivery_lookup.get(conn, shared=shared)
+        deliveries = conn.delivery_lookup.get(conn, shared=shared)
+        deliveries.reuse.enable_dispatch()
+        return deliveries
 
     async def fetch_session_event_page(
         self,
