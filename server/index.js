@@ -29,6 +29,7 @@ const { createWsBridge } = require('./ws_bridge');
 const { freezeWebDist } = require('./web_build_id');
 const { createPrivateDashboardRoute } = require('./private_dashboards');
 const { createDesignRoutes } = require('./designs');
+const { parseDesignRoute } = require('../lib/design_routes.cjs');
 const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
 
 const DEFAULT_PORT = 7795;
@@ -364,6 +365,17 @@ function resolveProfilePath(profile) {
   return path.join(ROOT, 'configs', `${profile}.js`);
 }
 
+const DESIGN_EMBED_ENTRY = '/next/design-embed.html';
+
+function classifyDesignPath(pathname) {
+  // Reserve malformed paths in the Design namespaces and the internal HTML
+  // filename. Only parseDesignRoute on the unmodified target can admit them.
+  const match = /^\/+next\/+(?:(embed\/+)?design(?=\/|$)|(design-embed\.html)$)/
+    .exec(pathname.replace(/\\/g, '/'));
+  if (!match) return null;
+  return match[1] || match[2] ? 'embed' : 'workspace';
+}
+
 function serveStatic(res, urlPath, configJson, frozen) {
   const rel = urlPath === '/' ? 'web.html' : urlPath === '/designs/' ? 'designs.html' : urlPath === '/next/' ? 'next/index.html' : urlPath.replace(/^\/+/, '');
   // Path traversal guard — a request must not escape the frozen bundle.
@@ -478,16 +490,24 @@ async function main(argv = process.argv.slice(2)) {
   });
   const designs = createDesignRoutes({ libraryRoot: CONFIG.dashboards?.designLibraryRoot || process.env.PENTACLE_DESIGN_LIBRARY_ROOT || null });
   const loginLimiter = createLoginLimiter();
+  const identityAuth = auth?.mode === 'tailscale';
   const server = http.createServer((req, res) => {
     if (!auth && !loopbackRequestAllowed(req)) {
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }).end('origin_refused');
       return;
     }
-    const urlPath = new URL(req.url, 'http://localhost').pathname;
-    // When auth is on, /login is the only unauthenticated surface; a GET
-    // navigation for anything else is redirected there and every api call gets
-    // a 401. Loopback (auth === null) is served exactly as before.
-    if (auth && auth.mode === 'tailscale') {
+    // Keep a malformed Design path from normalizing into another route. Also
+    // reserve normalized aliases so they cannot reach the static file lookup.
+    const rawPath = req.url.split(/[?#]/, 1)[0].replace(/^https?:\/\/[^/\\]*/i, '');
+    const rawDesignMode = classifyDesignPath(rawPath);
+    const urlPath = rawDesignMode ? rawPath : new URL(req.url, 'http://localhost').pathname;
+    const designMode = rawDesignMode || classifyDesignPath(urlPath);
+    if (designMode === 'embed' && !identityAuth) {
+      res.writeHead(404).end('not found');
+      return;
+    }
+    // Token-authenticated navigation uses the existing login flow.
+    if (identityAuth) {
       if (!auth.isAuthed(req)) {
         res.writeHead(401, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-store' })
           .end(JSON.stringify({ error: 'tailnet identity required' }));
@@ -504,6 +524,16 @@ async function main(argv = process.argv.slice(2)) {
         }
         return;
       }
+    }
+    if (designMode) {
+      const route = parseDesignRoute(req.url);
+      if (!route) { res.writeHead(404).end('not found'); return; }
+      if (route.mode === 'embed' && req.method !== 'GET') {
+        res.writeHead(405, { allow: 'GET' }).end('method not allowed');
+        return;
+      }
+      serveStatic(res, route.mode === 'embed' ? DESIGN_EMBED_ENTRY : '/next/', configJson, frozen);
+      return;
     }
     if (urlPath === '/api/config') {
       res.writeHead(200, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-cache' })

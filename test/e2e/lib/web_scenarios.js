@@ -632,6 +632,7 @@ const SCENARIOS = [
   ['composer-draft-per-chat', composerDraftPerChat],
   ['composer-draft-pending-send', composerDraftPendingSend],
   ['composer-draft-retire', composerDraftRetire],
+  ...require('./next_design_scenarios.cjs'),
   ['next-home-rail', require('./next_scenarios').homeRail],
   ['next-chat-card', require('./next_scenarios').chatCard],
   ['next-composer', require('./next_scenarios').composer],

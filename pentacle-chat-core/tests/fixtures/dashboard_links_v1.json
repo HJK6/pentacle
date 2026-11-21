@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "event_cases": [
+    {
+      "name": "home-ignores-event-path-and-presentation",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Browse the sample designs.",
+        "raw": {
+          "dashboard_link": {
+            "dashboard": "design",
+            "path": "/next/embed/design/sample-project/sample-board",
+            "presentation": "embed"
+          }
+        }
+      },
+      "link": { "dashboard": "design" },
+      "paths": { "workspace": "/next/design", "embed": "/next/embed/design" }
+    },
+    {
+      "name": "board-uses-attachment-and-caption-without-display-fields",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Sample board caption",
+        "raw": { "dashboard_link": { "dashboard": "design", "target": { "project_id": "sample-project", "design_id": "sample-board" } } },
+        "attachments": [{ "key": "1111111111111111111111111111111111111111111111111111111111111111", "mime": "image/png" }]
+      },
+      "link": { "dashboard": "design", "target": { "project_id": "sample-project", "design_id": "sample-board" } },
+      "paths": { "workspace": "/next/design/sample-project/sample-board", "embed": "/next/embed/design/sample-project/sample-board" },
+      "previews": [{ "media_available": false, "attachment_available": true, "image": "attachment", "title": "Sample board caption" }]
+    },
+    {
+      "name": "screen-prefers-pinned-preview-and-falls-back-to-attachment-or-text",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Sample screen caption",
+        "raw": {
+          "dashboard_link": {
+            "dashboard": "design",
+            "target": { "project_id": "sample-project", "design_id": "sample-board", "view_id": "sample-screen" },
+            "title": " Sample screen ",
+            "subtitle": "Sample board",
+            "revision_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        },
+        "attachments": [{ "key": "2222222222222222222222222222222222222222222222222222222222222222", "mime": "image/png" }]
+      },
+      "link": {
+        "dashboard": "design",
+        "target": { "project_id": "sample-project", "design_id": "sample-board", "view_id": "sample-screen" },
+        "title": "Sample screen",
+        "subtitle": "Sample board",
+        "revision_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "paths": {
+        "workspace": "/next/design/sample-project/sample-board/sample-screen",
+        "embed": "/next/embed/design/sample-project/sample-board/sample-screen"
+      },
+      "previews": [
+        { "media_available": true, "attachment_available": true, "image": "revision", "title": "Sample screen" },
+        { "media_available": false, "attachment_available": true, "image": "attachment", "title": "Sample screen" },
+        { "media_available": false, "attachment_available": false, "image": null, "title": "Sample screen" }
+      ]
+    },
+    {
+      "name": "bad-optional-metadata-keeps-target-and-uses-available-attachment",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Sample fallback caption",
+        "raw": {
+          "dashboard_link": {
+            "dashboard": "design",
+            "target": { "project_id": "0", "design_id": "board--", "view_id": "1" },
+            "title": [],
+            "subtitle": "  ",
+            "revision_id": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+          }
+        },
+        "attachments": [{ "key": "3333333333333333333333333333333333333333333333333333333333333333", "mime": "image/png" }]
+      },
+      "link": { "dashboard": "design", "target": { "project_id": "0", "design_id": "board--", "view_id": "1" } },
+      "paths": { "workspace": "/next/design/0/board--/1", "embed": "/next/embed/design/0/board--/1" },
+      "previews": [{ "media_available": false, "attachment_available": true, "image": "attachment", "title": "Sample fallback caption" }]
+    },
+    {
+      "name": "target-without-display-text-or-image-remains-actionable",
+      "event": {
+        "kind": "ASSIST",
+        "text": "",
+        "raw": { "dashboard_link": { "dashboard": "design", "target": { "project_id": "sample-project", "design_id": "sample-board" } } }
+      },
+      "link": { "dashboard": "design", "target": { "project_id": "sample-project", "design_id": "sample-board" } },
+      "paths": { "workspace": "/next/design/sample-project/sample-board", "embed": "/next/embed/design/sample-project/sample-board" },
+      "previews": [{ "media_available": false, "attachment_available": false, "image": null, "title": "Design" }]
+    },
+    {
+      "name": "ordinary-markdown-and-top-level-lookalike",
+      "event": {
+        "kind": "ASSIST",
+        "text": "[Sample design](/next/design/sample-project/sample-board)",
+        "dashboard_link": { "dashboard": "design" },
+        "raw": { "source": "agent_image" },
+        "attachments": [{ "key": "4444444444444444444444444444444444444444444444444444444444444444", "mime": "image/png" }]
+      },
+      "link": null,
+      "paths": { "workspace": null, "embed": null }
+    },
+    {
+      "name": "unknown-dashboard-keeps-ordinary-caption-and-attachment",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Sample ordinary caption",
+        "raw": { "dashboard_link": { "dashboard": "sample-dashboard" } },
+        "attachments": [{ "key": "5555555555555555555555555555555555555555555555555555555555555555", "mime": "image/png" }]
+      },
+      "link": null,
+      "paths": { "workspace": null, "embed": null }
+    },
+    {
+      "name": "explicit-null-target-is-not-home",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Sample malformed link caption",
+        "raw": { "dashboard_link": { "dashboard": "design", "target": null } },
+        "attachments": [{ "key": "6666666666666666666666666666666666666666666666666666666666666666", "mime": "image/png" }]
+      },
+      "link": null,
+      "paths": { "workspace": null, "embed": null }
+    },
+    {
+      "name": "missing-required-design-id",
+      "event": { "raw": { "dashboard_link": { "dashboard": "design", "target": { "project_id": "sample-project" } } } },
+      "link": null,
+      "paths": { "workspace": null, "embed": null }
+    },
+    {
+      "name": "explicit-null-view-is-not-a-board",
+      "event": {
+        "raw": { "dashboard_link": { "dashboard": "design", "target": { "project_id": "sample-project", "design_id": "sample-board", "view_id": null } } }
+      },
+      "link": null,
+      "paths": { "workspace": null, "embed": null }
+    },
+    {
+      "name": "encoded-id",
+      "event": {
+        "raw": { "dashboard_link": { "dashboard": "design", "target": { "project_id": "sample-project", "design_id": "%73ample-board" } } }
+      },
+      "link": null,
+      "paths": { "workspace": null, "embed": null }
+    },
+    {
+      "name": "extra-target-key",
+      "event": {
+        "raw": { "dashboard_link": { "dashboard": "design", "target": { "project_id": "sample-project", "design_id": "sample-board", "screen_id": "sample-screen" } } }
+      },
+      "link": null,
+      "paths": { "workspace": null, "embed": null }
+    }
+  ],
+  "rejected_paths": [
+    { "name": "home-trailing-slash", "workspace": "/next/design/", "embed": "/next/embed/design/" },
+    { "name": "board-trailing-slash", "workspace": "/next/design/demo/board/", "embed": "/next/embed/design/demo/board/" },
+    { "name": "project-only", "workspace": "/next/design/demo", "embed": "/next/embed/design/demo" },
+    { "name": "empty-segment", "workspace": "/next/design//board", "embed": "/next/embed/design//board" },
+    { "name": "extra-segment", "workspace": "/next/design/demo/board/screen/extra", "embed": "/next/embed/design/demo/board/screen/extra" },
+    { "name": "encoded-ascii", "workspace": "/next/design/%64emo/board", "embed": "/next/embed/design/%64emo/board" },
+    { "name": "encoded-slash", "workspace": "/next/design/demo%2fboard/screen", "embed": "/next/embed/design/demo%2fboard/screen" },
+    { "name": "uppercase-id", "workspace": "/next/design/Demo/board", "embed": "/next/embed/design/Demo/board" },
+    { "name": "dot-segment", "workspace": "/next/design/demo/../board", "embed": "/next/embed/design/demo/../board" },
+    { "name": "query", "workspace": "/next/design?show=board", "embed": "/next/embed/design?show=board" },
+    { "name": "empty-query", "workspace": "/next/design/demo/board?", "embed": "/next/embed/design/demo/board?" },
+    { "name": "fragment", "workspace": "/next/design/demo/board#screen", "embed": "/next/embed/design/demo/board#screen" },
+    { "name": "empty-fragment", "workspace": "/next/design/demo/board#", "embed": "/next/embed/design/demo/board#" }
+  ]
+}
