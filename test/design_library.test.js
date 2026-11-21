@@ -7,6 +7,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const L = require('../lib/design_library.cjs');
 const P = require('../lib/design_prepare.cjs');
+const { DESIGN_FRAME_NAME } = require('../lib/design_frame.cjs');
 const fixture = require('./fixtures/design_library.cjs');
 function scratch(t) { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gallery-unit-')); t.after(() => fs.rmSync(root, { recursive: true, force: true })); return root; }
 
@@ -238,6 +239,7 @@ test('the prepared keys shim only forwards navigation outside editable controls'
   const dom = new JSDOM(result.html, {
     runScripts: 'dangerously',
     beforeParse(window) {
+      window.name = DESIGN_FRAME_NAME;
       window.parent = { postMessage: (...args) => posted.push(args) };
     },
   });
@@ -279,4 +281,21 @@ test('stored revisions recheck board structure and board-only edits change the i
   invalid.revision_id = L.revisionIdentity(invalid);
   L.atomicJson(file, invalid);
   assert.throws(() => L.verifyRevision(recorded.dir), /example-board.*node 2.*ends/);
+});
+
+test('an unnamed legacy gallery frame keeps ordinary key behavior', async t => {
+  const root = scratch(t);
+  fs.writeFileSync(path.join(root, 'index.html'), '<main>Scrollable prototype</main>');
+  const { html } = await P.prepareDocument({ sourceRoot: root, entry: 'index.html' });
+  const { JSDOM } = require('jsdom');
+  const forwarded = [];
+  const { window } = new JSDOM(html, {
+    runScripts: 'dangerously',
+    beforeParse(frame) { frame.parent = { postMessage: (...args) => forwarded.push(args) }; },
+  });
+  t.after(() => window.close());
+  const key = new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+  window.document.querySelector('main').dispatchEvent(key);
+  assert.equal(key.defaultPrevented, false);
+  assert.deepEqual(forwarded, []);
 });

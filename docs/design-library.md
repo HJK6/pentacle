@@ -263,8 +263,10 @@ The catalog includes resolved `projects[].designs` with a `changed_at` per
 board. The change date tracks board nodes and their screens along the selected
 revision's history. Send the last catalog `ETag` as `If-None-Match` to get a
 bodyless 304 when the catalog is unchanged. The catalog remains private and
-no-store. Prepared documents relay Escape and arrow keys to the dashboard when
-focus is outside editable controls and the prototype has not handled the key.
+no-store. The Design viewer opts its live frame in by setting the frame name
+from `lib/design_frame.cjs`. The prepared document then relays Escape and arrow
+keys when focus is outside editable controls and the prototype has not handled
+the key. Other viewers keep their normal keyboard behavior.
 
 ```sh
 node --test test/design_library.test.js test/design_library_http.test.js test/ui_review_artifacts.test.js
