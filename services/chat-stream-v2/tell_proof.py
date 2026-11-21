@@ -85,6 +85,8 @@ class TellDeliveryParseCache:
 # Reuse bounds: a stream larger than these is read per call exactly as before.
 _TAIL_REUSE_MAX_ROWS = 4096
 _TAIL_REUSE_MAX_BYTES = 8 * 1024 * 1024
+_SQLITE_MAX_INTEGER = (1 << 63) - 1
+_SQLITE_MIN_INTEGER = -(1 << 63)
 
 # Source rows (including duplicates), UTF-8 wire/key bytes and range markers
 # are capped across a projection. Oversized or uncertain ranges use legacy SQL.
@@ -157,11 +159,15 @@ class ProjectionReuse:
         self._changes = None
         self._tail = {}
         self._dispatch = None
+        self.exact_anchors = False
         self._dispatch_rows = 0
         self._dispatch_bytes = 0
 
     def enable_dispatch(self):
         self._dispatch = {}
+
+    def enable_exact_anchors(self):
+        self.exact_anchors = True
 
     def _fresh(self, conn):
         changes = conn.total_changes
@@ -454,6 +460,20 @@ def _tail_events(conn, target, birth, watermark, reuse):
         yield _TailEvent(row["event_id"], row["event_json"])
 
 
+def _exact_tail_event(conn, target, birth, watermark, anchor):
+    """One lifecycle-matched anchor, or None to retry a failed read on the old path."""
+    try:
+        with closing(conn.execute(
+            "SELECT event_id,event_json FROM session_event_tail "
+            "WHERE event_id=? AND stream_id=? AND session_created_at=? AND event_id>?",
+            (anchor, target, birth, watermark),
+        )) as cursor:
+            row = cursor.fetchone()
+    except sqlite3.Error:
+        return None
+    return () if row is None else (_TailEvent(row["event_id"], row["event_json"]),)
+
+
 def retained_proof(conn, payload, *, deliveries=None):
     """Run inside the promotion transaction; never infer missing original anchors."""
     delivery = payload.get("delivery") or {}
@@ -493,7 +513,18 @@ def retained_proof(conn, payload, *, deliveries=None):
 
     # The retained history may be older than the current 500-event live tail.
     reuse = deliveries.reuse if deliveries is not None else None
-    for tail in _tail_events(conn, target, birth, watermark, reuse):
+    anchor = delivery.get("proof_event_id")
+    tails = None
+    if (reuse is not None and reuse.exact_anchors and type(anchor) is int
+            and _SQLITE_MIN_INTEGER <= anchor <= _SQLITE_MAX_INTEGER
+            and watermark <= _SQLITE_MAX_INTEGER and _lookup_string(birth)
+            and reuse.dispatch_contains(conn, target, text, generation) is not None):
+        # The legacy loop can check dispatch before rejecting a non-anchor row.
+        # If membership is uncertain, retain that loop and its SQL errors.
+        tails = _exact_tail_event(conn, target, birth, watermark, anchor)
+    if tails is None:
+        tails = _tail_events(conn, target, birth, watermark, reuse)
+    for tail in tails:
         try:
             event = tail.event()
             candidate_wire = delivery_wire(event)

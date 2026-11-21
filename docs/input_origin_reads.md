@@ -83,6 +83,23 @@ back to the original SQL, including its own error and short-circuit
 behavior. A failed materialization is not retried for that range in the
 same read. No memberships or fallback markers survive the snapshot.
 
+## Exact retained-proof anchors
+
+Within the inventory and event-page savepoints only, a plain Python integer
+`proof_event_id` in SQLite's signed 64-bit range can seek directly to one
+retained event. The existing generation and session-birth checks still run;
+the seek also requires the same stream, lifecycle and an event ID strictly
+after the proof watermark. At most the selected row is decoded on this path.
+A missing row, malformed selected JSON or disqualified event supplies no
+proof. The same wire, digest, dispatch, overlap and audit checks apply.
+
+Absent anchors keep the ordered tail walk and its unsplit-quotation veto.
+Unsupported anchors (including booleans, floats, strings and out-of-range
+integers), uncertain operator-dispatch membership and point-query failures
+use the ordered walk, preserving its equality and error behavior. Writer
+and intake callers keep the existing walk. No point result survives the
+read; paired receipts and their match limit are unchanged.
+
 ## Regression evidence
 
 `tests/test_read_projection_deliveries.py` drives real Store inventory and

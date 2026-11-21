@@ -7023,6 +7023,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         """Called only on the Store thread, inside the reader's savepoint."""
         deliveries = conn.delivery_lookup.get(conn, shared=shared)
         deliveries.reuse.enable_dispatch()
+        deliveries.reuse.enable_exact_anchors()
         return deliveries
 
     async def fetch_session_event_page(
