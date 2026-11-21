@@ -238,7 +238,7 @@ async function newChatParity(ctx) {
     await session.eval(install);
     if(width<600) await session.click('#sidebar-toggle');
     await session.click('#btn-new');
-    const machines=await session.eval("[...document.querySelectorAll('#new-session-location [data-loc]')].map(x=>x.dataset.loc)");
+    const machines=await session.eval("[...document.querySelectorAll('#new-session-location [data-loc]')].map(x=>({id:x.dataset.loc,label:x.querySelector('.new-session-option-label').textContent.trim()}))");
     await session.click('#new-session-location [data-loc=local]');
     await session.waitFor("document.querySelectorAll('#spawn-provider option').length===3 && /^(allowed-|auto)/.test(document.querySelector('#spawn-model option')?.value||'')",{timeoutMs:ctx.timeoutMs});
     const expected=await session.eval("[...document.querySelectorAll('#spawn-provider option')].map(x=>x.value)");
@@ -257,7 +257,7 @@ async function newChatParity(ctx) {
       await session.click(`[data-testid="set-provider-${provider}"]`);
       const models=await session.eval("[...document.querySelectorAll('[data-set=model]')].map(x=>x.dataset.val)");
       await session.click(`[data-testid="set-model-${oldChoices[provider].models[0]}"]`);
-      const next=await session.eval("({efforts:[...document.querySelectorAll('[data-set=effort]')].map(x=>x.dataset.val),accounts:[...document.querySelectorAll('[data-set=account]')].map(x=>x.dataset.val),machines:[...document.querySelectorAll('[data-set=host]')].map(x=>x.dataset.val)})");
+      const next=await session.eval("({efforts:[...document.querySelectorAll('[data-set=effort]')].map(x=>x.dataset.val),accounts:[...document.querySelectorAll('[data-set=account]')].map(x=>x.dataset.val),machines:[...document.querySelectorAll('[data-set=host]')].map(x=>({id:x.dataset.val,label:x.textContent.trim()}))})");
       report.ok(`new chat ${provider} choices match the current web at ${width}`,JSON.stringify(models)===JSON.stringify(oldChoices[provider].models)&&JSON.stringify(next.efforts)===JSON.stringify(oldChoices[provider].efforts)&&JSON.stringify(next.accounts)===JSON.stringify(oldChoices[provider].accounts)&&JSON.stringify(next.machines)===JSON.stringify(machines),{models,next,expected:oldChoices[provider],machines});
     }
     await session.screenshot(path.join(report.dir,`next-repair-choices-${width}.png`));

@@ -153,8 +153,8 @@ async function openNewChat() {
   try {
     const response = await catalogLoader.load({ refresh: true }); if (generation !== newChatGeneration) return;
     if (!response?.ok) throw new Error(response?.error || 'Unable to load models');
-    const hostIds = config.hostIds || Object.keys(config.hosts || {});
-    newChatControl = mountNewChatForm(newChatMount, { catalog: response.catalog, machineOptions: hostIds.map(id => ({ id, label: config.hostNames?.[id] || id })), localHostId: config.chatStream?.localHost || config.localHostId || 'local', accountLabels: config.chatStream?.accountLabels || {}, spawn: request => cc.chatSpawnV2(request), store,
+    const hostIds = Array.isArray(config.hostIds) && config.hostIds.length ? config.hostIds : ['local'];
+    newChatControl = mountNewChatForm(newChatMount, { catalog: response.catalog, machineOptions: hostIds.map(id => ({ id, label: hostPresentation.hostLabel(config, id) })), localHostId: config.chatStream?.localHost || config.localHostId || 'local', accountLabels: config.chatStream?.accountLabels || {}, spawn: request => cc.chatSpawnV2(request), store,
       onStarted: ({ streamId, session }) => openChat(streamId, session) });
   } catch (error) { if (generation === newChatGeneration) newChatMount.textContent = error.message || 'Unable to load models'; }
 }
