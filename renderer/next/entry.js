@@ -15,6 +15,7 @@ const { createTerminalPaste } = require('../terminal_paste');
 const layout = require('./layout');
 const { mountComposer } = require('./composer');
 const { mountNewChatForm } = require('./new_chat');
+const { mountLimitsView } = require('./limits_view');
 const hostPresentation = require('../host_presentation');
 const { statusRollup, nextMode } = require('./status_card');
 const store = window.PentacleChatStore;
@@ -53,11 +54,11 @@ const statusMount = node('div', 'status'); card.insertBefore(statusMount, cardCo
 const newChatMount = node('div', 'new-chat-host', card); newChatMount.hidden = true;
 const brand = button('Assistant', '<span class="logo"></span>', 'rail-button brand on'); const group = node('div', 'rail-group', rail); const chatsButton = button('Chats', icons.chats, 'rail-button'); group.append(chatsButton); rail.prepend(brand); node('div', 'rail-spacer', rail); const limitsButton = button('Limits and machines', icons.limits, 'rail-button'); const settingsButton = button('Settings', icons.settings, 'rail-button'); rail.append(limitsButton, settingsButton);
 const popover = node('div', 'popover', root.querySelector('.next-app')); popover.hidden = true;
-let assistantComposerControl = null; let assistantComposerStream = null; let cardComposerControl = null;
+let assistantComposerControl = null; let assistantComposerStream = null; let cardComposerControl = null; let limitsControl = null;
 function mountAssistantComposer(id) { if (!id || id === assistantComposerStream) return; assistantComposerControl?.dispose(); assistantComposerStream = id; assistantComposerControl = mountComposer({ host: assistantComposer, transcript: assistantVoice, streamId: id, drafts, cc, chatStore: store }); }
 function mountCardComposer(id) { cardComposerControl?.dispose(); cardComposerControl = id ? mountComposer({ host: cardComposer, transcript: cardVoice, streamId: id, drafts, cc, chatStore: store }) : null; }
-function closePopover() { state.popover = null; popover.hidden = true; chatsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
-function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; ({ chats: chatsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name !== 'chats'); renderPopover(); }
+function closePopover() { limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; chatsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
+function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; ({ chats: chatsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name !== 'chats'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); }
 function sessions() { return store.getState().sessions || []; }
 function selectedSession() { return sessions().find(s => s.stream_id === state.selected) || (state.admittedSession?.stream_id === state.selected ? state.admittedSession : null); }
 function assistantSession() { return uniqueAssistantComposite(sessions()); }
@@ -78,6 +79,7 @@ for (const transcript of [assistantInner, cardInner]) transcript.addEventListene
   if (sendNow) store.sendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId);
 });
 function renderPopover() {
+  if (state.popover === 'limits' && limitsControl) { limitsControl.update({ limits: store.getLimits(), hosts: state.hosts }); return; }
   popover.replaceChildren();
   if (state.popover === 'chats') {
     const newChat = button('New chat', 'New chat'); newChat.onclick = () => { closePopover(); openNewChat(); }; popover.append(newChat);
@@ -89,8 +91,11 @@ function renderPopover() {
     const heading = node('div', 'theme-heading', popover); heading.textContent = 'Theme'; const grid = node('div', 'themes', popover); const selected = document.documentElement.dataset.theme || 'dark';
     for (const theme of ['dark', 'light', 'cosmic']) { const row = button(theme, `<span class="theme-preview sw-${theme}" aria-hidden="true"><span class="theme-mini"><i></i><b></b></span></span><span>${theme[0].toUpperCase() + theme.slice(1)}</span>`, `theme-choice${selected === theme ? ' on' : ''}`); row.setAttribute('aria-pressed', String(selected === theme)); row.onclick = () => { document.documentElement.classList.add('swap'); document.documentElement.dataset.theme = theme; localStorage.setItem('pentacle.next.theme', theme); renderPopover(); requestAnimationFrame(() => document.documentElement.classList.remove('swap')); }; grid.append(row); }
   } else if (state.popover === 'limits') {
-    for (const limit of store.getLimits()) { const label = node('div', 'popover-title', popover); label.textContent = `${limit.label} ${limit.pct == null ? '—' : `${Math.round(limit.pct)}%`}`; const bar = node('div', 'meter', popover); const fill = node('span', '', bar); fill.style.width = `${Math.max(0, Math.min(100, limit.pct || 0))}%`; }
-    for (const [host, stats] of Object.entries(state.hosts)) { const row = node('div', 'popover-title', popover); const pct = (used, total) => total > 0 ? `${Math.round(used / total * 100)}%` : '—'; row.textContent = `${host} · CPU ${stats.cpu_usage_pct == null ? '—' : `${Math.round(stats.cpu_usage_pct)}%`} · RAM ${pct(stats.memory_used_bytes,stats.memory_total_bytes)} · Disk ${pct(stats.disk_used_bytes,stats.disk_total_bytes)}`; }
+    const hostIds = Array.isArray(config.hostIds) && config.hostIds.length ? config.hostIds : ['local'];
+    const hostOrder = hostIds.map(id => hostPresentation.streamHost(config, id));
+    limitsControl = mountLimitsView(popover, { localHost: hostPresentation.streamHost(config, 'local'), hostOrder,
+      hostLabel: host => { const id = hostIds.find(item => hostPresentation.streamHost(config, item).toLowerCase() === String(host).toLowerCase()) || host; return hostPresentation.hostLabel(config, id); } });
+    limitsControl.update({ limits: store.getLimits(), hosts: state.hosts });
   }
 }
 function render() {
@@ -146,7 +151,7 @@ async function openNewChat() {
   leaveNewChat(); disposeTerminal(); mountCardComposer(null); state.selected = null; state.mode = 'new'; state.layout = layout.show(state.layout, 'chat', '__new__', innerWidth); syncLayout();
   const generation = newChatGeneration; title.textContent = ''; statusButton.hidden = terminalButton.hidden = true; cardBody.hidden = terminalMount.hidden = statusMount.hidden = cardComposer.hidden = true; newChatMount.hidden = false; newChatMount.textContent = 'Loading…';
   try {
-    const response = await catalogLoader.load(); if (generation !== newChatGeneration) return;
+    const response = await catalogLoader.load({ refresh: true }); if (generation !== newChatGeneration) return;
     if (!response?.ok) throw new Error(response?.error || 'Unable to load models');
     const hostIds = config.hostIds || Object.keys(config.hosts || {});
     newChatControl = mountNewChatForm(newChatMount, { catalog: response.catalog, machineOptions: hostIds.map(id => ({ id, label: config.hostNames?.[id] || id })), localHostId: config.chatStream?.localHost || config.localHostId || 'local', accountLabels: config.chatStream?.accountLabels || {}, spawn: request => cc.chatSpawnV2(request), store,
