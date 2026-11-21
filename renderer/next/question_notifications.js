@@ -11,6 +11,7 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
   let version = 0;
   const terminalNotifications = new Set();
   const terminalQuestions = new Set();
+  const retiredQuestions = new Set();
   let inFlight = null;
   let refreshAgain = false;
   let readFailed = false;
@@ -55,6 +56,7 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
         const id = item?.question_id;
         if (item?.state !== 'open') continue;
         if (!id) { incomplete = true; continue; }
+        retiredQuestions.delete(id);
         listed.add(id);
         identities.set(id, item.spec_id || item.envelope?.spec_id || null);
         // prompt.list is the complete open set; notification.list is capped.
@@ -83,9 +85,12 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
         if (id && open && !listed.has(id) && (versions.get(notificationId) || 0) <= startedAt) {
           records.delete(notificationId);
           identities.delete(id);
+          retiredQuestions.add(id);
         }
       }
-      missingIdentities = new Set([...records.values()].filter(needsIdentity).map(questionId));
+      missingIdentities = new Set([...records.entries()]
+        .filter(([notificationId, record]) => (versions.get(notificationId) || 0) <= startedAt && needsIdentity(record))
+        .map(([, record]) => questionId(record)));
       onChange();
     }).catch(() => { readFailed = true; onChange(); }).finally(() => {
       inFlight = null;
@@ -98,6 +103,7 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
     if (!id) return false;
     const previous = records.get(id);
     const state = record?.state || record?.question?.state;
+    if ((!state || state === 'open') && retiredQuestions.has(questionId(record))) return false;
     if (state && state !== 'open') {
       terminalNotifications.add(id);
       const qid = questionId(record) || questionId(previous);
@@ -114,7 +120,7 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
     let missingIdentity = false;
     for (const item of items || []) {
       changed = add(item) || changed;
-      if (needsIdentity(item)) missingIdentity = true;
+      if (needsIdentity(item) || retiredQuestions.has(questionId(item))) missingIdentity = true;
     }
     if (changed) onChange();
     if (missingIdentity) void refreshIdentities();

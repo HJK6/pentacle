@@ -98,6 +98,21 @@ test('a successful open-question read removes an older stale open notification',
   assert.equal(result.questions.length, 0);
 });
 
+test('a stale notification cannot revive a retired question, but a later durable open record can', async () => {
+  let rows = [];
+  const index = createQuestionNotifications(() => {}, { promptList: async () => ({ ok: true, questions: rows }) });
+  index.ingest([notice('q1')]);
+  await tick();
+  assert.equal(index.values().length, 0);
+  index.ingest([notice('q1')]);
+  assert.equal(index.values().length, 0);
+  await tick();
+  assert.equal(index.values().length, 0);
+  rows = [durable('q1')];
+  await index.refreshIdentities();
+  assert.equal(buildQuestionPlacement({ notifications: index.values() }).questions.length, 1);
+});
+
 test('a late identity reply cannot reopen an answered notification', async () => {
   let resolveList;
   const index = createQuestionNotifications(() => {}, { promptList: () => new Promise(resolve => { resolveList = resolve; }) });
@@ -119,6 +134,7 @@ test('a new notification arriving during a read is resolved by a follow-up read'
   await tick();
   assert.equal(requests.length, 2);
   assert.equal(index.values().find(item => item.question.question_id === 'q2').question_identity_pending, true);
+  assert.equal(index.values().find(item => item.question.question_id === 'q2').question_identity_failed, false);
   requests[1]({ ok: true, questions: [{ question_id: 'q2', state: 'open', spec_id: 'spec-2' }] });
   await tick();
   assert.equal(index.values().find(item => item.question.question_id === 'q2').question.spec_id, 'spec-2');
