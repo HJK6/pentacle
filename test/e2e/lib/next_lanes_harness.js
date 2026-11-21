@@ -203,7 +203,7 @@ async function enterNext(ctx, width = 1440) {
     });
     await ctx.session.send('Page.navigate', { url: `${ctx.url}next/` });
     await ctx.session.waitFor(`window.__nextLanesDocumentMarker === ${json(hook.documentMarker)} && !!window.cc && !!window.PentacleChatStore
-      && document.querySelectorAll('.rail-button').length === 6`, { timeoutMs: ctx.timeoutMs });
+      && document.querySelectorAll('.rail-button').length === 7`, { timeoutMs: ctx.timeoutMs });
     await ctx.session.eval("document.documentElement.dataset.theme='dark'; localStorage.setItem('pentacle.next.theme','dark'); true");
     await ctx.session.waitFor("window.cc.getChatStreamState().then(s => s.connected === true && (s.sessions || []).length > 0)", { timeoutMs: ctx.timeoutMs });
     await ctx.session.waitFor('typeof window.__nextLanesFrameSink === "function"', { timeoutMs: ctx.timeoutMs });

@@ -4,7 +4,7 @@ function isolated(run) { return async ctx => { try { await run(ctx); } finally {
 async function visit(ctx, width = 1440) {
   await ctx.session.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
   await ctx.session.send('Page.navigate', { url: ctx.url + 'next/' });
-  await ctx.session.waitFor("!!window.cc && !!window.PentacleChatStore && document.querySelectorAll('.rail-button').length === 6", { timeoutMs: ctx.timeoutMs });
+  await ctx.session.waitFor("!!window.cc && !!window.PentacleChatStore && document.querySelectorAll('.rail-button').length === 7", { timeoutMs: ctx.timeoutMs });
   await ctx.session.eval("document.documentElement.dataset.theme='dark'; localStorage.setItem('pentacle.next.theme','dark'); true");
   await ctx.session.waitFor("window.cc.getChatStreamState().then(s => s.connected === true && (s.sessions || []).length > 0)", { timeoutMs: ctx.timeoutMs });
 }
@@ -20,8 +20,8 @@ async function homeRail(ctx) {
       return new Set(open.map(question => question.question_id)).size;
     })()`);
     const expectedLabel = expectedCount ? `Questions (${expectedCount})` : 'Questions';
-    const expectedNames = ['Assistant Fixture', 'Lanes', 'Chats', expectedLabel, 'Limits and machines', 'Settings'];
-    await session.waitFor(`document.querySelectorAll('.rail-button')[3]?.dataset.count === ${JSON.stringify(String(expectedCount))}`,
+    const expectedNames = ['Assistant Fixture', 'Lanes', 'Dashboards', 'Chats', expectedLabel, 'Limits and machines', 'Settings'];
+    await session.waitFor(`document.querySelectorAll('.rail-button')[4]?.dataset.count === ${JSON.stringify(String(expectedCount))}`,
       { timeoutMs: ctx.timeoutMs, label: `home rail hydrates the daemon's ${expectedCount} open questions at ${width}` });
     const info = await session.eval(`(() => {
       const rail = document.querySelector('.rail');
@@ -36,7 +36,7 @@ async function homeRail(ctx) {
         chatLit: rail.querySelector('[aria-label=Chats]').classList.contains('on'),
       };
     })()`);
-    report.ok(`rail has six icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(expectedNames)
+    report.ok(`rail has seven icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(expectedNames)
       && JSON.stringify(info.counts) === JSON.stringify([[expectedLabel, String(expectedCount)]])
       && !info.text.trim() && !info.input && !info.overflow && info.assistant === 'local:web-gate-assistant' && info.lit && !info.chatLit,
       { ...info, expectedCount });

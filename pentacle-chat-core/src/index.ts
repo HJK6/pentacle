@@ -34,3 +34,6 @@ export {
 export * from "./services/daemonUpdates";
 export * from './services/workLanes';
 export { readableLaneRowStatus } from './services/readableLanes';
+
+export { buildDesignPath, parseDashboardLinkEvent } from './services/dashboardLinks';
+export type { DashboardLink, DesignPresentation, DesignTarget } from './services/dashboardLinks';
