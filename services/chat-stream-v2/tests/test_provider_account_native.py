@@ -163,6 +163,43 @@ def test_claude_native_logged_out_is_an_auth_failure(tmp_path):
         claude_identity(binding(tmp_path,"claude"),run=run)
 
 
+def test_claude_native_logged_out_exit_one_is_an_auth_failure(tmp_path):
+    from subprocess import CompletedProcess
+    from provider_account_native import claude_identity
+    def run(argv, **kwargs):
+        assert argv == ["/bin/echo", "auth", "status", "--json"]
+        assert kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path)
+        return CompletedProcess(argv, 1, json.dumps({"loggedIn": False}), "")
+    with pytest.raises(AccountError, match="^provider_auth_failed$"):
+        claude_identity(binding(tmp_path, "claude"), run=run)
+
+
+@pytest.mark.parametrize("code,stdout,stderr,expected", [
+    (0, "{", "", "provider_response_invalid"),
+    (0, "[]", "", "provider_response_invalid"),
+    (1, "{}", "", "provider_rpc_failed"),
+    (1, "{", "", "provider_rpc_failed"),
+    (1, "[]", "", "provider_rpc_failed"),
+    (1, '{"loggedIn": 0}', "", "provider_rpc_failed"),
+    (2, '{"loggedIn": false}', "", "provider_rpc_failed"),
+    (1, "", "capacity", "provider_capacity"),
+    (1, "", "network", "provider_transport_failed"),
+])
+def test_claude_status_failure_controls(tmp_path, code, stdout, stderr, expected):
+    from subprocess import CompletedProcess
+    from provider_account_native import claude_identity
+    def run(argv, **kwargs): return CompletedProcess(argv, code, stdout, stderr)
+    with pytest.raises(AccountError, match="^" + expected + "$"):
+        claude_identity(binding(tmp_path, "claude"), run=run)
+
+
+def test_claude_status_subprocess_failure_keeps_typed_error(tmp_path):
+    from provider_account_native import claude_identity
+    def run(*args, **kwargs): raise OSError("fixture")
+    with pytest.raises(AccountError, match="^provider_probe_failed$"):
+        claude_identity(binding(tmp_path, "claude"), run=run)
+
+
 def test_first_enrollment_can_pin_native_uuid_after_verified_login_identity(tmp_path):
     private=tmp_path/"private"; private.mkdir(mode=0o700)
     registry=Registry(private/"registry.json",private/"homes")
