@@ -149,7 +149,7 @@ def retained(csv_path, runs_path, repo):
     return list(rows.values())
 
 
-def classifications(row, decisions, signatures=(), repo_root=None):
+def classifications(row, decisions, signatures=(), repo_root=None, *, unclassified_steps=()):
     """One decision covers one failed job and step on one SHA and attempt."""
     first = row["first"]
     if first == SUCCESS and not row.get("missing"):
@@ -160,7 +160,10 @@ def classifications(row, decisions, signatures=(), repo_root=None):
     for failure in row.get("failures", []):
         key = (str(row["id"]), row["sha"], failure["job"], failure["step"])
         override = decisions.get(key)
-        if override:
+        if (failure["job"], failure["step"]) in unclassified_steps:
+            causes.append(dict(kind="unclassified", cause="Python failure identity unavailable",
+                               evidence=failure["source"], job=failure["job"], step=failure["step"]))
+        elif override:
             causes.extend(dict(**c, evidence=failure["source"], job=failure["job"], step=failure["step"],
                                reviewer=override["reviewer"], reason=override["reason"],
                                revision=override["revision"], review_source=override["source"])
