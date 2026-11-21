@@ -81,6 +81,15 @@ test('a failed identity lookup exposes Retry without hiding the question or answ
   dom.window.close();
 });
 
+test('an open notification omitted by the identity read stays unplaced and can be retried', async () => {
+  const index = createQuestionNotifications(() => {}, { promptList: async () => ({ ok: true, questions: [] }) });
+  index.ingest([notice('q1')]);
+  await tick();
+  const result = buildQuestionPlacement({ notifications: index.values(), sessions: [{ stream_id: 'local:chat', visibility: 'default', title: 'Chat' }] });
+  assert.equal(result.questions[0].placement.kind, 'unplaced');
+  assert.equal(result.questions[0].placement.retryIdentity, true);
+});
+
 test('a late identity reply cannot reopen an answered notification', async () => {
   let resolveList;
   const index = createQuestionNotifications(() => {}, { promptList: () => new Promise(resolve => { resolveList = resolve; }) });

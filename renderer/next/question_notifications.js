@@ -46,6 +46,7 @@ function createQuestionNotifications(onChange = () => {}, options = {}) {
         if (!id || item.state !== 'open') continue;
         identities.set(id, item.spec_id || item.envelope?.spec_id || null);
       }
+      identityFailed = [...records.values()].some(needsIdentity);
       onChange();
     }).catch(() => { identityFailed = true; onChange(); }).finally(() => {
       inFlight = null;
