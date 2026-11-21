@@ -343,6 +343,8 @@ async function checkGesture(ctx, width, kind, start, end) {
   try {
     await touch(ctx, 'touchStart', start);
     await touch(ctx, 'touchMove', end);
+    // Release a stopped pan so Chrome does not treat the next tap as a fling cancel.
+    if (kind === 'pan') await ctx.cdp.sleep(100);
     await touch(ctx, 'touchEnd', []);
     const deltaScale = 'Math.abs(m.a-(' + before.scale + '))';
     const deltaPosition = 'Math.hypot(m.e-(' + before.x + '),m.f-(' + before.y + '))';
