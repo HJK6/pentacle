@@ -559,8 +559,8 @@ class EventPush:
         satellite_pid = msg.get("satellite_pid")
         incarnation = msg.get("satellite_incarnation")
         incarnation = incarnation if isinstance(incarnation, str) and 0 < len(incarnation) <= 128 else ""
-        await self.store.record_satellite_runtime(
-            host, satellite_sha, satellite_pid, incarnation, admitted=False,
+        generation = await self.store.begin_satellite_push(
+            host, satellite_sha, satellite_pid, incarnation, version_ok=not stale,
         )
         if stale:
             return err("satellite_version_mismatch", version=version)
@@ -862,8 +862,8 @@ class EventPush:
         pending = msg.get("chat_recovery_pending")
         gaps = msg.get("chat_recovery_gaps")
         recovery_measured = (type(pending) is int and pending >= 0 and isinstance(gaps, list))
-        await self.store.record_satellite_runtime(
-            host, satellite_sha, satellite_pid, incarnation, admitted=True,
+        await self.store.finish_satellite_push(
+            host, generation,
             useful=inserted + sum(result.get("inserted", 0) for result in recovery_results),
             recovery_pending=max(pending, sum(result['status'] != 'drained' for result in recovery_results))
                 if recovery_measured else None,

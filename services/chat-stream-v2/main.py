@@ -340,7 +340,7 @@ async def run(args: argparse.Namespace) -> int:
     from assistant_restore import parse_auto_restore_flag
     auto_restore_enabled = parse_auto_restore_flag(os.environ)
     restart_notice_enabled = restart_notice.parse_flag(os.environ)
-    store = Store(args.db)
+    store = Store(args.db, daemon_start=True)
     lifecycle = DaemonLifecycle(store, host=args.local_host)
     tmux = Tmux(args.tmux_bin)
     alerts = Alerts(store)
