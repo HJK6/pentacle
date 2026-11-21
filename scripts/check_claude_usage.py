@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import errno
 import json
+import math
 import os
 import re
 import shlex
@@ -237,14 +238,52 @@ def _remove_dead_probe_socket(captured):
         os.close(fd)
 
 
+def _named_cache(path: Path) -> tuple[tuple[str, str] | None, dict]:
+    try:
+        data = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None, {}
+    if not isinstance(data, dict):
+        return None, {}
+    login = data.get("oauthAccount")
+    identity = None
+    if isinstance(login, dict):
+        account, pool = login.get("accountUuid"), login.get("organizationUuid")
+        if isinstance(account, str) and account and isinstance(pool, str) and pool:
+            identity = account, pool
+    cache = data.get("cachedUsageUtilization")
+    return identity, cache if isinstance(cache, dict) else {}
+
+
+def _named_cache_is_fresh(path: Path, identity: tuple[str, str], since: float, now: float) -> bool:
+    login, cache = _named_cache(path)
+    account = cache.get("accountUuid")
+    if ((login is not None and login != identity)
+            or (isinstance(account, str) and account and account != identity[0])):
+        raise RuntimeError("Claude /usage named account identity changed")
+    stamp = cache.get("fetchedAtMs")
+    if type(stamp) not in (int, float):
+        return False
+    try:
+        fetched_at = stamp / 1000
+    except OverflowError:
+        return False
+    if not math.isfinite(fetched_at):
+        return False
+    if fetched_at > now:
+        raise RuntimeError("Claude /usage named cache timestamp is in the future")
+    return login == identity and account == identity[0] and fetched_at >= since
+
+
 def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
-            run=subprocess.run, sleep=time.sleep, monotonic=time.monotonic) -> dict:
+            run=subprocess.run, sleep=time.sleep, monotonic=time.monotonic, wall_time=time.time) -> dict:
     socket = "pentacle-usage-" + uuid.uuid4().hex
     env = dict(os.environ)
     env.pop("CLAUDECODE", None)
     env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
 
     command_args = [claude, "--disallowed-tools", "AskUserQuestion"]
+    freshness = None
     if env.get("PENTACLE_USAGE_NAMED_ACCOUNT") == "1":
         # The optional named-home adapter ships with the compatible account
         # consumer; a standalone older installation fails closed here.
@@ -261,6 +300,19 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
         home = env.get("CLAUDE_CONFIG_DIR", "")
         if not os.path.isabs(home) or Path(home) != Path(home).resolve():
             raise RuntimeError("named account home unavailable")
+        fence = env.get("PENTACLE_USAGE_FRESH_SINCE")
+        if fence is not None:
+            try:
+                since = float(fence)
+            except ValueError:
+                raise RuntimeError("Claude /usage invalid named freshness fence") from None
+            if not math.isfinite(since) or not 0 < since <= wall_time():
+                raise RuntimeError("Claude /usage invalid named freshness fence")
+            cache_path = Path(home) / ".claude.json"
+            identity, _ = _named_cache(cache_path)
+            if identity is None:
+                raise RuntimeError("Claude /usage named login identity unavailable")
+            freshness = cache_path, identity, since
         clean = {key:value for key,value in env.items() if key in allowed}
         clean["CLAUDE_CONFIG_DIR"] = home
         # Preserve this probe's owned socket location, never a provider token.
@@ -286,6 +338,10 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
             screen = call("capture-pane", "-p", "-t", "probe", "-S", "-150").stdout
             if re.search(r"sign in to continue|log ?in to continue", screen, re.I):
                 raise RuntimeError("Claude CLI is not logged in; run it once interactively and sign in")
+            if freshness is not None:
+                visible = "\n".join(screen.splitlines()[-60:]).lower()
+                if re.search(r"not logged in|please run /login|authentication_error|invalid authentication|401 unauthorized", visible):
+                    raise RuntimeError("Claude CLI is not logged in")
             if re.search(r"trust (?:the |these )?files|trust this (?:folder|workspace)", screen, re.I):
                 # Never auto-accept the trust dialog (deliberate security contract).
                 # ``cwd`` is an operator-configured path (PENTACLE_USAGE_CWD or the
@@ -301,10 +357,18 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
                 call("send-keys", "-t", "probe", "Enter")
                 sent = True
             elif sent:
-                result = parse_weekly_usage(screen)
-                if result is not None:
+                if freshness is not None and "refreshing" not in visible:
+                    if re.search(r"rate[ _-]limited|rate limit reached|temporarily limited", visible):
+                        raise RuntimeError("Claude /usage reported rate_limit")
+                    if re.search(r"showing last-known usage|could not refresh", visible):
+                        raise RuntimeError("Claude /usage could not refresh the named account")
+                parsed = parse_weekly_usage(screen)
+                if parsed is not None and (freshness is None or _named_cache_is_fresh(*freshness, wall_time())):
+                    result = parsed
                     return result
             sleep(1)
+        if freshness is not None:
+            raise RuntimeError("Claude /usage did not produce a fresh named account cache sample within the timeout")
         raise RuntimeError("Claude /usage did not provide labeled weekly account limits within the timeout")
     finally:
         # A pending parsed return takes precedence, even inside a caller's except.

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import socket
@@ -103,7 +104,9 @@ def test_only_explicit_weekly_fable_label_populates_fable():
     assert value["week_fable_resets"] == "Friday"
 
 
-def test_probe_sends_only_usage_and_cleans_its_dedicated_socket(socket_transport):
+def test_probe_sends_only_usage_and_cleans_its_dedicated_socket(socket_transport, monkeypatch):
+    monkeypatch.delenv("PENTACLE_USAGE_NAMED_ACCOUNT", raising=False)
+    monkeypatch.setenv("PENTACLE_USAGE_FRESH_SINCE", "ignored by a display caller")
     calls = []
     screens = iter(["Claude Code\n❯ ", "Current week (all models)\n42% used\nResets tomorrow"])
 
@@ -584,6 +587,102 @@ def test_named_probe_keeps_exact_home_and_rejects_inherited_auth_overrides(monke
     assert 'CLAUDE_CONFIG_DIR=/absolute/named-home' in argv
     assert '--setting-sources' in argv and '--settings' in argv
     assert 'fake-only' not in command[-1] and 'ANTHROPIC_API_KEY' not in kwargs['env']
+
+
+@pytest.fixture
+def named_refresh_cache(tmp_path, monkeypatch):
+    home = tmp_path.resolve()
+    monkeypatch.setenv("PENTACLE_USAGE_NAMED_ACCOUNT", "1")
+    monkeypatch.setenv("PENTACLE_USAGE_FRESH_SINCE", "100")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    path = home / ".claude.json"
+
+    def write(stamp, account="fixture-account"):
+        path.write_text(json.dumps({
+            "oauthAccount": {"accountUuid": "fixture-account", "organizationUuid": "fixture-pool"},
+            "cachedUsageUtilization": {"accountUuid": account, "fetchedAtMs": stamp},
+        }))
+
+    return write
+
+
+@pytest.mark.parametrize("stamp,cached_account,extra_captures", [
+    (99500, "fixture-account", 1),
+    (None, None, 1),
+    (100500, "fixture-account", 0),
+])
+def test_named_refresh_keeps_one_writer_until_the_host_fence_is_met(
+    named_refresh_cache, socket_transport, stamp, cached_account, extra_captures,
+):
+    import shlex
+
+    named_refresh_cache(stamp, cached_account)
+    bars = "Current week (all models)\n12% used"
+    calls = []
+    captures = 0
+
+    def run(command, **kwargs):
+        nonlocal captures
+        calls.append(command)
+        assert "PENTACLE_USAGE_FRESH_SINCE" not in kwargs["env"]
+        if command[3] == "new-session":
+            assert not any(arg.startswith("PENTACLE_USAGE_FRESH_SINCE=") for arg in shlex.split(command[-1]))
+        if command[3] != "capture-pane":
+            return SimpleNamespace(stdout="", returncode=0)
+        captures += 1
+        if captures == 1:
+            return SimpleNamespace(stdout="❯", returncode=0)
+        if extra_captures and captures == 3:
+            named_refresh_cache(101000)
+        return SimpleNamespace(stdout=bars, returncode=0)
+
+    assert probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=socket_transport(run),
+                         sleep=lambda _: None, wall_time=lambda: 101.5)["week_all_pct"] == 12
+    assert captures == 2 + extra_captures
+    assert [c[-1] for c in calls if c[3] == "send-keys"] == ["/usage", "Enter"]
+    assert calls[-1][3] == "kill-server" and len({c[2] for c in calls}) == 1
+
+
+@pytest.mark.parametrize("stamp,account,suffix,error", [
+    (100500, "wrong-account", "", "identity changed"),
+    (102000, "fixture-account", "", "timestamp is in the future"),
+    (99500, "fixture-account", "Showing last-known usage (could not refresh)", "could not refresh"),
+    (99500, "fixture-account", "Rate limit reached", "rate_limit"),
+    (99500, "fixture-account", "Please run /login", "not logged in"),
+    (99500, "fixture-account", "Refreshing…", "within the timeout"),
+])
+def test_named_refresh_failure_keeps_the_error_and_cleans_its_socket(
+    named_refresh_cache, socket_transport, stamp, account, suffix, error,
+):
+    named_refresh_cache(stamp, account)
+    calls = []
+    elapsed = 0
+
+    def run(command, **kwargs):
+        first_capture = not any(c[3] == "capture-pane" for c in calls)
+        calls.append(command)
+        screen = "❯" if first_capture else "Current week (all models)\n12% used\n" + suffix
+        return SimpleNamespace(stdout=screen if command[3] == "capture-pane" else "", returncode=0)
+
+    def sleep(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    with pytest.raises(RuntimeError, match=error):
+        probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=socket_transport(run),
+                      timeout=3, sleep=sleep, monotonic=lambda: elapsed, wall_time=lambda: 101.5)
+    assert [c[-1] for c in calls if c[3] == "send-keys"] == ["/usage", "Enter"]
+    assert calls[-1][3] == "kill-server"
+    socket_path = Path(os.environ["TMUX_TMPDIR"]) / f"tmux-{os.geteuid()}" / calls[0][2]
+    assert not socket_path.exists()
+
+
+@pytest.mark.parametrize("fence", ["bad", "nan", "inf", "102"])
+def test_invalid_named_refresh_fence_stops_before_launch(named_refresh_cache, monkeypatch, fence):
+    monkeypatch.setenv("PENTACLE_USAGE_FRESH_SINCE", fence)
+    with pytest.raises(RuntimeError, match="invalid named freshness fence"):
+        probe.collect(claude="claude", tmux="tmux", cwd="/tmp", wall_time=lambda: 101.5,
+                      run=lambda *args, **kwargs: pytest.fail("writer should not launch"))
 
 
 @pytest.mark.parametrize("screen", ["zero", "nonzero", "trust", "auth"])

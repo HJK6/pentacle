@@ -296,6 +296,13 @@ Each enrolled host has a private mode-0700 directory containing its mode-0600
   SHA256, and a configured `claude_usage_command` using the existing usage adapter.
   Existing secure browser/profile and Keychain setup remains host-owned.
 
+For a bound Claude observation, the host passes its original freshness timestamp
+to the named usage adapter. The adapter keeps the same `/usage` process alive
+while the display is waiting for a fresh account-matched cache write. It exits on
+that write, a confirmed terminal failure, or the existing timeout and then cleans
+up its owned process and socket. The host independently verifies the login
+identity and final cache timestamp before accepting the observation.
+
 The daemon's `executors` map selects each host's reviewed Python and host-helper
 script through the existing authenticated host transport. `bindings` imports
 verified non-secret host enrollment receipts. Profile references stay host-local.
