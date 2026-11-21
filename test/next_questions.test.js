@@ -485,6 +485,41 @@ test('a committed answer with a lost reply is shown from the stored record exact
   dom.window.close();
 });
 
+test('a lost reply is recorded before the matching reconciliation read even on a tied clock', async () => {
+  const { outcomeBeforeRead } = require('./e2e/lib/next_lanes_event_order');
+  const q = openItem();
+  const { document, dom } = docWithMounts();
+  const timeline = [];
+  let resolveCalls = 0;
+  const record = answeredRecord('question-a', '2026-11-20T12:00:00Z', ['change'], [
+    { label: 'Keep', value: 'keep' }, { label: 'Change', value: 'change' },
+  ]);
+  const questions = createQuestions({
+    document, notifications: [q], inventory: inventory([]), receiptMs: 50,
+    cc: {
+      notificationResolve: async () => {
+        resolveCalls += 1;
+        timeline.push({ type: 'notification.resolve:reply_lost', questionId: 'question-a', at: 960.2 });
+        throw new Error('reply lost after accept');
+      },
+      promptList: async args => {
+        timeline.push({ type: 'prompt.list:start', sequence: 1, at: 960.2, args });
+        return { ok: true, questions: [record] };
+      },
+    },
+  });
+  questions.mountList(document.getElementById('list'));
+  document.querySelector('[data-option-index="2"]').click();
+  document.querySelector('.next-question-send').click();
+  await flush(12);
+  assert.equal(resolveCalls, 1);
+  assert.equal(timeline.filter(row => row.type === 'prompt.list:start').length, 1);
+  assert.deepEqual(timeline[1].args, { spec_id: 'spec-a', open: false });
+  assert.equal(outcomeBeforeRead(timeline, 'notification.resolve:reply_lost', 'question-a', 1), true);
+  assert.equal(document.querySelector('.next-question-sent-answer').textContent, 'Change');
+  questions.dispose(); dom.window.close();
+});
+
 test('You said loads the newest answered record by spec and maps stored option values to labels after reload', async () => {
   const calls = [];
   const records = [

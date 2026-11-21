@@ -3,6 +3,7 @@
 const { fixtureRequest } = require('./closed_chat_scenario');
 const F = require('./next_lanes_fixtures');
 const H = require('./next_lanes_harness');
+const { outcomeBeforeRead, resolveBeforeOutcome } = require('./next_lanes_event_order');
 
 const json = value => JSON.stringify(value);
 const sel = value => json(value);
@@ -902,7 +903,7 @@ async function nextQuestionUncertainRun(ctx, ownedIds, hooks) {
     const failed=timeline.find(row=>row.type==='notification.resolve:failed'&&row.questionId===${sel(before.question_id)});
     const reconcileRead=reads.find(row=>row.records.some(record=>record.question_id===${sel(before.question_id)}));
     const promptTimeline=reconcileRead?timeline.filter(row=>row.sequence===reconcileRead.sequence&&row.type.startsWith('prompt.list:')):[];
-    return {reads,resolve,failed,reconcileRead,
+    return {reads,resolve,failed,reconcileRead, allTimeline:timeline,
       reconcileRecord:reconcileRead?.records.find(record=>record.question_id===${sel(before.question_id)})||null,
       promptTimeline,
       timeline:timeline.filter(row=>row.questionId===${sel(before.question_id)})};
@@ -919,7 +920,7 @@ async function nextQuestionUncertainRun(ctx, ownedIds, hooks) {
       && beforeEvidence.promptTimeline[0]?.type === 'prompt.list:start'
       && beforeEvidence.promptTimeline[1]?.type === 'prompt.list:resolved'
       && beforeEvidence.promptTimeline.every(row=>row.sequence===beforeEvidence.reconcileRead.sequence)
-      && beforeEvidence.failed.at < beforeEvidence.promptTimeline[0]?.at
+      && outcomeBeforeRead(beforeEvidence.allTimeline, 'notification.resolve:failed', before.question_id, beforeEvidence.reconcileRead.sequence)
       && beforeEvidence.reconcileRecord?.state === 'open' && !beforeEvidence.reconcileRecord?.hasStoredAnswer,
     { state: beforeStatus?.question?.state, answer: beforeStatus?.question?.answer || null, beforeCalls, beforeNotificationId, beforeEvidence });
   await ctx.session.eval("window.__nextQuestionResolveGate.mode='normal'");
@@ -947,7 +948,8 @@ async function nextQuestionUncertainRun(ctx, ownedIds, hooks) {
     const matching=reads.flatMap(read=>read.records.filter(record=>record.question_id===${sel(lost.question_id)}).map(record=>({read,record})));
     const finished=window.__nextQuestionResolveGate.timeline.find(row=>row.type==='notification.resolve:reply_lost'&&row.questionId===${sel(lost.question_id)});
     const promptTimeline=reads.length?window.__nextQuestionResolveGate.timeline.filter(row=>row.sequence===reads[0].sequence&&row.type.startsWith('prompt.list:')):[];
-    return {reads,resolve,finished,matching,promptTimeline,timeline:window.__nextQuestionResolveGate.timeline.filter(row=>row.questionId===${sel(lost.question_id)})};
+    return {reads,resolve,finished,matching,promptTimeline,allTimeline:window.__nextQuestionResolveGate.timeline,
+      timeline:window.__nextQuestionResolveGate.timeline.filter(row=>row.questionId===${sel(lost.question_id)})};
   })()`);
   const lostResolveCount = await ctx.session.eval(`window.__nextQuestionResolveGate.timeline.filter(row=>row.type==='notification.resolve:start'&&row.questionId===${sel(lost.question_id)}).length`);
   const lostReceipt = await ctx.session.eval(`(() => ({label:document.querySelector(${sel(`${lostRow} .next-question-sent-label`)})?.textContent || '',
@@ -961,8 +963,8 @@ async function nextQuestionUncertainRun(ctx, ownedIds, hooks) {
       && lostStatus.question?.answer?.selections?.length === 1 && lostStatus.question?.answer?.selections?.[0] === 'keep'
       && lostBefore?.question?.question_id === lost.question_id && lostBefore.question.state === 'open' && !lostBefore.question.answer
       && reconciliation.resolve?.notificationId === lostNotificationId && reconciliation.finished?.status === 'committed_reply_lost'
-      && reconciliation.resolve.at < reconciliation.finished.at
-      && reconciliation.finished.at < reconciliation.promptTimeline[0]?.at
+      && resolveBeforeOutcome(reconciliation.allTimeline, 'notification.resolve:reply_lost', lost.question_id)
+      && outcomeBeforeRead(reconciliation.allTimeline, 'notification.resolve:reply_lost', lost.question_id, reconcileRead?.read?.sequence)
       && reconciliation.promptTimeline[0]?.type === 'prompt.list:start'
       && reconciliation.promptTimeline.at(-1)?.type === 'prompt.list:resolved'
       && lostResolveCount === 1 && reconciledRead
