@@ -41,6 +41,7 @@ function localFrame() {
 
 async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSITE, SESSION('other')], requestStreamEvents, realStore = false, manualTimers = false, lanesSidebar = true } = {}) {
   let onFrame = null;
+  let onDisconnect = null;
   const calls = [];
   const timers = [];
   const h = installRenderer({
@@ -49,6 +50,7 @@ async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSI
     requestStreamEvents: async (args) => { calls.push(args); return requestStreamEvents ? requestStreamEvents(args) : { ok: true, count: 0 }; },
     ccOverrides: {
       onChatStreamFrame(cb) { onFrame = cb; },
+      onDisconnect(cb) { onDisconnect = cb; },
       getChatStreamState: async () => ({ connected: true, events: [], sessions, schedules: [], ...snapshot }),
     },
   });
@@ -66,6 +68,7 @@ async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSI
   const api = {
     h, doc, calls, timers,
     push: async (frame) => { onFrame(frame); await flush(); },
+    disconnect: async () => { onDisconnect({ epoch: 1 }); await flush(); },
     stats: () => doc.getElementById('stats').textContent,
     rows: () => [...doc.querySelectorAll('#session-list .lane-row')],
     row: (id) => doc.querySelector(`#session-list .lane-row[data-lane-id="${id}"]`),
@@ -79,6 +82,29 @@ async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSI
   };
   return api;
 }
+
+test('classic question link stays separate and goes stale until a fresh lane snapshot', async (t) => {
+  const id = 'wl-active-0002';
+  const waiting = localFrame();
+  waiting.lanes.find(lane => lane.lane_id === id).activity = 'waiting_on_you';
+  const app = await boot(t, { snapshot: { work_lanes: waiting, state_version: 1 } });
+  const readRow = () => app.row(id);
+  const route = () => readRow().parentElement.querySelector('.lane-question-link');
+  assert.match(readRow().textContent, /Waiting on you/);
+  assert.equal(route()?.getAttribute('href'), `/next/?lane=${id}`);
+  assert.equal(route()?.tabIndex, 0);
+  assert.equal(route()?.closest('[role="button"]'), null);
+  await app.disconnect();
+  assert.match(readRow().textContent, /Connection lost/);
+  assert.equal(route(), null);
+  await app.push({ connected: true, state_version: 2 });
+  assert.match(readRow().textContent, /Connection lost/);
+  const working = localFrame();
+  working.lanes.find(lane => lane.lane_id === id).activity = 'working';
+  await app.push({ connected: true, work_lanes: working, state_version: 3 });
+  assert.match(readRow().querySelector('.lane-activity').textContent, /Working/);
+  assert.doesNotMatch(readRow().textContent, /Connection lost|Waiting on you/);
+});
 
 test('by default the sidebar shows no lane count and no Lanes section, from a push or a snapshot', async (t) => {
   const app = await boot(t, { lanesSidebar: false, snapshot: { work_lanes: fixture.inventory_frame, state_version: 1 } });

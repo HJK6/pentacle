@@ -100,10 +100,42 @@ export function readableLaneClass(lane: WorkLane, working = false): LaneClass {
 }
 
 /** Additional prose for the existing lane age slots. Parked lanes keep their hold text. */
-export function readableLaneWord(lane: WorkLane): string | null {
-  if (lane.parked) return null;
+function daemonLaneWord(lane: Pick<CurrentWorkLane, 'activity' | 'external'>): string | null {
   if (lane.activity === 'waiting_on_dot') return `waiting on ${lane.external?.label ?? 'Dot'}`;
   return lane.activity === 'blocked' ? 'blocked' : null;
+}
+
+export function readableLaneWord(lane: WorkLane): string | null {
+  return lane.parked ? null : daemonLaneWord(lane);
+}
+
+const laneLifecycleLabels = { active: 'Active', blocked: 'Blocked', paused: 'Paused', done: 'Done' };
+const laneLeadLabels = { working: 'Lead working', idle: 'Lead idle', offline: 'Lead offline', lost: 'No visible lead' };
+
+/** The aggregate lane activity and the bound seat's health are independent. */
+export function readableLaneRowStatus(lane: CurrentWorkLane, current = true, placedQuestion = false) {
+  const lifecycle = lane.parked ? 'Parked' : laneLifecycleLabels[lane.state] ?? null;
+  const detail = lane.parked?.reason ?? (lane.state === 'blocked' ? lane.blocker : null);
+  if (!current) {
+    return { primary: 'Connection lost', lifecycle, detail, secondaryActivity: null, lead: null, questionRoute: false };
+  }
+  const word = daemonLaneWord(lane);
+  const activity = lane.activity === 'working' ? 'Working'
+    : lane.activity === 'waiting_on_you' ? 'Waiting on you'
+    : word ? word[0].toUpperCase() + word.slice(1) : null;
+  const held = !!lane.parked || lane.state === 'paused';
+  const lead = lane.lead;
+  const health = lead && (lead.status === 'closed' || !lead.presence.online) ? 'offline'
+    : !lead?.qualifies ? 'lost' : lead.presence.working ? 'working' : 'idle';
+  return {
+    primary: held ? lifecycle : activity ?? (lane.state === 'blocked' ? lifecycle : null),
+    lifecycle,
+    detail,
+    secondaryActivity: held && activity !== 'Blocked' ? activity : null,
+    lead: { health, label: laneLeadLabels[health] },
+    questionRoute: lane.activity === 'waiting_on_you' || placedQuestion
+      || (lane.progress?.members ?? []).some(member => (member.open_questions?.count ?? 0) > 0),
+  };
 }
 
 /** Header counts; parked lanes are in none of them. */

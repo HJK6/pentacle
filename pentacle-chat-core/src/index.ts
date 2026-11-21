@@ -33,3 +33,4 @@ export {
 
 export * from "./services/daemonUpdates";
 export * from './services/workLanes';
+export { readableLaneRowStatus } from './services/readableLanes';

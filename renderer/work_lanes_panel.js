@@ -24,20 +24,6 @@ function workLanesStatsText(inventory, { sessions, needsAnswer, working, search,
     : `${lanes}${sessions} sessions | ${needsAnswer} need answer | ${working} working`;
 }
 
-function presenceClass(lane) {
-  const lead = lane.lead;
-  if (!lead || !lead.qualifies) return lead && !lead.presence.online ? 'is-offline' : 'is-lost';
-  if (!lead.presence.online) return 'is-offline';
-  return lead.presence.working ? 'is-working' : 'is-idle';
-}
-
-function presenceLabel(lane) {
-  const cls = presenceClass(lane);
-  return {
-    'is-working': 'Lead working', 'is-idle': 'Lead idle', 'is-offline': 'Lead offline', 'is-lost': 'No visible lead',
-  }[cls];
-}
-
 function leadCardSession(lane) {
   const card = lane.lead && lane.lead.status_card;
   if (!card || !(card.goal || card.update)) return null;
@@ -50,8 +36,9 @@ function leadCardSession(lane) {
   };
 }
 
-function renderLaneRow(lane, { tapTarget, etaLabel, nowMs, renderLeadCard }) {
+function renderLaneRow(lane, { tapTarget, etaLabel, rowStatus, current = true, nowMs, renderLeadCard }) {
   const tap = tapTarget(lane);
+  const status = rowStatus(lane, current);
   const attrs = [
     `data-lane-id="${escapeHtml(lane.lane_id)}"`,
     `data-lane-state="${escapeHtml(lane.state)}"`,
@@ -61,36 +48,47 @@ function renderLaneRow(lane, { tapTarget, etaLabel, nowMs, renderLeadCard }) {
   if (tap.stream_id) attrs.push(`data-stream-id="${escapeHtml(tap.stream_id)}"`);
   if (tap.generation) attrs.push(`data-generation="${escapeHtml(tap.generation)}"`);
   const eta = etaLabel(lane, nowMs);
-  const etaHtml = eta.text
+  const etaHtml = current && eta.text
     ? `<span class="lane-eta${eta.stale ? ' is-stale' : ''}" title="${eta.stale ? 'No current lead is updating this ETA' : 'Lead ETA'}">${escapeHtml(eta.text)}</span>`
     : '';
   const owner = lane.owner_kind === 'operator'
     ? '<span class="lane-owner is-operator" title="Operator-started lane" aria-label="Operator-started lane">&#9670;</span>'
     : '<span class="lane-owner is-fd" title="FD-managed lane" aria-label="FD-managed lane">&#9671;</span>';
-  const blocker = lane.state === 'blocked' && lane.blocker
-    ? `<div class="lane-blocker">Blocked: ${escapeHtml(lane.blocker)}</div>`
+  const detail = status.detail
+    ? `<div class="${lane.state === 'blocked' ? 'lane-blocker' : 'lane-summary'}">${escapeHtml(status.lifecycle)}: ${escapeHtml(status.detail)}</div>`
     : '';
   const chatNote = tap.action === 'unavailable'
     ? '<span class="lane-chat-note is-unavailable">Chat unavailable</span>'
     : tap.action === 'history' ? '<span class="lane-chat-note is-history">History</span>' : '';
-  const cardSession = renderLeadCard ? leadCardSession(lane) : null;
+  const cardSession = current && renderLeadCard ? leadCardSession(lane) : null;
   const cardHtml = cardSession ? renderLeadCard(cardSession, { nowMs }) : '';
-  const step = lane.lead && lane.lead.status_card && lane.lead.status_card.active_step
+  const step = current && lane.lead && lane.lead.status_card && lane.lead.status_card.active_step
     ? `<div class="lane-step">${escapeHtml(lane.lead.status_card.active_step)}</div>` : '';
-  const label = presenceLabel(lane);
-  return `<div class="lane-row" role="button" tabindex="0" ${attrs.join(' ')}>
+  const badge = lane.parked ? 'PARKED' : STATE_LABEL[lane.state] || lane.state;
+  const primary = status.primary && status.primary !== status.lifecycle
+    ? `<div class="lane-activity">${escapeHtml(status.primary)}</div>` : '';
+  const secondaryActivity = status.secondaryActivity
+    ? `<div class="lane-summary">${escapeHtml(status.secondaryActivity)}</div>` : '';
+  const presence = status.lead
+    ? `<span class="lane-presence is-${status.lead.health}" title="${status.lead.label}" aria-hidden="true"></span>` : '';
+  const leadNote = status.lead ? `<span class="lane-lead">${status.lead.label}</span>` : '';
+  const question = status.questionRoute
+    ? `<a class="lane-question-link" href="/next/?lane=${escapeHtml(encodeURIComponent(lane.lane_id))}">Open lane questions</a>` : '';
+  return `<div class="lane-row-shell"><div class="lane-row" role="button" tabindex="0" ${attrs.join(' ')}>
     <div class="lane-head">
-      <span class="lane-presence ${presenceClass(lane)}" title="${label}" aria-label="${label}"></span>
+      ${presence}
       <span class="lane-title">${escapeHtml(lane.title || lane.lane_id)}</span>
       ${owner}
-      <span class="lane-state is-${escapeHtml(lane.state)}">${lane.parked ? 'PARKED' : STATE_LABEL[lane.state] || escapeHtml(lane.state)}</span>
+      <span class="lane-state is-${escapeHtml(lane.state)}">${current ? '' : 'Last known · '}${escapeHtml(badge)}</span>
     </div>
+    ${primary}
+    ${secondaryActivity}
     ${lane.summary ? `<div class="lane-summary">${escapeHtml(lane.summary)}</div>` : ''}
-    ${blocker}
+    ${detail}
     ${step}
-    <div class="lane-meta">${etaHtml}${chatNote}</div>
+    <div class="lane-meta">${leadNote}${etaHtml}${chatNote}</div>
     ${cardHtml}
-  </div>`;
+  </div>${question}</div>`;
 }
 
 // The "Lanes (N)" sidebar section. N is the daemon's open count (counts.open),
