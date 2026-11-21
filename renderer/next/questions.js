@@ -52,7 +52,7 @@ function uniqueOpenNotifications(notifications) {
 }
 
 function currentHeldRead(read, lane) {
-  if (read?.status !== 'held') return false;
+  if (!read?.reply) return false;
   const listedRevision = text(lane?.detail_revision);
   const readRevision = text(read?.detailRevision);
   return !listedRevision || readRevision === listedRevision;
@@ -82,7 +82,7 @@ function listGoals(lane, laneReads) {
 }
 
 function laneMembers(lane, laneReads) {
-  const preview = Array.isArray(lane?.members) ? lane.members : [];
+  const preview = Array.isArray(lane?.progress?.members) ? lane.progress.members : (Array.isArray(lane?.members) ? lane.members : []);
   const read = safeRead(laneReads, lane?.lane_id, 'members');
   const all = new Map();
   for (const member of preview) {
@@ -96,7 +96,7 @@ function laneMembers(lane, laneReads) {
       }
     }
   }
-  const rawTotal = Number(lane?.members_total);
+  const rawTotal = Number(lane?.progress?.members_total ?? lane?.members_total);
   const previewComplete = Number.isFinite(rawTotal) && rawTotal <= preview.length;
   return {
     members: [...all.values()],
@@ -122,6 +122,7 @@ function sessionIndex(sessions) {
 function placementFor(notification, lanes, laneReads, listedSessions) {
   const specId = questionSpecId(notification);
   const producerId = questionProducerId(notification);
+  if (notification?.question_identity_pending) return { kind: 'unplaced', retryIdentity: !!notification.question_identity_failed, retryReads: [], retryLaneIds: [] };
   if (!specId) {
     const chat = producerId ? listedSessions.get(producerId) : null;
     if (chat) {
@@ -197,8 +198,8 @@ function buildQuestionPlacement({ inventory, notifications, sessions, laneReads 
     laneMembers(lane, laneReads).members.some((member) => text(member?.spec_id) === item.specId)));
   if (hasUnlocatedSpec && lanes.length) {
     const searchOrder = lanes.map((lane, index) => ({ lane, index }))
-      .sort((a, b) => Number((b.lane.members || []).some((member) => Number(member?.open_questions?.count) > 0))
-        - Number((a.lane.members || []).some((member) => Number(member?.open_questions?.count) > 0)) || a.index - b.index);
+      .sort((a, b) => Number((b.lane.progress?.members || b.lane.members || []).some((member) => Number(member?.open_questions?.count) > 0))
+        - Number((a.lane.progress?.members || a.lane.members || []).some((member) => Number(member?.open_questions?.count) > 0)) || a.index - b.index);
     for (const { lane } of searchOrder) {
       const state = laneMembers(lane, laneReads);
       if (!state.known && state.read?.status === 'idle' && text(lane?.lane_id)) requestedMembers.add(text(lane.lane_id));
@@ -731,7 +732,11 @@ function createQuestions(options = {}) {
 
   function retryForQuestion(id) {
     const item = getSnapshot().list.find((candidate) => candidate.id === id);
-    if (!item || typeof laneReads?.retry !== 'function') return Promise.resolve(false);
+    if (!item) return Promise.resolve(false);
+    if (item.placement.retryIdentity && typeof options.retryQuestionIdentity === 'function') {
+      return Promise.resolve(options.retryQuestionIdentity()).catch(() => false);
+    }
+    if (typeof laneReads?.retry !== 'function') return Promise.resolve(false);
     const reads = item.placement.retryReads || [];
     const tasks = reads.map(({ laneId, kind, goalId }) => {
       try { return Promise.resolve(laneReads.retry(laneId, kind, goalId)).catch(() => false); }
@@ -817,7 +822,7 @@ function createQuestions(options = {}) {
     const head = element('div', 'next-question-list-heading', row);
     renderQuestionHeading(head, item);
     const placement = item.placement;
-    if (placement.kind === 'unplaced' && placement.retryReads?.length) {
+    if (placement.kind === 'unplaced' && (placement.retryIdentity || placement.retryReads?.length)) {
       const retry = element('button', 'next-question-retry', head, 'Retry');
       retry.type = 'button';
       retry.addEventListener('click', () => { void retryForQuestion(item.id); });

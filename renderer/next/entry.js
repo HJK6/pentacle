@@ -38,7 +38,7 @@ const laneConnection = { stateVersion: null, connected: false, error: null };
 const laneListeners = new Set();
 let lanesControl = null;
 let questionsControl = null;
-const questionNotifications = createQuestionNotifications(() => questionsControl?.update({ notifications: questionNotifications.values() }));
+const questionNotifications = createQuestionNotifications(() => questionsControl?.update({ notifications: questionNotifications.values() }), { promptList: args => cc.promptList(args) });
 function applyLaneFrame(frame) {
   if (!frame || (frame.type !== 'work_lanes.inventory' && !frame.work_lanes)) return;
   // Connection snapshots carry state_version; daemon inventory pushes do not.
@@ -222,7 +222,7 @@ lanesCard.addEventListener('pointerdown', () => { state.layout = layout.markUsed
 lanesCard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
 const theme = localStorage.getItem('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
 let assistantHistory = null;
-questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions,
+questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(),
   onOpenSpec: specId => { const placement = questionsControl.getSnapshot().list.find(item => item.placement?.specId === specId)?.placement; closePopover(); if (placement?.laneId) { openLaneTarget(placement.laneId, placement.goalId); lanesControl?.openSpec(placement.laneId, placement.goalId, specId); } },
   onOpenChat: streamId => { closePopover(); openChat(streamId); } });
 let laneRenderPending = false;
@@ -241,6 +241,7 @@ async function loadSnapshot() {
     const connection = cc.webConnectionState?.(); const snapshot = await cc.getChatStreamState();
     const current = cc.webConnectionState?.(); if (connection && (!current?.open || current.epoch !== connection.epoch)) return;
     state.connected = !!snapshot?.connected; state.hosts = snapshot?.hosts_stats || {}; store.applyFrame({ type: 'snapshot', ...(snapshot || {}) }); applyLaneFrame({ type: 'snapshot', ...(snapshot || {}) }); questionNotifications.frame(snapshot);
+    void questionNotifications.refreshIdentities();
     if (typeof cc.notificationList === 'function') void cc.notificationList({ states: ['open'] }).then(reply => { if (Array.isArray(reply?.notifications)) questionNotifications.ingest(reply.notifications); }).catch(() => {});
     if (snapshot?.connected && recoveryEpoch !== null && current?.epoch === recoveryEpoch) {
       const unresolved = Object.values(store.getState().optimisticSends || {}).filter(send => ['queued','dispatched','indeterminate'].includes(send.status));
