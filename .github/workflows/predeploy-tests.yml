@@ -12,6 +12,8 @@ jobs:
     timeout-minutes: 50
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
     - uses: actions/setup-node@v4
       with:
         node-version: '22'
@@ -57,16 +59,6 @@ jobs:
       run: |
         python3 -m pip install PyYAML==6.0.3 pytest==9.0.3
         python3 scripts/test_ci_required_aggregate.py
-    - name: Advisory web-server quarantine
-      if: ${{ !cancelled() }}
-      continue-on-error: true
-      timeout-minutes: 2
-      run: |
-        advisory_root="$(mktemp -d "${RUNNER_TEMP}/web-advisory.XXXXXX")"
-        unset TMUX
-        export HOME="$advisory_root" PENTACLE_RUNTIME_DIR="$advisory_root/.pentacle" TMUX_TMPDIR="$advisory_root"
-        trap 'tmux kill-server >/dev/null 2>&1 || true' EXIT
-        node --test --test-name-pattern='^two concurrent connections keep their local tmux sessions isolated$' test/web_server.test.js
     - name: Source integrity at gate end
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
       if: ${{ always() }}
@@ -81,6 +73,8 @@ jobs:
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/test-attempts.v1.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/npm/gate/npm-test-summary.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/npm/gate/node-junit/*.xml
     - name: Retain failed gate evidence
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
@@ -94,6 +88,8 @@ jobs:
     timeout-minutes: 50
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
     - uses: actions/setup-node@v4
       with:
         node-version: '22'
@@ -156,6 +152,8 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5]
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
     - uses: actions/setup-node@v4
       with:
         node-version: '22'
@@ -210,13 +208,6 @@ jobs:
       run: |
         umask 077
         python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/daemon" --target v2-unit-ci-shard --shard-index "${{ matrix.shard }}" --shard-count 6 --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon-unit-${{ matrix.shard }}" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
-    - name: Advisory daemon quarantine
-      if: ${{ !cancelled() && matrix.shard == 0 }}
-      continue-on-error: true
-      timeout-minutes: 4
-      run: |
-        umask 077
-        python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/advisory" --target v2-quarantined --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon-advisory" --purpose diagnostic --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/advisory/attempt-manifest.json"
     - name: Source integrity at gate end
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
       if: ${{ always() }}
@@ -234,7 +225,7 @@ jobs:
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/v2-unit-evidence.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/unit.junit.xml
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/unit.progress.jsonl
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/advisory/gate/pytest.junit.xml
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/unit-advisory.junit.xml
     - name: Retain failed gate evidence
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
@@ -249,6 +240,8 @@ jobs:
     needs: [daemon-unit]
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
     - uses: actions/setup-node@v4
       with:
         node-version: '22'
@@ -400,6 +393,10 @@ jobs:
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/shareability-install/**
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/shareability-checklist/**
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/cli/gate/pytest.junit.xml
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/cli/gate/pytest.progress.jsonl
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/shared/gate/pytest.junit.xml
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/shared/gate/pytest.progress.jsonl
     - name: Retain failed gate evidence
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4

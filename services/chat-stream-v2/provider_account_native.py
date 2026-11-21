@@ -279,7 +279,7 @@ def claude_observation(binding: Binding, *, collect_usage, run=subprocess.run, n
     last_wall = _wait_claude_refresh(binding, identity, started, now) if wait_for_refresh else started
     # collect_usage drives the existing bounded /usage adapter with THIS env,
     # pinned executable and a configured trusted cwd. Never use the default cache.
-    collect_usage(binding, environment(binding))
+    collect_usage(binding, environment(binding) | {"PENTACLE_USAGE_FRESH_SINCE": str(started)})
     cache, login = _claude_cache(binding)
     account = cache.get("accountUuid")
     if (login.get("organizationUuid") != identity["pool_id"]

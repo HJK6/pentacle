@@ -251,6 +251,7 @@ def run_cell(
     validate_session=None,
     provider_probe=None,
     test_profile_snapshot=None,
+    qualification_key=None,
 ) -> dict[str, object]:
     """Run one matrix cell; a created stream is always closed and verified."""
     stream_id = ""
@@ -283,7 +284,7 @@ def run_cell(
         # this activation's idempotency UUID.  Keep this construction adjacent
         # to the immutable spawn payload so a caller cannot accidentally reuse
         # a friendly/static fleet-smoke name after a reconnect.
-        idempotency_key = uuid.uuid4().hex
+        idempotency_key = qualification_key or uuid.uuid4().hex
         name = f"v2-fleet-smoke-{provider}-{idempotency_key[:12]}"
         spawn = {"objective": "Exercise the existing spawn contract",
             "type": "spawn",
@@ -306,6 +307,13 @@ def run_cell(
             spawn["account"] = account
         if prompt_mode == "prompted":
             spawn["initial_prompt"] = f"Reply exactly {marker} and do nothing else."
+        if qualification_key is not None:
+            import qualification_admission
+            if account != "ours":
+                raise ValueError("first qualification requires the ours account")
+            _, marker = qualification_admission.smoke_identity(qualification_key, provider)
+            spawn = {**qualification_admission.smoke_request(host, qualification_key, provider, prompt_mode, model, effort),
+                     "catalog_version": catalog["catalog_version"], "request_id": spawn["request_id"]}
         if prepare_owned_spawn is not None:
             prepare_owned_spawn(spawn)
         result = rpc(spawn, "spawn")
@@ -977,6 +985,7 @@ def run_matrix(
     accounts=None,
     test_profile_snapshot=None,
     report_only=False,
+    qualification_keys=None,
 ) -> list[dict[str, object]]:
     if cells is None:
         cells = smoke_plan()["cells"]
@@ -1023,6 +1032,8 @@ def run_matrix(
                         validate_session=getattr(close_owned, "validate", None),
                         **({"provider_probe": provider_probe} if provider_probe is not None else {}),
                         **({"account": account} if account is not None else {}),
+                        **({"qualification_key": qualification_keys[(host, provider, prompt_mode)]}
+                           if qualification_keys is not None and (host, provider, prompt_mode) in qualification_keys else {}),
                     )
                     if evidence is not None and isinstance(result, dict):
                         evidence.append({"outcome": "passed", **result})
@@ -1137,6 +1148,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="private pinned local Codex binding/config input; requires URL and HOST")
     parser.add_argument("--test-profile-snapshot", type=Path,
                         help="sealed derived test-profile JSON; freezes this run")
+    parser.add_argument("--first-qualification-keys", type=Path,
+                        help="owner-only request keys for a fenced coordinated first qualification")
     parser.add_argument("--account", action="append", default=None,
                         help="PROVIDER=ALIAS or HOST/PROVIDER=ALIAS; repeat to cover every included cell")
     parser.add_argument(
@@ -1199,6 +1212,21 @@ def main(argv: list[str] | None = None) -> int:
                 "outcome": "UNTESTED", "reason": code}, "cells": []}, sort_keys=True))
             return EXIT_UNTESTED
     evidence: list[dict[str, object]] = []
+    qualification_keys = None
+    if args.first_qualification_keys is not None:
+        from deploy.coordinated import read_json
+        keys = read_json(args.first_qualification_keys)
+        bootstrap_host = keys.get("host")
+        if (set(keys) != {"host", "cells"} or not isinstance(keys["cells"], dict)
+                or bootstrap_host not in optional_hosts):
+            parser.error("qualification keys must name a configured optional host")
+        qualification_keys = {(bootstrap_host, *key.split("/")): value for key, value in keys["cells"].items()}
+        expected = {(host, provider, mode) for host, provider, mode in cells if host == bootstrap_host}
+        if (args.host is not None or not args.report_only or len(expected) != 4
+                or set(qualification_keys) != expected
+                or any(not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key)
+                       for key in qualification_keys.values())):
+            parser.error("qualification keys require the full report-only bootstrap host matrix")
     results = run_matrix(
         url, args.token_path or DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
         test_profile_snapshot=profile,
@@ -1206,6 +1234,7 @@ def main(argv: list[str] | None = None) -> int:
         **({"report_only": True} if args.report_only else {}),
         **({"accounts": accounts} if accounts else {}),
         **({"provider_probe": provider_probe} if provider_probe is not None else {}),
+        **({"qualification_keys": qualification_keys} if qualification_keys is not None else {}),
     )
     # A successful verdict requires actual evidence for every planned cell.
     # run_matrix returns nongreen rows and appends completed passes to evidence.

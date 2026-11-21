@@ -20,6 +20,8 @@ import time
 
 from deploy.coordinated import (Invalid, HelperProofFailure, absolute, atomic_bytes, atomic_json, read_json, canonical, digest,
     file_digest, host_scope, private_file)
+from deploy import first_qualification
+import qualification_admission
 from provider_cli_artifact import code_identity, validate_proof
 from provider_accounts import AccountError, Binding
 from account_store import AccountStore
@@ -133,6 +135,7 @@ class Runtime:
         self.installer = load_installer(self.controller)
         self.stopped = False
         self.recovery_authorization = self.verified_prior = None
+        self.first_qualification_authorization = None
 
     def checked(self, argv, cwd=None):
         result = self.runner(tuple(str(a) for a in argv), cwd or self.repo)
@@ -144,6 +147,23 @@ class Runtime:
     def git(self, *args):
         return self.d._git(self.repo, *args, runner=self.runner)
 
+    def live_identity(self, sha):
+        state = self.d._launchd_state(self.service.launchd_label, self.runner)
+        if not state.answered or not state.loaded or not state.pid:
+            raise Invalid("live daemon identity is unavailable")
+        birth = self.d._process_start(state.pid, self.runner)
+        confirmed, _ = self.d._verify_runtime_sha(sha, state.pid)
+        if not birth or not confirmed or not self.prior_still_running(
+                None, {"sha": sha, "pid": state.pid, "birth": birth}):
+            raise Invalid("live daemon identity is unconfirmed")
+        return {"sha": sha, "pid": state.pid, "birth": birth}
+
+    def check_first_qualification_authorization(self):
+        authorization = self.first_qualification_authorization
+        if authorization is None or time.time() >= authorization["expires_at"]:
+            raise Invalid("first qualification operation authorization expired")
+        return authorization
+
     def database(self, plist=None):
         plist = plist or self.d._launchd_plist(self.service.launchd_label)
         arguments = plist.get("ProgramArguments", [])
@@ -151,7 +171,7 @@ class Runtime:
             raise Invalid("coordinated deploy needs the installed daemon --db path")
         return absolute(arguments[arguments.index("--db") + 1])
 
-    def account_snapshot(self, policy, database, *, accounts=None, scope=None):
+    def account_snapshot(self, policy, database, *, accounts=None, scope=None, qualification_host=None):
         with sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN")
@@ -197,7 +217,13 @@ class Runtime:
                 for host in hosts:
                     maintenance = maintenance_status(ledger, host)
                     hold = maintenance["hold"]
-                    if maintenance["slot"] is not None or (hold and hold["held_until"] > time.time()):
+                    allowed_hold = False
+                    if hold and str(hold["reason"]).startswith(qualification_admission.HOLD_PREFIX):
+                        _, record = first_qualification.read_admission(conn, host)
+                        allowed_hold = first_qualification.owned_hold(hold, record) and (
+                            host == qualification_host or (scope is not None
+                                and host not in scope["included_hosts"] and record["phase"] == "rollback"))
+                    if maintenance["slot"] is not None or (hold and hold["held_until"] > time.time() and not allowed_hold):
                         raise Invalid("active provider maintenance blocks deployment")
             except AccountError as exc:
                 raise Invalid("account admission state invalid: " + str(exc)) from exc
@@ -281,11 +307,33 @@ class Runtime:
             raise Invalid("intent must name the installed machine and policy paths")
         policy = json.loads(private_file(intent["policy_file"]).read_bytes())
         scope = host_scope(intent["machines_file"], intent["excluded_hosts"])
-        accounts = self.account_snapshot(policy, self.database(plist),
-            accounts=intent.get('smoke_accounts'), scope=scope)
+        bootstrap = intent.get("first_qualification")
+        qualification_host = None
+        prior_scope = scope
+        stamp_path = self.d._stamp_path(self.repo, self.service)
+        if bootstrap is not None:
+            first_qualification.validate_intent(intent, scope)
+            qualification_host = bootstrap["prior_exclusion"]["host"]
+            first_qualification.validate_window(bootstrap)
+            if self.live_identity(intent["prior_sha"]) != bootstrap["expected_live"]:
+                raise Invalid("live prior differs from first qualification approval")
+            stamp_bytes = private_file(stamp_path).read_bytes()
+            prior_stamp = json.loads(stamp_bytes)
+            prior_scope = first_qualification.prior_scope(intent, intent["machines_file"], prior_stamp,
+                hashlib.sha256(stamp_bytes).hexdigest(), file_digest(intent["machines_file"]))
+        else:
+            prior_stamp = self.d._read_stamp(self.repo, self.service)
+        database = self.database(plist)
+        accounts = self.account_snapshot(policy, database, accounts=intent.get('smoke_accounts'), scope=scope,
+            **({"qualification_host": qualification_host} if bootstrap is not None else {}))
+        if bootstrap is not None:
+            hold, admission = first_qualification.read_runtime_admission(database, qualification_host)
+            if (hold is not None or admission is not None) and not (
+                    first_qualification.owned_hold(hold, admission) and admission["phase"] == "rollback"):
+                raise Invalid("first qualification cannot adopt an unrelated bootstrap host admission hold")
         from deploy.restoration import qualified_prior
-        prior_qualification = qualified_prior(self.d._read_stamp(self.repo, self.service),
-            intent["prior_sha"], [b for b in accounts["selected_bindings"] if b["host"] in scope["included_hosts"]])
+        prior_qualification = qualified_prior(prior_stamp,
+            intent["prior_sha"], [b for b in accounts["selected_bindings"] if b["host"] in prior_scope["included_hosts"]])
         arguments = plist.get("ProgramArguments", [])
         self.d._validate_v2_launchd_program(self.repo, arguments)
         # Match packet/activation-evidence.py's optional unbuffered prefix.
@@ -302,10 +350,19 @@ class Runtime:
             evidence[direction] = {"path": intent[key], "sha256": file_digest(intent[key])}
         machine_copy = folder / "machines.json"
         atomic_bytes(machine_copy, Path(intent["machines_file"]).read_bytes())
+        target_machines = machine_copy
+        if bootstrap is not None:
+            catalog = first_qualification.prepare_catalog(intent, machine_copy, folder)
+            target_machines = Path(catalog["target_snapshot"])
+            self.check_target_catalog(target_machines)
         preimages = {"policy": self.preimage(Path(intent["policy_file"]), folder, "policy.before"),
             "plist": self.preimage(self.d._launchd_plist_path(self.service.launchd_label), folder, "daemon.before"),
-            "stamp": self.preimage(self.d._stamp_path(self.repo, self.service), folder, "stamp.before"),
+            "stamp": self.preimage(stamp_path, folder, "stamp.before"),
             "collector": self.preimage(self.d._usage_collector_plist_path(), folder, "collector.before")}
+        if bootstrap is not None:
+            if (preimages["stamp"]["sha256"] != bootstrap["prior_stamp_sha256"]
+                    or file_digest(machine_copy) != bootstrap["catalog_sha256"]):
+                raise Invalid("first qualification stamp or catalog changed during capture")
         # Schedule is never installed for a declared exclusion. Preserve it for
         # drift detection even on a full-matrix coordinated transaction.
         schedule = self.d._launchd_plist_path("com.pentacle.spawn-fleet-smoke")
@@ -316,10 +373,13 @@ class Runtime:
         source = {}
         hosts = {row["name"]: row for row in scope["machines"]}
         for direction, sha in (("target", intent["target_sha"]), ("prior", intent["prior_sha"])):
+            selected_scope = prior_scope if direction == "prior" else scope
             bundle = folder / (direction + "-bundle")
             bundle.mkdir(mode=0o700)
-            manifest = (self.installed_prior_bundle(sha, bundle, policy, scope, prior_qualification)
+            manifest = (self.installed_prior_bundle(sha, bundle, policy, selected_scope, prior_qualification)
                         if direction == "prior" else None)
+            if direction == "prior" and bootstrap is not None and manifest is None:
+                raise Invalid("first qualification requires the installed qualified prior archive")
             if manifest is None:
                 manifest = self.installer._archive(self.repo, sha, bundle, provider_cli_pin=accounts["pin"], spawn_settings=overlay)
             snapshot = folder / (direction + "-source")
@@ -328,11 +388,11 @@ class Runtime:
                 archive.extractall(snapshot, filter="data")
             # Only forward inference needs a sealed profile or runner API.
             if direction == "target":
-                profile_plan = self.smoke_plan(snapshot, scope, machine_copy,
+                profile_plan = self.smoke_plan(snapshot, scope, target_machines,
                                                accounts=intent.get('smoke_accounts', []))
                 profile_path = folder / "target-test-profile.json"
                 atomic_json(profile_path, profile_plan["test_profile"])
-                sealed_plan = self.smoke_plan(snapshot, scope, machine_copy,
+                sealed_plan = self.smoke_plan(snapshot, scope, target_machines,
                     accounts=intent.get('smoke_accounts', []), test_profile=profile_path)
                 if profile_plan != sealed_plan:
                     raise Invalid("runner cannot honor sealed test profile")
@@ -347,7 +407,7 @@ class Runtime:
                 data = (snapshot / template).read_bytes().replace(self.d.RELEASE_CHECKOUT_TOKEN, str(self.repo).encode())
                 plistlib.loads(data)
             helpers = {}
-            for host in scope["included_hosts"]:
+            for host in selected_scope["included_hosts"]:
                 executor = policy.get("executors", {}).get(host)
                 if not isinstance(executor, dict) or not {"script", "python"} <= set(executor):
                     raise Invalid("included executor is missing")
@@ -361,7 +421,9 @@ class Runtime:
                                                hosts[host].get("ssh_target") is None)
                 release = self.installer.stage_helper_source(target, bundle, sha, manifest)
                 helper = {"target": vars(target), "python": str(python), "script": release + "/app/" + HELPER}
-                helper["proof"] = self.helper_proof(helper, accounts, identity, manifest, sha, test_profile=direction == "target")
+                helper["proof"] = self.helper_proof(helper, accounts, identity, manifest, sha, test_profile=direction == "target",
+                    **({"native_readiness": True} if bootstrap is not None and direction == "target"
+                       and host == qualification_host else {}))
                 if direction == "target" and helper["proof"]["closure"].get("test_profile") != profile_plan["test_profile"]:
                     raise Invalid("staged native helper test settings mismatch")
                 helpers[host] = helper
@@ -371,7 +433,7 @@ class Runtime:
                 source[direction].update(runner_sha256=file_digest(snapshot / RUNNER),
                     test_profile={"path": str(profile_path), "sha256": file_digest(profile_path)},
                     smoke_plan=sealed_plan)
-            daemon_helper = {**helpers[scope["local_hosts"][0]], "python": str(self.d._venv_python(self.repo, self.service))}
+            daemon_helper = {**helpers[selected_scope["local_hosts"][0]], "python": str(self.d._venv_python(self.repo, self.service))}
             source[direction]["daemon_interpreter"] = {"helper": daemon_helper,
                 "proof": self.helper_proof(daemon_helper, accounts, identity, manifest, sha, closure_only=True, test_profile=direction == "target")}
             if direction == "prior":
@@ -393,7 +455,18 @@ class Runtime:
                 "accounts": accounts, "source": source, "gates": evidence, "preimages": preimages,
                 "post_policy": {"path": str(post_policy_path), "sha256": file_digest(post_policy_path)},
                 "post_plist": {"path": str(post_plist_path), "sha256": file_digest(post_plist_path)}}
+        if bootstrap is not None:
+            prepared["prior_scope"] = prior_scope
+            prepared["qualification_catalog"] = catalog
+            prepared["qualification_admission_before"] = [hold, admission]
+            prepared["qualification_cells"] = first_qualification.prepare_cells(
+                qualification_host, source["target"]["smoke_plan"], accounts)
         return prepared
+
+    def check_target_catalog(self, machines):
+        decisions = self.d._catalog_release_exclusions(str(machines))
+        if any(row["status"] in {"active", "pending", "invalid", "migration_required"} for row in decisions):
+            raise Invalid("target catalog must select all fleet hosts without pending exclusions")
 
     def remote_json(self, helper, argv):
         target = self.installer.Target(**helper["target"])
@@ -459,10 +532,12 @@ class Runtime:
                 record("response_invalid")
             raise Invalid("helper proof response invalid") from exc
 
-    def helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False, test_profile=False):
+    def helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False,
+                     test_profile=False, native_readiness=False):
         try:
             return self._helper_proof(helper, accounts, identity, manifest, sha,
-                                      verify_release=verify_release, closure_only=closure_only, test_profile=test_profile)
+                verify_release=verify_release, closure_only=closure_only, test_profile=test_profile,
+                **({"native_readiness": True} if native_readiness else {}))
         except Invalid:
             raise
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -470,7 +545,8 @@ class Runtime:
         except Exception as exc:
             raise Invalid("helper closure/artifact verification failed: " + type(exc).__name__) from exc
 
-    def _helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False, test_profile=False):
+    def _helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False,
+                      test_profile=False, native_readiness=False):
         target = self.installer.Target(**helper["target"])
         if verify_release:
             self.installer.verify_helper_source(target, sha, manifest)
@@ -483,6 +559,11 @@ profile={}
 if sys.argv[2] == 'forward':
     from _shared.spawn_profiles import resolve_test_profile
     profile['test_profile']=resolve_test_profile()
+if sys.argv[3] == 'readiness':
+    import yaml, cryptography, jsonschema, qualification_admission
+    requirements=(app/'services/chat-stream-v2/requirements.txt').read_text().splitlines()
+    for package in ('PyYAML','cryptography','jsonschema'):
+        assert package+'=='+importlib.metadata.version(package) in requirements, 'helper_dependency_version_mismatch'
 origins={}; dependencies={}
 for name,module in list(sys.modules.items()):
     value=getattr(module,'__file__',None)
@@ -499,12 +580,13 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
  version=sys.version,modules=origins,dependency_files=dependencies,
  dependencies=sorted((d.metadata['Name'],d.version) for d in importlib.metadata.distributions()))))
 '''
-        closure = self.remote_json(helper, [helper["python"], "-I", "-c", program, app, "forward" if test_profile else "closure"])
+        closure = self.remote_json(helper, [helper["python"], "-I", "-c", program, app,
+            "forward" if test_profile else "closure", "readiness" if native_readiness else "standard"])
         if closure.get("identity") != identity or closure.get("python") != helper["python"]:
             raise Invalid("staged helper identity/interpreter mismatch")
         if closure_only:
             return closure
-        proofs = []
+        proofs, readiness = [], []
         for raw in accounts["selected_bindings"]:
             binding = Binding(**raw)
             if binding.host != target.name or not binding.enabled:
@@ -514,9 +596,22 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
                 "--operation-id", digest({"sha": sha, "binding": binding.key}), "--pin-json", canonical(accounts["pin"]).decode()])
             validate_proof(binding, accounts["pin"], proof, consumer_identity=identity)
             proofs.append(proof)
+            if native_readiness:
+                if binding.alias != "ours":
+                    raise Invalid("native readiness is restricted to the bootstrap host ours bindings")
+                response = self.remote_json(helper, [helper["python"], helper["script"], "observe-bound",
+                    "--provider", binding.provider, "--account", binding.alias, "--login-generation", binding.generation,
+                    "--operation-id", digest({"sha": sha, "readiness": binding.key}),
+                    "--pin-json", canonical(accounts["pin"]).decode()])
+                observed = response.get("observation") or {}
+                if (response.get("outcome") != "ok" or response.get("binding_key") != binding.key
+                        or response.get("artifact_proof") != proof or observed.get("auth_mode") != "subscription"
+                        or observed.get("provider_id") != binding.provider_id or observed.get("pool_id") != binding.pool_id):
+                    raise Invalid("bootstrap host native account readiness does not match the selected binding")
+                readiness.append({"binding_key": binding.key, "auth_mode": observed["auth_mode"]})
         if {Binding(**r).provider for r in accounts["selected_bindings"] if r["host"] == target.name and r["enabled"]} != {"claude", "codex"}:
             raise Invalid("included host lacks both provider bindings")
-        return {"closure": closure, "artifacts": proofs}
+        return {"closure": closure, "artifacts": proofs, **({"native_readiness": readiness} if native_readiness else {})}
 
     def smoke_argv(self, snapshot, scope, machines, *, accounts=(), dry_run=False, test_profile=None, report_only=False):
         return ("/usr/bin/env", "-u", "PENTACLE_MACHINES_JSON", "-u", "PENTACLE_SMOKE_HOSTS",
@@ -565,8 +660,18 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
                     or settings["mode"] is not None and stat.S_IMODE(info.st_mode) != settings["mode"]):
                 raise Invalid("test settings owner/type/permission drift")
         paths = {key: value["path"] for key, value in receipt["preimages"].items()}
-        return {"sha": self.git("rev-parse", "HEAD"),
-                "files": {key: file_digest(path) if Path(path).exists() else None for key, path in paths.items()}}
+        result = {"sha": self.git("rev-parse", "HEAD"),
+                  "files": {key: file_digest(path) if Path(path).exists() else None for key, path in paths.items()}}
+        if "prior_scope" in receipt:
+            result["catalog"] = first_qualification.check_catalog(receipt)
+            for key, path in paths.items():
+                if result["files"][key] is not None:
+                    info = Path(path).lstat()
+                    old = receipt["preimages"][key]
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != old["uid"]
+                            or stat.S_IMODE(info.st_mode) != old["mode"]):
+                        raise Invalid("first qualification file ownership or mode drift")
+        return result
 
     def check_preimages(self, receipt):
         for row in receipt["preimages"].values():
@@ -617,21 +722,39 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         if 'post_schedule' in receipt and receipt['post_schedule']['path'] != str(folder/'schedule.after'):
             raise Invalid('scheduled account definition substitution')
         self.check_preimages(receipt)
-        if (file_digest(receipt["intent"]["machines_file"]) != receipt["machines_sha256"]
+        bootstrap = receipt["intent"].get("first_qualification")
+        machines = receipt["intent"]["machines_file"]
+        if bootstrap is not None:
+            first_qualification.check_catalog(receipt)
+            machines = receipt["qualification_catalog"]["target_snapshot"]
+            if forward:
+                self.check_target_catalog(machines)
+        elif (file_digest(machines) != receipt["machines_sha256"]
                 or file_digest(private_file(receipt["machines_snapshot"])) != receipt["machines_sha256"]):
             raise Invalid("machine catalog drift")
-        scope = host_scope(receipt["intent"]["machines_file"], receipt["intent"]["excluded_hosts"])
+        scope = host_scope(machines, receipt["intent"]["excluded_hosts"])
         if scope != receipt["scope"]:
             raise Invalid("sealed scope substitution")
+        original_stamp = receipt["preimages"]["stamp"]
+        stamp = read_json(original_stamp["saved"]) if original_stamp["saved"] else {}
+        prior_scope = scope
+        if bootstrap is not None:
+            first_qualification.validate_intent(receipt["intent"], scope)
+            first_qualification.validate_window(bootstrap, require_current=forward)
+            prior_scope = first_qualification.prior_scope(receipt["intent"], receipt["machines_snapshot"],
+                stamp, original_stamp["sha256"], receipt["machines_sha256"])
+            if prior_scope != receipt.get("prior_scope"):
+                raise Invalid("sealed first qualification prior scope substitution")
         original_policy = json.loads(Path(receipt["preimages"]["policy"]["saved"]).read_bytes())
         expected_policy = copy.deepcopy(original_policy)
         hosts = {row["name"]: row for row in scope["machines"]}
         for direction in ("target", "prior"):
+            selected_scope = prior_scope if direction == "prior" else scope
             source = receipt["source"][direction]
             sha = receipt["intent"][direction + "_sha"]
             if (source["sha"] != sha or source["manifest"].get("commit") != sha
                     or source["snapshot"] != str(Path(receipt["transaction_directory"]) / (direction + "-source"))
-                    or set(source["helpers"]) != set(scope["included_hosts"])
+                    or set(source["helpers"]) != set(selected_scope["included_hosts"])
                     or source["code_identity"] != code_identity_at(self.repo, sha, self.runner)):
                 raise Invalid("sealed source substitution")
             if direction == "target" and forward:
@@ -650,7 +773,7 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
                     raise Invalid("sealed helper path/interpreter/transport substitution")
                 if direction == "target":
                     expected_policy["executors"][host]["script"] = helper["script"]
-            daemon_helper = {**source["helpers"][scope["local_hosts"][0]],
+            daemon_helper = {**source["helpers"][selected_scope["local_hosts"][0]],
                              "python": str(self.d._venv_python(self.repo, self.service))}
             if source["daemon_interpreter"]["helper"] != daemon_helper:
                 raise Invalid("sealed daemon interpreter substitution")
@@ -661,14 +784,13 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         if plistlib.loads(Path(receipt["post_plist"]["path"]).read_bytes()) != expected_plist:
             raise Invalid("sealed launchd definition substitution")
         policy = json.loads(private_file(receipt["intent"]["policy_file"]).read_bytes())
-        accounts = self.account_snapshot(policy, receipt["accounts"]["database"], accounts=receipt["intent"].get("smoke_accounts"), scope=receipt["scope"])
+        accounts = self.account_snapshot(policy, receipt["accounts"]["database"], accounts=receipt["intent"].get("smoke_accounts"),
+            scope=scope, **({"qualification_host": bootstrap["prior_exclusion"]["host"]} if bootstrap is not None else {}))
         if accounts != receipt["accounts"]:
             raise Invalid("provider pin/account generation drift")
         from deploy.restoration import qualified_prior
-        original_stamp = receipt["preimages"]["stamp"]
-        stamp = read_json(original_stamp["saved"]) if original_stamp["saved"] else {}
         if qualified_prior(stamp, receipt["intent"]["prior_sha"], [b for b in accounts["selected_bindings"]
-                if b["host"] in scope["included_hosts"]]) != receipt["prior_qualification"]:
+                if b["host"] in prior_scope["included_hosts"]]) != receipt["prior_qualification"]:
             raise Invalid("prior qualification substitution")
         for direction in ("target", "prior"):
             gate = receipt["gates"][direction]
@@ -685,15 +807,26 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         if forward:  # the sealed target, before any stop; rollback is never gated
             self.d._load_read_timing_receipt(self.read_timing_receipt, receipt["intent"]["target_sha"])
         self.validate_common(receipt, forward=forward)
+        bootstrap = receipt["intent"].get("first_qualification")
+        if forward and bootstrap is not None and self.live_identity(receipt["intent"]["prior_sha"]) != bootstrap["expected_live"]:
+            raise Invalid("live prior identity drift after first qualification preparation")
+        if forward and bootstrap is not None and list(first_qualification.read_runtime_admission(
+                receipt["accounts"]["database"], bootstrap["prior_exclusion"]["host"])) != receipt["qualification_admission_before"]:
+            raise Invalid("bootstrap host admission changed after preparation")
         now = self.current(receipt)
         if now["sha"] != receipt["intent"]["prior_sha"] or any(now["files"][key] != value["sha256"] for key, value in receipt["preimages"].items()):
             raise Invalid("source/policy/plist/stamp drift after preparation")
+        if bootstrap is not None and now["catalog"] != receipt["machines_sha256"]:
+            raise Invalid("machine catalog changed before first qualification")
         if self.d._dirty_entries(self.repo, self.runner):
             raise Invalid("release checkout drift")
         for direction in (("target", "prior") if forward else ("prior",)):
             source = receipt["source"][direction]
-            for helper in source["helpers"].values():
-                if self.helper_proof(helper, receipt["accounts"], source["code_identity"], source["manifest"], source["sha"], test_profile=direction == "target") != helper["proof"]:
+            for host, helper in source["helpers"].items():
+                if self.helper_proof(helper, receipt["accounts"], source["code_identity"], source["manifest"], source["sha"],
+                        test_profile=direction == "target",
+                        **({"native_readiness": True} if bootstrap is not None and direction == "target"
+                           and host == bootstrap["prior_exclusion"]["host"] else {})) != helper["proof"]:
                     raise Invalid("staged helper proof drift")
             daemon = source["daemon_interpreter"]
             if self.helper_proof(daemon["helper"], receipt["accounts"], source["code_identity"], source["manifest"], source["sha"], closure_only=True, test_profile=direction == "target") != daemon["proof"]:
@@ -704,7 +837,8 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
                 raise Invalid("original helper proof drift before stop")
         if forward:
             source = receipt["source"]["target"]
-            if self.smoke_plan(source["snapshot"], receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
+            machines = receipt["qualification_catalog"]["target_snapshot"] if bootstrap is not None else receipt["machines_snapshot"]
+            if self.smoke_plan(source["snapshot"], receipt["scope"], machines, accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
                 raise Invalid("runner plan drift")
         self.guard(receipt, rollback=not forward)
 
@@ -780,6 +914,10 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             if (not fresh.answered or fresh.pid != pid or fresh.loaded != state.loaded
                     or (pid and self.d._process_start(pid, self.runner) != start)):
                 raise Invalid("admitted daemon identity changed before bootout")
+            if pid and expected_identity.get('sha') is not None:
+                confirmed, _ = self.d._verify_runtime_sha(expected_identity['sha'], pid)
+                if not confirmed:
+                    raise Invalid("admitted daemon SHA changed before bootout")
         if state.loaded:
             self.checked(("launchctl", "bootout", self.d._launchctl_target(self.service.launchd_label)))
         final = self.d._wait_launchd_unloaded(self.service.launchd_label, self.runner, timeout_s=self.d.RELOAD_UNLOAD_WAIT_S)
@@ -803,6 +941,8 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         if not self.stopped:
             raise Invalid("source/policy switch requires proven process exit")
         self.validate_common(receipt, forward=not rollback)
+        if "prior_scope" in receipt:
+            self.check_first_qualification_authorization()
         if self.d._dirty_entries(self.repo, self.runner):
             raise Invalid("release source drift while stopping")
         self.guard(receipt, rollback=True)
@@ -811,7 +951,11 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         if not self.stopped:
             raise Invalid("ordered switch requires stopped daemon")
         direction = "prior" if rollback else "target"
+        if "prior_scope" in receipt:
+            first_qualification.change_admission(receipt, "rollback" if rollback else "fenced")
         self.checked(("git", "checkout", "--detach", receipt["source"][direction]["sha"]))
+        if "prior_scope" in receipt:
+            first_qualification.change_catalog(receipt, rollback=rollback)
         if rollback:
             for key in ("policy", "plist", "collector", "stamp", "test_settings", *(("schedule",) if 'post_schedule' in receipt else ())):
                 row = receipt["preimages"][key]
@@ -852,14 +996,29 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             if value not in allowed:
                 raise Invalid("unrelated policy/plist/schedule/stamp drift blocks recovery")
         auth = self.recovery_authorization
+        if "prior_scope" in receipt:
+            expected = self.check_first_qualification_authorization()["expected_live"]
+            state = self.d._launchd_state(self.service.launchd_label, self.runner)
+            if (not state.answered or state.pid != expected["pid"] or now["sha"] != expected["sha"]
+                    or (state.pid is not None and self.live_identity(now["sha"]) != expected)):
+                raise Invalid("first qualification recovery process differs from FD approval")
+            hold, admission = self.qualification_admission(receipt)
+            if ([hold, admission] not in (receipt["qualification_admission_before"], [None, None])
+                    and not (first_qualification.owned_hold(hold, admission)
+                             and admission["seal"] == receipt["receipt_sha256"])):
+                raise Invalid("unrelated bootstrap host admission state blocks recovery")
+            prior = receipt["source"]["prior"]
+            for helper in prior["helpers"].values():
+                if self.helper_proof(helper, receipt["accounts"], prior["code_identity"], prior["manifest"], prior["sha"]) != helper["proof"]:
+                    raise Invalid("staged prior helper proof drift before recovery")
         if auth is not None:
             live = auth["expected_live"]
             state = self.d._launchd_state(self.service.launchd_label, self.runner)
             if (not state.answered or state.pid != live["pid"] or now["sha"] != live["sha"]
                     or self.d._process_start(state.pid, self.runner) != live["birth"]):
                 raise Invalid("expected live daemon identity drift")
-            # The replacement controller's installer must reproduce the sealed
-            # prior proofs before any stop, as forward revalidate does.
+        if auth is not None or "prior_scope" in receipt:
+            # Reproduce the sealed prior proofs before any recovery stop.
             prior = receipt["source"]["prior"]
             for helper in prior["original_helpers"].values():
                 if self.helper_proof(helper, receipt["accounts"], prior["code_identity"], prior["manifest"], prior["sha"], verify_release=False) != helper["proof"]:
@@ -869,6 +1028,10 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         self.validate_common(receipt, forward=False)
         if self.current(receipt) != journal.get("restored"):
             raise Invalid("restored state drift")
+        if "prior_scope" in receipt:
+            hold, admission = self.qualification_admission(receipt)
+            if not first_qualification.owned_hold(hold, admission) or admission["phase"] != "rollback":
+                raise Invalid("restored bootstrap host admission fence is unproven")
 
     def keep_stopped(self, receipt):
         self.stop(receipt)
@@ -885,8 +1048,16 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         try:
             return self._start_verify(receipt, rollback=rollback, partial=partial)
         except Exception as exc:
+            if "prior_scope" in receipt and not rollback:
+                try:
+                    hold, admission = self.qualification_admission(receipt)
+                    if (first_qualification.owned_hold(hold, admission) and admission["phase"] == "testing"
+                            and admission["seal"] == receipt["receipt_sha256"]):
+                        first_qualification.change_admission(receipt, "failed")
+                except (OSError, ValueError, sqlite3.Error, Invalid) as fence_error:
+                    partial["admission_readback_error"] = type(fence_error).__name__
             # Completed sub-results survive a later verifier's raise.
-            exc.partial_result = {"outcome": "failed", **copy.deepcopy(partial)}
+            exc.partial_result = {**copy.deepcopy(partial), "outcome": "failed"}
             raise
 
     def _start_verify(self, receipt, *, rollback, partial):
@@ -912,6 +1083,10 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             raise Invalid("loaded runtime SHA not confirmed")
         partial["runtime"] = runtime
         self.validate_common(receipt, forward=not rollback)
+        if "prior_scope" in receipt:
+            expected_catalog = receipt["machines_sha256"] if rollback else receipt["qualification_catalog"]["target_sha256"]
+            if first_qualification.check_catalog(receipt) != expected_catalog:
+                raise Invalid("live catalog does not match the activated scope")
         dispatch = []
         result = {"outcome": "passed", "boot": boot.as_stamp(), "runtime": runtime}
         if rollback:
@@ -924,52 +1099,136 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             try:
                 result["restoration"] = self.restoration_proof(receipt, source, boot)
             except Exception as exc:
+                if "prior_scope" in receipt:
+                    raise
                 result["restoration"] = {"outcome": "failed", "reason": str(exc)}
             if not self.verified_prior or not self.prior_still_running(receipt, self.verified_prior):
                 raise Invalid("prior process identity changed during restoration report")
+            if "prior_scope" in receipt:
+                hold, admission = self.qualification_admission(receipt)
+                if not first_qualification.owned_hold(hold, admission) or admission["phase"] != "rollback":
+                    raise Invalid("restored bootstrap host admission fence is unproven")
             result["model_canary"] = {"outcome": "not_run_by_design"}
             row = receipt["preimages"]["stamp"]
             if row["saved"]: atomic_bytes(row["path"], Path(row["saved"]).read_bytes(), mode=row["mode"])
             else: Path(row["path"]).unlink(missing_ok=True)
         else:
-            # Produce the existing actual dispatch proof without model input.
-            # Full fleet smoke is a later report, never a serving rollback gate.
             from deploy.restoration import verify_no_input
+            qualifying = "prior_scope" in receipt
+            dispatch_scope = receipt.get("prior_scope", receipt["scope"])
             bindings = [b for b in receipt["accounts"]["selected_bindings"]
-                        if b["host"] in receipt["scope"]["included_hosts"] and b["enabled"]]
+                        if b["host"] in dispatch_scope["included_hosts"] and b["enabled"]]
             verify_no_input(bindings, Path(receipt["transaction_directory"]) / "forward-owned")
+            if qualifying:
+                partial.update(self.qualify_first_host(receipt, boot, stamp))
+                if partial["outcome"] != "passed":
+                    raise Invalid("first qualification failed a required fleet or activation check")
             dispatch = self.dispatched_proofs(receipt, source, boot)
             self.validate_common(receipt, forward=True)
             stamp.update(daemon_boot_readback=boot.as_stamp(), daemon_runtime_readback=runtime,
                          coordinated_phase="committed")
-            self.d._write_stamp(self.repo, self.service, stamp)
+            if qualifying:
+                self.check_activated_qualification_config(receipt)
+                self.finish_first_qualification(receipt, stamp, partial["qualification_instance"])
+                result.update(partial)
+            else:
+                self.d._write_stamp(self.repo, self.service, stamp)
         result["helper_dispatch"] = dispatch
         partial.update(result)
         return result
 
-    def post_checks(self, receipt, serving):
+    def qualification_admission(self, receipt):
+        host = receipt["intent"]["first_qualification"]["prior_exclusion"]["host"]
+        return first_qualification.read_runtime_admission(receipt["accounts"]["database"], host)
+
+    def post_checks(self, receipt, serving, *, first_qualification=False, stamp=None):
         source = receipt["source"]["target"]
-        stamp = self.d._read_stamp(self.repo, self.service)
+        if stamp is None:
+            stamp = self.d._read_stamp(self.repo, self.service)
         def smoke_check():
+            machines = receipt["qualification_catalog"]["target_snapshot"] if first_qualification else receipt["machines_snapshot"]
             if file_digest(self.repo / RUNNER) != source["runner_sha256"]:
                 raise Invalid("installed smoke runner drift")
-            if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
+            if self.smoke_plan(self.repo, receipt["scope"], machines, accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
                 raise Invalid("pre-canary runner plan drift")
-            smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"], report_only=True), self.repo)
-            return self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
+            argv = self.smoke_argv(self.repo, receipt["scope"], machines,
+                accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"], report_only=True)
+            if first_qualification:
+                argv += ("--first-qualification-keys", str(Path(receipt["transaction_directory"]) / "qualification-keys.json"))
+            smoke = self.runner(argv, self.repo)
+            if first_qualification:
+                atomic_json(Path(receipt["transaction_directory"]) / "first-fleet-result.json",
+                            {"exit": smoke.returncode, "report": self.d._smoke_payload(smoke)})
+            return self.d._fleet_smoke_verdict(smoke, machines,
                         declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=read_json(source["test_profile"]["path"]))
         boot = self.d.BootReadback(**serving["boot"])
         checks = self.d.run_post_release_checks(self.service, self.repo, source["sha"], stamp,
                     runner=self.runner, prior_log_size=self.log_offsets,
                     prior_pid=self.old_pid, prior_start=self.old_start, boot=boot,
                     fleet_smoke_check=smoke_check, no_outgoing_writer=self.old_pid is None)
-        self.d._write_stamp(self.repo, self.service, stamp)
+        if not first_qualification:
+            self.d._write_stamp(self.repo, self.service, stamp)
         return {**checks, "outcome": "passed" if all(value.get("outcome") == "passed" for value in checks.values()) else "failed"}
+
+    def qualify_first_host(self, receipt, boot, stamp):
+        from deploy.restoration import BINDING_FIELDS
+        keys = {}
+        for key, cell in receipt["qualification_cells"].items():
+            request = cell["request"]
+            mode = "prompted" if "initial_prompt" in request else "promptless"
+            keys[f"{request['provider']}/{mode}"] = key
+        path = Path(receipt["transaction_directory"]) / "qualification-keys.json"
+        host = receipt["intent"]["first_qualification"]["prior_exclusion"]["host"]
+        birth = self.d._process_start(boot.pid, self.runner)
+        expected = {"sha": receipt["intent"]["target_sha"], "pid": boot.pid, "birth": birth}
+        if not birth or self.live_identity(expected["sha"]) != expected:
+            raise Invalid("bootstrap host qualification target process identity changed")
+        deadline = self.check_first_qualification_authorization()["expires_at"]
+        try:
+            atomic_json(path, {"host": host, "cells": keys})
+            first_qualification.change_admission(receipt, "testing", pid=boot.pid,
+                cells=receipt["qualification_cells"], deadline=deadline)
+            checks = self.post_checks(receipt, {"boot": boot.as_stamp()}, first_qualification=True, stamp=stamp)
+        finally:
+            path.unlink(missing_ok=True)
+        rows = checks["fleet_smoke"].get("cells", [])
+        bindings = {(b["host"], b["provider"]): b for b in receipt["accounts"]["selected_bindings"]}
+        expected_cells = {(host, provider, mode) for host, provider in bindings for mode in ("prompted", "promptless")}
+        if (checks["outcome"] != "passed" or len(rows) != len(expected_cells)
+                or {(r.get("host"), r.get("provider"), r.get("prompt_mode")) for r in rows} != expected_cells
+                or any(r.get("outcome") != "passed" or any(
+                    (r.get("account_binding") or {}).get(key) != bindings[(r["host"], r["provider"])][key]
+                    for key in BINDING_FIELDS) for r in rows)):
+            return {**checks, "outcome": "failed", "qualification_instance": expected}
+        return {**checks, "qualification_instance": expected}
+
+    def check_activated_qualification_config(self, receipt):
+        now = self.current(receipt)
+        expected = {key: value["sha256"] for key, value in receipt["preimages"].items() if key != "stamp"}
+        expected.update(policy=receipt["post_policy"]["sha256"], plist=receipt["post_plist"]["sha256"])
+        if (now["sha"] != receipt["intent"]["target_sha"]
+                or any(now["files"][key] != value for key, value in expected.items())
+                or now["catalog"] != receipt["qualification_catalog"]["target_sha256"]):
+            raise Invalid("activated bootstrap host source, policy, or catalog drift")
+
+    def finish_first_qualification(self, receipt, stamp, expected):
+        self.check_first_qualification_authorization()
+        if self.live_identity(expected["sha"]) != expected:
+            raise Invalid("target identity drift before bootstrap host qualification commit")
+        stamp["first_qualification"] = {
+            "runtime": expected,
+            "host": receipt["intent"]["first_qualification"]["prior_exclusion"]["host"],
+            "prior_scope": receipt["prior_scope"]["included_hosts"],
+        }
+        stamp["smoke_accounts"] = receipt["intent"]["smoke_accounts"]
+        self.d._write_stamp(self.repo, self.service, stamp)
+        first_qualification.change_admission(receipt, "release")
 
     def restoration_proof(self, receipt, source, boot):
         from deploy.restoration import verify_no_input
+        scope = receipt.get("prior_scope", receipt["scope"])
         bindings = [b for b in receipt["accounts"]["selected_bindings"]
-                    if b["host"] in receipt["scope"]["included_hosts"] and b["enabled"]]
+                    if b["host"] in scope["included_hosts"] and b["enabled"]]
         result = verify_no_input(bindings, Path(receipt["transaction_directory"]) / "rollback-owned")
         expected = {(b["host"], b["provider"], b["alias"], b["generation"]) for b in bindings}
         cells = result.get("cells", [])
@@ -978,8 +1237,8 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
                 or any(b.get("outcome") != "passed" or b.get("cleanup") != "passed"
                        or not b.get("session_generation") for b in cells)):
             raise Invalid("incomplete no-input restoration proof")
-        result.update(included_hosts=receipt["scope"]["included_hosts"],
-                      excluded_hosts=receipt["scope"].get("excluded_hosts", []),
+        result.update(included_hosts=scope["included_hosts"],
+                      excluded_hosts=scope.get("excluded_hosts", []),
                       full_fleet_acceptance=False,
                       runtime={"sha":source["sha"], "pid":boot.pid,
                                "birth":self.d._process_start(boot.pid, self.runner)})
@@ -991,10 +1250,13 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
 
     def dispatched_proofs(self, receipt, source, boot):
         proofs = []
+        scope = receipt["scope"]
+        if "prior_scope" in receipt and source["sha"] == receipt["intent"]["prior_sha"]:
+            scope = receipt["prior_scope"]
         with sqlite3.connect(Path(receipt["accounts"]["database"]).as_uri() + "?mode=ro", uri=True) as conn:
             for raw in receipt["accounts"]["selected_bindings"]:
                 binding = Binding(**raw)
-                if binding.host not in receipt["scope"]["included_hosts"] or not binding.enabled: continue
+                if binding.host not in scope["included_hosts"] or not binding.enabled: continue
                 row = conn.execute("SELECT v FROM kv WHERE k=?", ("provider_cli.verified:" + binding.key,)).fetchone()
                 if not row: raise Invalid("actual helper dispatch proof missing")
                 value = json.loads(row[0])

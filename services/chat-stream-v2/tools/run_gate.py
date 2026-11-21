@@ -2,6 +2,7 @@
 """Run one v2 gate tier and write exact-SHA machine-readable evidence."""
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -73,6 +74,27 @@ def _junit_counts(path: Path) -> dict[str, Any] | None:
     return result
 
 
+def _advisory_observed(path: Path, expected: list[str]) -> bool:
+    root = ET.parse(path).getroot()
+    cases = list(root.iter('testcase'))
+    if any(case.find('skipped') is not None for case in cases):
+        return False
+    observed = [case.get('classname', '') + '::' + case.get('name', '') for case in cases]
+    keys = []
+    for node in expected:
+        head, bracket, parameter = node.partition('[')
+        file, *parts = head.split('::')
+        if not file.endswith('.py') or not parts:
+            return False
+        if bracket:
+            parts[-1] += bracket + parameter
+        module = file[:-3].replace('/', '.')
+        if len(parts) > 1:
+            module += '.' + '.'.join(parts[:-1])
+        keys.append(module + '::' + parts[-1])
+    return len(observed) == len(keys) and set(observed) == set(keys)
+
+
 def _sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
 def _git_status() -> str:
@@ -93,8 +115,8 @@ def _apply_strict_full_soak(env: dict[str, str]) -> None:
         env.update({"SOAK_TIER": "full", **SOAK_PRESETS["full"]})
 def _tier_command(tier: str, junit: Path, basetemp: Path) -> list[str]:
     args = {
-        "unit": ["tests", "--ignore=tests/smoke", "--ignore=tests/soak", "-m", "not soak and not repin_exhaustive and not quarantined", "-q", "-rs"],
-        "smoke": ["tests/smoke", "-q", "-rs", "--maxfail=1"],
+        "unit": ["tests", "--ignore=tests/smoke", "--ignore=tests/soak", "-m", "not soak and not repin_exhaustive and not quarantined and not admission_hold", "-q", "-rs"],
+        "smoke": ["tests/smoke", "-m", "not quarantined and not admission_hold", "-q", "-rs", "--maxfail=1"],
         "soak": ["tests/soak", "-m", "soak", "-q", "-s", "-rs"],
     }.get(tier)
     if args is None:
@@ -201,7 +223,8 @@ def _copy_output(proc: subprocess.Popen[str], path: Path, facts: dict[str, Any])
             log.close()
         except OSError as exc:
             facts["log_error"] = type(exc).__name__
-def _run_process(command: list[str], *, env: dict[str, str], log_path: Path, timeout: float) -> tuple[int, bool]:
+def _run_process(command: list[str], *, env: dict[str, str], log_path: Path, timeout: float,
+                 advisory: bool = False) -> tuple[int, bool]:
     global _TERMINATION_REQUESTED
     output: dict[str, Any] = {"bytes": 0, "logged_bytes": 0, "dropped_bytes": 0, "truncated": False, "log_error": None, "echo_error": None, "reader_joined": False}
     _LAST_PROCESS.clear()
@@ -222,8 +245,9 @@ def _run_process(command: list[str], *, env: dict[str, str], log_path: Path, tim
         _LAST_PROCESS["termination"] = {"kind": "external_signal", "signal": _TERMINATION_SIGNAL or "SIGINT"}
         code = 143
     except subprocess.TimeoutExpired:
-        _TERMINATION_REQUESTED = True
-        _mark_active()
+        if not advisory:
+            _TERMINATION_REQUESTED = True
+            _mark_active()
         terminate_process_group(proc)
         _LAST_PROCESS["termination"] = {"kind": "internal_timeout", "signal": None, "bound_s": timeout}
         timed_out, code = True, 124
@@ -276,6 +300,7 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
     return primary, reporting
 def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1,
               shard_index: int | None = None, shard_count: int | None = None) -> dict[str, Any]:
+    started = time.monotonic()
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
     junit, log = evidence / f"{tier}.junit.xml", evidence / f"{tier}.log"
@@ -284,6 +309,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     journal.unlink(missing_ok=True)
     env, soak = os.environ.copy(), None
     env[MANIFEST_ENV] = str(manifest)
+    env['PYTHONPATH'] = os.pathsep.join(filter(None, (str(REPO_ROOT / 'scripts'), env.get('PYTHONPATH', ''))))
     # The fleet gate is strict: a capability a managed test requires must be present, never a green skip.
     # Only a sandbox that truly lacks tmux/ps/lsof may opt out by exporting PENTACLE_TEST_STRICT_CAPABILITIES=0;
     # never a fleet, merge or deploy gate, and never CI (see docs/TEST_CAPABILITIES.md).
@@ -302,6 +328,11 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
         if preflight != 0:
             return _result(tier, code=preflight, passed=False, reason="preflight_failed", timed_out=preflight_timeout, preflight=preflight, command=[str(PRE_FLIGHT)], junit=junit, log=log, soak=soak)
     command = _tier_command(tier, junit, basetemp)
+    admission_manifest = evidence / f'{tier}.admission.json'
+    if tier in {'unit', 'smoke'}:
+        admission_manifest.unlink(missing_ok=True)
+        command += ['-p', 'admission_plugin', f'--admission-root={REPO_ROOT}', '--admission-suite=daemon',
+                    f'--admission-manifest={admission_manifest}']
     if tier == "unit" and unit_workers > 1:
         command += ["-n", str(unit_workers), "--dist", "loadfile", "--max-worker-restart=0"]
     command += ["-p", "tools.gate_progress", f"--gate-progress-journal={journal}", f"--gate-progress-run-id={_ACTIVE_RUN_ID or ''}:{tier}"]
@@ -322,6 +353,59 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     result = _result(tier, code=code, passed=reason is None, reason=reason, command=command, timed_out=timed_out, preflight=preflight if tier in {"smoke", "soak"} else None, junit=junit, log=log, counts=counts, soak=soak,
                      bound_s=timeout, subprocess_returncode=facts.get("subprocess_returncode"), termination=facts.get("termination"), output=facts.get("output"), progress=progress)
     result["secondary_outcomes"] = secondary
+    if tier in {'unit', 'smoke'} and counts and 'parse_error' not in counts and not terminated and not timed_out:
+        try:
+            admission_state = json.loads(admission_manifest.read_text())
+            if admission_state.get('complete') is not True or not isinstance(admission_state.get('held'), list):
+                raise ValueError('admission inventory incomplete')
+            if str(REPO_ROOT / 'scripts') not in sys.path:
+                sys.path.insert(0, str(REPO_ROOT / 'scripts'))
+            from admission_inputs import load_quarantine
+            data = load_quarantine(REPO_ROOT)
+            tests = data['nonblocking_tests']
+            if (data['version'] != 1 or not isinstance(tests, list)
+                    or any(not isinstance(t, str) or '::' not in t for t in tests)
+                    or len(set(tests)) != len(tests)):
+                raise ValueError('invalid quarantine inventory')
+            tests = [t.removeprefix('daemon::') for t in tests
+                     if t.startswith(('tests/', 'daemon::tests/'))]
+            tests = [t for t in tests if (t.startswith('tests/smoke/') if tier == 'smoke'
+                                           else not t.startswith(('tests/smoke/', 'tests/soak/')))]
+            tests.extend(row['id'] for row in admission_state['held'])
+            tests = sorted(set(tests))
+            files = sorted({t.split('::', 1)[0] for t in tests})
+            if shard_index is not None:
+                files = [file for file in files if int(hashlib.sha256(file.encode()).hexdigest(), 16) % shard_count == shard_index]
+            if files:
+                for test in tests:
+                    if test.split('::', 1)[0] in files:
+                        print('[v2-gate] advisory ' + test, flush=True)
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise ValueError('no time remaining for quarantine advisory')
+                advisory_junit = evidence / f'{tier}-advisory.junit.xml'
+                advisory_junit.unlink(missing_ok=True)
+                advisory_command = [_python_bin(), '-m', 'pytest', *files, '-m', 'quarantined or admission_hold', '-q', '-rs',
+                                    '-p', 'admission_plugin', f'--admission-root={REPO_ROOT}', '--admission-suite=daemon',
+                                    f'--admission-manifest={evidence / (tier + "-advisory-admission.json")}',
+                                    f'--junitxml={advisory_junit}', '--basetemp', str(basetemp / (tier + '-advisory'))]
+                advisory_code, advisory_timeout = _run_process(advisory_command, env=env,
+                    log_path=evidence / 'unit-advisory.log', timeout=remaining, advisory=True)
+                result['advisory'] = {'command': advisory_command, 'returncode': advisory_code,
+                                      'timed_out': advisory_timeout, 'junit': str(advisory_junit),
+                                      'counts': _junit_counts(advisory_junit)}
+                if advisory_code not in (0, 1) and not advisory_timeout:
+                    raise ValueError('quarantine advisory did not execute')
+                expected = [test for test in tests if test.split('::', 1)[0] in files]
+                if not advisory_timeout and not _advisory_observed(advisory_junit, expected):
+                    raise ValueError('quarantined identity missing from advisory execution')
+        except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as exc:
+            result['advisory_error'] = type(exc).__name__
+            if result['passed']:
+                result.update(passed=False, reason='quarantine_advisory_incomplete',
+                              primary_outcome='quarantine_advisory_incomplete')
+            else:
+                result['secondary_outcomes'].append('quarantine_advisory_incomplete')
     return result
 
 
@@ -505,6 +589,10 @@ def main() -> int:
             if not cleanup_errors and not manifest.exists():
                 for tier in tiers:
                     shutil.rmtree(basetemp / tier, ignore_errors=True)
+                    if tier in {'unit', 'smoke'}:
+                        shutil.rmtree(basetemp / (tier + '-advisory'), ignore_errors=True)
+                        if (basetemp / (tier + '-advisory')).exists():
+                            cleanup_errors.append('basetemp_not_removed:' + tier + '-advisory')
                     if (basetemp / tier).exists():
                         cleanup_errors.append(f"basetemp_not_removed:{tier}")
             elif manifest.exists() and not cleanup_errors:

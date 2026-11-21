@@ -474,10 +474,26 @@ def run_preflight_script(run, script: Path, env: Dict[str, str]) -> List[Dict[st
 def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path) -> List[str]:
     spec = target.get("select")
     if not select:
+        if target.get("quarantine_defaults"):
+            try:
+                from admission_inputs import load_quarantine
+                data = load_quarantine(checkout)
+                tests = data["nonblocking_tests"]
+                if (data["version"] != 1 or not isinstance(tests, list)
+                        or any(not isinstance(t, str) or not t or "::" not in t for t in tests)
+                        or len(set(tests)) != len(tests)):
+                    raise ValueError("invalid quarantine inventory")
+                select = sorted({t.removeprefix("daemon::").split("::", 1)[0]
+                                 for t in tests if t.startswith(("tests/", "daemon::tests/"))})
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise SetupFailure([fail("selection", "quarantine inventory unavailable: %s" % exc, "")]) from exc
+            if not select:
+                return []
         if spec and "default_patterns" not in target:
             # A bare pytest target would collect its whole rootdir; a focused target never defaults to the full suite.
             raise SetupFailure([fail("selection", "this target requires at least one --select", "name the test files (and optional ::nodes) to run; use a v2-unit/v2-merge target for the full suite")])
-        return list(target.get("default_patterns", []))
+        if not select:
+            return list(target.get("default_patterns", []))
     if not spec:
         raise SetupFailure([fail("selection", "this target takes no --select", "")])
     pattern = re.compile(spec["pattern"])
@@ -561,6 +577,8 @@ def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, can
         return "harness_failure", ff, secondary  # killed by a signal the runner did not send
     if reason == "test_failures":
         return ("product_failure" if counts.get("failures") else "unknown"), ff, secondary
+    if reason == 'quarantine_advisory_incomplete':
+        return 'incomplete', ff, secondary
     if reason in ("missing_junit", "invalid_junit", "no_tests_collected", "source_changed_during_gate", "soak_skipped", "evidence_incomplete", "usage_manifest_invalid", "usage_manifest_timeout"):
         return "harness_failure", ff, secondary
     return "unknown", ff, secondary
@@ -583,6 +601,22 @@ def classify_pytest(junit: Path, returncode: int, timed_out: bool, cancelled: bo
     return "unknown", {"stage": "subject", "code": "errors_without_assertions"}, {"counts": counts}
 
 
+def classify_admission_pytest(junit: Path, final: Path, returncode: int, timed_out: bool, cancelled: bool):
+    outcome, failure, secondary = classify_pytest(junit, returncode, timed_out, cancelled)
+    if timed_out or cancelled:
+        return outcome, failure, secondary
+    try:
+        complete = json.loads(final.read_text()).get('complete') is True
+    except (OSError, ValueError, AttributeError):
+        complete = False
+    if not complete:
+        secondary['admission'] = 'incomplete'
+        if outcome == 'product_failure':
+            return outcome, failure, secondary
+        return 'incomplete', {'stage': 'subject', 'code': 'admission_incomplete'}, secondary
+    return outcome, failure, secondary
+
+
 def classify_npm(summary: Path, returncode: int, timed_out: bool, cancelled: bool) -> Tuple[str, Optional[Dict[str, str]], Dict[str, Any]]:
     if cancelled:
         return "cancelled", {"stage": "subject", "code": "cancelled"}, {}
@@ -597,6 +631,21 @@ def classify_npm(summary: Path, returncode: int, timed_out: bool, cancelled: boo
     unclean = [r["file"] for r in rows if (r.get("cleanup") or {}).get("status") not in (None, "clean", "not_started")]
     if unclean:
         secondary["cleanup"] = "failed"
+    if any(r.get('reason') in ('advisory_incomplete', 'advisory_cleanup_incomplete') for r in rows):
+        secondary['advisory'] = 'incomplete'
+        if any(r.get('status') == 'fail' and (r.get('execution') or {}).get('exitCode') not in (None, 0) for r in rows):
+            return 'product_failure', {'stage': 'subject', 'code': 'test_failures'}, secondary
+        if unclean:
+            return 'cleanup_failure', {'stage': 'subject', 'code': 'advisory_cleanup_incomplete'}, secondary
+        return 'incomplete', {'stage': 'subject', 'code': 'advisory_incomplete'}, secondary
+    if 'admission_inventory_unavailable' in data.get('runner_errors', []):
+        secondary['admission'] = 'incomplete'
+        if any(r.get('status') == 'fail' and (r.get('execution') or {}).get('exitCode') not in (None, 0) for r in rows):
+            return 'product_failure', {'stage': 'subject', 'code': 'test_failures'}, secondary
+        if (any(error != 'admission_inventory_unavailable' for error in data.get('runner_errors', []))
+                or data.get('directory_cleanup_errors') or unclean):
+            return 'harness_failure', {'stage': 'subject', 'code': 'runner_errors'}, secondary
+        return 'incomplete', {'stage': 'subject', 'code': 'admission_incomplete'}, secondary
     if data.get("runner_errors") or data.get("directory_cleanup_errors"):
         return "harness_failure", {"stage": "subject", "code": "runner_errors"}, secondary
     if any(r.get("status") == "timeout" for r in rows):
@@ -1113,6 +1162,14 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
         return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
     if kind == "pytest_files":
         junit = gate_dir / "pytest.junit.xml"
+        if target.get("admission_suite"):
+            command = [str(venv / "bin" / "python"), str(checkout / "scripts/admission_pytest.py"),
+                       "--root", str(checkout), "--suite", target["admission_suite"], "--junit", str(junit),
+                       "--basetemp", str(basetemp / "pytest"), "--manifest", str(gate_dir / "admission.json"),
+                       *(["--strict-capabilities"] if target.get("strict_capabilities", True) else []),
+                       "--", *selection]
+            return command, {"cwd": checkout / target.get("select", {}).get("root", profile_root(service_dir, checkout)),
+                             "classify": lambda rc, to: classify_admission_pytest(junit, gate_dir / "admission.json.final", rc, to, False)}
         command = [str(venv / "bin" / "python"), "-m", "pytest", *selection, "-q", "-rs",
                    *(["--strict-capabilities"] if target.get("strict_capabilities", True) else []),
                    "--junitxml=%s" % junit, "--basetemp", str(basetemp / "pytest")]

@@ -2213,12 +2213,18 @@ class SpawnCtl:
         # wrongly refused mid-freeze and the idempotency guarantee breaks. The
         # hold self-expires, so an abandoned freeze never wedges admission.
         hold = await self.store.get_spawn_admission_hold(host)
+        qualification = None
         if hold is not None:
+            import qualification_admission
+            if idempotency_key and str(hold.get("reason")).startswith(qualification_admission.HOLD_PREFIX):
+                permitted = await self.store.submit(lambda conn: qualification_admission.active_cell(conn, msg, time.time()))
+                if permitted is not None:
+                    qualification = msg
             already = (
                 await self._admitted_for_key(host, idempotency_key)
                 if idempotency_key else {"admitted_count": 0}
             )
-            if not already.get("admitted_count"):
+            if qualification is None and not already.get("admitted_count"):
                 raise VerbError(
                     "spawn_frozen",
                     f"spawn admission is frozen on {host}"
@@ -2369,6 +2375,7 @@ class SpawnCtl:
                 request_payload_hash=payload_hash, ttl_s=RESERVATION_TTL_S,
                 request_id=request_id, nonce=nonce, owner_instance_id=self.instance_id,
                 refuse_if_held=True,
+                **({"qualification_message": qualification} if qualification is not None else {}),
             )
             status = claim["status"]
             if status == "replay":

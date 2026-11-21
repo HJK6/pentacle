@@ -65,6 +65,63 @@ def fence(repo, *, recovering=None):
         raise c.Invalid('unfinished ordinary operation requires its authorized recovery')
 
 
+def _compare_process(adapter, expected, observed):
+    """Compare ordinary identities, accepting only independently proved turnover."""
+    if not isinstance(expected, dict) or not isinstance(observed, dict):
+        raise c.Invalid('ordinary process observation malformed')
+    if {k:v for k,v in expected.items() if k != 'provenance'} != {k:v for k,v in observed.items() if k != 'provenance'}:
+        raise c.Invalid('ordinary primary identity drift')
+    def identities(value):
+        p = value.get('provenance')
+        if (not isinstance(p, dict) or set(p) != {'launchd_answered','pid','processes'}
+                or p['launchd_answered'] is not True or p['pid'] != value.get('pid')
+                or not isinstance(p['processes'], list)):
+            raise c.Invalid('ordinary process census malformed or unavailable')
+        rows = {}
+        for row in p['processes']:
+            if (not isinstance(row, dict) or set(row) != {'pid','start'}
+                    or type(row['pid']) is not int or row['pid'] <= 0
+                    or not isinstance(row['start'], str) or not row['start'].strip()
+                    or row['pid'] in rows):
+                raise c.Invalid('ordinary process census malformed or duplicate')
+            rows[row['pid']] = row['start']
+        if value.get('pid') is not None and rows.get(value['pid']) != value.get('birth'):
+            raise c.Invalid('ordinary primary absent from census')
+        return rows
+    before, after = identities(expected), identities(observed)
+    if any(before[pid] != after[pid] for pid in before.keys() & after.keys()):
+        raise c.Invalid('ordinary process PID reused')
+    departed = [{'pid':pid, 'start':before[pid]} for pid in sorted(before.keys() - after.keys())]
+    added = [{'pid':pid, 'start':after[pid]} for pid in sorted(after.keys() - before.keys())]
+    if any(not adapter.process_absent(row['pid'], row['start']) for row in departed):
+        raise c.Invalid('ordinary departed helper exit unproven')
+    surviving = [{'pid':pid, 'start':after[pid]} for pid in sorted(after) if pid != observed.get('pid')]
+    if surviving and not adapter.authenticate_new_processes(observed, surviving):
+        raise c.Invalid('ordinary helper ownership unproven')
+    return {'previous': [{'pid':pid, 'start':before[pid]} for pid in sorted(before)],
+            'observed': [{'pid':pid, 'start':after[pid]} for pid in sorted(after)],
+            'departed_absent': departed, 'added_owned': added}
+
+
+def compare_process(adapter, expected, observed):
+    try:
+        return _compare_process(adapter, expected, observed)
+    except c.Invalid as exc:
+        def safe_rows(value):
+            if not isinstance(value, dict): return []
+            provenance = value.get('provenance')
+            if not isinstance(provenance, dict) or not isinstance(provenance.get('processes'), list): return []
+            safe = []
+            for row in provenance['processes'][:256]:
+                if not isinstance(row, dict) or type(row.get('pid')) is not int or row['pid'] <= 0: continue
+                start = row.get('start')
+                safe.append({'pid':row['pid'], 'birth_sha256':hashlib.sha256(start.encode()).hexdigest()
+                             if isinstance(start,str) else None})
+            return safe
+        detail = {'previous':safe_rows(expected), 'observed':safe_rows(observed)}
+        raise c.Invalid(str(exc) + ' ' + json.dumps(detail, separators=(',',':'))) from exc
+
+
 class Bundle:
     def __init__(self, adapter, folder):
         self.a = adapter
@@ -72,6 +129,11 @@ class Bundle:
         self.bundle = self.journal = None
 
     def persist(self, **updates):
+        if sealed_read(self.folder/'journal.json') != self.journal:
+            raise c.Invalid('ordinary recovery journal changed during operation')
+        if getattr(self, 'controller_grant', None):
+            updates.update(controller_used=self.controller_grant['replacement_controller_sha'],
+                           controller_authorization_sha256=self.controller_grant['authorization_sha256'])
         body = {k:v for k,v in self.journal.items() if k != 'sha256'}
         body.update(updates)
         body['sequence'] += 1
@@ -103,7 +165,12 @@ class Bundle:
             'repo':str(adapter.repo), 'prior_sha':prior, 'target_sha':target,
             'metadata':metadata, 'preimages':originals, 'source':source})
         current = adapter.observe(self.bundle)
-        if (current['source'] != prior or current['process'] != metadata['prior_process']
+        try:
+            process_decision = adapter.compare_process(metadata['prior_process'], current['process'])
+        except c.Invalid as exc:
+            c.atomic_json(self.folder/'process-decision.json', {'outcome':'refused', 'reason':str(exc)})
+            raise
+        if (current['source'] != prior
                 or current['collector'] != metadata['prior_collector']
                 or any(current['files'][k] != {'sha256':v['sha256'],'mode':v['mode']} for k,v in originals.items())
                 or any(v['sha256'] is not None and c.file_digest(self.folder/(k+'.before')) != v['sha256'] for k,v in originals.items())):
@@ -113,7 +180,8 @@ class Bundle:
             'schema':SCHEMA, 'operation':operation, 'bundle_sha256':self.bundle['sha256'],
             'sequence':0, 'phase':'forward', 'allowed_source':[prior,target], 'allowed_files':{
                 k:[{'sha256':v['sha256'], 'mode':v['mode']}] for k,v in originals.items()},
-            'process':current['process'], 'collector':current['collector'], 'result':None})
+            'process':current['process'], 'collector':current['collector'], 'result':None,
+            'process_decision':process_decision})
         # Nothing may mutate until the complete bundle and journal are durable.
         c.atomic_json(c.state_root(adapter.repo)/'ordinary-active.json',
                       {'operation':operation, 'bundle':str(self.folder)})
@@ -194,25 +262,49 @@ class Bundle:
 
     def admit(self, authorization, go):
         b, j = self.bundle, self.journal
+        self.a.recovery_authorization = None
         if j['phase'] == 'qualified':
             raise c.Invalid('qualified operation is not an ordinary failure recovery')
-        self.a.validate(b)
         now = self.state()
         if now['source'] not in j['allowed_source'] or now['source'] not in (b['prior_sha'], b['target_sha']):
             raise c.Invalid('unrelated ordinary source drift')
-        if now['process'] != j['process'] or now['collector'] != j['collector']:
-            raise c.Invalid('unrecorded ordinary process identity')
+        self.process_decision = self.a.compare_process(j['process'], now['process'])
+        self.a.verify_sealed_prior(b, now['process'])
+        if now['collector'] != j['collector']:
+            raise c.Invalid('unrecorded ordinary collector identity')
         for name, state in now['files'].items():
             if state not in j['allowed_files'][name]:
                 raise c.Invalid('unrecognized ordinary file drift')
-        auth = c.read_json(authorization)
+        auth = c.read_json(c.private_file(authorization))
+        replacement = auth.get('replacement_controller_sha')
+        self.controller_grant = None
+        if replacement is not None:
+            if (b['operation'] != '08826e95f2d347f498d8caea51d4ad13'
+                    or not isinstance(replacement, str) or not re.fullmatch(r'[0-9a-f]{40}', replacement)
+                    or replacement == b['metadata']['controller_sha']
+                    or not isinstance(auth.get('authorized_by'), str) or not auth['authorized_by'].strip()):
+                raise c.Invalid('ordinary replacement controller authorization refused')
         expected = {'schema':SCHEMA, 'operation':b['operation'], 'bundle_sha256':b['sha256'],
             'controller_sha':b['metadata']['controller_sha'], 'prior_sha':b['prior_sha'],
             'target_sha':b['target_sha'], 'expected_state':now, 'go_tell_id':go}
-        if (set(auth) != {*expected, 'fd_gate_reference'} or any(auth.get(k) != v for k,v in expected.items())
+        auth_state = auth.get('expected_state')
+        if not isinstance(auth_state, dict):
+            raise c.Invalid('ordinary recovery expected state malformed')
+        if {k:v for k,v in auth_state.items() if k != 'process'} != {k:v for k,v in now.items() if k != 'process'}:
+            raise c.Invalid('ordinary recovery authorized state drift')
+        self.authorization_decision = self.a.compare_process(auth_state.get('process'), now['process'])
+        expected['expected_state'] = auth_state
+        extra = {'replacement_controller_sha', 'authorized_by'} if replacement is not None else set()
+        if (set(auth) != {*expected, 'fd_gate_reference', *extra} or any(auth.get(k) != v for k,v in expected.items())
                 or not isinstance(go,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}',go)
                 or not isinstance(auth['fd_gate_reference'],str) or not auth['fd_gate_reference'].strip()):
             raise c.Invalid('ordinary recovery requires exact separate FD authority/current state')
+        if replacement is not None:
+            self.controller_grant = {'operation': b['operation'], 'bundle_sha256': b['sha256'],
+                'starting_journal_sha256': j['sha256'], 'original_controller_sha': b['metadata']['controller_sha'],
+                'replacement_controller_sha': replacement, 'authorization_sha256': c.file_digest(authorization)}
+            self.a.recovery_authorization = self.controller_grant
+        self.a.validate(b)
         return now
 
     def recover(self, authorization, go):
@@ -223,10 +315,12 @@ class Bundle:
                 raise c.Invalid('completed ordinary recovery drift')
             return self.journal['result']
         # Persist intent before stop. Unknown outcomes remain fenced, never inferred successful.
-        self.persist(phase='recovering', authorization_sha256=c.file_digest(authorization), go_tell_id=go)
+        self.persist(phase='recovering', authorization_sha256=c.file_digest(authorization), go_tell_id=go,
+                     process_decision=self.process_decision, authorization_process_decision=self.authorization_decision)
         boot_proven = False
+        self.a.before_stop = lambda decision: self.persist(pre_stop_process_decision=decision)
         try:
-            self.a.stop(self.bundle, now)
+            self.a.stop(self.bundle, now, [self.process_decision, self.authorization_decision])
             stopped_identity=self.a.observe(self.bundle)
             if (stopped_identity['process'].get('pid') is not None or stopped_identity['process'].get('loaded')
                     or stopped_identity['collector'].get('pid') is not None or stopped_identity['collector'].get('loaded')):
@@ -242,6 +336,7 @@ class Bundle:
             self.persist(phase='restoring', allowed_source=list({now['source'],self.bundle['prior_sha']}))
             self.a.restore_source(self.folder, self.bundle)
             for name, row in self.bundle['preimages'].items():
+                self.a.ensure_stopped(self.bundle)
                 path = Path(row['path'])
                 state={'sha256':row['sha256'],'mode':row['mode']}
                 allowed=copy.deepcopy(self.journal['allowed_files']); current=file_state(path)
@@ -334,6 +429,48 @@ class OrdinaryRuntime:
         else: value['sha']=None
         value['provenance']=self.runtime.provenance({})
         return value
+
+    def verify_sealed_prior(self, bundle, observed):
+        rows = bundle['metadata']['prior_process']['provenance']['processes']
+        if (not isinstance(rows, list) or any(not isinstance(r, dict) or set(r) != {'pid','start'}
+                or type(r['pid']) is not int or r['pid'] <= 0 or not isinstance(r['start'],str) or not r['start']
+                for r in rows) or len({r['pid'] for r in rows}) != len(rows)):
+            raise c.Invalid('ordinary sealed prior census malformed or duplicate')
+        current = {r['pid']:r['start'] for r in observed['provenance']['processes']}
+        for row in rows:
+            pid, birth = row['pid'], row['start']
+            if pid in current:
+                if current[pid] != birth: raise c.Invalid('ordinary sealed prior PID reused')
+            elif not self.process_absent(pid, birth):
+                raise c.Invalid('ordinary sealed prior process exit unproven')
+        return rows
+
+    def compare_process(self, expected, observed):
+        return compare_process(self, expected, observed)
+
+    def process_absent(self, pid, birth):
+        # A reused PID is not proof of absence for ordinary admission.
+        return self.runtime._process_absent(pid)
+
+    def authenticate_new_processes(self, primary, added):
+        # Require actual same-UID ancestry to the unchanged launchd primary.
+        # Helper names or command substrings alone are not ownership proof.
+        state = self.job(self.service.launchd_label)
+        if any(state[k] != primary[k] for k in ('loaded', 'pid', 'birth')):
+            return False
+        rows = self.runtime.process_rows()
+        by_pid = {}
+        for pid, parent, uid, _ in rows:
+            if pid in by_pid: return False
+            by_pid[pid] = (parent, uid)
+        owned = {primary['pid']}
+        for _ in rows:
+            owned.update(pid for pid, (parent, uid) in by_pid.items()
+                         if parent in owned and uid == os.getuid())
+        if any(row['pid'] not in owned or self.d._process_start(row['pid'], self.runner) != row['start']
+               for row in added):
+            return False
+        return self.job(self.service.launchd_label) == state
 
     def observe(self, bundle):
         return {'source':self.git('rev-parse','HEAD'),
@@ -453,7 +590,14 @@ print(json.dumps(result))
         from deploy.restoration import inherited_receipt_seal
         from deploy.coordinated_runtime import code_identity_at
         m=bundle['metadata']
-        if (self.controller == self.repo or self.git('rev-parse','HEAD',repo=self.controller) != m['controller_sha']
+        grant = getattr(self, 'recovery_authorization', None)
+        allowed_controller = m['controller_sha']
+        if grant is not None:
+            if (grant['operation'] != bundle['operation'] or grant['bundle_sha256'] != bundle['sha256']
+                    or grant['original_controller_sha'] != m['controller_sha']):
+                raise c.Invalid('ordinary replacement controller scope drift')
+            allowed_controller = grant['replacement_controller_sha']
+        if (self.controller == self.repo or self.git('rev-parse','HEAD',repo=self.controller) != allowed_controller
                 or self.d._dirty_entries(self.controller,self.runner) or self.d._dirty_entries(self.repo,self.runner)
                 or self.git('remote','get-url','origin') != m['origin']
                 or self.git('remote','get-url','origin',repo=self.controller) != m['origin']):
@@ -483,12 +627,21 @@ print(json.dumps(result))
         self.d.verify_deploy_guard(self.service,self.stream,self.runner,repo=self.repo,
             sha=bundle['prior_sha'],rollback=True,rollback_from_sha=self.git('rev-parse','HEAD'))
 
-    def stop(self, bundle, now):
-        # Caller has checked exact current process identity and all drift predicates.
+    def stop(self, bundle, now, decisions):
         collector=now['collector']
-        if self.observe(bundle) != {k:v for k,v in now.items() if k != 'journal_sha256'}:
+        fresh = self.observe(bundle)
+        if {k:v for k,v in fresh.items() if k != 'process'} != {k:v for k,v in now.items() if k not in ('journal_sha256', 'process')}:
             raise c.Invalid('ordinary identity/state drift immediately before stop')
-        self.runtime.stop({},provenance=now['process']['provenance'], expected_identity=now['process'])
+        pre_stop = self.compare_process(now['process'], fresh['process'])
+        tracked = {(r['pid'],r['start']) for decision in decisions for key in ('previous','observed') for r in decision[key]}
+        tracked.update((r['pid'],r['start']) for key in ('previous','observed') for r in pre_stop[key])
+        sealed_prior = self.verify_sealed_prior(bundle, fresh['process'])
+        tracked.update((r['pid'],r['start']) for r in sealed_prior)
+        if len({pid for pid, _ in tracked}) != len(tracked):
+            raise c.Invalid('ordinary tracked PID reused before stop')
+        self.tracked_processes = tracked
+        self.before_stop(pre_stop)
+        self.runtime.stop({},provenance={'processes':[{'pid':pid,'start':birth} for pid,birth in tracked]}, expected_identity=now['process'])
         if self.job(self.d.USAGE_COLLECTOR_LABEL) != collector:
             raise c.Invalid('collector drift before stop')
         if collector['loaded']:
@@ -498,12 +651,17 @@ print(json.dumps(result))
                 or (collector['pid'] and not self.d._prior_writer_exited(collector['pid'],collector['birth'],self.runner))):
             raise c.Invalid('collector exit unproven')
 
-    def restore_source(self, folder, bundle):
-        if not self.runtime.stopped: raise c.Invalid('ordinary source restore requires proven stop')
+    def ensure_stopped(self, bundle):
+        if not self.runtime.stopped: raise c.Invalid('ordinary restoration requires proven stop')
+        if any(not self.process_absent(pid,birth) for pid,birth in self.tracked_processes):
+            raise c.Invalid('ordinary tracked process exit no longer proven')
         process=self.process([bundle['prior_sha'],bundle['target_sha']]); collector=self.job(self.d.USAGE_COLLECTOR_LABEL)
         if (process['pid'] is not None or process['loaded'] or process['provenance']['processes']
                 or collector['pid'] is not None or collector['loaded']):
-            raise c.Invalid('ordinary process reappeared before source restoration')
+            raise c.Invalid('ordinary process reappeared before restoration')
+
+    def restore_source(self, folder, bundle):
+        self.ensure_stopped(bundle)
         self.runtime.checked(('git','fetch',str(folder/'source.bundle'),'refs/heads/prior'))
         self.runtime.checked(('git','checkout','--detach',bundle['prior_sha']))
 

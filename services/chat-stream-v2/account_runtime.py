@@ -335,7 +335,13 @@ class AccountRuntime:
                     from account_pool_control import assert_eligible
                     current=check(a,binding)
                     hold=a.conn.execute("SELECT held_until FROM v2_spawn_admission_hold WHERE host=?",(binding.host,)).fetchone()
-                    if hold and hold[0]>self.clock(): raise AccountError("provider_cli_pin_unavailable",reason="admission_hold")
+                    if hold and hold[0]>self.clock():
+                        import qualification_admission
+                        if (qualification_admission.active_cell(a.conn, message or {}, self.clock(),
+                                    claimed=True, binding=binding.public()) is None
+                                or message["host"] != binding.host
+                                or row["stream_id"] != f"{binding.host}:{message['session_name']}"):
+                            raise AccountError("provider_cli_pin_unavailable",reason="admission_hold")
                     consumer_current(a,binding.host,getattr(self.sessions,"local_host",None),self.clock())
                     if current!=pin: raise AccountError("provider_cli_pin_mismatch",reason="pin_changed_during_verification")
                     active=a._available(a._cell(binding.host,binding.provider,binding.alias))

@@ -234,7 +234,7 @@ def test_concrete_capture_rechecks_real_synthetic_accounts_helpers_and_dependenc
     stamp=runtime.d._read_stamp(fixture.repo,runtime.service)
     stamp['requirements_hash']=runtime.d._sha256(fixture.repo/runtime.service.requirements_path)
     runtime.d._write_stamp(fixture.repo,runtime.service,stamp)
-    monkeypatch.setattr(a,'process',lambda *args:{'sha':fixture.prior,'pid':111,'birth':'synthetic','loaded':True,'provenance':{'processes':[]}})
+    monkeypatch.setattr(a,'process',lambda *args:{'sha':fixture.prior,'pid':111,'birth':'synthetic','loaded':True,'provenance':{'launchd_answered':True,'pid':111,'processes':[{'pid':111,'start':'synthetic'}]}})
     monkeypatch.setattr(a,'job',lambda label:{'loaded':False,'pid':None,'birth':None})
     monkeypatch.setattr(runtime.d,'verify_deploy_guard',lambda *args,**kw:{'sole_deployer':True})
     metadata=a.capture(fixture.prior,fixture.prior,None,[])
@@ -335,8 +335,8 @@ def test_real_loss_after_stop_before_checkpoint_refuses_ambiguous_reentry(operat
 import os,sys
 from ordinary_recovery_fixture import SyntheticRuntime,cli
 stop=SyntheticRuntime.stop
-def crash(self,bundle,now):
-    stop(self,bundle,now);os._exit(75)
+def crash(self,bundle,now,decision):
+    stop(self,bundle,now,decision);os._exit(75)
 SyntheticRuntime.stop=crash
 cli(sys.argv[1],sys.argv[2:])
 '''
@@ -368,3 +368,202 @@ def test_forward_terminal_publication_cannot_adopt_prior_source(operation):
     with pytest.raises(o.c.Invalid,match='state drift'):
         b.finish({'serving':True,'disposition':'active and checks passed'})
     assert o.sealed_read(b.folder/'journal.json')['phase']!='qualified'
+
+
+def test_enrollment_allows_proven_departed_helper(operation, tmp_path):
+    a, b, prior, target, git = operation
+    # Remove the synthetic existing operation fence before a separate enrollment.
+    (o.c.state_root(a.repo)/'ordinary-active.json').unlink()
+    probes = a.probes()
+    probes['process']['provenance'] = {'launchd_answered': True, 'pid': 101, 'processes': [{'pid': 101, 'start': 'synthetic-prior'}]}
+    a.save_probes(probes)
+    original_capture = a.capture
+    def capture(*args):
+        metadata = original_capture(*args)
+        metadata['prior_process']['provenance']['processes'].append({'pid': 404, 'start': 'helper-birth'})
+        return metadata
+    a.capture = capture
+    a.process_absent = lambda pid, birth: pid == 404 and birth == 'helper-birth'
+    enrolled = o.Bundle.prepare(a, tmp_path/'second-bundle', prior, target, None, [])
+    assert enrolled.journal['phase'] == 'forward'
+
+
+def test_recovery_allows_proven_departed_helper(operation):
+    a, b, prior, target, git = operation
+    forward(operation)
+    probes = a.probes()
+    probes['process']['provenance'] = {'launchd_answered': True, 'pid': 202, 'processes': [{'pid': 202, 'start': 'synthetic-target'}]}
+    a.save_probes(probes)
+    process = copy.deepcopy(probes['process'])
+    process['provenance']['processes'].append({'pid': 404, 'start': 'helper-birth'})
+    b.persist(process=process)
+    a.process_absent = lambda pid, birth: pid == 404 and birth == 'helper-birth'
+    auth = authority(a, b)
+    assert b.admit(auth, 'synthetic-go')['source'] == target
+
+
+def process_snapshot(*rows):
+    return {'loaded':True, 'pid':101, 'birth':'root', 'sha':'a'*40,
+            'provenance':{'launchd_answered':True, 'pid':101,
+                          'processes':[{'pid':pid,'start':birth} for pid,birth in rows]}}
+
+
+def test_process_comparison_turnover_and_refusal_controls():
+    from types import SimpleNamespace
+    expected=process_snapshot((101,'root'),(202,'old'))
+    current=process_snapshot((303,'new'),(101,'root'))
+    adapter=SimpleNamespace(process_absent=lambda pid,birth: (pid,birth)==(202,'old'),
+                            authenticate_new_processes=lambda primary,rows: rows in ([{'pid':303,'start':'new'}], [{'pid':202,'start':'old'}]))
+    decision=o.compare_process(adapter,expected,current)
+    assert decision['departed_absent']==[{'pid':202,'start':'old'}]
+    assert decision['added_owned']==[{'pid':303,'start':'new'}]
+    assert o.compare_process(adapter,expected,process_snapshot((202,'old'),(101,'root')))['added_owned']==[]
+    adapter.process_absent=lambda *args: False
+    with pytest.raises(o.c.Invalid,match='exit unproven'): o.compare_process(adapter,expected,current)
+    adapter.process_absent=lambda *args: True
+    adapter.authenticate_new_processes=lambda *args: False
+    with pytest.raises(o.c.Invalid,match='ownership unproven'): o.compare_process(adapter,expected,current)
+    for malformed in (process_snapshot((101,'root'),(101,'root')),
+                      process_snapshot((101,'root'),(202,'reused')),
+                      process_snapshot((202,'old'))):
+        with pytest.raises(o.c.Invalid): o.compare_process(adapter,expected,malformed)
+    replaced=process_snapshot((101,'root'));replaced['birth']='different'
+    with pytest.raises(o.c.Invalid,match='primary identity drift'): o.compare_process(adapter,expected,replaced)
+
+
+def test_replacement_controller_is_exactly_operation_bound(operation):
+    a,b,prior,target,git=operation
+    forward(operation)
+    b.bundle['operation']='08826e95f2d347f498d8caea51d4ad13'
+    auth=authority(a,b)
+    # authority() reloads the sealed operation; use a synthetic sealed-operation
+    # identity here solely to exercise admission, not the original-bundle rehearsal.
+    b.bundle['operation']='08826e95f2d347f498d8caea51d4ad13'
+    payload=o.c.read_json(auth);payload['operation']=b.bundle['operation']
+    payload.update(replacement_controller_sha='e'*40,authorized_by='fixture FD')
+    o.c.atomic_json(auth,payload)
+    probes=a.probes();probes['controller_sha']='e'*40;a.save_probes(probes)
+    before=(b.folder/'journal.json').read_bytes()
+    assert b.admit(auth,'synthetic-go')['source']==target
+    assert a.recovery_authorization['replacement_controller_sha']=='e'*40
+    payload['operation']='f'*32;o.c.atomic_json(auth,payload)
+    with pytest.raises(o.c.Invalid): b.admit(auth,'synthetic-go')
+    assert (b.folder/'journal.json').read_bytes()==before
+
+
+def test_authorization_accepts_owned_turnover_but_refuses_unexplained(operation):
+    a,b,prior,target,git=operation;forward(operation)
+    p=a.probes();p['process']['provenance']={'launchd_answered':True,'pid':202,
+        'processes':[{'pid':202,'start':'synthetic-target'}]};a.save_probes(p)
+    b.persist(process=copy.deepcopy(p['process']))
+    auth=authority(a,b)
+    p=a.probes();p['process']['provenance']['processes'].append({'pid':404,'start':'new-helper'});a.save_probes(p)
+    a.authenticate_new_processes=lambda primary,rows: True
+    assert b.admit(auth,'synthetic-go')['source']==target
+    a.authenticate_new_processes=lambda primary,rows: False
+    journal=(b.folder/'journal.json').read_bytes()
+    with pytest.raises(o.c.Invalid,match='ownership unproven'): b.admit(auth,'synthetic-go')
+    assert (b.folder/'journal.json').read_bytes()==journal
+    assert not (a.root/'events').exists()
+
+
+def test_stopped_fence_refuses_survivor_and_reappearance():
+    from types import SimpleNamespace
+    a=o.OrdinaryRuntime.__new__(o.OrdinaryRuntime)
+    a.runtime=SimpleNamespace(stopped=True)
+    a.tracked_processes={(202,'old-helper')}
+    a.process_absent=lambda *args: False
+    with pytest.raises(o.c.Invalid,match='exit no longer proven'): a.ensure_stopped({})
+    a.process_absent=lambda *args: True
+    a.d=SimpleNamespace(USAGE_COLLECTOR_LABEL='fixture')
+    a.process=lambda *args: {'pid':None,'loaded':False,'provenance':{'processes':[{'pid':303,'start':'writer'}]}}
+    a.job=lambda *args: {'pid':None,'loaded':False}
+    with pytest.raises(o.c.Invalid,match='reappeared'): a.ensure_stopped({'prior_sha':'a','target_sha':'b'})
+
+
+def test_concrete_stop_rejects_changed_sha_before_bootout():
+    from types import SimpleNamespace
+    from deploy.coordinated_runtime import Runtime
+    calls=[]
+    runtime=Runtime.__new__(Runtime)
+    runtime.repo=Path('/private/tmp')
+    runtime.service=SimpleNamespace(launchd_label='synthetic-label')
+    runtime.runner=None
+    runtime.d=SimpleNamespace(_launchd_state=lambda *a:SimpleNamespace(answered=True,loaded=True,pid=111),
+        _process_start=lambda *a:'synthetic-birth', _capture_log_offsets=lambda *a:{},
+        _daemon_log_paths=lambda *a:(), _verify_runtime_sha=lambda *a:(False,None))
+    runtime.process_rows=lambda:[]
+    runtime.checked=lambda *a:calls.append(a)
+    with pytest.raises(o.c.Invalid,match='SHA changed before bootout'):
+        runtime.stop({},expected_identity={'pid':111,'birth':'synthetic-birth','sha':'a'*40})
+    assert not calls
+
+
+def test_new_helper_requires_live_same_user_ancestry():
+    from types import SimpleNamespace
+    a=o.OrdinaryRuntime.__new__(o.OrdinaryRuntime)
+    a.service=SimpleNamespace(launchd_label='fixture');a.runner=None
+    a.job=lambda label:{'loaded':True,'pid':101,'birth':'root'}
+    a.d=SimpleNamespace(_process_start=lambda pid,runner:{202:'helper',303:'unrelated'}.get(pid))
+    a.runtime=SimpleNamespace(process_rows=lambda:[(101,1,os.getuid(),'root'),
+        (202,101,os.getuid(),'helper'),(303,1,os.getuid(),'unrelated')])
+    primary={'loaded':True,'pid':101,'birth':'root'}
+    assert a.authenticate_new_processes(primary,[{'pid':202,'start':'helper'}])
+    assert not a.authenticate_new_processes(primary,[{'pid':303,'start':'unrelated'}])
+    assert not a.authenticate_new_processes(primary,[{'pid':202,'start':'reused'}])
+
+
+def test_pre_stop_tracks_sealed_and_authorized_identities():
+    from types import SimpleNamespace
+    a=o.OrdinaryRuntime.__new__(o.OrdinaryRuntime)
+    recorded=[]
+    a.runtime=SimpleNamespace(stop=lambda receipt,provenance,expected_identity: recorded.extend(provenance['processes']))
+    a.d=SimpleNamespace(USAGE_COLLECTOR_LABEL='fixture',RELOAD_UNLOAD_WAIT_S=0,
+        _wait_launchd_unloaded=lambda *args,**kw:SimpleNamespace(answered=True,loaded=False,pid=None))
+    a.runner=None
+    process=process_snapshot((101,'root'))
+    collector={'loaded':False,'pid':None,'birth':None}
+    now={'source':'a','files':{},'process':process,'collector':collector,'journal_sha256':'seal'}
+    a.observe=lambda bundle:{k:v for k,v in now.items() if k!='journal_sha256'}
+    a.job=lambda label:collector
+    a.before_stop=lambda decision:None
+    a.process_absent=lambda pid,birth:True
+    a.compare_process=lambda expected,current:{'previous':[{'pid':101,'start':'root'}],
+        'observed':[{'pid':101,'start':'root'}],'departed_absent':[],'added_owned':[]}
+    decisions=[{'previous':[{'pid':202,'start':'authorized'}], 'observed':[]},
+               {'previous':[], 'observed':[{'pid':101,'start':'root'}]}]
+    bundle={'metadata':{'prior_process':{'provenance':{'processes':[{'pid':303,'start':'sealed'}]}}}}
+    a.stop(bundle,now,decisions)
+    assert {(row['pid'],row['start']) for row in recorded}=={(101,'root'),(202,'authorized'),(303,'sealed')}
+
+
+def test_sealed_prior_pid_reuse_refuses_before_stop():
+    a=o.OrdinaryRuntime.__new__(o.OrdinaryRuntime)
+    a.process_absent=lambda pid,birth:False
+    bundle={'metadata':{'prior_process':{'provenance':{'processes':[{'pid':202,'start':'old'}]}}}}
+    with pytest.raises(o.c.Invalid,match='PID reused'):
+        a.verify_sealed_prior(bundle,process_snapshot((101,'root'),(202,'new')))
+    with pytest.raises(o.c.Invalid,match='exit unproven'):
+        a.verify_sealed_prior(bundle,process_snapshot((101,'root')))
+
+
+def test_replacement_controller_grant_survives_restoration_revalidation(operation):
+    a,b,prior,target,git=operation;forward(operation)
+    synthetic_operation='08826e95f2d347f498d8caea51d4ad13'
+    body={k:v for k,v in b.bundle.items() if k!='sha256'};body['operation']=synthetic_operation
+    b.bundle=o.sealed_write(b.folder/'bundle.json',body)
+    journal={k:v for k,v in b.journal.items() if k!='sha256'}
+    journal.update(operation=synthetic_operation,bundle_sha256=b.bundle['sha256'])
+    b.journal=o.sealed_write(b.folder/'journal.json',journal)
+    pointer=o.c.state_root(a.repo)/'ordinary-active.json'
+    o.c.atomic_json(pointer,{'operation':synthetic_operation,'bundle':str(b.folder)})
+    auth=authority(a,b);payload=o.c.read_json(auth)
+    payload.update(replacement_controller_sha='e'*40,authorized_by='fixture FD')
+    o.c.atomic_json(auth,payload)
+    probes=a.probes();probes['controller_sha']='e'*40;a.save_probes(probes)
+    original_bundle=(b.folder/'bundle.json').read_bytes()
+    assert invoke(a,b,auth)==d.EXIT_PRIOR_RESTORED
+    journal=o.sealed_read(b.folder/'journal.json')
+    assert journal['controller_used']=='e'*40
+    assert journal['controller_authorization_sha256']==o.c.file_digest(auth)
+    assert (b.folder/'bundle.json').read_bytes()==original_bundle
