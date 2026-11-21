@@ -446,14 +446,25 @@ class WorkLanesInventory:
                                   Path(root) / "work" if root else None, changed=self.refresh)
 
     async def refresh_for_close(self):
-        """Apply a fresh index observation without waiting for projection tails."""
+        """Wait for the existing coalesced inventory drain."""
+        self._index_dirty = True
+        self.refresh()
+        if self._task is not None:
+            await asyncio.shield(self._task)
+        if self.specs is not None and self._index_dirty:
+            raise RuntimeError("work_index_refresh_pending")
+
+    async def observe_for_close(self):
+        """Apply the requested index observation without awaiting projection tails."""
         self._index_dirty = True
         try:
-            await self.reconcile_index()
-            if self.specs is not None and self._index_dirty:
-                raise RuntimeError("work_index_refresh_pending")
+            # Marks arriving during a scan require another applied observation.
+            # The caller owns the deadline and cancellation of this waiter.
+            while self._index_dirty:
+                await self.reconcile_index()
+                if self.specs is None:
+                    break
         finally:
-            # Preserve ordinary asynchronous lane reconciliation and emission.
             self.refresh()
 
     def refresh(self) -> None:

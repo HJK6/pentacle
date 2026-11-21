@@ -1470,8 +1470,6 @@ class Sessions:
     async def _guard_lead_disposition(self, row, close_kind):
         if close_kind not in {"session_close", "manager_close", "idle_reap"}:
             return True
-        if not (row.get("assigned_spec_id") or row.get("spec_ids") or row.get("spec_id")):
-            return False
         return await self.refresh_attendance()
 
     async def _close_attendance_ids(self, sid, generation, close_kind):
@@ -1481,16 +1479,19 @@ class Sessions:
             from store_watch_wake import _session
             from store_lifecycle_authority import configured, front_desk_principal
             from work_attendance import attendance_ids
+            from work_owed import _close_obligations
             row = _session(conn, sid)
             if not row or row.get("status") != "open" or row.get("session_generation") != generation:
                 return frozenset()
+            obligations = {context["spec_id"] for context in _close_obligations(
+                conn, sid, generation, pending_only=False)}
             try:
                 desk = front_desk_principal(conn, configured(conn)) or {}
                 is_desk = desk.get("stream_id") == sid and desk.get("session_generation") == generation
             except ValueError:
                 # An unresolved FD principal can make any assigned seat an owner.
-                return frozenset(attendance_ids(row) | ({row["assigned_spec_id"]} if row.get("assigned_spec_id") else set()))
-            return frozenset(attendance_ids(row, front_desk=is_desk))
+                return frozenset(obligations | attendance_ids(row) | ({row["assigned_spec_id"]} if row.get("assigned_spec_id") else set()))
+            return frozenset(obligations | attendance_ids(row, front_desk=is_desk))
         return await self.store.submit(read)
 
     async def refresh_attendance(self):
@@ -1558,6 +1559,7 @@ class Sessions:
             )
         # Bind even generation-omitting requests before the first slow wait.
         first = await self.store.fetch_session(host, session_name)
+        self.assistant.guard_close(first, close_kind)
         if expected_generation is None and first is not None:
             expected_generation = self._row_generation(first)
         deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
@@ -1614,6 +1616,8 @@ class Sessions:
                             return await self._stale_close_result(sid, row)
                         current_ids = await self._close_attendance_ids(sid, expected_generation, close_kind)
                         if current_ids and current_ids != observed:
+                            if time.monotonic() >= deadline:
+                                raise VerbError("work_observation_changed", "Attendance changed during close preflight; retry the close")
                             # Release both fences before obtaining evidence for changed attendance.
                             continue
                         warnings.extend(await self._check_lead_disposition(sid, self._row_generation(row),

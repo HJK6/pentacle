@@ -246,7 +246,7 @@ def test_close_uses_existing_dirty_drain_to_observe_one_accepted_move():
         specs = Specs()
         inventory = WorkLanesInventory(store, sessions, server.broadcast, specs=specs, refresh_min_s=0)
         inventory._running = True
-        sessions.refresh_work_for_close = inventory.refresh_for_close
+        sessions.refresh_work_for_close = inventory.observe_for_close
         try:
             assert (await server._on_close(request(row)))["type"] == "close.ok"
             assert specs.calls == 1 and tmux.kills == 1
@@ -562,7 +562,7 @@ def test_parent_qa_close_does_not_wait_for_unrelated_projection_tail(tmp_path, h
             return await original_lifecycle()
         store.reconcile_lane_lifecycle = hold_lifecycle
         async def refresh():
-            await inv.refresh_for_close()
+            await inv.observe_for_close()
         sessions.refresh_work_for_close = refresh
         try:
             parent_row = await store.open_session(HOST, "parent", role="worker")
@@ -692,7 +692,7 @@ def test_close_index_refresh_waits_for_apply_but_not_projection_tail(tmp_path):
             inv.refresh()
             await asyncio.wait_for(tail.wait(), 2)
             store.reconcile_work_observations = hold_apply
-            refresh = asyncio.create_task(inv.refresh_for_close())
+            refresh = asyncio.create_task(inv.observe_for_close())
             await asyncio.wait_for(apply.wait(), 2)
             assert not refresh.done() and not release_tail.is_set()
             release_apply.set()
@@ -706,5 +706,129 @@ def test_close_index_refresh_waits_for_apply_but_not_projection_tail(tmp_path):
             release_tail.set()
             await inv.stop()
             await server.close()
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cause", ["second_close", "watcher_mark"])
+def test_close_index_observation_rechecks_mark_during_apply(tmp_path, cause):
+    from test_work_lane_goals import scanner, write_item
+    from work_lanes_projection import WorkLanesInventory
+
+    async def run():
+        store = Store(); store.start()
+        sessions = Sessions(store, local_host=HOST)
+        source = scanner(tmp_path)
+        write_item(tmp_path, "item_00", status="in_progress")
+        inv = WorkLanesInventory(store, sessions, lambda *a, **k: None,
+                                 specs=source, settle_s=0, refresh_min_s=0)
+        inv._running = True
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = store.reconcile_work_observations
+        calls = 0
+        async def held_apply(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            return await original(*args, **kwargs)
+        store.reconcile_work_observations = held_apply
+        second = None
+        try:
+            first = asyncio.create_task(inv.observe_for_close())
+            await asyncio.wait_for(entered.wait(), 2)
+            if cause == "second_close":
+                second = asyncio.create_task(inv.observe_for_close())
+                await asyncio.sleep(0)
+            else:
+                inv._index_dirty = True
+                inv.refresh()
+            release.set()
+            await asyncio.wait_for(first, 2)
+            if second is not None:
+                await asyncio.wait_for(second, 2)
+            assert calls >= 2 and not inv._index_dirty
+        finally:
+            release.set()
+            if second is not None:
+                await asyncio.gather(second, return_exceptions=True)
+            await inv.stop()
+            store.stop()
+    asyncio.run(run())
+
+
+def test_planner_obligation_refreshes_before_disposition_warning():
+    async def run():
+        from test_work_owed import observe
+        store, sessions, server, tmux, row = await environment(role="planner")
+        await observe(store, "in_progress", "active", 100, identity="spec_demo__item_00")
+        calls = []
+        async def refresh():
+            calls.append(True)
+            await observe(store, "backlog", "accepted-move", 101, identity="spec_demo__item_00")
+        sessions.refresh_work_for_close = refresh
+        try:
+            result = await server._on_close(request(row))
+            assert calls == [True] and result["type"] == "close.ok"
+            assert not [w for w in result.get("warnings", []) if w.get("kind") == "disposition"]
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_attending_last_owner_survives_dirty_mark_during_scan(tmp_path):
+    from test_work_attendance import accept
+    from test_work_lane_goals import scanner, write_item
+    from work_lanes_projection import WorkLanesInventory
+
+    async def run():
+        store, sessions, server, tmux, row = await environment()
+        folder = write_item(tmp_path, "item_00", status="in_progress", epic=None)
+        await accept(store, folder, "spec_demo__item_00")
+        from work_attendance import attendance_conn
+        from work_owed import _observation
+        from store_work_index import _state_conn
+        def known_owner(conn):
+            return (_observation(conn, _state_conn(conn), "spec_demo__item_00"),
+                    attendance_conn(conn).owners)
+        observation, owners = await store.submit(known_owner)
+        assert observation["known"] and observation["status"] == "in_progress"
+        assert set(observation["document_revisions"]) == {"spec.md", "summary.md"}
+        assert owners["spec_demo__item_00"] == [f"{HOST}:{row['session_name']}"]
+        assert (await store.fetch_session(HOST, row["session_name"]))["session_generation"] == row["session_generation"]
+        import time
+        source = scanner(tmp_path)
+        scan = source.scan_work_observations
+        source.scan_work_observations = lambda: scan(now=time.time() + 5)
+        inv = WorkLanesInventory(store, sessions, server.broadcast, specs=source,
+                                 settle_s=0, refresh_min_s=0)
+        inv._running = True
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = store.reconcile_work_observations
+        calls = 0
+        async def held_apply(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            return await original(*args, **kwargs)
+        store.reconcile_work_observations = held_apply
+        sessions.refresh_work_for_close = inv.observe_for_close
+        close = asyncio.create_task(server._on_close(request(row)))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            inv._index_dirty = True
+            inv.refresh()
+            release.set()
+            with pytest.raises(VerbError) as error:
+                await close
+            assert error.value.code == "work_last_owner" and calls >= 2
+            assert tmux.kills == 0 and (await store.fetch_session(HOST, row["session_name"]))["status"] == "open"
+        finally:
+            release.set()
+            await asyncio.gather(close, return_exceptions=True)
+            await inv.stop()
             store.stop()
     asyncio.run(run())
