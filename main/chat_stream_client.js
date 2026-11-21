@@ -1044,6 +1044,15 @@ try {
     }
   }
 
+  /** Read first-class lane detail without reshaping the daemon's reply. */
+  workLanesShow(laneId, { goalId, membersAfter, membersLimit } = {}) {
+    const payload = { type: 'work_lanes.show', lane_id: laneId };
+    if (goalId !== undefined && goalId !== null) payload.goal_id = goalId;
+    if (membersAfter !== undefined && membersAfter !== null) payload.members_after = membersAfter;
+    if (membersLimit !== undefined && membersLimit !== null) payload.members_limit = membersLimit;
+    return this.sendCommand(payload, 'work_lanes.show', { rawResponse: true });
+  }
+
   _mergeStreamEvents(events) {
     if (!Array.isArray(events) || events.length === 0) return 0;
     const seen = new Set();

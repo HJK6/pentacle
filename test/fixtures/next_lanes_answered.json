@@ -1,0 +1,79 @@
+{
+  "question_id": "fixture-question-id",
+  "schema_version": 1,
+  "created_at": "2026-11-20T00:00:00Z",
+  "updated_at": "2026-11-20T00:00:00Z",
+  "answered_at": "2026-11-20T00:00:00Z",
+  "producer_stream_id": "fixture-producer-stream-id",
+  "producer_provider": null,
+  "producer_session_generation": "fixture-producer-session-generation",
+  "spec_id": null,
+  "dedup_key": "fixture-dedup-key",
+  "notification_id": "fixture-notification-id",
+  "state": "answered",
+  "envelope": {
+    "allow_custom": true,
+    "answer": {
+      "action_id": "fixture-action-id",
+      "action_kind": "yes_no",
+      "actor_class": "fixture-actor-class",
+      "actor_client": "fixture-actor-client",
+      "actor_stream_id": null,
+      "actor_verified": true,
+      "at": "2026-11-20T00:00:00Z",
+      "by": "fixture-by",
+      "choice": true,
+      "claimed_by": "fixture-claimed-by",
+      "custom_text": null,
+      "label": "Fixture choice",
+      "note": null,
+      "notification_id": "fixture-notification-id",
+      "selections": [
+        "fixture-choice"
+      ],
+      "value": null
+    },
+    "answered_at": "2026-11-20T00:00:00Z",
+    "body": "fixture-body",
+    "context": null,
+    "created_at": "2026-11-20T00:00:00Z",
+    "dedup_key": "fixture-dedup-key",
+    "default_action": null,
+    "options": [
+      {
+        "label": "Fixture choice",
+        "value": "fixture-choice"
+      }
+    ],
+    "producer_provider": null,
+    "producer_session_generation": "fixture-producer-session-generation",
+    "producer_stream_id": "fixture-producer-stream-id",
+    "question_id": "fixture-question-id",
+    "response_mode": "single_choice",
+    "schema_version": 1,
+    "spec_id": null,
+    "title": "fixture-title",
+    "ttl_seconds": null,
+    "updated_at": "2026-11-20T00:00:00Z"
+  },
+  "answer": {
+    "action_id": "fixture-action-id",
+    "action_kind": "yes_no",
+    "actor_class": "fixture-actor-class",
+    "actor_client": "fixture-actor-client",
+    "actor_stream_id": null,
+    "actor_verified": true,
+    "at": "2026-11-20T00:00:00Z",
+    "by": "fixture-by",
+    "choice": true,
+    "claimed_by": "fixture-claimed-by",
+    "custom_text": null,
+    "label": "Fixture choice",
+    "note": null,
+    "notification_id": "fixture-notification-id",
+    "selections": [
+      "fixture-choice"
+    ],
+    "value": null
+  }
+}
