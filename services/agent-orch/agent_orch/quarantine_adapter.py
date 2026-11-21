@@ -11,10 +11,9 @@ from .quarantine_relay import prepare_bundle
 
 PUBLIC_REPOSITORY = 'https://github.com/HJK6/pentacle.git'
 FLEET_CHECKER_SHA256 = '6816589b7e3f41c0a411215a9e55581c7bede0079cb69cc7b20219fa4e34891c'
-_SEAT_IDENTITY_ENV = (
-    'AGENT_ORCH_STREAM_TOKEN', 'AGENT_ORCH_STREAM_TOKEN_FILE', 'AGENT_ORCH_STREAM_ID',
-    'AGENT_ORCH_INTERNAL_LEADER_STREAM_ID', 'PENTACLE_STREAM_ID', 'TMUX', 'TMUX_PANE',
-    'PENTACLE_WORK_REPORT_READER_TOKEN',
+_NOTIFY_ENV = (
+    'HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE',
+    'AGENT_ORCH_WS_URL', 'AGENT_ORCH_HOST_ID', 'AGENT_ORCH_RUNTIME_DIR',
 )
 
 
@@ -40,7 +39,7 @@ class ProductionAdapter:
         return 'flaky-test-quarantine:' + hashlib.sha256(value).hexdigest()
 
     def _notify(self, key, title, message, severity='warning'):
-        env = {k: v for k, v in os.environ.items() if k not in _SEAT_IDENTITY_ENV}
+        env = {name: os.environ[name] for name in _NOTIFY_ENV if name in os.environ}
         proc = subprocess.run([self.agent_orch, 'notify', '--producer', 'flaky-test-quarantine',
                                '--severity', severity, '--title', title, '--message', message,
                                '--dedup-key', key], env=env, capture_output=True, text=True,
