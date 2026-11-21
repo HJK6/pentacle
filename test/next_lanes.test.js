@@ -270,7 +270,7 @@ test('U3 L11: the full road, eight-record preview, forty members and question pl
 });
 
 test('U3 L65: no-road detail preserves daemon order, record classes and the default stop', () => {
-  const sentClasses = 'bbwmqwww';
+  const sentClasses = 'bbwmwwww';
   const completeClasses = `${sentClasses}${'w'.repeat(57)}b`;
   const titles = [];
   const goals = Array.from(completeClasses.slice(0, 65), (letter, index) => {
@@ -289,7 +289,7 @@ test('U3 L65: no-road detail preserves daemon order, record classes and the defa
   const looseMember = member('l65-no-goal-spec', null, { status: 'in_progress' });
   const item = lane({
     lane_id: 'lane-l65', title: 'Synthetic L65', goals: goals.slice(0, 8), goals_total: 65,
-    goal_road: null, goal_classes: `${sentClasses}w`, goal_counts: [62, 2, 1, 0], default_goal: defaultGoal,
+    goal_road: null, goal_classes: `${sentClasses}w`, goal_counts: [63, 2, 0, 0], default_goal: defaultGoal,
     members: [questionMember, looseMember], members_total: 2,
   });
   const projection = { goal_classes: completeClasses, goals_total: 65, default_goal: { ...defaultGoal, blocked: 1 } };
@@ -318,9 +318,9 @@ test('U3 L65: no-road detail preserves daemon order, record classes and the defa
   assert.deepEqual(afterGoalsRoot.active[0].attention.map(row => [row.title, row.reason]), [
     [goals[2].title, 'needs you'], [goals[0].title, '2 blocked'],
   ]);
-  assert.equal(afterGoalsRoot.active[0].more, 62);
-  assert.equal(afterGoalsRoot.active[0].attention.length + afterGoalsRoot.active[0].more, 64,
-    'the queued goal is outside attention; the other 64 unfinished goals are question, blocked, or active');
+  assert.equal(afterGoalsRoot.active[0].more, 63);
+  assert.equal(afterGoalsRoot.active[0].attention.length + afterGoalsRoot.active[0].more, 65,
+    'the one question, two blocked goals and remaining active goals fill the 65-goal attention set');
 
   membersRead = { status: 'held', reply: detail };
   const afterMembers = buildLanesViewModel({ inventory: inventory([item]), reads, questions, route: { level: 'lane', laneId: item.lane_id } });
