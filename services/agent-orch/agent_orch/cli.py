@@ -1896,6 +1896,27 @@ def assistant_brief(args):
     return _assistant_call(args, payload)
 
 
+def assistant_priorities(args):
+    payload = {"type": "assistant.priorities." + args.priorities_action}
+    for key in ("composite_stream_id", "id", "rank", "label", "words", "source", "owner", "spec_id", "revision", "done"):
+        value = getattr(args, key, None)
+        if value is not None: payload[key] = value
+    try:
+        response = asyncio.run(assistant_once(load_config(), payload, timeout=float(args.timeout)))
+    except ServiceCredentialUnavailable:
+        raise
+    except Exception as exc:
+        response, code, message = _direct_rpc_transport_error(payload['type'], None, exc)
+        _print_response(response); print(f"agent-orch assistant: {message}", file=sys.stderr); return code
+    if getattr(args, 'json', False) or not str(response.get('type', '')).endswith('.ok'):
+        _print_response(response)
+    else:
+        print(f"Revision {response['revision']}")
+        for item in response['items']:
+            print(f"{item['rank']}. {item['id']} {item['label']} | owner {item['owner'] or 'front desk'} | source {item['source']} | words {item['words']} | spec {item['spec_id'] or '-'} | {'checked' if item['words_checked'] else 'unverified'}")
+    return 0 if str(response.get('type', '')).endswith('.ok') else 1
+
+
 def assistant_owed(args):
     payload = {"type": "assistant.owed." + args.owed_action}
     if args.composite_stream_id: payload["composite_stream_id"] = args.composite_stream_id
@@ -6022,6 +6043,23 @@ def build_parser() -> argparse.ArgumentParser:
         target.add_argument("--owes-spec")
         target.add_argument("--owes-lane")
         owed_flags_parser.add_argument("--closes", action="append")
+    priorities_parser = assistant_sub.add_parser("priorities", help="read and manage ranked priorities")
+    priorities_sub = priorities_parser.add_subparsers(dest="priorities_action", required=True)
+    for action in ("list", "add", "move", "remove", "owner"):
+        p = priorities_sub.add_parser(action)
+        p.add_argument("--composite-stream-id"); p.add_argument("--timeout", type=float, default=30)
+        p.set_defaults(func=assistant_priorities)
+        if action in {"move", "remove", "owner"}: p.add_argument("id")
+        if action in {"add", "move"}: p.add_argument("--rank", type=int, required=True)
+        if action == "add":
+            p.add_argument("--label", required=True); p.add_argument("--words", required=True)
+            p.add_argument("--owner"); p.add_argument("--spec-id")
+        if action in {"add", "move"}: p.add_argument("--source", required=True)
+        if action == "remove":
+            source = p.add_mutually_exclusive_group(required=True)
+            source.add_argument("--source"); source.add_argument("--done", action="store_true")
+        if action == "owner": p.add_argument("--owner", required=True)
+        if action == "list": p.add_argument("--revision", type=int); p.add_argument("--json", action="store_true")
     owed_parser = assistant_sub.add_parser("owed", help="read and manage follow-up items")
     owed_sub = owed_parser.add_subparsers(dest="owed_action", required=True)
     for action in ("open", "close", "list", "show"):

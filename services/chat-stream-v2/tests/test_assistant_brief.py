@@ -5,14 +5,16 @@ from assistant_brief import compose, Section, Brief
 @pytest.mark.parametrize('reason', ['bind','rebind','restore','compaction','daemon_start','requested'])
 def test_compose_contract(reason):
     sections = {name: Section(name + ': 30', [name + ':' + '界'*180 for _ in range(30)])
-                for name in ('owed','questions','rulings','wakes','usage','windows','lanes','seats')}
+                for name in ('priorities','owed','questions','rulings','wakes','usage','windows','lanes','seats')}
     text = compose({'at':'2026-11-18T00:00:00Z','reason':reason,'sections':sections})
     assert text.startswith('[front desk brief] 2026-11-18T00:00:00Z reason=' + reason)
     assert len(text.encode()) <= 6000
     for name in sections: assert name + ': 30' in text
     assert 'Commands:' in text
     assert 'seats:' + '界'*180 not in text
-    assert 'owed:' + '界'*180 in text
+    assert 'priorities:' + '界'*180 in text
+    assert text.index('priorities: 30') < text.index('owed: 30')
+    assert 'agent-orch assistant priorities list' in text
 
 @pytest.mark.asyncio
 async def test_gather_isolates_failure():

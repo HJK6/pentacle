@@ -2019,6 +2019,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
             import assistant_owed
             assistant_owed.initialize(conn)
+            import assistant_priorities
+            assistant_priorities.initialize(conn)
             import coordination_holds
             coordination_holds.initialize(conn)
             store_qa.initialize(conn)

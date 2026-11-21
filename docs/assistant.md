@@ -534,3 +534,7 @@ next request either. A baseline that may still be unsubmitted refuses advisor
 tells with `guidelines_delivery_unconfirmed` for at most ten minutes after it
 was sent. `inspect` includes `assistant_guidelines`, with the seat, last delivered
 identity and time, and whether the identity matches the current files.
+
+## Ranked priorities
+
+Each assistant composite keeps a ranked list and a history of full list revisions in the sessions database. The bound front desk and authenticated operator can use `agent-orch assistant priorities add`, `move`, `remove`, and `owner`; the advisor can read with `list` or `list --revision N --json`. Add and move cite `--source message:<full-id>` or `--source seat:<stream-id>`; removal cites a source or uses `--done`. Message-sourced words are checked against the operator message ignoring case and whitespace. Seat-sourced words are marked unverified. An empty owner means the front desk. Each change records its actor, source when applicable, and a new atomic revision. The front desk brief displays the highest twelve entries first; covered spawn and send ruling packets capture the list at request creation.
