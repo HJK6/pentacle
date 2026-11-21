@@ -1,5 +1,6 @@
 """Exercise the command and revision-checked publisher transport in isolated work."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 
 from agent_orch import cli, reliability_run
 from agent_orch.quarantine_decisions import MemoryPublisher
+from agent_orch.quarantine_transition import _key
 from test_reliability_score import NOW, change_json, make_work, pkg, sources, stamp, write
 
 
@@ -248,3 +250,137 @@ def test_on_watch_closure_keeps_first_miss_until_recurrence(writer, sources):
     assert record['item'] == target
     assert record['occurrences'] == ['nightly-soak/' + original, 'nightly-soak/' + new]
     assert report(sources, NOW)['conditions']['open_failure_items']['numerator'] == 1
+
+
+def writer_alerts(sources):
+    return json.loads(Path(sources['work']['register']).read_text()).get('writer_alerts', {})
+
+
+def run_writer(config, now=NOW, surfaces=('releases',)):
+    return reliability_run.run(json.loads(config.read_text()), now, surfaces)
+
+
+def failed_source(monkeypatch):
+    real = reliability_run.WorkWriter._ingest
+    state = {'error': OSError('private failure: /tmp/fixture-details')}
+
+    def ingest(self, sources, writer_state, surface, cutoff):
+        if surface == 'releases' and state['error'] is not None:
+            raise state['error']
+        return real(self, sources, writer_state, surface, cutoff)
+
+    monkeypatch.setattr(reliability_run.WorkWriter, '_ingest', ingest)
+    return state
+
+
+def test_alert_episode_source_rearms_after_success_but_not_if_unattempted(writer, sources, monkeypatch):
+    _, alerts, config = writer
+    state = failed_source(monkeypatch)
+    identity = _key('scorecard-source', 'releases')
+    assert run_writer(config)['status'] == 'incomplete'
+    assert run_writer(config, surfaces=())['status'] == 'complete'
+    assert identity in writer_alerts(sources)
+    state['error'] = None
+    assert run_writer(config)['status'] == 'complete'
+    assert identity not in writer_alerts(sources)
+    state['error'] = OSError('second episode')
+    assert run_writer(config)['status'] == 'incomplete'
+    assert alerts == [identity, identity]
+    assert writer_alerts(sources)[identity]['failures'] == 1
+
+
+def test_alert_episode_repeated_failures_update_record_without_another_alert(writer, sources, monkeypatch):
+    _, alerts, config = writer
+    state = failed_source(monkeypatch)
+    identity = _key('scorecard-source', 'releases')
+    first = run_writer(config)
+    assert first['issues'] == [{'key': 'releases', 'kind': 'source', 'error': 'OSError', 'alert': 'confirmed'}]
+    assert writer_alerts(sources)[identity] == {
+        'error': 'OSError', 'first_failed_at': stamp(NOW), 'last_failed_at': stamp(NOW), 'failures': 1}
+    state['error'] = ValueError('another private value')
+    later = NOW + timedelta(minutes=3)
+    second = run_writer(config, later)
+    assert second['issues'] == [{'key': 'releases', 'kind': 'source', 'error': 'ValueError', 'alert': 'confirmed'}]
+    assert alerts == [identity]
+    assert writer_alerts(sources)[identity] == {
+        'error': 'ValueError', 'first_failed_at': stamp(NOW), 'last_failed_at': stamp(later), 'failures': 2}
+
+
+@pytest.mark.parametrize('next_step', ['fail', 'succeed'])
+def test_alert_episode_legacy_true_migrates_or_clears(writer, sources, monkeypatch, next_step):
+    _, alerts, config = writer
+    state = failed_source(monkeypatch)
+    identity = _key('scorecard-source', 'releases')
+    change_json(Path(sources['work']['register']), writer_alerts={identity: True})
+    if next_step == 'succeed':
+        state['error'] = None
+        assert run_writer(config)['status'] == 'complete'
+        assert identity not in writer_alerts(sources)
+    else:
+        assert run_writer(config)['status'] == 'incomplete'
+        assert writer_alerts(sources)[identity] == {
+            'error': 'OSError', 'first_failed_at': stamp(NOW), 'last_failed_at': stamp(NOW), 'failures': 1}
+    assert alerts == []
+
+
+def test_alert_episode_occurrence_rearms_when_pending_work_succeeds(writer, sources):
+    wire, alerts, config = writer
+    fail_workflow(sources)
+    wire.interrupt_after = 'update'
+    assert run_writer(config, surfaces=('hosted',))['status'] == 'incomplete'
+    register = json.loads(Path(sources['work']['register']).read_text())
+    pending, = register['pending']
+    identity = _key('scorecard-occurrence', pending['writer_key'])
+    assert alerts == [identity]
+    assert run_writer(config, surfaces=())['status'] == 'complete'
+    assert identity in writer_alerts(sources)
+    result = run_writer(config, surfaces=('hosted',))
+    assert result['status'] == 'complete' and result['pending'] == []
+    assert identity not in writer_alerts(sources)
+
+
+@pytest.mark.parametrize('kind,key,method', [
+    ('alias', 'old-cause', '_merge'), ('prevention', 'work-history', '_maintenance'),
+])
+def test_alert_episode_alias_and_prevention_rearm(writer, sources, monkeypatch, kind, key, method):
+    _, alerts, config = writer
+    if kind == 'alias':
+        change_json(config, cause_aliases={'old-cause': dict(cause='new-cause',
+            reviewer='fixture-reviewer', revision='fixture-revision', evidence='fixture-evidence')})
+    real = getattr(reliability_run.WorkWriter, method)
+    fail = True
+
+    def step(self, *args):
+        if fail:
+            raise TypeError('fixture step failure')
+        return real(self, *args)
+    monkeypatch.setattr(reliability_run.WorkWriter, method, step)
+    identity = _key('scorecard-' + kind, key)
+    assert run_writer(config, surfaces=())['status'] == 'incomplete'
+    fail = False
+    assert run_writer(config, surfaces=())['status'] == 'complete'
+    assert identity not in writer_alerts(sources)
+    fail = True
+    assert run_writer(config, surfaces=())['status'] == 'incomplete'
+    assert alerts == [identity, identity]
+
+
+def test_alert_episode_unconfirmed_retry_does_not_create_a_confirmed_entry(writer, sources, monkeypatch):
+    _, alerts, config = writer
+    failed_source(monkeypatch)
+    identity = _key('scorecard-source', 'releases')
+    fail = True
+
+    def alert(_, key, message):
+        alerts.append((key, message))
+        if fail:
+            raise OSError('notification not confirmed')
+    monkeypatch.setattr(reliability_run.ProductionAdapter, 'scorecard_alert', alert)
+    assert run_writer(config)['issues'] == [
+        {'key': 'releases', 'kind': 'source', 'error': 'OSError', 'alert': 'unconfirmed'}]
+    assert identity not in writer_alerts(sources)
+    fail = False
+    assert run_writer(config)['issues'] == [
+        {'key': 'releases', 'kind': 'source', 'error': 'OSError', 'alert': 'confirmed'}]
+    assert writer_alerts(sources)[identity]['failures'] == 1
+    assert alerts == [(identity, 'Cannot reconcile releases')] * 2
