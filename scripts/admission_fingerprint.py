@@ -10,14 +10,15 @@ import re
 
 
 @lru_cache(maxsize=4096)
-def _parse_cached(path, mtime, size):
-    text = Path(path).read_text(encoding='utf-8')
+def _parse_cached(path, _sha256, content):
+    # Preserve the universal newline handling of Path.read_text().
+    text = content.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
     return text, ast.parse(text, filename=path)
 
 
 def _parse(path):
-    stat = path.stat()
-    return _parse_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    content = path.read_bytes()
+    return _parse_cached(str(path), hashlib.sha256(content).digest(), content)
 
 
 def _source(text, node):

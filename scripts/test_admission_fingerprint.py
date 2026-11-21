@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -103,3 +104,17 @@ def test_javascript_declared_fixture_paths_and_directories_are_inputs(tmp_path):
     original = javascript_fingerprint(tmp_path, 'test/case.test.js')
     item.write_text('{\"changed\":true}')
     assert javascript_fingerprint(tmp_path, 'test/case.test.js') != original
+def test_same_size_fixture_rewrite_with_preserved_mtime_is_fingerprinted(tmp_path):
+    tests = tmp_path / 'tests'
+    tests.mkdir()
+    fixture = tests / 'conftest.py'
+    fixture.write_text('import pytest\n@pytest.fixture\ndef probe():\n    return 1\n')
+    (tests / 'test_sample.py').write_text('def test_case(probe):\n    assert probe\n')
+    node = 'tests/test_sample.py::test_case'
+    before = fixture.stat()
+    original = python_fingerprint(tmp_path, node)
+    fixture.write_text(fixture.read_text().replace('return 1', 'return 2'))
+    os.utime(fixture, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = fixture.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert python_fingerprint(tmp_path, node) != original
