@@ -923,8 +923,14 @@ function createQuestions(options = {}) {
     const snapshot = getSnapshot();
     if (mount.kind === 'list') {
       mount.container.classList.add('next-questions-list');
+      if (options.questionReadFailed?.()) {
+        const error = element('div', 'next-question-check-failed', mount.container, 'Questions could not be refreshed. ');
+        const retry = element('button', 'next-question-retry', error, 'Retry');
+        retry.type = 'button';
+        retry.addEventListener('click', () => { void options.retryQuestionIdentity?.(); });
+      }
       if (!snapshot.list.length) {
-        element('div', 'next-question-empty', mount.container, 'No questions waiting.');
+        if (!options.questionReadFailed?.()) element('div', 'next-question-empty', mount.container, 'No questions waiting.');
         return;
       }
       for (const item of snapshot.list) renderListItem(mount.container, mount, item);

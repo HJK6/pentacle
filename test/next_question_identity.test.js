@@ -90,13 +90,12 @@ test('a failed identity lookup exposes Retry without hiding the question or answ
   dom.window.close();
 });
 
-test('an open notification omitted by the identity read stays unplaced and can be retried', async () => {
+test('a successful open-question read removes an older stale open notification', async () => {
   const index = createQuestionNotifications(() => {}, { promptList: async () => ({ ok: true, questions: [] }) });
   index.ingest([notice('q1')]);
   await tick();
   const result = buildQuestionPlacement({ notifications: index.values(), sessions: [{ stream_id: 'local:chat', visibility: 'default', title: 'Chat' }] });
-  assert.equal(result.questions[0].placement.kind, 'unplaced');
-  assert.equal(result.questions[0].placement.retryIdentity, true);
+  assert.equal(result.questions.length, 0);
 });
 
 test('a late identity reply cannot reopen an answered notification', async () => {
@@ -135,4 +134,71 @@ test('actual serialized notifier shape is joined to its durable record before pl
   const lane = { lane_id: 'lane', title: 'Lane', goals: [{ goal_id: 'goal', title: 'Goal' }], progress: { members: [{ spec_id: 'spec_gate__next_lanes__07', goal_id: 'goal' }], members_total: 1 } };
   const result = buildQuestionPlacement({ inventory: { lanes: [lane] }, notifications: index.values() });
   assert.equal(result.questions[0].placement.kind, 'lane_goal');
+});
+
+function durable(id) {
+  return { question_id: id, notification_id: `notice-${id}`, producer_stream_id: 'local:chat', state: 'open', spec_id: `spec-${id}`,
+    envelope: { question_id: id, producer_stream_id: 'local:chat', title: `Question ${id}`, body: 'Choose', response_mode: 'single_choice', allow_custom: true, options: [{ label: 'Keep', value: 'keep' }] } };
+}
+
+test('prompt.list supplies every open question even when the notification snapshot omits it', async () => {
+  const rows = Array.from({ length: 120 }, (_, i) => durable(`q${i}`));
+  const index = createQuestionNotifications(() => {}, { promptList: async () => ({ ok: true, questions: rows }) });
+  // Simulate an absent or failed notificationList response, and a capped snapshot
+  // filled with unrelated producers. The durable read is the membership source.
+  index.ingest(Array.from({ length: 100 }, (_, i) => ({ notification_id: `other-${i}`, producer: 'other', state: 'open' })));
+  await index.refreshIdentities();
+  const result = buildQuestionPlacement({ notifications: index.values() });
+  assert.equal(result.questions.length, 120);
+  assert.equal(result.questions.find(item => item.id === 'q119').specId, 'spec-q119');
+  assert.equal(result.questions[0].model.options[0].label, 'Keep');
+});
+
+test('a prompt-only durable question remains answerable using its actual notification ID', async () => {
+  const dom = new JSDOM('<div id="list"></div>');
+  const sent = [];
+  const index = createQuestionNotifications(() => {}, { promptList: async () => ({ ok: true, questions: [durable('q1')] }) });
+  await index.refreshIdentities();
+  const control = createQuestions({ document: dom.window.document, notifications: index.values(), cc: { notificationResolve: async (...args) => { sent.push(args); return { ok: true }; } } });
+  control.mountList(dom.window.document.querySelector('#list'));
+  dom.window.document.querySelector('.next-question-option').click();
+  dom.window.document.querySelector('.next-question-send').click();
+  await tick();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0], 'notice-q1');
+  assert.equal(sent[0][1], 'yes_no');
+  assert.deepEqual(sent[0][2], { selections: ['keep'], submit: true });
+  control.dispose();
+  dom.window.close();
+});
+
+test('a terminal frame prevents an older prompt.list response from recreating a missing notification', async () => {
+  let resolveList;
+  const index = createQuestionNotifications(() => {}, { promptList: () => new Promise(resolve => { resolveList = resolve; }) });
+  const pending = index.refreshIdentities();
+  await tick();
+  index.frame({ type: 'notification', notification: { notification_id: 'notice-q1', state: 'answered' } });
+  resolveList({ ok: true, questions: [durable('q1')] });
+  await pending;
+  assert.equal(buildQuestionPlacement({ notifications: index.values() }).questions.length, 0);
+});
+
+test('a failed initial durable read exposes a global Retry even with an empty snapshot', async () => {
+  let calls = 0;
+  let control;
+  const dom = new JSDOM('<div id="list"></div>');
+  const index = createQuestionNotifications(() => control?.update({ notifications: index.values() }), {
+    promptList: async () => ++calls === 1 ? { ok: false } : { ok: true, questions: [durable('q1')] },
+  });
+  control = createQuestions({ document: dom.window.document, questionReadFailed: () => index.readFailed(), retryQuestionIdentity: () => index.refreshIdentities() });
+  control.mountList(dom.window.document.querySelector('#list'));
+  await index.refreshIdentities();
+  assert.match(dom.window.document.querySelector('#list').textContent, /could not be refreshed/);
+  assert.doesNotMatch(dom.window.document.querySelector('#list').textContent, /No questions waiting/);
+  dom.window.document.querySelector('.next-question-retry').click();
+  await tick();
+  assert.equal(control.getSnapshot().openCount, 1);
+  assert.ok(dom.window.document.querySelector('.next-question-form'));
+  control.dispose();
+  dom.window.close();
 });

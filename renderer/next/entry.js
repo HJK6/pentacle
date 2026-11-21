@@ -222,7 +222,7 @@ lanesCard.addEventListener('pointerdown', () => { state.layout = layout.markUsed
 lanesCard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
 const theme = localStorage.getItem('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
 let assistantHistory = null;
-questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(),
+questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(), questionReadFailed: () => questionNotifications.readFailed(),
   onOpenSpec: specId => { const placement = questionsControl.getSnapshot().list.find(item => item.placement?.specId === specId)?.placement; closePopover(); if (placement?.laneId) { openLaneTarget(placement.laneId, placement.goalId); lanesControl?.openSpec(placement.laneId, placement.goalId, specId); } },
   onOpenChat: streamId => { closePopover(); openChat(streamId); } });
 let laneRenderPending = false;
