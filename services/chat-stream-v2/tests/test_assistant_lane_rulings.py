@@ -83,6 +83,8 @@ def test_preflight_packet_has_concrete_frozen_redacted_intent(tmp_path, monkeypa
                    "initial_prompt": prompt, "risks": "Caller supplied risk", "exclusions": "No policy rewrite"}
             if rule == "composer_boundary":
                 msg["initial_prompt_baseline_end"] = len(baseline)
+            priority = [{"rank": 1, "label": "first", "owner": None}]
+            await h["store"].submit(lambda c: (c.execute("INSERT INTO v2_assistant_priorities VALUES(?,?,?)", (h["server"].assistant_composite.config.stream_id, 1, json.dumps(priority))), c.commit()))
             first = await h["dispatch"](msg, "desk")
             assert first["type"] == "spawn.pending_ruling", first
             rid = first["ruling_request_id"]
@@ -90,6 +92,8 @@ def test_preflight_packet_has_concrete_frozen_redacted_intent(tmp_path, monkeypa
             stored = json.loads(row["intent_json"])
             packet = json.loads(stored["_ruling_packet"].split("\n", 1)[1])
             assert list(packet)[:3] == ["objective", "acceptance", "work_item"]
+            assert packet["priorities"] == {"revision": 1, "items": priority}
+            await h["store"].submit(lambda c: (c.execute("UPDATE v2_assistant_priorities SET revision=2,items_json=?", ("[]",)), c.commit()))
             assert packet["objective"] == msg["objective"]
             assert packet["acceptance"] == msg["acceptance"]
             assert packet["work_item"]["origin"] == "Fix admission packets"
@@ -1748,6 +1752,8 @@ def test_covered_send_payload_is_normalized_before_digest_packet_and_release(tmp
     async def go():
         store, root, advisor, _target, server, tmux = await _covered_send_rig(tmp_path)
         try:
+            priority = [{"rank": 1, "label": "first", "owner": "lane:one"}]
+            await store.submit(lambda c: (c.execute("INSERT INTO v2_assistant_priorities VALUES(?,?,?)", (server.assistant_composite.config.stream_id, 1, json.dumps(priority))), c.commit()))
             msg = _covered_send_msg(root, 30)
             msg.pop("text")
             msg["message"] = "The canonical body"
@@ -1759,6 +1765,9 @@ def test_covered_send_payload_is_normalized_before_digest_packet_and_release(tmp
             notice = await store.submit(lambda c: c.execute(
                 "SELECT body FROM v2_outbound_notices WHERE notice_id LIKE ?", (f"assistant-lane-ruling:{rid}:%",)).fetchone()[0])
             assert json.loads(notice.split("\n", 1)[1])["prompt_excerpt"] == "The canonical body"
+            assert json.loads(notice.split("\n", 1)[1])["priorities"] == {"revision": 1, "items": priority}
+            await store.submit(lambda c: (c.execute("UPDATE v2_assistant_priorities SET revision=2,items_json=?", ("[]",)), c.commit()))
+            assert json.loads((await server.lane_rulings._fetch(rid))["intent_json"])["_ruling_packet"] == intent["_ruling_packet"]
             with pytest.raises(VerbError, match="assistant_ruling_intent_changed"):
                 await server._on_send({**msg, "message": "changed", "request_id": "changed-body"})
             with pytest.raises(VerbError, match="assistant_ruling_send_body_ambiguous"):

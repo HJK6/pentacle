@@ -381,6 +381,8 @@ class AssistantComposite:
         self.store = store
         from assistant_owed import OwedItems
         self.owed = OwedItems(self)
+        from assistant_priorities import Priorities
+        self.priorities = Priorities(self)
         self.sessions = sessions
         from front_desk_digest import FrontDeskDigest
         self.front_desk_digest = FrontDeskDigest(store, lambda: self.config, lambda: self.sessions)

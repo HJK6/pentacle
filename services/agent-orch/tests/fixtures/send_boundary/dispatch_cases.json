@@ -1,14 +1,23 @@
 [
   {
     "command": "reliability score",
-    "argv": ["reliability", "score", "--json"],
+    "argv": [
+      "reliability",
+      "score",
+      "--json"
+    ],
     "handler": "agent_orch.reliability_score.command",
     "network_entry": null,
     "not_applicable": "receipt reader without daemon RPC"
   },
   {
     "command": "reliability reconcile",
-    "argv": ["reliability", "reconcile", "--config", "/fixture/scorecard-writer.json"],
+    "argv": [
+      "reliability",
+      "reconcile",
+      "--config",
+      "/fixture/scorecard-writer.json"
+    ],
     "handler": "agent_orch.reliability_run.command",
     "network_entry": null,
     "not_applicable": "work publisher and notification subprocesses"
@@ -520,6 +529,79 @@
       "fixture"
     ],
     "handler": "agent_orch.cli.assistant_advice",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant priorities list",
+    "argv": [
+      "assistant",
+      "priorities",
+      "list"
+    ],
+    "handler": "agent_orch.cli.assistant_priorities",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant priorities add",
+    "argv": [
+      "assistant",
+      "priorities",
+      "add",
+      "--rank",
+      "1",
+      "--label",
+      "fixture",
+      "--words",
+      "fixture",
+      "--source",
+      "message:fixture"
+    ],
+    "handler": "agent_orch.cli.assistant_priorities",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant priorities move",
+    "argv": [
+      "assistant",
+      "priorities",
+      "move",
+      "fixture",
+      "--rank",
+      "1",
+      "--source",
+      "message:fixture"
+    ],
+    "handler": "agent_orch.cli.assistant_priorities",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant priorities remove",
+    "argv": [
+      "assistant",
+      "priorities",
+      "remove",
+      "fixture",
+      "--done"
+    ],
+    "handler": "agent_orch.cli.assistant_priorities",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant priorities owner",
+    "argv": [
+      "assistant",
+      "priorities",
+      "owner",
+      "fixture",
+      "--owner",
+      "none"
+    ],
+    "handler": "agent_orch.cli.assistant_priorities",
     "network_entry": "assistant_once",
     "not_applicable": null
   },

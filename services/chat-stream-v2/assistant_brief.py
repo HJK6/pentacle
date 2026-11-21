@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 CAP_BYTES = 6000
-ORDER = ('owed','questions','rulings','wakes','usage','windows','lanes','seats')
-CAPS = dict(owed=15,questions=8,rulings=8,wakes=10,usage=None,windows=24,lanes=12,seats=10)
-LABELS = dict(zip(ORDER,('Owed','Operator questions','Advisor rulings','Wakes','Usage','Windows','Lanes','Seats')))
-COMMANDS = ('Commands: agent-orch assistant owed list; agent-orch prompt list --open; '
+ORDER = ('priorities','owed','questions','rulings','wakes','usage','windows','lanes','seats')
+CAPS = dict(priorities=12,owed=15,questions=8,rulings=8,wakes=10,usage=None,windows=24,lanes=12,seats=10)
+LABELS = dict(zip(ORDER,('Priorities','Owed','Operator questions','Advisor rulings','Wakes','Usage','Windows','Lanes','Seats')))
+COMMANDS = ('Commands: agent-orch assistant priorities list; agent-orch assistant owed list; agent-orch prompt list --open; '
             'agent-orch wake list; agent-orch account status; '
             'agent-orch hold list; agent-orch screen status; agent-orch spawn freeze --help; '
             'agent-orch work-lane list; agent-orch list; agent-orch assistant brief; '
@@ -59,6 +59,11 @@ class Brief:
             except Exception as exc: return Section(f'{LABELS[n]}: unavailable ({type(exc).__name__})',[])
         return dict(at=utc(now),reason=reason,sections=dict(zip(ORDER,await asyncio.gather(*(one(n) for n in ORDER)))))
     async def text(self,reason,binding=None): return compose(await self.gather(reason,binding))
+    async def priorities(self,binding,now):
+        from assistant_priorities import snapshot
+        result = await self.store.submit(lambda c: snapshot(c,self.composite.config.stream_id))
+        lines = [f"  {r['rank']}. {clip(r['label'])} owner {clip(r['owner'] or 'front desk')} source {clip(r['source'])}" for r in result['items'][:12]]
+        return Section(f"Priorities: {len(result['items'])} open, revision {result['revision']}",lines)
     async def owed(self,binding,now):
         stream=self.composite.config.stream_id
         count=(await self.rows("SELECT COUNT(*) n,SUM(due_at IS NOT NULL AND julianday(due_at)<julianday(?)) overdue FROM v2_assistant_owed WHERE stream_id=? AND state='open'",(utc(now),stream)))[0]
