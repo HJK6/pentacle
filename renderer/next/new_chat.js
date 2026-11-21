@@ -1,7 +1,6 @@
 'use strict';
 
-const SUPPORTED_PROVIDERS = Object.freeze(['claude', 'codex']);
-const PROVIDER_LABELS = Object.freeze({ claude: 'Claude', codex: 'Codex' });
+const ACCOUNT_PROVIDERS = new Set(['claude', 'codex']);
 const SPAWN_PROFILE = 'desktop_manual';
 const DEFAULT_FAILURE = 'Failed to start chat';
 
@@ -10,8 +9,24 @@ function catalogFrom(input) {
   return input && typeof input === 'object' ? input : {};
 }
 
+function modelCatalogFor(catalog) {
+  const available = catalog?.available_models;
+  if (available && typeof available === 'object' && !Array.isArray(available)) return available;
+  const models = catalog?.models;
+  return models && typeof models === 'object' && !Array.isArray(models) ? models : {};
+}
+
 function modelMapFor(catalog, provider) {
-  return catalog.models?.[provider] || catalog.available_models?.[provider] || {};
+  return modelCatalogFor(catalog)[provider] || {};
+}
+
+function providerDisplayName(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  if (normalized === 'codex') return 'Codex';
+  if (normalized === 'claude') return 'Claude';
+  if (normalized === 'gemini') return 'Gemini';
+  if (normalized === 'cursor') return 'Cursor';
+  return provider ? String(provider).trim() : 'Agent';
 }
 
 function profileFor(catalog, provider) {
@@ -43,12 +58,8 @@ function normalizeMachineOptions(options = {}) {
 function accountDisplayName(account, labels, provider) {
   const alias = String(account?.alias || '');
   const configured = labels?.[provider]?.[alias];
-  const raw = typeof configured === 'string' && configured.trim()
-    ? configured.trim()
-    : [account?.username, account?.display_name, account?.label, account?.email]
-      .find(value => typeof value === 'string' && value.trim())?.trim();
-  if (!raw) return '';
-  return raw.split('@')[0].trim();
+  if (typeof configured === 'string' && configured.trim()) return configured.trim().split('@')[0];
+  return alias;
 }
 
 function singleLine(value) {
@@ -112,12 +123,13 @@ function createNewChatForm(options = {}) {
 
   function providers() {
     const profiles = catalog.profiles?.[SPAWN_PROFILE] || {};
-    return SUPPORTED_PROVIDERS.flatMap((provider) => {
+    const models = modelCatalogFor(catalog);
+    return Object.keys(models).flatMap((provider) => {
       const profile = profiles[provider];
-      const providerModels = modelMapFor(catalog, provider);
+      const providerModels = models[provider] || {};
       const modelCount = Object.keys(providerModels).length;
       if (!Array.isArray(profile) || !modelCount) return [];
-      return [{ id: provider, label: PROVIDER_LABELS[provider], modelCount }];
+      return [{ id: provider, label: providerDisplayName(provider), modelCount }];
     });
   }
 
@@ -127,18 +139,26 @@ function createNewChatForm(options = {}) {
   }
 
   function accountsFor(provider = state.provider, machineId = state.machine) {
-    if (!provider || !machineId) return [];
+    if (!provider || !machineId || !ACCOUNT_PROVIDERS.has(provider)) return [];
     const rows = catalog.account_status?.accounts;
     if (!Array.isArray(rows)) return [];
     return rows.flatMap((account) => {
       if (account?.host !== machineId || account?.provider !== provider
-        || account.active !== true || account.enabled !== true || account.health !== 'healthy') return [];
+        || !account.active || !account.enabled || account.health !== 'healthy') return [];
       const alias = String(account.alias || '');
       const label = accountDisplayName(account, accountLabels, provider);
-      // The form shows configured usernames, never the daemon's private alias.
       if (!alias || !label) return [];
       return [{ id: alias, label }];
     });
+  }
+
+  function defaultAccountAlias(provider = state.provider, machineId = state.machine) {
+    if (!provider || !machineId || !ACCOUNT_PROVIDERS.has(provider)) return null;
+    const defaults = catalog.account_status?.defaults;
+    if (!Array.isArray(defaults)) return null;
+    const alias = defaults.find(row => row?.host === machineId && row?.provider === provider)?.alias;
+    return alias && accountsFor(provider, machineId).some(account => account.id === alias)
+      ? String(alias) : null;
   }
 
   function effortsFor(provider = state.provider, model = state.model) {
@@ -157,10 +177,10 @@ function createNewChatForm(options = {}) {
   function canStart() {
     return state.phase === 'form' && state.visible
       && !!state.provider && !!state.model && !!state.effort
-      && !!state.account && !!state.machine
+      && !!state.machine
       && modelIds().includes(state.model)
       && effortsFor().includes(state.effort)
-      && accountsFor().some(account => account.id === state.account)
+      && (!state.account || accountsFor().some(account => account.id === state.account))
       && machines.some(machine => machine.id === state.machine);
   }
 
@@ -210,7 +230,7 @@ function createNewChatForm(options = {}) {
       state.provider = selected;
       state.model = null;
       state.effort = null;
-      state.account = null;
+      state.account = defaultAccountAlias(selected, state.machine);
       changed = true;
     } else if (field === 'model' && modelIds().includes(selected)) {
       if (state.model === selected) return false;
@@ -227,10 +247,14 @@ function createNewChatForm(options = {}) {
       changed = true;
     } else if (field === 'machine' && machines.some(machine => machine.id === selected)) {
       if (state.machine === selected) return false;
+      const previousDefault = defaultAccountAlias(state.provider, state.machine);
+      const previousAccount = state.account;
       state.machine = selected;
-      if (state.account && !accountsFor(state.provider, selected).some(account => account.id === state.account)) {
-        state.account = null;
-      }
+      const nextAccounts = accountsFor(state.provider, selected);
+      state.account = previousAccount && previousAccount !== previousDefault
+        && nextAccounts.some(account => account.id === previousAccount)
+        ? previousAccount
+        : defaultAccountAlias(state.provider, selected);
       changed = true;
     }
 
@@ -243,18 +267,22 @@ function createNewChatForm(options = {}) {
 
   function spawnRequest() {
     const profile = profileFor(catalog, state.provider);
-    return {
+    const defaultAlias = catalog.account_status?.defaults?.find(
+      row => row?.host === state.machine && row?.provider === state.provider,
+    )?.alias;
+    const request = {
       hostId: state.machine,
       provider: state.provider,
       model: state.model,
       effort: state.effort,
-      account: state.account,
       spawnProfile: SPAWN_PROFILE,
       catalogVersion: catalog.catalog_version,
       resolutionSource: state.model === profile?.[0] && state.effort === profile?.[1]
         ? 'profile_default'
         : 'explicit_override',
     };
+    if (state.account && state.account !== defaultAlias) request.account = state.account;
+    return request;
   }
 
   function notifyAdmitted(reply) {
@@ -545,7 +573,6 @@ function mountNewChatForm(root, options = {}) {
 
 module.exports = {
   DEFAULT_FAILURE,
-  SUPPORTED_PROVIDERS,
   createNewChatForm,
   mountNewChatForm,
 };

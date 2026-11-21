@@ -55,7 +55,7 @@ async function newChat(ctx) {
   await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs });
   report.ok('provider tiles show catalog counts and Start is disabled', await session.eval("document.querySelector('[data-testid=\"set-provider-claude\"]').textContent.includes('1 model') && document.querySelector('[data-testid=\"set-provider-codex\"]').textContent.includes('1 model') && document.querySelector('[data-testid=\"start-chat\"]').disabled"));
   await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
-  report.ok('account displays its username and enables Start', await session.eval("document.querySelector('[data-testid=\"set-account-ours\"]').textContent==='fixture' && !document.querySelector('[data-testid=\"start-chat\"]').disabled"));
+  report.ok('account uses the current-web alias fallback and permits Start', await session.eval("document.querySelector('[data-testid=\"set-account-ours\"]').textContent==='ours' && !document.querySelector('[data-testid=\"start-chat\"]').disabled"));
   await session.click('[data-testid="start-chat"]'); await session.waitFor("document.querySelector('.start-error')?.textContent === 'Fixture refusal'", { timeoutMs: ctx.timeoutMs });
   report.ok('a resolved refusal retains the choices and displays its reason', await session.eval("document.querySelector('[data-testid=\"set-provider-claude\"]').getAttribute('aria-checked')==='true' && document.querySelector('[data-testid=\"set-model-fixture-model\"]').getAttribute('aria-checked')==='true' && document.querySelector('[data-testid=\"set-account-ours\"]').getAttribute('aria-checked')==='true' && window.__nextRequests.length === 1"));
   await session.eval(`window.__nextReply={ok:true,type:'spawn.ok',state:'queued',streamId:'local:not-listed',stream_id:'local:not-listed',request_id:'fixture',spawn_request_id:'fixture',queue_handle:'fixture'}; true`);
@@ -63,6 +63,7 @@ async function newChat(ctx) {
   await session.eval("document.querySelector('[data-testid=\"start-chat\"]').click(),true");
   report.ok('queued admission holds the disabled form and records its stream', await session.eval("document.querySelector('[data-testid=\"start-chat\"]').disabled && window.__pentacleNextAdmitted.includes('local:not-listed') && window.__nextRequests.length === 2"));
   await session.click('.card [aria-label="Close"]'); await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]');
+  await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs });
   report.ok('leaving and reopening shows a fresh form', await session.eval("!!document.querySelector('[data-testid=\"set-provider-claude\"]') && !document.querySelector('.start-error')"));
   await session.screenshot(path.join(report.dir, 'next-new-chat.png'));
   await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
@@ -70,7 +71,7 @@ async function newChat(ctx) {
   await session.click('[data-testid="start-chat"]');
   await session.waitFor("!document.querySelector('.card').hidden && !!document.querySelector('.card [data-next-composer]')", { timeoutMs: ctx.timeoutMs });
   report.ok('an admitted listed session opens its ordinary chat and is recorded', await session.eval("window.__pentacleNextAdmitted.includes('local:web-gate-1') && !!document.querySelector('.card [aria-label=\"Terminal\"]')"));
-  await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]'); await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
+  await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]'); await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs }); await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
   await session.eval(`window.__nextReply={ok:true,streamId:'local:web-gate-empty',session:{...window.PentacleChatStore.getState().sessions.find(s=>s.stream_id==='local:web-gate-empty'),state:'ready'}}; true`);
   await session.click('[data-testid="start-chat"]'); await session.waitFor("window.__pentacleNextAdmitted.includes('local:web-gate-empty') && !!document.querySelector('.card [data-next-composer]')",{timeoutMs:ctx.timeoutMs});
   report.ok('an ordinary ready reply opens the empty session and records its ID',await session.eval("!!document.querySelector('.card-title').textContent && !document.querySelector('.card .thread-inner .slot-chat-row') && !document.querySelector('.new-chat-host:not([hidden])')"));
@@ -82,8 +83,15 @@ async function limitsSettings(ctx) {
   try { await visit(ctx);
   await session.click('[aria-label="Limits and machines"]');
   report.ok('limits popover opens with usage rows and lights its control', await session.eval("!document.querySelector('.popover').hidden && document.querySelector('.popover').textContent.includes('Claude') && document.querySelector('[aria-label=\"Limits and machines\"]').classList.contains('open')"));
-  await session.waitFor("document.querySelector('.popover').textContent.includes('fixture-machine')", { timeoutMs: ctx.timeoutMs });
-  report.ok('machine CPU, RAM and disk figures use the snapshot', await session.eval("(() => {const text=document.querySelector('.popover').textContent;return text.includes('CPU 24%')&&text.includes('RAM 25%')&&text.includes('Disk 40%')})()"));
+  await session.waitFor("!!document.querySelector('[data-machine-host=\"fixture-machine\"]')", { timeoutMs: ctx.timeoutMs });
+  report.ok('machine CPU, RAM and disk figures use separate mock table columns', await session.eval("(() => {const row=document.querySelector('[data-machine-host=\"fixture-machine\"]');const cells=[...row.querySelectorAll('[role=cell]')].map(x=>x.textContent);return JSON.stringify(cells)===JSON.stringify(['24%','25%','40%'])&&!!document.querySelector('.limits-view h3')})()"));
+  await session.screenshot(path.join(report.dir,'next-repair-stats-1440.png'));
+  await session.send('Emulation.setDeviceMetricsOverride', {width:440,height:956,deviceScaleFactor:1,mobile:false});
+  await session.waitFor("window.innerWidth===440", {timeoutMs:ctx.timeoutMs});
+  report.ok('phone stats table does not overflow', await session.eval("document.documentElement.scrollWidth===document.documentElement.clientWidth && !!document.querySelector('[data-machine-host=\"fixture-machine\"]')"));
+  await session.screenshot(path.join(report.dir,'next-repair-stats-440.png'));
+  await session.send('Emulation.setDeviceMetricsOverride', {width:1440,height:900,deviceScaleFactor:1,mobile:false});
+  await session.waitFor("window.innerWidth===1440", {timeoutMs:ctx.timeoutMs});
   await session.send('Input.dispatchKeyEvent', { type:'keyDown', key:'Escape', code:'Escape' });
   report.ok('Escape closes the popover', await session.eval("document.querySelector('.popover').hidden"));
   await session.click('[aria-label="Limits and machines"]'); await session.click('.stage');
@@ -204,3 +212,55 @@ async function narrowPhone(ctx) {
   await session.send('Emulation.clearDeviceMetricsOverride');
 }
 module.exports.narrowPhone=isolated(narrowPhone);
+async function scrollAndFocus(ctx) {
+  const {session,report}=ctx;
+  for (const width of [1440,440]) {
+    await visit(ctx,width);
+    const baseline=await session.eval(`(() => {const input=document.querySelector('.pane .next-composer-input'), outer=input.closest('.next-composer'), scroller=document.querySelector('.pane .thread'); const filler=document.createElement('div');filler.style.height='2000px';filler.style.flex='none';filler.textContent='Scroll fixture';scroller.append(filler);scroller.scrollTop=500;const before=getComputedStyle(outer).boxShadow;input.focus();return {outline:getComputedStyle(input).outlineStyle,before,after:getComputedStyle(outer).boxShadow,scrollbar:getComputedStyle(scroller).scrollbarWidth,width:getComputedStyle(scroller,'::-webkit-scrollbar').width,overflow:scroller.scrollHeight>scroller.clientHeight};})()`);
+    report.ok(`composer focus uses the outer cue at ${width}`,baseline.outline==='none' && baseline.before!==baseline.after,baseline);
+    report.ok(`scrollbar is thin and styled at ${width}`,baseline.overflow && baseline.scrollbar==='thin' && baseline.width==='7px',baseline);
+    await session.screenshot(path.join(report.dir,`next-repair-scroll-focus-${width}.png`));
+  }
+}
+module.exports.scrollAndFocus=isolated(scrollAndFocus);
+async function newChatParity(ctx) {
+  const {session,report}=ctx;
+  const catalog={catalog_version:'parity-fixture',profiles:{desktop_manual:{claude:['allowed-claude','low'],codex:['allowed-codex','low'],cursor:['auto','default'],gemini:['hidden-gemini','default']}},
+    models:{claude:{'allowed-claude':{efforts:['low','high']},'hidden-claude':{efforts:['low']}},codex:{'allowed-codex':{efforts:['low','medium']},'hidden-codex':{efforts:['low']}},cursor:{auto:{efforts:['default']}},gemini:{'hidden-gemini':{efforts:['default']}}},
+    available_models:{claude:{'allowed-claude':{efforts:['low','high']}},codex:{'allowed-codex':{efforts:['low','medium']}},cursor:{auto:{efforts:['default']}}},
+    account_status:{accounts:[{host:'local',provider:'claude',alias:'fixture-account',active:true,enabled:true,health:'healthy'}],defaults:[{host:'local',provider:'claude',alias:'fixture-account'}]}};
+  const install=`window.cc.chatSpawnCatalog=async()=>({ok:true,catalog:${JSON.stringify(catalog)}});window.cc.chatSpawnV2=async()=>{throw Error('unexpected spawn')};true`;
+  for(const width of [1440,440]) {
+    await session.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+    await session.send('Page.navigate',{url:ctx.url});
+    await session.waitFor("!!window.cc && !!document.querySelector('#btn-new')",{timeoutMs:ctx.timeoutMs});
+    await session.eval("new Promise(resolve=>setTimeout(resolve,500))");
+    await session.eval(install);
+    if(width<600) await session.click('#sidebar-toggle');
+    await session.click('#btn-new');
+    const machines=await session.eval("[...document.querySelectorAll('#new-session-location [data-loc]')].map(x=>({id:x.dataset.loc,label:x.querySelector('.new-session-option-label').textContent.trim()}))");
+    await session.click('#new-session-location [data-loc=local]');
+    await session.waitFor("document.querySelectorAll('#spawn-provider option').length===3 && /^(allowed-|auto)/.test(document.querySelector('#spawn-model option')?.value||'')",{timeoutMs:ctx.timeoutMs});
+    const expected=await session.eval("[...document.querySelectorAll('#spawn-provider option')].map(x=>x.value)");
+    const oldChoices={};
+    for(const provider of expected){
+      await session.eval(`(()=>{const e=document.querySelector('#spawn-provider');e.value=${JSON.stringify(provider)};e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+      oldChoices[provider]=await session.eval("({models:[...document.querySelectorAll('#spawn-model option')].map(x=>x.value),efforts:[...document.querySelectorAll('#spawn-effort option')].map(x=>x.value),accounts:[...document.querySelectorAll('#spawn-account option')].map(x=>x.value)})");
+    }
+    await session.screenshot(path.join(report.dir,`current-repair-choices-${width}.png`));
+    await visit(ctx,width); await session.eval(install);
+    await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]');
+    await session.waitFor("!!document.querySelector('[data-set=provider]')",{timeoutMs:ctx.timeoutMs});
+    const actual=await session.eval("[...document.querySelectorAll('[data-set=provider]')].map(x=>x.dataset.val)");
+    report.ok(`new chat providers match the current web at ${width}`,JSON.stringify(actual)===JSON.stringify(expected),{actual,expected});
+    for(const provider of expected){
+      await session.click(`[data-testid="set-provider-${provider}"]`);
+      const models=await session.eval("[...document.querySelectorAll('[data-set=model]')].map(x=>x.dataset.val)");
+      await session.click(`[data-testid="set-model-${oldChoices[provider].models[0]}"]`);
+      const next=await session.eval("({efforts:[...document.querySelectorAll('[data-set=effort]')].map(x=>x.dataset.val),accounts:[...document.querySelectorAll('[data-set=account]')].map(x=>x.dataset.val),machines:[...document.querySelectorAll('[data-set=host]')].map(x=>({id:x.dataset.val,label:x.textContent.trim()}))})");
+      report.ok(`new chat ${provider} choices match the current web at ${width}`,JSON.stringify(models)===JSON.stringify(oldChoices[provider].models)&&JSON.stringify(next.efforts)===JSON.stringify(oldChoices[provider].efforts)&&JSON.stringify(next.accounts)===JSON.stringify(oldChoices[provider].accounts)&&JSON.stringify(next.machines)===JSON.stringify(machines),{models,next,expected:oldChoices[provider],machines});
+    }
+    await session.screenshot(path.join(report.dir,`next-repair-choices-${width}.png`));
+  }
+}
+module.exports.newChatParity=isolated(newChatParity);

@@ -640,6 +640,8 @@ const SCENARIOS = [
   ['next-new-chat', require('./next_scenarios').newChat],
   ['next-limits-settings', require('./next_scenarios').limitsSettings],
   ['next-narrow-phone', require('./next_scenarios').narrowPhone],
+  ['next-scroll-focus', require('./next_scenarios').scrollAndFocus],
+  ['next-new-chat-parity', require('./next_scenarios').newChatParity],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.
