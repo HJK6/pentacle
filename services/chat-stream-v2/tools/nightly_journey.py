@@ -128,6 +128,7 @@ def report(args):
     if record.get("report_line") and any(record.get(k) != v for k, v in identity.items()):
         raise ValueError("receipt already contains a different report intent")
     record.update(identity)
+    record.setdefault("finalized_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     bound_path = path.parent / "bound.json"
     if bound_path.exists():
         record.update(json.loads(bound_path.read_text()))
@@ -141,9 +142,27 @@ def report(args):
     delivery_incident = delivery.get("classification") == "delivery_failure"
     cause_target = delivery.get("cause_target") if delivery_incident else None
     delivery_only = delivery_incident and failed_checks == {"client_delivery"}
+    writer_config = getattr(args, "scorecard_writer", None) if args.job == "nightly-soak" else None
+    writer_handled = bool(record.get("scorecard_items"))
+    if writer_config and args.result != "PASS" and not writer_handled:
+        # Expose the bound source result before attempting its work write. A
+        # timed-out or interrupted command leaves the same receipt for replay.
+        atomic(path, record)
+        try:
+            completed = subprocess.run(
+                ["agent-orch", "reliability", "reconcile", "--config", writer_config, "--surface", "nightly"],
+                capture_output=True, text=True, timeout=60, check=False)
+            result = json.loads(completed.stdout)
+            links = result.get("links", {}).get(str(path), [])
+            if links:
+                record["item"] = links[0]
+                record["scorecard_items"] = links
+            writer_handled = str(path) in result.get("handled_sources", [])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
     if args.result == "FAIL" and record["item"] == "none" and delivery_only:
         record["item"] = cause_target or "none"
-    if args.result == "FAIL" and record["item"] == "none" and not delivery_only:
+    if args.result == "FAIL" and record["item"] == "none" and not delivery_only and not writer_config:
         stem = f"pentacle__nightly_{job_name(args.job)}_{signature(args.job, args.row, args.primary_error)}"
         topic = stem.removeprefix("pentacle__")
         try:
@@ -167,7 +186,7 @@ def report(args):
         deliver_report(record, path, rpc)
     except Exception as exc:
         errors.append(f"report: {exc}")
-    if args.result != "PASS":
+    if args.result != "PASS" and not writer_handled:
         try:
             if "notification" not in record:
                 message = f"{args.primary_error} {path} {record['item']}"
@@ -272,6 +291,8 @@ def main(argv=None):
             sub.add_argument("--primary-error", default="")
             sub.add_argument("--row", default="full")
             sub.add_argument("--date")
+            sub.add_argument("--scorecard-writer", default=os.environ.get("PENTACLE_RELIABILITY_WRITER_CONFIG"),
+                             help="Private installed work-reconciliation configuration")
             sub.add_argument("--notifications-db", default=str(Path.home() / ".local/share/pentacle-stream/notifications.db"))
             sub.add_argument("--notices-db", default=str(Path.home() / ".local/share/pentacle-stream/sessions.db"))
             sub.add_argument("--notice-wait-s", type=float, default=30)

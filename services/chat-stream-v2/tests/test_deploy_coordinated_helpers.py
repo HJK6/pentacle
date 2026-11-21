@@ -1143,6 +1143,7 @@ def test_helper_child_refusal_is_journaled_without_starting_apply(transaction, m
     _, journal = tx.load(path)
     assert journal['phase'] == 'prepared' and journal['history'] == ['prepared']
     assert 'account_busy' in journal['helper_proof_failure']['reason']
+    assert journal['first_forward_at'].endswith('Z') and journal['first_forward_refused'] is True
     assert 'private-argument' not in json.dumps(journal)
     assert adapter.calls == ['prepare']
     assert (adapter.source, adapter.policy, adapter.pid) == ('prior', 'prior', 111)

@@ -85,31 +85,44 @@ class MemoryPublisher:
         self.submit = submit
 
     def reopen(self, item_id, test, restoration):
+        self.reactivate(item_id, restoration['sha256'],
+                        'A verified restored test has recurring failures.',
+                        'Resolve the new quarantine recurrence.', legacy=True)
+
+    def reactivate(self, item_id, occurrence, reason, next_action, *, legacy=False):
         if not self.requesting_stream_id:
             raise ValueError('recurrence publisher identity unavailable')
+        self._move(item_id, 'backlog', occurrence, legacy=legacy, reason=reason, next_action=next_action,
+                   requesting_stream_id=self.requesting_stream_id)
+
+    def supersede(self, item_id, successor, closure_report):
+        self._move(item_id, 'deprecated', successor, closure={'reference': closure_report},
+                   reason='The same cause is tracked by ' + successor + '.')
+
+    def _move(self, item_id, status, evidence_id, *, legacy=False, **fields):
         for _ in range(3):
             folders = list((self.root / 'work').glob('*/' + item_id))
             if len(folders) != 1:
                 raise ValueError('decision unavailable or ambiguous')
             folder = folders[0]
-            if folder.parent.name not in ('completed', 'deprecated'):
+            terminal = folder.parent.name in ('completed', 'deprecated')
+            if (status == 'backlog' and not terminal) or (status == 'deprecated' and terminal):
                 return
             paths = [(folder / name).relative_to(self.root).as_posix() for name in ('spec.md', 'summary.md')]
             reads = [self.submit({'operation': 'read', 'path': path}) for path in paths]
             if any(not value.get('ok') for value in reads):
                 raise ValueError('decision revision unavailable')
             expected = {path: value['revision'] for path, value in zip(paths, reads)}
-            request = {'operation': 'move', 'item_id': 'spec_' + item_id, 'status': 'backlog',
-                       'request_id': self._request_id('reopen', item_id, restoration['sha256'], *expected.values()),
-                       'expected': expected, 'requesting_stream_id': self.requesting_stream_id,
-                       'reason': 'A verified restored test has recurring failures.',
-                       'next_action': 'Resolve the new quarantine recurrence.'}
+            identity = ('reopen', item_id) if legacy else ('move', item_id, status)
+            request = {'operation': 'move', 'item_id': 'spec_' + item_id, 'status': status,
+                       'request_id': self._request_id(*identity, evidence_id, *expected.values()),
+                       'expected': expected, **fields}
             result = self.submit(request)
             if result.get('ok'):
                 return
             if result.get('code') != 'REVISION_CONFLICT':
-                raise ValueError('decision reopening incomplete: ' + str(result.get('code', 'unknown')))
-        raise ValueError('decision reopening remained conflicted')
+                raise ValueError('decision move incomplete: ' + str(result.get('code', 'unknown')))
+        raise ValueError('decision move remained conflicted')
 
     @staticmethod
     def _request_id(*parts):
@@ -119,22 +132,27 @@ class MemoryPublisher:
     def create(self, item_id, test):
         if not item_id.startswith('pentacle__flaky_'):
             raise ValueError('invalid generated decision ID')
+        self.create_item(item_id, 'Flaky test decision', 'Resolve a confirmed flaky test and its coverage.')
+
+    def create_item(self, item_id, title, summary, *, owner=None):
+        if not item_id.startswith(('pentacle__flaky_', 'pentacle__scorecard_')):
+            raise ValueError('invalid generated work ID')
         topic = item_id.removeprefix('pentacle__')
         request = {'operation': 'create', 'request_id': self._request_id('create', item_id),
-                   'metadata': {'repo': 'pentacle', 'topic': topic, 'title': 'Flaky test decision',
-                                'summary': 'Resolve a confirmed flaky test and its coverage.',
-                                'kind': 'defect', 'status': 'backlog', 'machine': self.machine,
-                                'owner': self.owner, 'epic': self.epic}}
+                   'metadata': {'repo': 'pentacle', 'topic': topic, 'title': title,
+                                'summary': summary, 'kind': 'defect', 'status': 'backlog',
+                                'machine': self.machine, 'owner': owner or self.owner, 'epic': self.epic}}
         result = self.submit(request)
         if not result.get('ok'):
             raise ValueError('decision creation incomplete: ' + str(result.get('code', 'unknown')))
 
     def attach(self, item_id, test, occurrences):
-        matches = list((self.root / 'work').glob('*/' + item_id + '/spec.md'))
-        if len(matches) != 1:
-            raise ValueError('decision spec unavailable or ambiguous')
-        path = matches[0].relative_to(self.root).as_posix()
-        marker = '- Quarantine observation: '
+        self.attach_observations(item_id, 'Quarantine observation',
+                                 [{'test': test, **row} for row in occurrences], test=test)
+
+    def attach_observations(self, item_id, label, occurrences, *, test=None, next_action=None):
+        path = self.spec_path(item_id)
+        marker = f'- {label}: '
         for _ in range(3):
             current = self.submit({'operation': 'read', 'path': path})
             if not current.get('ok'):
@@ -148,24 +166,58 @@ class MemoryPublisher:
             for line in body.splitlines():
                 if line.startswith(marker):
                     observation = json.loads(line[len(marker):])
-                    if observation.get('test') != test:
+                    if test is not None and observation.get('test') != test:
                         raise ValueError('decision test identity mismatch')
                     known.add(observation['id'])
             additions = [row for row in occurrences if row['id'] not in known]
             if not additions:
                 return
-            lines = [marker + json.dumps({'test': test, **row}, sort_keys=True, separators=(',', ':'))
+            lines = [marker + json.dumps(row, sort_keys=True, separators=(',', ':'))
                      for row in additions]
             if '## Tracking\n' not in body:
                 raise ValueError('decision tracking section missing')
             body = body.replace('## Tracking\n', '## Tracking\n\n' + '\n'.join(lines) + '\n', 1)
             rev = current['revision']
             digest = hashlib.sha256(body.encode()).hexdigest()
-            request = {'operation': 'update', 'request_id': self._request_id('attach', path, rev, digest),
-                       'expected': {path: rev}, 'documents': {path: {'body': body}}}
+            expected = {path: rev}
+            documents = {path: {'body': body}}
+            identity = ['attach', path, rev, digest]
+            if next_action:
+                summary = str(Path(path).with_name('summary.md'))
+                current_summary = self.submit({'operation': 'read', 'path': summary})
+                if not current_summary.get('ok') or not current_summary.get('content'):
+                    raise ValueError('work summary read incomplete')
+                summary_body = current_summary['content'].split('---', 2)[2].lstrip('\n')
+                default = '**Next action** — Gather requirements with the user and fill the spec.'
+                if default in summary_body.splitlines():
+                    summary_body = summary_body.replace(default, '**Next action** — ' + next_action, 1)
+                    expected[summary] = current_summary['revision']
+                    documents[summary] = {'body': summary_body}
+                    identity.extend((expected[summary], hashlib.sha256(summary_body.encode()).hexdigest()))
+            request = {'operation': 'update', 'request_id': self._request_id(*identity),
+                       'expected': expected, 'documents': documents}
             result = self.submit(request)
             if result.get('ok'):
-                return
+                if label == 'Quarantine observation':
+                    return
+                readback = self.submit({'operation': 'read', 'path': path})
+                if readback.get('ok') and all(line in readback['content'].splitlines() for line in lines):
+                    return
+                raise ValueError('decision attachment readback incomplete')
             if result.get('code') != 'REVISION_CONFLICT':
                 raise ValueError('decision attachment incomplete: ' + str(result.get('code', 'unknown')))
         raise ValueError('decision attachment remained conflicted')
+
+    def spec_path(self, item_id):
+        matches = list((self.root / 'work').glob('*/' + item_id + '/spec.md'))
+        if len(matches) != 1:
+            raise ValueError('decision spec unavailable or ambiguous')
+        return matches[0].relative_to(self.root).as_posix()
+
+    def observations(self, item_id, label):
+        current = self.submit({'operation': 'read', 'path': self.spec_path(item_id)})
+        if not current.get('ok'):
+            raise ValueError('decision read incomplete')
+        marker = f'- {label}: '
+        return [json.loads(line[len(marker):]) for line in current['content'].splitlines()
+                if line.startswith(marker)]

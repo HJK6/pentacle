@@ -12,18 +12,30 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/us
 export NIGHTLY_PUBLISHER_CMD=${NIGHTLY_PUBLISHER_CMD:-"$PY $MEMORY_ROOT/scripts/new_work_item.py"}
 WINDOW=$HOME/.pentacle/nightly-journey/window.json
 ROOT=$HOME/.pentacle/soak
-RUN=$ROOT/$(date -u +%Y%m%dT%H%M%SZ)
+START=$(date -u +%FT%TZ)
+RUN=$ROOT/${START//[-:]/}
+print "=== nightly-soak scheduled start $START run=$RUN"
 mkdir -p "$RUN/evidence" || exit 70
 decision=$($PY $TOOLS/nightly_journey.py admit --job nightly-soak --window "$WINDOW" --wait-within-window)
 admission_rc=$?
-$PY -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({"admission":sys.argv[2],"terminated_at_bound":False}))' "$RUN/evidence/receipt.json" "$decision" || exit 70
+$PY - "$RUN/evidence/receipt.json" "$decision" "$CHECKOUT/.pentacle-deploy/chat-streamd-v2.json" <<'PY'
+import json, sys
+from pathlib import Path
+receipt, decision, stamp = sys.argv[1:]
+record = {"admission": decision, "terminated_at_bound": False}
+try:
+    record["source_sha"] = json.loads(Path(stamp).read_text())["sha"]
+except (OSError, ValueError, KeyError):
+    pass
+Path(receipt).write_text(json.dumps(record))
+PY
+(( $? == 0 )) || exit 70
 if (( admission_rc != 0 )); then
   print "=== nightly-soak BLOCKED $(date -u +%FT%TZ) reason=$decision evidence=$RUN/evidence"
   cd "$MEMORY_ROOT" || exit 70
-  $PY $TOOLS/nightly_journey.py report --job nightly-soak --result BLOCKED --evidence "$RUN/evidence" --primary-error "$decision"
+  $PY $TOOLS/nightly_journey.py report --job nightly-soak --date "${START%%T*}" --result BLOCKED --evidence "$RUN/evidence" --primary-error "$decision"
   exit 2
 fi
-print "=== nightly-soak start $(date -u +%FT%TZ) run=$RUN"
 cd "$CHECKOUT" || exit 70
 $PY $TOOLS/scheduled_admission.py --envelope-s 2400 --receipt "$RUN/evidence/bound.json" -- \
   $PY $TOOLS/nightly_journey.py check-release --checkout "$CHECKOUT" --evidence "$RUN/evidence"
@@ -51,7 +63,7 @@ result=$(<$RUN/evidence/result.txt)
 primary=$(<$RUN/evidence/primary-error.txt)
 print "=== nightly-soak end $(date -u +%FT%TZ) rc=$rc result=$result evidence=$RUN/evidence"
 cd "$MEMORY_ROOT" || exit 70
-$PY $TOOLS/nightly_journey.py report --job nightly-soak --result "$result" --evidence "$RUN/evidence" --primary-error "$primary"
+$PY $TOOLS/nightly_journey.py report --job nightly-soak --date "${START%%T*}" --result "$result" --evidence "$RUN/evidence" --primary-error "$primary"
 report_rc=$?
 (( rc != 0 )) && exit $rc
 [[ $result == PASS ]] || exit 1
