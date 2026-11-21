@@ -138,6 +138,7 @@ function waitForListen(port, timeoutMs, isDead = () => false) {
 function onceExit(proc, timeoutMs = 3000) {
   return new Promise((resolve) => {
     if (!proc || proc.exitCode !== null || proc.signalCode !== null) { resolve(true); return; }
+    if (timeoutMs <= 0) { resolve(false); return; }
     let timer;
     const finish = (exited) => { clearTimeout(timer); proc.removeListener('exit', onExit); resolve(exited); };
     const onExit = () => finish(true);
@@ -162,62 +163,92 @@ async function stopOwnedProcess(proc, graceMs = 3000) {
   return { pid: proc.pid, exited: true, forced, exit_code: proc.exitCode, signal: proc.signalCode };
 }
 
-function groupAlive(pgid, inspection) {
+function cleanupFailure(message, inspection) {
+  const error = new Error(`CLEANUP_FAIL: ${message}`);
+  error.inspection = inspection;
+  return error;
+}
+
+function groupAlive(pgid, deadline, inspection) {
   try { process.kill(-pgid, 0); return true; } catch (error) {
-    if (error.code === 'ESRCH') return false;
-    if (error.code === 'EPERM') {
-      const observed = { pgid, probe_error: { code: error.code, message: error.message }, probe_observed_at: new Date().toISOString() };
-      // Darwin's existing bounded inspector must parse the COMPLETE table. This
-      // is observation only: any member (including Z) or scan error still fails.
-      // No witness authorizes another signal or reconstructs historical absence.
-      if (process.platform === 'darwin') {
-        observed.scan_started_at = new Date().toISOString();
-        try { observed.members = require('../../scripts/lib/test-runner').groupMembers(pgid); }
-        catch (scanError) { observed.scan_error = scanError.message; }
+    const observed = { pgid, probe_error: { code: error.code, message: error.message }, probe_observed_at: new Date().toISOString() };
+    if (error.code === 'ESRCH') {
+      if (inspection.length) inspection.push(observed);
+      return false;
+    }
+    inspection.push(observed);
+    if (error.code === 'EPERM' && process.platform === 'darwin') {
+      observed.scan_started_at = new Date().toISOString();
+      try {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('cleanup deadline reached');
+        observed.members = require('../../scripts/lib/test-runner').groupMembers(pgid, remaining);
+        if (!Array.isArray(observed.members)) throw new Error('missing complete process group scan');
+        if (Date.now() > deadline) throw new Error('scan completed after cleanup deadline');
+        return observed.members.length > 0;
+      } catch (scanError) {
+        observed.scan_error = scanError.message;
+      } finally {
         observed.scan_finished_at = new Date().toISOString();
       }
-      inspection.push(observed);
-      if (Array.isArray(observed.members) && observed.members.length === 0) return false;
     }
-    const failure = new Error(`CLEANUP_FAIL: cannot inspect owned process group ${pgid}: ${error.message}`);
-    failure.inspection = inspection;
-    throw failure;
+    throw cleanupFailure(`cannot inspect owned process group ${pgid}: ${error.message}` +
+      (observed.scan_error ? ` (${observed.scan_error})` : ''), inspection);
   }
 }
 
-async function groupEmpty(pgid, timeoutMs, inspection) {
-  const deadline = Date.now() + timeoutMs;
-  while (groupAlive(pgid, inspection)) {
+async function groupEmpty(pgid, deadline, inspection) {
+  while (groupAlive(pgid, deadline, inspection)) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining)));
+    if (inspection.length && Date.now() > deadline) {
+      throw cleanupFailure(`cannot verify owned process group ${pgid} before cleanup deadline`, inspection);
+    }
   }
   return true;
 }
 
-// Stops the process group of a child this invocation spawned with `detached: true`
-// (its pgid is the child's pid). Escalation stops as soon as the group is empty, and
-// an empty group is never signalled again, so a recycled id cannot be hit.
-async function stopOwnedGroup(proc, graceMs = 3000) {
-  if (!proc || !proc.pid) return { pid: null, exited: true, forced: false };
+// A failed CDP attach and final teardown can both stop the same child. Share
+// its deadline and result so a second caller cannot reauthorize signalling.
+const ownedGroupStops = new WeakMap();
+function stopOwnedGroup(proc, graceMs = 3000) {
+  if (!proc || !proc.pid) return Promise.resolve({ pid: null, exited: true, forced: false });
+  if (!ownedGroupStops.has(proc)) ownedGroupStops.set(proc, stopGroup(proc, graceMs));
+  return ownedGroupStops.get(proc);
+}
+
+// After a denied probe or signal, only read-only observations can finish this stop.
+async function stopGroup(proc, graceMs) {
   const pgid = proc.pid;
   const inspection = [];
-  let forced = false, childExited;
-  if (groupAlive(pgid, inspection)) {
-    let deadline = Date.now() + graceMs;
-    try { process.kill(-pgid, 'SIGTERM'); } catch { /* verified below */ }
-    childExited = await onceExit(proc, Math.max(0, deadline - Date.now()));
-    if (!await groupEmpty(pgid, Math.max(0, deadline - Date.now()), inspection)) {
-      forced = true;
-      deadline = Date.now() + graceMs;
-      try { process.kill(-pgid, 'SIGKILL'); } catch { /* verified below */ }
-      childExited = await onceExit(proc, Math.max(0, deadline - Date.now()));
-      if (!await groupEmpty(pgid, Math.max(0, deadline - Date.now()), inspection)) throw new Error(`CLEANUP_FAIL: owned process group ${pgid} survived SIGKILL`);
+  const canSignal = () => !inspection.length && proc.exitCode === null && proc.signalCode === null;
+  let deadline = Date.now() + graceMs;
+  let forced = false;
+  let alive = groupAlive(pgid, deadline, inspection);
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    if (!alive) break;
+    if (canSignal()) {
+      if (signal === 'SIGKILL') {
+        forced = true;
+        deadline = Date.now() + graceMs;
+      }
+      try { process.kill(-pgid, signal); } catch (error) {
+        if (error.code === 'ESRCH') { alive = false; break; }
+        inspection.push({ pgid, signal, signal_error: { code: error.code, message: error.message } });
+        if (error.code !== 'EPERM') throw cleanupFailure(`cannot signal owned process group ${pgid}: ${error.message}`, inspection);
+      }
+      if (!inspection.length) await onceExit(proc, Math.max(0, deadline - Date.now()));
     }
-  } else {
-    childExited = await onceExit(proc, graceMs);
+    alive = !await groupEmpty(pgid, deadline, inspection);
+    if (alive && !canSignal()) {
+      throw cleanupFailure(`owned process group ${pgid} still present at cleanup deadline`, inspection);
+    }
   }
-  if (!childExited) throw new Error(`CLEANUP_FAIL: owned child ${pgid} exit was not observed`);
+  if (alive) throw cleanupFailure(`owned process group ${pgid} survived SIGKILL`, inspection);
+  if (!await onceExit(proc, Math.max(0, deadline - Date.now()))) {
+    throw cleanupFailure(`owned child ${pgid} exit was not observed`, inspection);
+  }
   return { pid: pgid, exited: true, forced, ...(inspection.length ? { inspection } : {}) };
 }
 
