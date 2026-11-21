@@ -174,8 +174,18 @@ function questionsForSpec(questions, specId) {
   return asArray(mapValue(questions && questions.bySpec, specId));
 }
 
+function previewMembers(lane) {
+  return asArray(lane && lane.progress && lane.progress.members);
+}
+
+function previewMembersComplete(lane) {
+  const members = previewMembers(lane);
+  const total = lane && lane.progress && lane.progress.members_total;
+  return Number.isFinite(total) && total >= 0 && total <= members.length;
+}
+
 function hasPreviewQuestion(lane) {
-  return asArray(lane && lane.members).some(member => Number(member && member.open_questions && member.open_questions.count || 0) > 0);
+  return previewMembers(lane).some(member => Number(member && member.open_questions && member.open_questions.count || 0) > 0);
 }
 
 function readForLane(reads, lane, kind, goalId) {
@@ -204,7 +214,7 @@ function fullMembersFor(lane, reads, goalId) {
     const members = detailMembers(reply);
     if (reply && (members.length || Number(reply.members_total) === 0)) return { members, reply };
   }
-  return { members: [], reply: null };
+  return { members: previewMembers(lane), reply: null };
 }
 
 function defaultGoalFor(lane, detailReply, members, completeMembers) {
@@ -352,19 +362,20 @@ function answeredValue(questions, specId) {
 function memberForSpec(lane, reads, route) {
   const details = fullMembersFor(lane, reads, route.goalId);
   const member = details.members.find(row => row.spec_id === route.specId)
-    || asArray(lane.members).find(row => row.spec_id === route.specId)
+    || previewMembers(lane).find(row => row.spec_id === route.specId)
     || null;
   return { member, reply: details.reply, detailHeld: !!details.reply };
 }
 
 function laneDetailView(lane, reads, questions, now, expanded) {
-  const membersRead = readForLane(reads, lane.lane_id, 'members');
+  const membersRead = readForLane(reads, lane, 'members');
   const detail = fullMembersFor(lane, reads);
   const detailHeld = !!detail.reply;
+  const membersComplete = detailHeld || previewMembersComplete(lane);
   // A goals-only reply can drive the root attention row, but the open lane view
   // waits for its members read before replacing the inventory preview.
   const goals = detail.reply ? detailGoals(detail.reply) : asArray(lane.goals);
-  const defaultGoal = defaultGoalFor(lane, detail.reply, detail.members, detailHeld);
+  const defaultGoal = defaultGoalFor(lane, detail.reply, detail.members, membersComplete);
   const stops = orderStops(lane, goals, defaultGoal, detail.reply).map(stop => {
     const isDefault = !!stop.isDefault;
     const goalId = isDefault ? null : stop.goal.goal_id;
@@ -380,12 +391,12 @@ function laneDetailView(lane, reads, questions, now, expanded) {
       position: typeof lane.goal_road === 'string' ? stop.position : null,
       number: typeof lane.goal_road === 'string' ? stop.number : null,
       question: group.length > 0 || (isDefault
-        ? asArray(lane.members).some(member => !member.goal_id && Number(member.open_questions && member.open_questions.count || 0) > 0)
-        : asArray(lane.members).some(member => member.goal_id === goalId && Number(member.open_questions && member.open_questions.count || 0) > 0)),
+        ? previewMembers(lane).some(member => !member.goal_id && Number(member.open_questions && member.open_questions.count || 0) > 0)
+        : previewMembers(lane).some(member => member.goal_id === goalId && Number(member.open_questions && member.open_questions.count || 0) > 0)),
       progress: progressFor(stop.goal, detailHeld),
       blockedCount: detailHeld && Number(stop.goal.blocked) > 0 ? Math.min(Number(stop.goal.blocked), Math.max(0, Number(stop.goal.total || 0) - Number(stop.goal.done || 0))) : 0,
       members: goalMembers,
-      sections: isDefault && detailHeld
+      sections: isDefault && membersComplete
         ? memberSections(goalMembers, expanded, `goal:${lane.lane_id}:default`, questions)
         : [],
     };
@@ -394,7 +405,7 @@ function laneDetailView(lane, reads, questions, now, expanded) {
   const isCapped = capped(lane);
   const unknownMore = isCapped && !detail.reply ? Math.max(0, Number(lane.goals_total || sentCount) - sentCount) : 0;
   const defaultStop = stops.find(stop => stop.isDefault);
-  const looseDone = detailHeld && !defaultStop ? detail.members.filter(member => !member.goal_id && (member.status === 'completed' || member.terminal === 'completed') && !readableDeprecated(member)) : [];
+  const looseDone = membersComplete && !defaultStop ? detail.members.filter(member => !member.goal_id && (member.status === 'completed' || member.terminal === 'completed') && !readableDeprecated(member)) : [];
   return {
     level: 'lane',
     lane,

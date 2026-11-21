@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
 const { buildLanesViewModel, mountLanesCard } = require('../renderer/next/lanes');
 const { createQuestions } = require('../renderer/next/questions');
+const { applyWorkLanesFrame, emptyWorkLanesInventory } = require('../pentacle-chat-core/src/services/workLanes.ts');
 const liveLaneFixture = require('./fixtures/next_lanes_live_redacted.json');
 
 function goal(goalId, title, rank, extra = {}) {
@@ -17,11 +18,17 @@ function member(specId, goalId = 'goal-a', extra = {}) {
 
 function lane(extra = {}) {
   const goals = [goal('goal-a', 'Synthetic goal', 1)];
+  const suppliedProgress = extra.progress || {};
+  const previewMembers = Array.isArray(suppliedProgress.members) ? suppliedProgress.members
+    : Array.isArray(extra.members) ? extra.members : [];
+  const previewTotal = Object.prototype.hasOwnProperty.call(suppliedProgress, 'members_total') ? suppliedProgress.members_total
+    : Object.prototype.hasOwnProperty.call(extra, 'members_total') ? extra.members_total : previewMembers.length;
   return {
     lane_id: 'lane-a', title: 'Synthetic lane', icon: 'flask', detail_revision: 'rev-a',
     goals, goals_total: goals.length, goal_road: 'm', goal_classes: 'm', goal_counts: [1, 0, 0, 0],
     members: [], members_total: 0,
     ...extra,
+    progress: { ...suppliedProgress, members: previewMembers, members_total: previewTotal },
   };
 }
 
@@ -106,6 +113,86 @@ function questionSnapshot(laneId, placed) {
 function placedQuestion(laneId, goalId, specId, questionId) {
   return { id: questionId, placement: { kind: 'lane_goal', laneId, goalId, specId } };
 }
+
+function normalizedPreviewFrame({ membersTotal = 1, members } = {}) {
+  const goalId = 'g_0123456789abcdef01234567';
+  const preview = members || [{ spec_id: 'synthetic-preview-spec', goal_id: goalId, title: 'Synthetic preview spec',
+    status: 'ready_for_dev', open_questions: { count: 1, first_question_id: 'synthetic-preview-question' } }];
+  const rawLane = {
+    lane_id: 'wl-synthetic-preview', title: 'Synthetic preview lane', state: 'active',
+    detail_revision: 'a'.repeat(64), goals: [{ goal_id: goalId, title: 'Synthetic preview goal', rank: 1,
+      state: 'in_progress', done: 0, total: 1, moving: 1, blocked: 0, working: false, pos: 0 }],
+    goals_total: 1, goal_road: 'm', goal_classes: 'm-', goal_counts: [1, 0, 0, 0], members_total: membersTotal,
+    members: preview,
+  };
+  return applyWorkLanesFrame(emptyWorkLanesInventory(), {
+    type: 'work_lanes.inventory', lanes: [rawLane], counts: { open: 1, active: 1, paused: 0, blocked: 0 },
+  });
+}
+
+test('normalized preview membership drives question marks and spec fallback while lane open still reads detail', () => {
+  const normalized = normalizedPreviewFrame();
+  const normalizedLane = normalized.lanes[0];
+  assert.equal(normalizedLane.members, undefined, 'the core normalizer nests preview membership under progress');
+  assert.equal(normalizedLane.progress.members_total, 1);
+  assert.equal(normalizedLane.progress.members.length, 1);
+
+  const root = buildLanesViewModel({ inventory: normalized });
+  assert.equal(root.active[0].question, true);
+
+  const laneModel = buildLanesViewModel({ inventory: normalized, route: { level: 'lane', laneId: normalizedLane.lane_id } });
+  assert.equal(laneModel.stops[0].question, true);
+  assert.equal(laneModel.detailHeld, false);
+
+  const specModel = buildLanesViewModel({ inventory: normalized,
+    route: { level: 'spec', laneId: normalizedLane.lane_id, goalId: normalizedLane.goals[0].goal_id, specId: 'synthetic-preview-spec' } });
+  assert.equal(specModel.member.title, 'Synthetic preview spec');
+
+  let memberRequests = 0;
+  const reads = readController({ requestMembers() { memberRequests += 1; } });
+  const { dom, root: mountRoot } = makeDom();
+  const control = mountLanesCard(mountRoot, { getState: () => ({ inventory: normalized }), reads });
+  assert.equal(memberRequests, 0, 'root question evidence needs no full membership read');
+  control.openLane(normalizedLane.lane_id);
+  assert.equal(memberRequests, 1, 'opening a lane always reads members for complete goals and detail-only facts');
+  control.destroy();
+  dom.window.close();
+
+  const partial = normalizedPreviewFrame({ membersTotal: 2 });
+  let partialRequests = 0;
+  const partialReads = readController({ requestMembers() { partialRequests += 1; } });
+  const partialDom = makeDom();
+  const partialControl = mountLanesCard(partialDom.root, { getState: () => ({ inventory: partial }), reads: partialReads });
+  partialControl.openLane(partial.lanes[0].lane_id);
+  assert.equal(partialRequests, 1, 'a capped preview still requests the full member detail');
+  partialControl.destroy();
+  partialDom.dom.window.close();
+
+  const countBelowPreview = normalizedPreviewFrame({ membersTotal: 0, members: [{ spec_id: 'synthetic-finished-preview',
+    goal_id: null, title: 'Synthetic finished preview', status: 'completed', terminal: 'completed' }] });
+  const finishedPreview = buildLanesViewModel({ inventory: countBelowPreview,
+    route: { level: 'lane', laneId: countBelowPreview.lanes[0].lane_id } });
+  assert.equal(finishedPreview.finishedEarlierCount, 1, 'a total below preview length is treated as a complete member set');
+});
+
+test('current-revision cached member detail remains visible during loading and failed refresh states', () => {
+  const normalized = normalizedPreviewFrame({ membersTotal: 2 });
+  const item = normalized.lanes[0];
+  const completeMembers = [...item.progress.members,
+    member('synthetic-preview-spec-2', item.goals[0].goal_id, { status: 'in_progress' })];
+  const reply = { ...heldReply(item.lane_id, item.goals, completeMembers), detail_revision: item.detail_revision };
+
+  for (const status of ['loading', 'failed']) {
+    const reads = readController({ getRead: (_laneId, kind) => kind === 'members'
+      ? { status, reply, detailRevision: item.detail_revision, error: status === 'failed' ? 'Synthetic refresh failure' : null }
+      : { status: 'idle', reply: null } });
+    const model = buildLanesViewModel({ inventory: normalized, reads, route: { level: 'lane', laneId: item.lane_id } });
+    assert.equal(model.detailHeld, true, `${status} keeps current-revision detail available`);
+    assert.equal(model.stops[0].members.length, 2);
+    assert.equal(model.readStatus, status);
+    assert.equal(model.retry, status === 'failed');
+  }
+});
 
 test('held road goals outside the preview use complete classes and hidden no-road goals use their reply classes', () => {
   const roadGoals = [
@@ -353,7 +440,7 @@ test('U3 L65: a moved working seat keeps the last root read until the no-road la
   const movedGoals = [...movedClasses].map((letter, index) => roadGoal('lane-seat-move', index, letter, goals[index]));
   for (const row of movedGoals) delete row.pos;
   const item = lane({ lane_id: 'lane-seat-move', title: 'Synthetic seat lane', goals: goals.slice(0, 8), goals_total: 65,
-    goal_road: null, goal_classes: 'd'.repeat(8), goal_counts: [2, 0, 0, 63] });
+    goal_road: null, goal_classes: 'd'.repeat(8), goal_counts: [2, 0, 0, 63], members: [], members_total: 2 });
   const frame = inventory([item]);
   const workingSeat = (id, activity) => ({ stream_id: id, role: null, host: null, visibility: null, parent_stream_id: null,
     activity, last_activity: null });
