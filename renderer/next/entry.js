@@ -6,7 +6,7 @@ require('../web_cc').installWebCc();
 const { filterSidebarSessions } = require('../sidebar_filter');
 const { uniqueAssistantComposite } = require('../workspace_layout');
 const { createSpawnCatalogLoader } = require('../spawn_catalog_loader');
-const { createTerminalView } = require('../terminal_view');
+const { createTerminalView, disposeTerminalView } = require('../terminal_view');
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11');
@@ -102,7 +102,7 @@ function render() {
   if (state.popover) renderPopover();
 }
 let terminal = null; let terminalGeneration = 0; let terminalQueue = Promise.resolve();
-function disposeTerminal() { terminalGeneration++; if (terminal) { terminal.observer?.disconnect(); terminal.term.dispose(); terminal = null; } terminalQueue = terminalQueue.then(() => cc.killPty(0)).catch(() => {}); terminalMount.replaceChildren(); }
+function disposeTerminal() { terminalGeneration++; const previous = terminal; terminal = null; disposeTerminalView(previous); terminalQueue = terminalQueue.then(() => cc.killPty(0)).catch(() => {}); terminalMount.replaceChildren(); }
 cc.onPtyData((slot, data) => { if (slot === 0 && terminal) terminal.term.write(data); });
 async function openTerminal(session) {
   disposeTerminal(); const generation = terminalGeneration;

@@ -15,4 +15,9 @@ function createTerminalView(container, theme, { Terminal, FitAddon, Unicode11Add
   } catch (error) { console.warn('[App] WebGL renderer unavailable, using DOM fallback:', error.message); }
   return { term, fitAddon };
 }
-module.exports = { createTerminalView };
+function disposeTerminalView(view, logger = console) {
+  if (!view) return;
+  try { view.observer?.disconnect(); } catch (error) { logger.warn('[terminal] observer disposal failed:', error); }
+  try { view.term.dispose(); } catch (error) { logger.warn('[terminal] renderer disposal failed:', error); }
+}
+module.exports = { createTerminalView, disposeTerminalView };

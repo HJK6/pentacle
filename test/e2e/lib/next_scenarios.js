@@ -123,10 +123,20 @@ async function composer(ctx) {
 }
 module.exports.composer = isolated(composer);
 async function terminalStatus(ctx) {
-  const { session, report, tmux } = ctx; await visit(ctx);
+  const { session, report, tmux, cdp } = ctx; await visit(ctx);
   const name = `ptest-web-next-${process.pid}-${Date.now().toString(36)}`;
   tmux(['new-session','-d','-s',name,'sh','-c','stty raw -echo; exec cat']);
+  let ptyOutput = '';
+  const observeFrame = raw => {
+    try {
+      const event = JSON.parse(raw);
+      if (event.method !== 'Network.webSocketFrameReceived') return;
+      const message = JSON.parse(event.params.response.payloadData);
+      if (message.event === 'pty:data' && message.args?.[0] === 0) ptyOutput += message.args[1];
+    } catch (_) { /* Ignore non-JSON and unrelated WebSocket frames. */ }
+  };
   try {
+    await session.send('Network.enable'); session.ws.on('message', observeFrame);
     await session.eval(`(() => {const original=window.cc.createPty;window.__nextPtyReady=false;window.cc.createPty=async(...args)=>{const pane=await original(...args);window.__nextPtyReady=!!pane;return pane};return true})()`);
     await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
     report.ok('a session without a status card has no status button', await session.eval("document.querySelector('.card [aria-label=\"Status\"]').hidden"));
@@ -136,8 +146,17 @@ async function terminalStatus(ctx) {
     await session.click('.card [aria-label="Terminal"]');
     await session.waitFor("!!document.querySelector('.terminal .xterm-screen')", { timeoutMs:ctx.timeoutMs });
     await session.waitFor("window.__nextPtyReady === true", { timeoutMs:ctx.timeoutMs });
+    if (process.env.PENTACLE_NEXT_REQUIRE_WEBGL === '1') {
+      report.ok('terminal uses an active WebGL renderer', await session.eval("[...document.querySelectorAll('.terminal canvas')].some(canvas => !!canvas.getContext('webgl2'))"));
+    }
+    const waitForOutput = async (predicate, label) => {
+      const deadline = Date.now() + ctx.timeoutMs;
+      while (!predicate() && Date.now() < deadline) await cdp.sleep(50);
+      if (!predicate()) throw new Error(`PTY ${label} timed out`);
+    };
+    await waitForOutput(() => ptyOutput.length > 0, 'attach output');
     await session.eval("window.cc.writePty(0, 'NEXT_TERMINAL_PROOF\\r'), true");
-    await session.waitFor("document.querySelector('.terminal').textContent.includes('NEXT_TERMINAL_PROOF')", { timeoutMs:ctx.timeoutMs });
+    await waitForOutput(() => ptyOutput.includes('NEXT_TERMINAL_PROOF'), 'sentinel output');
     report.ok('the new card displays a real tmux terminal', true);
     report.ok('terminal is inset and the composer is hidden', await session.eval("document.querySelector('.card .composer-host').hidden && getComputedStyle(document.querySelector('.terminal')).borderRadius === '14px' && parseFloat(getComputedStyle(document.querySelector('.terminal')).marginLeft) === 12"));
     await session.screenshot(path.join(report.dir, 'next-terminal.png'));
@@ -146,7 +165,7 @@ async function terminalStatus(ctx) {
     await session.screenshot(path.join(report.dir, 'next-status.png'));
     await session.send('Emulation.setDeviceMetricsOverride', { width:440, height:956, deviceScaleFactor:1, mobile:false }); await session.screenshot(path.join(report.dir, 'next-phone-status.png'));
     await session.click('.card [aria-label="Close"]');
-  } finally { try { tmux(['kill-session','-t',`=${name}`]); } catch (_) {} }
+  } finally { session.ws.off('message', observeFrame); try { tmux(['kill-session','-t',`=${name}`]); } catch (_) {} }
 }
 module.exports.terminalStatus = isolated(terminalStatus);
 async function voice(ctx) {
