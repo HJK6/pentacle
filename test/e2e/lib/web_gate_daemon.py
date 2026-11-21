@@ -4,6 +4,7 @@
 Only the registry's storage location is injected; challenge/proof verification
 and command authorization use the production implementation unchanged.
 """
+import asyncio
 import os
 from pathlib import Path
 import runpy
@@ -135,6 +136,54 @@ else:
 
         transcribe.Transcriber._call_backend = fixture_call_backend
     # END ASR FIXTURE
+
+    # Stable machine figures for the next-view limits journey. Preserve any
+    # real fixture entries and supply one isolated local host when absent.
+    import server as fixture_server
+    original_stats_snapshot = fixture_server.Server.host_stats_snapshot
+    def fixture_stats_snapshot(self):
+        if not (scratch / 'next-stats-fixture').exists():
+            return original_stats_snapshot(self)
+        from datetime import datetime, timezone
+        return {'fixture-machine': {'cpu_usage_pct': 24, 'memory_used_bytes': 25,
+                          'memory_total_bytes': 100, 'disk_used_bytes': 40,
+                          'disk_total_bytes': 100, 'sampled_at': datetime.now(timezone.utc).isoformat()}, **original_stats_snapshot(self)}
+    fixture_server.Server.host_stats_snapshot = fixture_stats_snapshot
+    original_server_bind = fixture_server.Server.bind
+    async def fixture_server_bind(self, *args, **kwargs):
+        result = await original_server_bind(self, *args, **kwargs)
+        async def publish_requested_stats():
+            was_enabled = False
+            while True:
+                enabled = (scratch / 'next-stats-fixture').exists()
+                if enabled and not was_enabled:
+                    await self.broadcast(self.hosts_stats_frame())
+                was_enabled = enabled
+                await asyncio.sleep(0.1)
+        asyncio.create_task(publish_requested_stats())
+        return result
+    fixture_server.Server.bind = fixture_server_bind
+
+    # Read-only catalog and account fixtures travel through the real daemon RPC
+    # and host bridge; spawn itself remains the browser boundary stand-in.
+    import uiverbs
+    import account_runtime
+    original_spawn_catalog = uiverbs.spawn_catalog
+    def fixture_spawn_catalog():
+        if not (scratch / 'next-catalog-fixture').exists():
+            return original_spawn_catalog()
+        return {'catalog_version': 'fixture',
+                'profiles': {'desktop_manual': {'claude': ['fixture-model', 'low'], 'codex': ['fixture-codex', 'low']}},
+                'models': {'claude': {'fixture-model': {'efforts': ['low']}}, 'codex': {'fixture-codex': {'efforts': ['low']}}}}
+    uiverbs.spawn_catalog = fixture_spawn_catalog
+    original_account_operation = account_runtime.AccountRuntime.operation
+    async def fixture_account_operation(self, message):
+        auth = message.get('_auth_context') or {}
+        if (scratch / 'next-catalog-fixture').exists() and message.get('action', 'status') == 'status' and auth.get('operator_authenticated') is True:
+            return {'type': 'account.ok', 'accounts': [{'host': 'local', 'provider': 'claude', 'alias': 'ours',
+                    'username': 'fixture@example.test', 'active': True, 'enabled': True, 'health': 'healthy'}], 'defaults': []}
+        return await original_account_operation(self, message)
+    account_runtime.AccountRuntime.operation = fixture_account_operation
 
     operator_auth.OperatorCredentialRegistry = FixtureRegistry
 

@@ -632,6 +632,14 @@ const SCENARIOS = [
   ['composer-draft-per-chat', composerDraftPerChat],
   ['composer-draft-pending-send', composerDraftPendingSend],
   ['composer-draft-retire', composerDraftRetire],
+  ['next-home-rail', require('./next_scenarios').homeRail],
+  ['next-chat-card', require('./next_scenarios').chatCard],
+  ['next-composer', require('./next_scenarios').composer],
+  ['next-voice', require('./next_scenarios').voice],
+  ['next-terminal-status', require('./next_scenarios').terminalStatus],
+  ['next-new-chat', require('./next_scenarios').newChat],
+  ['next-limits-settings', require('./next_scenarios').limitsSettings],
+  ['next-narrow-phone', require('./next_scenarios').narrowPhone],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.

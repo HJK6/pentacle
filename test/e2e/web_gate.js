@@ -306,6 +306,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [
   { host: 'local2', sessionName: 'web-gate-second-host', streamId: 'local2:web-gate-second-host' },
   { host: 'local', sessionName: 'web-gate-seam', streamId: 'local:web-gate-seam' },
   { host: 'local', sessionName: 'web-gate-wrap-paste', streamId: 'local:web-gate-wrap-paste' },
+  { host: 'local', sessionName: 'web-gate-empty', streamId: 'local:web-gate-empty' },
 ]) {
   const db = path.join(scratch, 'sessions.db');
   execFileSync(args.python, [DAEMON, scratch, '--issue'], { cwd: ROOT });
