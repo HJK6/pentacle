@@ -218,6 +218,24 @@ async function build({ minify = false } = {}) {
   copyStyles(html);
   copyIcons(html);
 
+  // The redesign is a separate entry in the same frozen release. Its assets
+  // remain relative to /next/ so the entry can later move without rewriting.
+  const nextSource = path.join(RENDERER, 'next');
+  const nextOut = path.join(OUT, 'next');
+  fs.mkdirSync(nextOut, { recursive: true });
+  await esbuild.build({
+    entryPoints: [path.join(nextSource, 'entry.js')], bundle: true,
+    format: 'iife', target: 'chrome134', platform: 'browser',
+    outfile: path.join(nextOut, 'bundle.js'), minify,
+    plugins: [rendererResolvePlugin()], logLevel: 'info',
+  });
+  fs.copyFileSync(path.join(nextSource, 'index.html'), path.join(nextOut, 'index.html'));
+  fs.copyFileSync(path.join(nextSource, 'style.css'), path.join(nextOut, 'style.css'));
+  fs.copyFileSync(path.join(ROOT, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), path.join(nextOut, 'xterm.css'));
+  fs.copyFileSync(path.join(RENDERER, 'dist', 'chat_core.bundle.js'), path.join(nextOut, 'chat_core.bundle.js'));
+  fs.cpSync(path.join(nextSource, 'fonts'), path.join(nextOut, 'fonts'), { recursive: true });
+  fs.copyFileSync(path.join(nextSource, 'pentacle.png'), path.join(nextOut, 'pentacle.png'));
+
   // Fonts and images referenced from the copied stylesheets by relative URL.
   for (const dir of ['fonts', 'assets', 'img']) {
     const from = path.join(RENDERER, dir);

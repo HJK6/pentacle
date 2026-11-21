@@ -365,7 +365,7 @@ function resolveProfilePath(profile) {
 }
 
 function serveStatic(res, urlPath, configJson, frozen) {
-  const rel = urlPath === '/' ? 'web.html' : urlPath === '/designs/' ? 'designs.html' : urlPath.replace(/^\/+/, '');
+  const rel = urlPath === '/' ? 'web.html' : urlPath === '/designs/' ? 'designs.html' : urlPath === '/next/' ? 'next/index.html' : urlPath.replace(/^\/+/, '');
   // Path traversal guard — a request must not escape the frozen bundle.
   if (path.isAbsolute(rel) || rel.split('/').includes('..')) {
     res.writeHead(403).end('forbidden');
@@ -518,6 +518,7 @@ async function main(argv = process.argv.slice(2)) {
     }
     if (designs.handle(req, res, urlPath)) return;
     if (urlPath === '/designs') { res.writeHead(302, { location: '/designs/' }).end(); return; }
+    if (urlPath === '/next') { res.writeHead(302, { location: '/next/' }).end(); return; }
     if (privateDashboards.handle(req, res, urlPath)) return;
     serveStatic(res, urlPath, configJson, frozen);
   });

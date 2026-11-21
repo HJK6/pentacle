@@ -2,11 +2,11 @@ const { bindComposerMic, createBrowserRecorder, uploadVoiceBlob } = require('./w
 const { createQuestionVoiceBar } = require('./question_voice_bar');
 /* global Terminal, FitAddon */
 
-// Bundle xterm.js and its addons for the browser.
+const { createTerminalView } = require('./terminal_view');
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
-const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: without this, ❯ and other unicode renders as __
-const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated rendering — fixes partial text paint on screen refresh
+const { Unicode11Addon } = require('@xterm/addon-unicode11');
+const { WebglAddon } = require('@xterm/addon-webgl');
 const { createTerminalPaste } = require('./terminal_paste');
 const { normalizeSplit, createGridColResizer } = require('./grid_col_resizer');
 const { normalizeSidebarWidth, createSidebarResizer } = require('./sidebar_resizer');
@@ -5858,36 +5858,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
     return;
   }
 
-  const term = new Terminal({
-    theme: terminalThemeForAppearance(),
-    fontFamily: "'SFMono-Regular', 'SF Mono', '.SF NS Mono', 'Menlo', 'Monaco', monospace",
-    fontSize: 13,
-    cursorBlink: true,
-    allowProposedApi: true,
-    scrollback: 0,
-  });
-
-  const fitAddon = new FitAddon();
-  const unicode11Addon = new Unicode11Addon();
-  term.loadAddon(fitAddon);
-  term.loadAddon(unicode11Addon);
-  term.unicode.activeVersion = '11';
-  term.open(container);
-
-  // Enable WebGL renderer for GPU-accelerated full-frame draws.
-  // The DOM renderer creates individual spans per cell — browser paint cycles
-  // can leave cells partially rendered until a repaint is forced (e.g. by
-  // selecting text). WebGL does full-frame GPU draws, eliminating this.
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      // Fall back to DOM renderer if GPU context is lost
-      webglAddon.dispose();
-    });
-    term.loadAddon(webglAddon);
-  } catch (e) {
-    console.warn('[App] WebGL renderer unavailable, using DOM fallback:', e.message);
-  }
+  const { term, fitAddon } = createTerminalView(container, terminalThemeForAppearance(), { Terminal, FitAddon, Unicode11Addon, WebglAddon });
 
   // Fit terminal BEFORE spawning PTY so tmux renders at the correct size
   // from the very first frame. Without this, the PTY spawns at 80x24,
