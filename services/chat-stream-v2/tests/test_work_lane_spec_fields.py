@@ -182,7 +182,7 @@ def test_lead_step_has_a_120_character_cap():
 
 def test_background_batch_covers_members_of_done_lanes(tmp_path):
     from types import SimpleNamespace
-    from test_work_lane_progress import a1_close
+    from test_work_lanes import seed_legacy_done
     from work_lanes_projection import WorkLanesInventory
     seen = []
     worked = {"elapsed_h": 2, "censored": False, "active_h": 0.5,
@@ -192,7 +192,7 @@ def test_background_batch_covers_members_of_done_lanes(tmp_path):
         return {spec: worked for spec in specs}
     async def body(env):
         stored = (await env.adopt(state="paused", owner="operator", members=[SPEC]))["lane"]
-        await a1_close(env, stored)
+        await seed_legacy_done(env, stored)
         async def broadcast(_):
             pass
         inventory = WorkLanesInventory(env.store, SimpleNamespace(list_open=lambda: []), broadcast, refresh_min_s=0)

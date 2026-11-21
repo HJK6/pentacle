@@ -98,6 +98,8 @@ def _compact_outcome(outcome: Any) -> dict[str, Any] | None:
     fields = ("type", "ok", "state", "stream_id", "error", "error_code", "reason",
               "already_closed", "admitted_count", "admitted_scope", "admitted_set_authoritative")
     compact = {key: outcome[key] for key in fields if key in outcome}
+    if outcome.get("error_code") == "work_last_owner":
+        compact.update({key: outcome[key] for key in ("expected_generation", "items", "retry_request_id") if key in outcome})
     if outcome.get("type") == "send.result":
         compact.update({key: outcome[key] for key in ("delivery", "receipt_id", "request_id", "reconcile")
                         if key in outcome})
@@ -832,7 +834,7 @@ class AssistantLaneRulings:
                     refusal = await spawnctl._work_link_refusal(authenticated, spec_binding)
                     if refusal is not None:
                         # The resolved spec is still independently readable.
-                        correction(refusal.code, "spec_id", str(refusal))
+                        correction(refusal.code, "role" if refusal.code == "work_owner_required" else "spec_id", str(refusal))
                 elif not spec_id and not message.get("assignment_exempt"):
                     raise VerbError("work_assignment_required", f"{auth['stream_id']} requires an assigned spec")
             except VerbError as exc:
@@ -862,7 +864,7 @@ class AssistantLaneRulings:
         )
         if (known and request["state"] == "release_blocked"
                 and request.get("ruling") == "approve"):
-            await self._release(request, retry_spawn=True)
+            await self._release(request, retry_approved=True)
             request = await self._fetch(request["ruling_request_id"])
         if request["state"] == "bypassed":
             return None
@@ -1022,6 +1024,12 @@ class AssistantLaneRulings:
                 requester=requester, requester_generation=generation, binding=binding,
                 target=target_stream_id, target_generation=target_generation,
             )
+        if prior and self._attendance_blocked(request):
+            await self._release(request, retry_approved=True)
+            request = await self._fetch(request["ruling_request_id"])
+            if self._attendance_blocked(request):
+                return {"type": "close.error", **json.loads(request["outcome_json"]),
+                        "ruling_request_id": request["ruling_request_id"], "request_id": key}
         if request["state"] == "bypassed":
             return None
         if request["state"] == "done" and request.get("outcome_json"):
@@ -1411,7 +1419,7 @@ class AssistantLaneRulings:
                 "detail_ref": {"table": "v2_assistant_lane_rulings", "ruling_request_id": rid},
             })
         notice_id = "assistant-lane-ruling-result:" + rid
-        if request["action"] == "spawn" and request.get("ruling") == "approve":
+        if request["action"] in {"spawn", "session_close"} and request.get("ruling") == "approve":
             previous = await self.store.submit(lambda conn: conn.execute(
                 "SELECT body FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone())
             if previous is not None and previous[0] != body:
@@ -1661,8 +1669,14 @@ class AssistantLaneRulings:
                 conn.execute("UPDATE v2_assistant_lane_rulings SET mirror_sent=1 WHERE ruling_request_id=?", (rid,))
         await self.store.submit(mark)
 
+    @staticmethod
+    def _attendance_blocked(request):
+        return (request["action"] == "session_close" and request["state"] == "approved_but_not_closed"
+                and request.get("ruling") == "approve"
+                and json.loads(request.get("outcome_json") or "{}").get("error_code") == "work_last_owner")
+
     async def _release(self, request: dict[str, Any], *, lifecycle_locked: bool = False,
-                       retry_spawn: bool = False) -> None:
+                       retry_approved: bool = False) -> None:
         if request["action"] == "advice":
             return
         # A question must be published while its producer is still the current
@@ -1682,25 +1696,24 @@ class AssistantLaneRulings:
         fd_fence = self.server.sessions.assistant.front_desk_mode and not lifecycle_locked
         gate = self.store.front_desk_fence() if fd_fence else nullcontext()
         async with gate, lifecycle:
-            await self._release_serial(request, fd_fence=fd_fence, retry_spawn=retry_spawn)
+            await self._release_serial(request, fd_fence=fd_fence, retry_approved=retry_approved)
 
     async def _release_serial(self, request: dict[str, Any], *, fd_fence: bool = False,
-                              retry_spawn: bool = False) -> None:
+                              retry_approved: bool = False) -> None:
         rid = request["ruling_request_id"]
         lock = self._release_locks.setdefault(rid, asyncio.Lock())
         async with lock:
             current = await self._fetch(rid)
-            if (retry_spawn and current and current["action"] == "spawn"
-                    and current["state"] == "release_blocked" and current.get("ruling") == "approve"):
-                # Only an authenticated same-intent request may re-arm a blocked
-                # approved spawn. Keep the original ruling/conditions and intent.
-                # Serializing re-arm with release avoids a stale retry overwriting
-                # done and retains SpawnCtl's durable successful-spawn protection.
+            blocked_spawn = (current and current["action"] == "spawn" and current["state"] == "release_blocked")
+            if (retry_approved and current and current.get("ruling") == "approve"
+                    and (blocked_spawn or self._attendance_blocked(current))):
+                # Caller matched the original identity, target generation and intent.
+                # Serialize re-arm with release so a replay cannot overwrite success.
                 def rearm(conn):
                     with conn:
                         conn.execute("UPDATE v2_assistant_lane_rulings SET state='approved' "
-                                     "WHERE ruling_request_id=? AND action='spawn' "
-                                     "AND state='release_blocked' AND ruling='approve'", (rid,))
+                                     "WHERE ruling_request_id=? AND action=? AND state=? AND ruling='approve' "
+                                     "AND outcome_json IS ?", (rid, current["action"], current["state"], current["outcome_json"]))
                 await self.store.submit(rearm)
                 current = await self._fetch(rid)
             if current is None or current["state"] not in {"approved", "unruled", "unruled_disabled", "bypassed"}:
@@ -1827,7 +1840,8 @@ class AssistantLaneRulings:
                                 and current["state"] == "approved" else "release_blocked")
                 await self._mark(rid, failed_state, {"error": str(exc)[:300],
                     "error_code": getattr(exc, "code", "release_failed"),
-                    **getattr(exc, "extra", {})})
+                    **getattr(exc, "extra", {}),
+                    **({"retry_request_id": intent["request_id"]} if getattr(exc, "code", "") == "work_last_owner" else {})})
                 return
             await self._mark(rid, "done", result)
 

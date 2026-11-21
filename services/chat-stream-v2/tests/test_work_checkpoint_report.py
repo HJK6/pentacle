@@ -45,10 +45,16 @@ NOT_PLAIN = LABELLED.replace("**Status** — Cut.", "**Status** — Cut; glue ne
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["done", "progress"])
 @pytest.mark.parametrize("source", [PROSE, NOT_PLAIN])
-async def test_owner_report_with_malformed_source_is_durable_with_warning(memory, status, source):
+async def test_malformed_status_refuses_done_but_allows_progress(memory, status, source):
     (memory / "summary.md").write_text(source)
     store, ledger = await ledger_with({"role": "lead", "assigned_spec_id": "spec_demo__bridge"})
     try:
+        if status == "done":
+            with pytest.raises(VerbError) as exc:
+                await ledger.report(report(status, "r-1"))
+            assert exc.value.code == "report_status_invalid"
+            assert await store.get_report("r-1") is None
+            return
         reply = await ledger.report(report(status, "r-1"))
         assert reply["work_checkpoint"]["state"] == "invalid"
         assert (await store.get_report("r-1"))["extras"]["work_checkpoint"]["state"] == "invalid"
@@ -148,11 +154,13 @@ async def test_failure_reports_are_never_refused_and_carry_the_deficiencies(memo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fields", [{"role": "worker", "assigned_spec_id": "spec_demo__bridge"},
                                     {"role": "nexus", "assigned_spec_id": "spec_demo__bridge"}])  # single-spec fallback only, nothing persisted
-async def test_non_owner_reports_are_unchanged(memory, fields):
+async def test_plain_assigned_item_claim_requires_status_across_roles(memory, fields):
     store, ledger = await ledger_with(fields)
     try:
-        reply = await ledger.report(report("done", "r-x"))
-        assert "work_checkpoint" not in reply
+        with pytest.raises(VerbError) as exc:
+            await ledger.report(report("done", "r-x"))
+        assert exc.value.code == "report_status_invalid"
+        assert await store.get_report("r-x") is None
     finally:
         store.stop()
 

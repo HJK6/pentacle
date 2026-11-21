@@ -5,7 +5,7 @@ import json
 import pytest
 
 from test_assistant_prose_mirror import ASSISTANT
-from test_work_lanes import FD, run
+from test_work_lanes import FD, run, seed_lane_work, seed_legacy_done
 from work_lanes_projection import project_lane
 
 
@@ -160,8 +160,10 @@ def test_closed_lead_product_reopen_and_generation_replacement_retain_report():
         lane = (await env.adopt(state="paused", lead=lead))["lane"]
         dispatch = await seed_route(env, lane, lead)
         completed = await complete(env, lane, lead, dispatch)
+        await seed_lane_work(env.store, lane["lane_id"])
         done = await env.op("set_state", {"to": "done", "outcome": "Synthetic completion"},
                             lane=lane["lane_id"], version=completed["version"])
+        await seed_lane_work(env.store, lane["lane_id"], "in_progress")
         await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lane["lane_id"], version=done["lane"]["version"])
         await env.store.mark_closed(*lead[0].split(":", 1), closed_at="2026-01-02T00:00:00Z", pane_status="closed")
         assert (await projected(env.store, lane["lane_id"]))["lead_reported_done"] is True
@@ -196,6 +198,7 @@ def test_lane_cancel_after_enqueue_has_unknown_outcome_until_readback(tmp_path, 
     LANE_CALLBACK = '_WorkLanesStoreMixin.apply_work_lane_operation.<locals>._op'
     async def body(env):
         lane = (await env.adopt(state='paused', owner='operator', members=[MEMBER]))['lane']
+        await seed_lane_work(env.store, lane["lane_id"])
         payload = {'to': 'done', 'outcome': 'Already queued',
                    'operator_confirmation': env.confirm('cancel-confirm', lane['lane_id'], 'set_state:done')}
         loop = asyncio.get_running_loop()
@@ -524,8 +527,7 @@ def test_v5_uncertainty_prevents_completion_reopening_and_settling(tmp_path, sou
         complete = await build_lane(env, root, key='stream:v5c', goal='c', items=[('c1', 'completed')])
         handclosed = await build_lane(env, root, key='stream:v5s', goal='s', items=[('s1', 'completed')])
         cid, hid = complete['lane_id'], handclosed['lane_id']
-        await env.op('set_state', {'to': 'done', 'outcome': 'Closed by hand', 'reason': 'FD closes'},
-                     lane=hid, version=handclosed['version'])
+        await seed_legacy_done(env, handclosed)
         assert (await lane_now(env, hid))['work_state_reason'] == 'fd'
         undo = _make_uncertain(root, source, [(sid, 'r', 'r1'), (cid, 'c', 'c1'), (hid, 's', 's1')])
         await refresh(env, root, sink)
@@ -659,9 +661,8 @@ def test_v7c_hand_closed_lane_settles_then_reopens(tmp_path):
         # A lane closed by hand while a goal is still unfinished is not settled.
         lane = await build_lane(env, root, key='stream:v7c', goal='g', items=[('i1', 'in_progress')])
         lid = lane['lane_id']
-        closed = await env.op('set_state', {'to': 'done', 'outcome': 'Closed early', 'reason': 'FD closes early'},
-                              lane=lid, version=lane['version'])
-        assert closed['lane']['work_state_reason'] == 'fd'
+        closed = await seed_legacy_done(env, lane)
+        assert closed['work_state_reason'] == 'fd'
         await lifecycle(env)  # still has unfinished goal → stays hand-closed, not settled
         assert (await lane_now(env, lid))['work_state_reason'] != 'goals_done'
         # Finish the goal: the next refresh marks it settled, silently, no alert.
@@ -696,9 +697,8 @@ def test_v7b_hand_closed_with_unfinished_goal_stays_done(tmp_path):
     async def body(env):
         lane = await build_lane(env, root, key='stream:v7b', goal='g', items=[('i1', 'in_progress')])
         lid = lane['lane_id']
-        closed = await env.op('set_state', {'to': 'done', 'outcome': 'Closed', 'reason': 'FD closes'},
-                              lane=lid, version=lane['version'])
-        assert closed['lane']['work_state_reason'] == 'fd'
+        closed = await seed_legacy_done(env, lane)
+        assert closed['work_state_reason'] == 'fd'
         # Adding another goal and another item leaves it hand-closed, not reopened.
         write_goal(root, lid, 'extra')
         write_item(root, 'i2', status='in_progress', epic='epic_g')
@@ -717,9 +717,8 @@ def test_v7d_pre_release_done_lane_settles_and_reopens(tmp_path):
         # is settled at the first certain refresh, then reopens on a new goal.
         lane = await build_lane(env, root, key='stream:v7d', goal='g', items=[('i1', 'completed')])
         lid = lane['lane_id']
-        closed = await env.op('set_state', {'to': 'done', 'outcome': 'Closed', 'reason': 'FD closes'},
-                              lane=lid, version=lane['version'])
-        assert closed['lane']['work_state_reason'] == 'fd'
+        closed = await seed_legacy_done(env, lane)
+        assert closed['work_state_reason'] == 'fd'
         result = await lifecycle(env)
         assert lid in result['settled']
         assert (await lane_now(env, lid))['work_state_reason'] == 'goals_done'

@@ -1438,6 +1438,7 @@ REPORT_REJECTIONS_INDEX_DDL = (
 )
 
 REPORT_COLUMNS = (
+    "status_freshness",
     "usage_snapshot", "report_id", "from_stream_id", "msg_id", "session_generation", "status", "summary", "findings",
     "next_action", "details", "extras", "reason", "completion_kind", "qa_verdict", "target_sha",
     "qa_attestation", "ac_claim", "claim_verified", "ac_claim_mismatch", "agent_orch_attestation",
@@ -1455,6 +1456,7 @@ REPORT_IDENTITY_COLUMNS = (
 )
 #: Report columns holding JSON, decoded on read so a caller never sees a blob.
 REPORT_JSON_COLUMNS = (
+    "status_freshness",
     "usage_snapshot",
     "findings", "details", "extras", "qa_attestation", "ac_claim", "ac_claim_mismatch",
     "agent_orch_attestation", "qa_attestation_validation",
@@ -2032,6 +2034,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 conn.execute("UPDATE v2_schedules SET objective_source='explicit' WHERE objective IS NOT NULL")
             if "exchange_json" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
+            if "status_freshness" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
+                conn.execute("ALTER TABLE v2_reports ADD COLUMN status_freshness TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN observer_binding TEXT")
             if "account_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
@@ -3104,6 +3108,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     (stream_id,),
                 )
             try:
+                from work_report_freshness import assignment_changed_conn
+                assignment_changed_conn(conn, stream_id, time.time())
                 lifecycle_watch_conn(conn, time.time())
                 install_default_conn(conn, f"{host}:{session_name}", time.time())
             except BaseException:
@@ -3125,6 +3131,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         *,
         expected_generation: str | None = None,
         expected_spec_source: dict[str, Any] | None = None,
+        attendance_gate: str | None = None,
+        attendance_available: bool = True,
         transfer_child_watch_custody: bool = False,
         **fields: Any,
     ) -> dict[str, Any] | None:
@@ -3142,6 +3150,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ):
                 return None
             return row
+        if attendance_gate:
+            from sessions import LEAD_CLOSE_REFRESH_TIMEOUT_S
+            attendance_deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
         closing = str(cols.get("status") or "") == "closed"
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -3157,6 +3168,12 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 if current is None or str(current[0] or "") != expected_generation:
                     conn.commit()
                     return None
+            if attendance_gate:
+                from work_attendance import departure_conn
+                current = _session_for_stream_conn(conn, f"{host}:{session_name}")
+                if current:
+                    departure_conn(conn, f"{host}:{session_name}", current["session_generation"],
+                                   cols, attendance_gate, observation_available=attendance_available, deadline=attendance_deadline)
             custody_child = _session_for_stream_conn(conn, f"{host}:{session_name}") if transfer_child_watch_custody else None
             assign = ", ".join(f"{k}=?" for k in cols)
             cur = conn.execute(
@@ -3166,6 +3183,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            if {"assigned_spec_id", "spec_ids", "spec_id"}.intersection(cols):
+                from work_report_freshness import assignment_changed_conn
+                assignment_changed_conn(conn, f"{host}:{session_name}", time.time())
             if "pane_pid" in cols or "provider" in cols:
                 store_usage.history_fill_conn(
                     conn, host, session_name, pane_pid=cols.get("pane_pid"), provider=cols.get("provider"),
@@ -3512,6 +3532,14 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
     ) -> dict[str, Any] | None:
         """CAS the reconciler's death transition to one unreserved row generation."""
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            from work_attendance import assigned_owners_conn, attendance_ids, record_attendance_cause
+            from store_lifecycle_authority import configured, front_desk_principal
+            stream_id = f"{host}:{session_name}"
+            prior = _session_for_stream_conn(conn, stream_id)
+            try:
+                desk = front_desk_principal(conn, configured(conn)) or {}
+            except ValueError:
+                desk = {}
             cur = conn.execute(
                 "UPDATE sessions SET status='closed', closed_at=?, pane_status='pane_dead', "
                 "presumed_dead_at=?, presumed_dead_fired_at=?, dead_open_closed_at=? "
@@ -3530,6 +3558,13 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            lost = attendance_ids(prior, front_desk=desk.get("stream_id") == stream_id)
+            if lost:
+                remaining = assigned_owners_conn(conn)
+                for spec in lost:
+                    if not remaining.get(spec):
+                        record_attendance_cause(conn, spec, stream_id, expected_generation, prior.get("role"),
+                                                "reconciler_dead", "confirmed_death")
             store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
             release_holder_conn(conn, stream_id, time.time())
@@ -5261,6 +5296,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         *,
         routing_snapshot: dict[str, Any] | None = None,
         qa_attestation_mode: str = "warn",
+        status_context: dict[str, Any] | None = None,
         announce: bool = True,
         _cancel_owner: asyncio.Task | None = None,
     ) -> dict[str, Any]:
@@ -5357,6 +5393,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
             ).fetchone())
             stored_fields["usage_snapshot"] = usage_row["usage"]
+            accepted_at = time.time()
+            from work_report_freshness import apply_report_gate
+            apply_report_gate(conn, stored_fields, usage_row, status_context or {}, accepted_at)
             stored_fields.update({
                 "session_generation": str(routing_snapshot["session_generation"]),
                 "effective_model": routing_snapshot.get("effective_model"),
@@ -5388,7 +5427,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 f"INSERT INTO v2_reports ({','.join(REPORT_COLUMNS)}, created_at)"
                 f" VALUES ({','.join('?' * len(REPORT_COLUMNS))}, ?)"
                 " ON CONFLICT(report_id) DO NOTHING",
-                [*values, time.time()],
+                [*values, accepted_at],
             ).rowcount == 1
             stored = _report_row(conn.execute(
                 "SELECT * FROM v2_reports WHERE report_id=?", (stored_fields["report_id"],)

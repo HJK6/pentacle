@@ -288,10 +288,13 @@ def validate(
                         f"{field} must be a literal top-level field",
                     )
                 )
-    if "completion_kind" in payload and payload["completion_kind"] is not None and payload["completion_kind"] not in {"implementation_ready", "tracked"}:
-        violations.append(_violation("completion_kind", "invalid_value", "completion_kind must be implementation_ready or tracked"))
-    if payload.get("completion_kind") in {"implementation_ready", "tracked"} and status != "done":
+    kinds = {"implementation_ready", "tracked", "seat_only"}
+    if "completion_kind" in payload and payload["completion_kind"] is not None and payload["completion_kind"] not in kinds:
+        violations.append(_violation("completion_kind", "invalid_value", "completion_kind must be implementation_ready, tracked or seat_only"))
+    if payload.get("completion_kind") in kinds and status != "done":
         violations.append(_violation("completion_kind", "invalid_status", "completion_kind requires status done"))
+    if payload.get("completion_kind") == "seat_only" and any(payload.get(k) is not None for k in ("qa_verdict", "target_sha", "qa_attestation", "ac_claim")):
+        violations.append(_violation("completion_kind", "invalid_dependency", "seat_only cannot assert QA or item acceptance"))
     if "qa_verdict" in payload and payload["qa_verdict"] is not None and payload["qa_verdict"] not in {"accept", "reject"}:
         violations.append(_violation("qa_verdict", "invalid_value", "qa_verdict must be accept or reject"))
     if "target_sha" in payload and (
@@ -349,7 +352,7 @@ def validate(
         details=payload.get("details"),
         extras=payload.get("extras"),
         reason=payload.get("reason") if isinstance(payload.get("reason"), str) and payload.get("reason") else None,
-        completion_kind=payload.get("completion_kind") if payload.get("completion_kind") in {"implementation_ready", "tracked"} else None,
+        completion_kind=payload.get("completion_kind") if payload.get("completion_kind") in kinds else None,
         qa_verdict=payload.get("qa_verdict") if payload.get("qa_verdict") in {"accept", "reject"} else None,
         target_sha=payload.get("target_sha") if isinstance(payload.get("target_sha"), str) else None,
         qa_attestation=payload.get("qa_attestation") if isinstance(payload.get("qa_attestation"), dict) else None,

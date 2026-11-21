@@ -314,7 +314,7 @@ def test_fd_preserves_external_ruling_with_or_without_report(reported):
     asyncio.run(run())
 
 
-def test_fd_close_of_undisposed_lead_keeps_owed_debt_with_fd():
+def test_fd_preserves_last_owner_and_takes_custody_on_confirmed_death():
     from test_work_unattended import cached
     async def run(env):
         auth = await setup(env)
@@ -325,8 +325,17 @@ def test_fd_close_of_undisposed_lead_keeps_owed_debt_with_fd():
         await env.sessions.refresh()
         await env.store.update_session(HOST, "target", parent_stream_id=FD)
         env.tmux.working.add("target")
-        result = await env.server._on_close(close(auth, force=True))
-        assert result["type"] == "close.ok" and env.tmux.killed == ["target"]
+        with pytest.raises(VerbError) as refused:
+            await env.server._on_close(close(auth, force=True))
+        assert refused.value.code == "work_last_owner" and env.tmux.killed == []
+        assert (await env.store.fetch_session(HOST, "target"))["status"] == "open"
+
+        env.tmux.live.discard("target")
+        async def session_state(name):
+            return "alive" if name in env.tmux.live else "gone"
+        env.tmux.session_state = session_state
+        result = await env.server._on_close(close(auth, force=True, request_id="retire-dead-target"))
+        assert result["type"] == "close.ok" and env.tmux.killed == []
         owed = await env.store.work_owed()
         assert [(i["spec_id"], i["closing_stream_id"]) for i in owed["items"]] == [
             ("spec_demo__item_00", HOST + ":target")]

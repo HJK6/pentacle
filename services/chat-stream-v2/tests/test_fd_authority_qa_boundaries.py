@@ -87,7 +87,7 @@ def test_stale_fd_cannot_configure_advisor_after_waiting_for_lock(tmp_path):
     _run(tmp_path, body, front_desk=True)
 
 
-def test_fd_own_child_with_pending_disposition_uses_fd_custody():
+def test_fd_own_busy_child_with_pending_disposition_refuses_last_owner_close():
     from test_fd_close_visible import setup, close, FD
     from test_lifecycle_authority import scenario, HOST as LHOST
     from test_work_unattended import cached
@@ -97,18 +97,16 @@ def test_fd_own_child_with_pending_disposition_uses_fd_custody():
         await env.store.update_session(LHOST, 'target', role='lead', assigned_spec_id='spec_demo__item_00',
             parent_stream_id=FD)
         await env.sessions.refresh()
-        # Explicit recovery of this FD's proven busy child retains FD debt.
+        # A generic force flag cannot retire the last live attending owner.
         env.tmux.working.add('target')
-        result = await env.server._on_close(close(auth, force=True, request_id='fd-busy-recovery'))
-        assert result['type'] == 'close.ok', result
-        assert env.tmux.killed == ['target']
+        from sessions import VerbError
+        with pytest.raises(VerbError) as refused:
+            await env.server._on_close(close(auth, force=True, request_id='fd-busy-recovery'))
+        assert refused.value.code == 'work_last_owner'
+        assert env.tmux.killed == []
+        assert (await env.store.fetch_session(LHOST, 'target'))['status'] == 'open'
         owed = await env.store.work_owed()
-        assert [(item['spec_id'], item['closing_stream_id']) for item in owed['items']] == [
-            ('spec_demo__item_00', LHOST + ':target')]
-        from store_work_index import _state_conn
-        state = await env.store.submit(_state_conn)
-        debt, = state['_lead_dispositions']['owed'].values()
-        assert debt['front_desk_owned'] is True
+        assert not any(item['closing_stream_id'] == LHOST + ':target' for item in owed['items'])
     scenario(body)
 
 

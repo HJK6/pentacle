@@ -1000,7 +1000,8 @@ def test_item3_byte_bound_disables_reuse_and_matches_oracle(monkeypatch):
 
 # --- Item 4: membership decode on demand by spec_id ---------------------------
 #
-# Oracle: the pre-change membership functions, copied VERBATIM from the base
+# Oracle: the pre-change membership functions, copied from the base and updated
+# for the current progress metadata contract
 # (725e0e0e store_work_index.py: effective_membership_conn without a cache,
 # members_conn, enrich_goals_conn) so a frozen database is read by the old
 # full-table decode. `_baseline_membership()` swaps them into store_work_lanes,
@@ -1043,6 +1044,8 @@ def _oracle_effective_membership(conn, decode_cache=None, **_ignored):
         if record.get("progress_changed_at"):
             member_["_progress_changed_at"] = record["progress_changed_at"]
         member_["_progress_at"] = record.get("progress_at")
+        member_["_progress_source_revisions"] = record.get("progress_source_revisions")
+        member_["_progress_epoch"] = record.get("progress_epoch")
         members[identity] = member_
     return {**snapshot, "records": records, "members": members}
 

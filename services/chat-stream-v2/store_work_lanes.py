@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 from work_lane_members import validate_members, validate_title
 from _shared.lane_icons import validate_icon
-from _shared.work_goals import EPIC_ID, derive_lane_id, goal_id, lane_work_status
+from _shared.work_goals import EPIC_ID, derive_lane_id, goal_id, goal_progress, lane_work_status
 from work_lane_progress import lane_lead_lost, members_working, seat_live, seat_working
 from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
                               effective_membership_conn, effective_membership_ids_conn,
@@ -166,6 +166,62 @@ def _accept_goals_conn(conn, goals: list[str], lane_id: str, stamp: str) -> None
                  (json.dumps(state, separators=(",", ":")),))
 
 
+class WorkLaneCloseBlocked(ValueError):
+    """Current effective work that prevents a manual terminal transition."""
+
+    def __init__(self, lane, work_status):
+        self.code = "work_lane_close_" + work_status
+        available = lane["_work_index_available"]
+        members = lane["_members"]
+        goals = lane["_goals"]
+        by_goal = {goal_id(epic): epic for epic in goals}
+        affected_members = []
+        for member in members:
+            observation = member["observation"]
+            quality = observation["quality"]
+            status = member.get("_goal_status", member.get("status"))
+            if quality == "fresh" and status in ("completed", "deprecated"):
+                continue
+            epic = by_goal.get(member.get("goal_id"))
+            affected_members.append({"spec_id": member["spec_id"], "source": "goal" if epic else "explicit",
+                                     "epic_id": epic, "status": status, "quality": quality,
+                                     "error": observation.get("error")})
+        affected_goals = []
+        for wire, epic in by_goal.items():
+            record = goals[epic]
+            group = [member for member in members if member.get("goal_id") == wire]
+            if record["quality"] != "fresh" or goal_progress(group)["state"] != "done":
+                affected_goals.append({"epic_id": epic, "quality": record["quality"], "error": record.get("error")})
+        self.details = {"lane_id": lane["lane_id"], "lane_version": lane["version"], "index_available": available,
+                        "members": affected_members, "member_count": len(affected_members),
+                        "goals": affected_goals, "goal_count": len(affected_goals)}
+        instruction = ("Finish or transfer the listed work and empty goals to their visible destination."
+                       if work_status == "unfinished" else
+                       "Verify the exact source ID before correcting an explicit entry. Restore unreadable sources "
+                       "and retry after a fresh sweep.")
+        super().__init__(f"{instruction} Read agent-orch work-lane show <lane> --members --json. "
+                         "For explicit membership, use set-members with the current version and the full ordered list. "
+                         "For goal membership, update the spec/summary pair or charter through the publisher. "
+                         "To retain the work here, use set-state --to paused --parked --reason.")
+
+
+def require_finished_lane(lane):
+    status = lane_work_status(lane["_goals"], lane["_members"], lane["_work_index_available"])
+    if status != "finished":
+        raise WorkLaneCloseBlocked(lane, status)
+
+
+def require_finished_routing_lane_conn(conn, lane):
+    if lane.get("work_state") is None:
+        return
+    ids = effective_membership_ids_conn(conn)
+    snapshot = effective_membership_conn(conn, spec_ids=effective_member_ids(conn, lane, ids), snapshot=ids)
+    facts = {**lane, "_members": members_conn(conn, lane, snapshot), "_work_index_available": ids["state"]["available"],
+             "_goals": {epic: record for epic, record in ids["goals"].items()
+                        if record["facts"]["lane_id"] == lane["lane_id"]}}
+    require_finished_lane(facts)
+
+
 class WorkLaneMemberConflict(ValueError):
     """Stable wire code with the conflicting product-lane identity kept separate."""
     code = "work_lane_member_conflict"
@@ -258,27 +314,44 @@ from store_lane_hues import (ensure_lane_hues_schema, enter_open_conn, prepare_h
 
 
 def ensure_latest_report_schema(conn) -> None:
+    from work_report_freshness import ensure_schema
+    ensure_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS v2_work_item_latest_report ("
                  "spec_id TEXT PRIMARY KEY, kind TEXT NOT NULL, at TEXT NOT NULL, report_id TEXT NOT NULL)")
 
 
 def record_latest_report_conn(conn, report: dict) -> bool:
     attribution = (report.get("usage_snapshot") or {}).get("attribution") or {}
-    if report.get("status") != "done" or attribution.get("mode") != "exclusive_primary" or not attribution.get("spec_id"):
+    spec_id = (report.get("status_freshness") or {}).get("spec_id") or attribution.get("spec_id")
+    if (report.get("status") != "done" or report.get("completion_kind") == "seat_only"
+            or attribution.get("mode") != "exclusive_primary" or not spec_id):
         return False
     kind = {"accept": "review_passed", "reject": "review_failed"}.get(report.get("qa_verdict"), "reported_done")
     at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(report["created_at"]))
     return bool(conn.execute("INSERT INTO v2_work_item_latest_report (spec_id,kind,at,report_id) VALUES (?,?,?,?) "
         "ON CONFLICT(spec_id) DO UPDATE SET kind=excluded.kind,at=excluded.at,report_id=excluded.report_id "
         "WHERE excluded.at >= v2_work_item_latest_report.at",
-        (attribution["spec_id"], kind, at, report["report_id"])).rowcount)
+        (spec_id, kind, at, report["report_id"])).rowcount)
 
 
 def enrich_latest_reports_conn(conn, members: list[dict]) -> None:
     for member in members:
-        row = conn.execute("SELECT kind,at,report_id FROM v2_work_item_latest_report WHERE spec_id=?", (member["spec_id"],)).fetchone()
+        row = conn.execute("""SELECT l.kind,l.at,l.report_id,
+            json_extract(r.status_freshness,'$.covers_event'),
+            json_extract(r.status_freshness,'$.spec_id'),
+            json_extract(r.status_freshness,'$.report_id'),
+            json_extract(r.status_freshness,'$.source_revisions'), r.created_at
+            FROM v2_work_item_latest_report l LEFT JOIN v2_reports r USING(report_id)
+            WHERE l.spec_id=?""", (member["spec_id"],)).fetchone()
         member["_latest_event"] = {"kind": row[0], "at": row[1]} if row else None
         member["_latest_report_id"] = row[2] if row else None
+        member["_latest_report_epoch"] = row[7] if row else None
+        if row and row[3] and row[4] == member["spec_id"] and row[5] == row[2]:
+            member["_status_reflected_report"] = row[2]
+        if row and row[6] and row[4] == member["spec_id"] and row[5] == row[2]:
+            if json.loads(row[6]) == member.get("_progress_source_revisions"):
+                # A delayed scan of the already reported edit is not an update after the report.
+                member["_progress_precedes_report"] = row[2]
 
 
 def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
@@ -1015,7 +1088,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         if operation == "set_state":
             enriched = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id, external_config=external_config)), None)
             if enriched:
-                lane.update({key: enriched[key] for key in ("_members", "_external_packets", "_has_work_seat", "_has_external_work")})
+                lane.update({key: enriched[key] for key in ("_members", "_goals", "_work_index_available", "_external_packets", "_has_work_seat", "_has_external_work")})
         _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor)
         if expected != int(lane["version"]):
             raise ValueError("assistant_lane_version_conflict")
@@ -1087,9 +1160,8 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == "done":
                 outcome = _text(payload.get("outcome"), UPDATE_TEXT_MAX, "work_lane_outcome_required",
                                 required=True)
-                changes["done_at"] = stamp
-                if lane.get("owner_kind") == "operator" and consumed is not None:
-                    changes["work_state_reason"] = "operator_confirmed"
+                require_finished_lane(lane)
+                changes.update(done_at=stamp, work_state_reason="goals_done")
                 update = ("lane_completed", "transition", outcome)
             elif prior_state == "blocked" and to in ("active", "paused"):
                 resolution = _text(payload.get("resolution"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")

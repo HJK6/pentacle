@@ -241,7 +241,7 @@ def lead_close_contexts_conn(conn, stream, generation, *, observation_available=
     return list(_close_obligations(conn, stream, generation, observation_available=observation_available))
 
 
-def disposition_commands(context):
+def disposition_commands(context, *, pause_for_owner=False, successors=None):
     """Recovery uses the observed two-document revisions, never a move override."""
     import shlex
     folder = PurePath(context.get("path") or "/memory/work/in_progress/item")
@@ -253,12 +253,21 @@ def disposition_commands(context):
     move = {"item_id": context["spec_id"], "status": "backlog", "expected": expected,
             "requesting_stream_id": context["stream_id"],
             "reason": "<reason for disposition>", "next_action": "<resume action>"}
+    if pause_for_owner:
+        # The publisher client supplies the identity of whoever chooses to pause.
+        move.pop("requesting_stream_id")
+        move.update(reason="Execution is paused pending a live implementation owner.",
+                    next_action=f"Assign a live implementation lead to {context['spec_id']} before resuming.")
     commands = []
-    if len(expected) != 2:
+    if len(expected) != 2 and not pause_for_owner:
         commands.extend(f"python3 {shlex.quote(client)} read <<'JSON'\n"
                         + json.dumps({"path": f"work/{folder.parent.name}/{stem}/{name}"}) + "\nJSON"
                         for name in ("spec.md", "summary.md"))
-    if len(expected) == 2:
+    if len(expected) == 2 and (not pause_for_owner or set(context["document_revisions"]) == {"spec.md", "summary.md"}):
         commands.append(f"python3 {shlex.quote(client)} move <<'JSON'\n" + json.dumps(move) + "\nJSON")
-    commands.append(f"agent-orch spec assign <successor> {context['spec_id']}")
+    if successors is None:
+        commands.append(f"agent-orch spec assign <successor> {context['spec_id']}")
+    else:
+        commands.extend(shlex.join(["agent-orch", "spec", "assign", stream, context["spec_id"]])
+                        for stream in successors)
     return commands

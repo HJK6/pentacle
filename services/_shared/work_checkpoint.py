@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import hashlib
+import subprocess
+import time
 from typing import Any
 
 from .specs_parser import _section, _without_fences, parse_work_facts
@@ -51,7 +53,55 @@ def checkpoint_deficiencies(spec_text: str, summary_text: str,
     return facts, found
 
 
-def work_checkpoint(spec_id: str, *, root: str | Path | None = None) -> dict[str, Any]:
+def _status_publication(root, path, content, status, line):
+    """Find the accepted commit that changed the parsed field, when history is available.
+
+    A synced working copy need not have authoritative history. Require its
+    exact bytes at the pinned tip. Follow the item across stage moves. Stop
+    at an ambiguous transition, an unproven start, or the
+    bounded history budget; an absent timestamp leaves the fallback active.
+    """
+    from .checkpoint_policy import parse_checkpoint
+    if not line or not (root / ".git").exists() or not re.fullmatch(r"[\w.-]+", path.parent.name):
+        return None
+    root = root.resolve()
+    relative = path.resolve().relative_to(root).as_posix()
+    deadline = time.monotonic() + 1
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), "--no-pager", *args], check=True,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=max(0.001, deadline-time.monotonic())).stdout
+
+    try:
+        tip = git("rev-parse", "--verify", "HEAD").decode().strip()
+        if git("show", f"{tip}:{relative}") != content:
+            return None
+        # A lifecycle move can both rename and edit the summary. Select every
+        # stage of this item and read the preimage blob from the raw diff.
+        for _ in range(32):
+            entry = git("log", "--first-parent", "--no-renames", "--raw", "--no-abbrev",
+                        "--format=%H %ct", "-1", tip, "--",
+                        f":(glob)work/*/{path.parent.name}/summary.md")
+            if not entry:
+                return None
+            header, *changes = entry.decode().splitlines()
+            revision, stamp = header.split()
+            blobs = [row.split("\t", 1)[0].split()[2:4] for row in changes if row.startswith(":")]
+            old = [before for before, _ in blobs if before.strip("0")]
+            new = [after for _, after in blobs if after.strip("0")]
+            if len(old) != 1 or len(new) != 1:
+                return None
+            previous = git("cat-file", "blob", old[0]).decode()
+            if parse_checkpoint(_without_fences(previous), status)["status_text"] != line:
+                return {"revision": revision, "at": int(stamp)}
+            tip = revision + "^1"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return None
+
+
+def work_checkpoint(spec_id: str, *, root: str | Path | None = None, report_status: bool = False) -> dict[str, Any]:
     """Return ``{state: valid|invalid|unverifiable, facts, deficiencies, error}`` from the current files."""
     from .spec_reader import SpecReader
     try:
@@ -73,7 +123,10 @@ def work_checkpoint(spec_id: str, *, root: str | Path | None = None) -> dict[str
                 "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__}
     facts, found = checkpoint_deficiencies(spec_text, summary_text, status)
     facts["source_changed_at"] = datetime.fromtimestamp(changed, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return {"state": "invalid" if found else "valid", "spec_id": spec_id, "facts": facts,
+    result = {"state": "invalid" if found else "valid", "spec_id": spec_id, "facts": facts,
             "deficiencies": found, "error": None, "policy_revision": facts["checkpoint_policy_revision"],
             "source_revisions": {"spec.md": hashlib.sha256(reader.consumed[Path(folder) / "spec.md"].content).hexdigest(),
                                  "summary.md": hashlib.sha256(summary[1]).hexdigest()}}
+    if report_status:
+        result["status_publication"] = _status_publication(reader.root, summary_path, summary[1], status, facts["status_line"])
+    return result

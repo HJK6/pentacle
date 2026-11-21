@@ -71,12 +71,22 @@ def member_status_behind(member: dict[str, Any], now_iso: str, index_available: 
     event = member.get("_latest_event") or {}
     at = event.get("at")
     progress = member.get("_progress_at")
+    if member.get("_status_reflected_report") and member["_status_reflected_report"] == member.get("_latest_report_id"):
+        return False
+    if member.get("_progress_precedes_report") and member["_progress_precedes_report"] == member.get("_latest_report_id"):
+        progress = None
+    event_epoch = member.get("_latest_report_epoch")
+    if event_epoch is None:
+        event_epoch = _epoch(at) if at else 0
+    progress_epoch = member.get("_progress_epoch")
+    if progress_epoch is None:
+        progress_epoch = _epoch(progress) if progress else 0
     return bool(index_available and member.get("status") not in ("completed", "deprecated")
                 and member.get("terminal") not in ("completed", "deprecated")
                 and member.get("observation", {}).get("quality") == "fresh"
                 and event.get("kind") in ("review_passed", "reported_done") and at
-                and (not progress or _epoch(at) > _epoch(progress))
-                and _epoch(now_iso) - _epoch(at) >= STATUS_BEHIND_GRACE_S)
+                and (not progress or event_epoch > progress_epoch)
+                and _epoch(now_iso) - event_epoch >= STATUS_BEHIND_GRACE_S)
 
 
 def lane_status_behind(lane: dict[str, Any], now_iso: str) -> bool | None:

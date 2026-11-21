@@ -526,6 +526,8 @@ class Ledger:
             "to_stream_id": row.get("to_stream_id"),
         }
         reply.update(_claim_wire_fields(row.get("claim_verified"), row.get("ac_claim_mismatch")))
+        if row.get("status_freshness"):
+            reply["status_freshness"] = row["status_freshness"]
         checkpoint = (row.get("extras") or {}).get("work_checkpoint") if isinstance(row.get("extras"), dict) else None
         if checkpoint is not None:
             reply["work_checkpoint"] = checkpoint
@@ -614,23 +616,23 @@ class Ledger:
             log.exception("record report rejection failed")
 
     async def _owner_checkpoint(self, msg: dict[str, Any], report_id: str, from_stream_id: str,
-                                status: str) -> dict[str, Any] | None:
-        """Attach checkpoint diagnostics without blocking durable reports.
+                                status: str, *, item_claim: bool = False) -> dict[str, Any] | None:
+        """Read the assigned source for an item claim or existing lead check.
 
-        Only an open lead with a persisted assignment gets a checkpoint. A
-        stored report replay remains independent of subsequent source edits.
+        A stored replay retains its original checkpoint across later edits.
         """
         if ":" not in from_stream_id or await self.store.get_report(report_id) is not None:
             return None
         row = await self.store.fetch_session(*from_stream_id.split(":", 1))
         from store_specs import effective_assignment
         spec_id = effective_assignment(row)
-        if (not spec_id or row.get("status") != "open" or str(row.get("role") or "").lower() != "lead"
-                or row.get("phase") in {"qa", "spec", "planning", "planner"}):
+        owner = row and row.get("role") == "lead" and row.get("phase") not in {"qa", "spec", "planning", "planner"}
+        if not spec_id or row.get("status") != "open" or not (owner or item_claim):
             return None
         from _shared.work_checkpoint import work_checkpoint
-        result = await asyncio.to_thread(work_checkpoint, spec_id)
+        result = await asyncio.to_thread(work_checkpoint, spec_id, report_status=item_claim)
         result["session_generation"] = row.get("session_generation")
+        result["_execution_owner"] = bool(owner)
         return result
 
     async def _authenticated_caller(self, msg: dict[str, Any]) -> str | None:
@@ -768,8 +770,16 @@ class Ledger:
             raise self._error(exc.code, str(exc), report_id, schema_violations=exc.violations) from exc
 
         claim_verified, claim_mismatch = await self.verify_ac_claim(validated.ac_claim)
-        checkpoint = await self._owner_checkpoint(msg, report_id, from_stream_id, str(validated.status))
-        if validated.completion_kind == "implementation_ready" and checkpoint and checkpoint["state"] != "valid":
+        auth = msg.get("_auth_context") or {}
+        generation = auth.get("session_generation") if auth.get("token_verified") and auth.get("stream_id") == from_stream_id else None
+        verdict = bool(validated.qa_verdict and qa_grade and generation)
+        item_claim = validated.status == "done" and not verdict and validated.completion_kind != "seat_only"
+        checkpoint = None
+        if validated.completion_kind != "seat_only":
+            checkpoint = await self._owner_checkpoint(msg, report_id, from_stream_id, str(validated.status), item_claim=item_claim)
+        execution_owner = checkpoint.pop("_execution_owner") if checkpoint else False
+        if (validated.completion_kind == "implementation_ready" and execution_owner
+                and checkpoint["state"] != "valid"):
             code = "work_checkpoint_" + checkpoint["state"]
             raise self._error(code, "Repair the assigned spec checkpoint before asserting implementation readiness",
                               report_id, spec_id=checkpoint["spec_id"],
@@ -839,6 +849,8 @@ class Ledger:
 
         async def persist_and_project():
             put_kwargs: dict[str, Any] = {}
+            if validated.status == "done":
+                put_kwargs["status_context"] = {"checkpoint": checkpoint, "authenticated_generation": generation}
             if not announce:
                 put_kwargs["announce"] = False
             if validated.completion_kind == "implementation_ready":
@@ -861,11 +873,16 @@ class Ledger:
                         log.exception("report roster projection failed after durable ingest")
             return row, inserted
 
+        from work_report_freshness import ReportStatusRefusal
         try:
             # Disconnect may cancel the report request after the Store commits.
             # Finish its roster projection before propagating cancellation;
             # notices, pane delivery and report-triggered close stay outside.
             row, inserted = await _finish_despite_cancel(persist_and_project())
+        except ReportStatusRefusal as exc:
+            command = f'agent-orch report --msg-id {raw_msg_id} --status done --result "$(cat report.json)"'
+            raise self._error(exc.code, f"{exc} Use {command}", report_id,
+                              spec_id=exc.spec_id, reason=exc.reason, repair_command=command) from exc
         except ReportProvenanceUnavailable as exc:
             raise self._routing_refusal(
                 "report_provenance_unavailable",

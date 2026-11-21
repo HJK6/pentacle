@@ -17,6 +17,9 @@ from _shared.work_observations import advance_observation, timestamp, unresolved
 from _shared.work_goals import advance_goals, detail_revision, goal_id
 
 DDL = (
+    "CREATE TABLE IF NOT EXISTS v2_work_attendance_causes (spec_id TEXT NOT NULL,gate TEXT NOT NULL,"
+    "stream_id TEXT,generation TEXT,seat_role TEXT,cause TEXT NOT NULL,observed_at TEXT NOT NULL,"
+    "PRIMARY KEY(spec_id,gate))",
     "CREATE TABLE IF NOT EXISTS v2_work_item_observations (spec_id TEXT PRIMARY KEY, record_json TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_work_index_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), state_json TEXT NOT NULL)",
 )
@@ -126,6 +129,8 @@ def effective_membership_conn(conn, *, spec_ids=None, snapshot: dict | None = No
         if record.get("progress_changed_at"):
             member["_progress_changed_at"] = record["progress_changed_at"]
         member["_progress_at"] = record.get("progress_at")
+        member["_progress_source_revisions"] = record.get("progress_source_revisions")
+        member["_progress_epoch"] = record.get("progress_epoch")
         members[identity] = member
     return {**snapshot, "records": records, "members": members}
 
@@ -255,6 +260,14 @@ def _prepare_records(rows, state: dict, scan: dict, *, settle_s: float, sweep: b
                 candidate = {"quality": "stale", "error": "work_goal_reference_unresolved"}
         record, transition = advance_observation(spec_id, previous, candidate,
             now=now, settle_s=settle_s, sweep=sweep)
+        if (candidate["quality"] == "fresh" and previous and state.get("available")
+                and previous["member"]["observation"]["quality"] == "fresh"
+                and "status_line" in previous["member"]
+                and previous["member"].get("checkpoint_policy_revision") == record["member"].get("checkpoint_policy_revision")
+                and previous["member"]["status_line"] != record["member"].get("status_line")):
+            record["status_change"] = {"after": state.get("_last_scan_at"),
+                                       "value": record["member"].get("status_line"),
+                                       "revision": (record.get("document_revisions") or {}).get("summary.md")}
         accepted |= candidate["quality"] == "fresh"
         if previous is not None:
             prior_quality = previous["member"]["observation"]["quality"]

@@ -398,6 +398,8 @@ def commit(conn,cid,registry,*,now=None,attempt_id=None):
         fields['handoff_from_stream_id']=sid
         conn.execute('UPDATE sessions SET '+','.join(k+'=?' for k in fields)+' WHERE host=? AND session_name=?',
                      (*fields.values(),host,name))
+        from work_report_freshness import assignment_changed_conn
+        assignment_changed_conn(conn, target, time.time())
         conn.execute('INSERT INTO v2_assistant_direct_handoff_proofs VALUES(?,?,?,?,?)',
                      (target,tgen,sid,gen,stamp()))
         conn.execute("UPDATE sessions SET parent_stream_id=? WHERE parent_stream_id=? AND status='open'",

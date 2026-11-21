@@ -747,6 +747,19 @@ class SpawnCtl:
             occupied = await self.store.submit(lambda conn: small_item_occupied_conn(conn, small, own_reservation=own))
             if occupied:
                 return VerbError("work_small_item_limit", small_item_message(small))
+        if (fd and not exempt and self._prompt_requested(msg) and msg.get("role") in {None, "", "worker"}
+                and msg.get("phase") not in {"analysis", "planning", "review", "spec", "qa"}
+                and not qa_dispatch.classified(msg, {"role": msg.get("role"), "phase": msg.get("phase")})):
+            from work_attendance import commission_ownership_conn
+            from sessions import LEAD_CLOSE_REFRESH_TIMEOUT_S
+            deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
+            outcome = await self.store.submit(lambda conn: commission_ownership_conn(
+                conn, spec_id, msg["_auth_context"], bool(small), deadline))
+            if outcome == "owner_required":
+                return VerbError("work_owner_required",
+                    f"Resubmit this commission with --role lead --spec-id {spec_id}.")
+            if outcome:
+                log.warning("Admitting commission for %s: %s", spec_id, outcome)
         return None
 
     async def _lane_admission(self, msg, binding, role):

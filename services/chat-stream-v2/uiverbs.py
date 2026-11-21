@@ -408,10 +408,11 @@ class UIVerbs:
             # Only the work assignment ends; authority tags are untouched.
             if await self.store.fetch_session(host, name) is None:
                 raise VerbError("session_not_found", "session does not exist", stream_id=f"{host}:{name}")
+            available = await self.sessions.refresh_attendance()
             async with self.sessions._graph_lock:
                 source = await self.store.fetch_session(host, name)
                 updated = await self.store.update_session(
-                    host, name, expected_spec_source=spec_binding_source(source),
+                    host, name, expected_spec_source=spec_binding_source(source), attendance_gate="unassign", attendance_available=available,
                     assigned_spec_id=UNASSIGNED,
                 )
             self.sessions.apply_durable(f"{host}:{name}", assigned_spec_id=UNASSIGNED)
@@ -490,11 +491,12 @@ class UIVerbs:
                 assigned = UNASSIGNED
 
         first_spec_id = spec_ids[0] if spec_ids else None
+        available = await self.sessions.refresh_attendance() if action in {"assign", "detach"} else True
         async with self.sessions._graph_lock:
             updated = await self.store.update_session(
                 host,
                 name,
-                expected_spec_source=source_check,
+                expected_spec_source=source_check, attendance_gate=action, attendance_available=available,
                 spec_id=first_spec_id,
                 spec_ids=spec_ids,
                 spec_resolution=resolver(first_spec_id) if first_spec_id else None,

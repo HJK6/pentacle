@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from work_lane_progress import lane_state, lane_progress, seat_live, seat_working, working_spec_ids, member_status_behind
+from store_work_index import member_ids
 from store_work_lane_episodes import LaneEpisodeSink
 from _shared.lane_icons import resolve_icon
 from _shared.lane_hues import resolve_hue
@@ -299,6 +300,8 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
     cursor = page[-1]["spec_id"] if page and len(remaining) > len(page) else None
     from work_lane_progress import progress_trail
     trail_events, unblocks = shown.get("_trail_events") or [], shown.get("_unblocks") or {}
+    # The cursor sorts by ID. Keep stored positions for ordered explicit-list repairs.
+    explicit_positions = {spec: i for i, spec in enumerate(member_ids(shown["lane"]))}
     page = [{**member, "unblocks": unblocks.get(member["spec_id"], [])[:4],
              "recent": progress_trail(trail_events, {member["spec_id"]})} for member in page]
     # Keep the legacy projection page, but serialize new source prose/metadata
@@ -331,6 +334,8 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
     response = {"type": "work_lanes.show.ok", "lane": lane, "projection": projection,
                 "events": shown["events"], "updates": shown["updates"], "members": page,
                 "members_total": total, "members_next": cursor,
+                "explicit_member_positions": {m["spec_id"]: explicit_positions[m["spec_id"]] for m in page
+                                              if m["spec_id"] in explicit_positions},
                 "detail_revision": projected.get("detail_revision"),
                 "work_index": shown["_work_index"]}
     # Use the actual normal response encoding's conservative ASCII size too:

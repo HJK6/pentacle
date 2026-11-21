@@ -5171,7 +5171,7 @@ class Server:
         return {"ok": bool(str(reply.get("type") or "").endswith(".ok")), "reply": reply}
 
     async def _on_assistant_operation(self, msg: dict[str, Any]) -> dict[str, Any]:
-        from store_work_lanes import WorkLaneGoalUnresolved, WorkLaneMemberConflict, WorkLaneMemberInUse
+        from store_work_lanes import WorkLaneCloseBlocked, WorkLaneGoalUnresolved, WorkLaneMemberConflict, WorkLaneMemberInUse
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified"):
@@ -5194,6 +5194,8 @@ class Server:
                         if identity not in existing and (specs is None or specs.resolution_for(identity) != "resolved"):
                             raise VerbError("work_lane_member_unresolved", f"{identity} is not a resolved spec")
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
+        except WorkLaneCloseBlocked as exc:
+            raise VerbError(exc.code, str(exc), **exc.details) from exc
         except (WorkLaneGoalUnresolved, WorkLaneMemberConflict, WorkLaneMemberInUse) as exc:
             raise VerbError(exc.code, str(exc)) from exc
         except ValueError as exc:
@@ -5239,6 +5241,8 @@ class Server:
         response = {"type": "work.report.get.ok", **{key: report.get(key) for key in (
             "report_id", "status", "from_stream_id", "provenance_qualified_spec_ids", "created_at",
         )}}
+        if report.get("completion_kind") == "seat_only":
+            response.update(completion_kind="seat_only", provenance_qualified_spec_ids=[])
         # The dedicated reader may verify protected releases. Other metadata
         # readers retain their original response, and opaque payload stays private.
         extras = report.get("extras")

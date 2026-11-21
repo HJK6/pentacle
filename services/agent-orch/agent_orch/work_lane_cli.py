@@ -159,6 +159,7 @@ def _complete_members(args, request, response):
             return first  # Preserve complete legacy response shapes verbatim.
         revision = first.get("detail_revision")
         members = list(first.get("members") or [])
+        explicit_positions = dict(first.get("explicit_member_positions") or {})
         cursor = first.get("members_next")
         seen = {member["spec_id"] for member in members}
         if len(seen) != len(members):
@@ -171,12 +172,14 @@ def _complete_members(args, request, response):
             page = _call(args, {**request, "members_after": cursor})
             if page.get("type") != "work_lanes.show.ok":
                 return page
-            if page.get("detail_revision") != revision:
+            if (page.get("detail_revision") != revision
+                    or (page.get("lane") or {}).get("version") != (first.get("lane") or {}).get("version")):
                 if restarted:
                     raise ValueError("lane detail changed twice; retry the complete read")
                 restarted = True
                 response = _call(args, request)
                 break
+            explicit_positions.update(page.get("explicit_member_positions") or {})
             for member in page.get("members") or []:
                 if member["spec_id"] in seen:
                     raise ValueError("lane detail duplicated a member; retry the complete read")
@@ -192,6 +195,9 @@ def _complete_members(args, request, response):
                 result["projection"] = {**first["projection"], "members": members, "members_next": None}
             if isinstance(first.get("lane"), dict):
                 result["lane"] = {**first["lane"], "members": [member["spec_id"] for member in members]}
+                if "explicit_member_positions" in first:
+                    result["explicit_member_positions"] = explicit_positions
+                    result["lane"]["explicit_members"] = sorted(explicit_positions, key=explicit_positions.__getitem__)
             return result
 
 

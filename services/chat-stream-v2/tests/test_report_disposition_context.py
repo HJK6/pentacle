@@ -108,7 +108,9 @@ def test_terminal_roles_multispec_and_other_current_owners(status, role, verdict
             await store.update_session("host-a", "reporter", role=role, assigned_spec_id="spec_demo__item_01",
                 spec_ids=["demo__item_00", "demo__item_01", "demo__item_02"])
             await store.open_session("host-a", "other", role="lead", visibility="hidden",
-                spec_ids=["demo__item_00", "demo__item_01"], assigned_spec_id="spec_demo__item_00")
+                spec_ids=["demo__item_00", "demo__item_01"], assigned_spec_id="spec_demo__item_00",
+                pane_status="pane_alive")
+            await store.open_session("host-a", "uncertain", role="lead", assigned_spec_id="spec_demo__item_00")
             await store.open_session("host-a", "observer", role="qa", assigned_spec_id="spec_demo__item_01")
             snapshot = await Ledger(store, sessions=sessions)._report_routing_snapshot("host-a:reporter")
             extra = {"qa_verdict": verdict} if verdict else {}

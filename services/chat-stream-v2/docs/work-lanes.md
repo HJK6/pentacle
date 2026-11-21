@@ -84,13 +84,19 @@ in-use reason and source-epic checks, but does not stop work.
 
 A new token-authenticated commission from the current direct-primary front desk
 (stream and generation) must explicitly name its own work item with `--spec-id`.
-Its effective membership must include a lane, counting active, paused, blocked
-and done lanes. The direct spawn path returns `work_assignment_required` for a
+At admission, effective membership in any active, paused, blocked or done lane qualifies. The direct spawn path returns `work_assignment_required` for a
 missing explicit assignment, or `work_lane_membership_required` for no lane.
 The held advisor path reports these as `spawn_preflight_failed` corrections on
 `spec_id`, without creating a ruling. Only an unavailable work index skips the
 membership check, with one log line naming the item; stale or errored available
 observations remain authoritative. Spec resolution/readability still applies.
+
+For a prompted execution commission on fresh ready or in-progress work, a sole
+roleless seat receives `work_owner_required` before the advisor ruling or spawn
+reservation. Resubmit the commission with `--role lead --spec-id ITEM`. Use
+the same role on the single execution seat for a small item. A helper can serve
+an item with a live implementation owner. Uncertain ownership admits with a
+recorded cause. The original admission decision carries through held release.
 
 Planners and requests with neither an initial prompt nor a command are exempt.
 Without an explicit item they keep inherited authority/usage tags but store an
@@ -152,9 +158,15 @@ Before creating or adopting a lane, follow [Lane organization](../../../docs/web
 
 The lane id the charter must name depends on the shape. For a promotion it is the existing routing row's `lane_id` (the promotion selector, unchanged). For a new lane it is derived from the adoption key by one shared function; `agent-orch work-lane lane-id --adoption-key <key>` prints it without writing, and each new-lane preview candidate shows it under the display-only key `new_lane_id`. `adopt --apply` passes `goals` through and drops `new_lane_id`; a new-lane entry still carries no `lane_id`. The front desk's procedure: read the lane id, publish the goal charter naming that `lane_id`, then adopt naming the charter in `goals`. Adopt refuses with `work_lane_goal_unresolved` until the daemon has observed the charter; retry the same request.
 
-**Automatic completion.** In every refresh, after the work index is reconciled and before the inventory frame is built, the daemon completes each open lane (in any open state, including parked) that certainly has no unfinished work. The transition has the same stored effects as `set-state --to done`, but the actor is `daemon:reconciler`, `work_state_reason` is `goals_done`, the event payload is `{"to":"done","auto":"goals_done","goals":[<epic ids>]}`, and no `lane_update` is published. The same refresh opens one `completed` episode, so the front desk still gets the `lane_completed` alert once per completion (now meaning "completed", not "ready to close"). No confirmation is asked, on operator-owned lanes too. Closing a lane early by hand, while it still has unfinished work, is unchanged (front desk only, outcome required, confirmation or override reason on an operator lane). Reopening by hand from `done` refuses with `work_lane_goal_required` unless the lane certainly has unfinished work, and `work_lane_goal_unresolved` when that is uncertain.
+**Automatic completion.** In every refresh, after the work index is reconciled and before the inventory frame is built, the daemon completes each open lane (in any open state, including parked) that certainly has no unfinished work. The transition has the same stored effects as `set-state --to done`, but the actor is `daemon:reconciler`, `work_state_reason` is `goals_done`, the event payload is `{"to":"done","auto":"goals_done","goals":[<epic ids>]}`, and no `lane_update` is published. The same refresh opens one `completed` episode, so the front desk still gets the `lane_completed` alert once per completion (now meaning "completed", not "ready to close"). No confirmation is asked, on operator-owned lanes too. Reopening by hand from `done` refuses with `work_lane_goal_required` unless the lane certainly has unfinished work, and `work_lane_goal_unresolved` when that is uncertain.
 
-**Automatic reopening (option A).** A completed lane is **settled** when its `work_state_reason` is `goals_done`; automatic completion stores that from the start. A lane closed by hand is settled at the first later refresh at which it certainly has no unfinished work (reason `goals_done`, one `{"to":"done","auto":"settled"}` event, no alert). A settled lane that certainly gains unfinished work moves from `done` to `paused` with reason `reopened` (event `{"to":"paused","auto":"work_added"}`, nothing published); a new empty goal, a new open item under a done goal, and an open unplaced item all count. The lane is never reopened as active or parked. A lane that is not settled (closed on purpose with work outstanding) is never reopened by the daemon. If the reopen membership check finds one of the lane's members in another open lane, the lane stays done and the daemon logs it. A lane with a Spec F `archived_at` mark is skipped by settling and reopening.
+**Manual closure.** After authority, confirmation and version checks, a manual `set-state --to done` requires the same certain, finished goals and members as automatic completion. This includes members beyond the preview and empty goals. The close transaction writes the settled marker, the manual event with the actor and outcome, and the ordinary publication. A confirmed close keeps its consumed question ID. A front desk override keeps its reason and actor in the event. Routed `lane.close` and `lane.decision` cancel apply the content check on an adopted lane before changing its routing phase. Routing-only lanes continue through their existing checks.
+
+The CLI returns `work_lane_close_unfinished` for fresh unfinished work and `work_lane_close_uncertain` for an unavailable index or unresolved observations. The response includes the lane version, affected member and goal counts, IDs, membership sources and observation quality. Read `agent-orch work-lane show <lane> --members --json` for the full membership. Its `lane.explicit_members` lists effective explicit entries in stored order, including across cursor pages. Each daemon page exposes the zero-based stored positions of its explicit entries in `explicit_member_positions`. Move continuing work to its visible destination and verify it has left the old lane’s effective membership. For a goal-derived member, publish the corrected spec/summary epic pair. To move a whole goal, publish its corrected charter. If the work belongs here, use `agent-orch work-lane set-state <lane> --to paused --parked --reason "<why>" --expected-version <version> --request-id <id>`.
+
+For an explicit ID typo, compare the exact declared source ID, including hyphens and underscores. For example, if `spec_demo-mobile__duplicate_banners` is missing and the source declares `spec_demo_mobile__duplicate_banners`, replace that one entry in the full ordered list. Run `agent-orch work-lane set-members <lane> --expected-version <version> --request-id <stable-id>` with one `--member` per corrected explicit entry in stored order, followed by any remaining goal-derived members. Supply `--reason` if a live assignment is affected. During a read outage, retain the membership and retry after a fresh sweep. Verify the missing observation clears in full detail before retrying the close.
+
+**Automatic reopening (option A).** A completed lane is **settled** when its `work_state_reason` is `goals_done`; automatic completion and a clean manual close both store it in the transition. A legacy lane closed by hand without that marker is settled at the first later refresh at which it certainly has no unfinished work (reason `goals_done`, one `{"to":"done","auto":"settled"}` event, no alert). A settled lane that certainly gains unfinished work moves from `done` to `paused` with reason `reopened` (event `{"to":"paused","auto":"work_added"}`, nothing published); a new empty goal, a new open item under a done goal, and an open unplaced item all count. The lane is never reopened as active or parked. A lane that is not settled (closed on purpose with work outstanding) is never reopened by the daemon. If the reopen membership check finds one of the lane's members in another open lane, the lane stays done and the daemon logs it. A lane with a Spec F `archived_at` mark is skipped by settling and reopening.
 
 The release is additive: a `pending` key inside the existing work-index state and one new `work_state_reason` value (`goals_done`). A daemon rolled back to the prior release ignores both; lanes it completed stay done, lanes it reopened stay paused.
 
@@ -678,7 +690,7 @@ Each projected member (inventory, list and `show --members`) adds:
 ## Spec attribution and completion
 
 Spec attribution and lane membership support tracking and display. A new
-managed commission requires its assignment to be in an open lane (above);
+managed commission requires its assignment to have membership in any lane state (above);
 handoffs, resumes and independent operator chats do not. Existing spawn
 authorization, idempotency and optional lead WIP policy still apply.
 
@@ -792,6 +804,25 @@ Spec `goal_text` is detail-only, normalized paragraph prose capped at 2000 code 
 Inventory budgets are unchanged: at most 800 added bytes per member over the existing pre-fields baseline, 2624 bytes per lane goal envelope, 327680 bytes at 16x8 and 1310720 at 64x8. No new checkpoint/prose metadata appears in inventory. A detail member adds at most 49152 encoded JSON bytes and selected-goal additions at most 65536; actual paginated responses remain at most 4194304 bytes with at most 32 members. New detail fields appear once in top-level `members`; `projection.members` retains its legacy fields for the same page. Normalizers preserve optional/retired policy fields; no duplicate checkpoint object or lane/goal narrative is created.
 
 A NEW open assigned execution lead's `implementation_ready` assertion requires a valid current coherently read checkpoint in addition to existing verified-QA requirements. Invalid/unverifiable source returns `work_checkpoint_invalid`/`work_checkpoint_unverifiable` and field repairs before the readiness row is stored. Ordinary progress/error/recovery/QA reports remain usable. Accepted report replay retains its original policy/source snapshot and payload identity even after source deletion or policy change; new assertions use current policy. These checks certify the recorded snapshot, never shipment or arbitrary prose truth.
+
+### Completion reports and Status
+
+An assigned seat making an item-level done claim needs a valid Status with a
+change since assignment or its preceding accepted item report. The daemon
+stores the report, generation, source revision and freshness decision together.
+An unchanged, missing or invalid line gets a repair command. Missing historical
+proof or an unreadable source admits an ordinary report with its diagnostic.
+Authenticated QA verdicts keep the owner's usual reflection obligation. A
+verified Status publication less than 30 minutes old covers only its own
+report. Later events each receive their own grace period.
+
+A non-owner can submit `agent-orch report --status done --completion-kind seat_only
+--result-file report.json` when another live seat attends or is assigned that
+item. The parent receipt retains the witness generation. Only item reports can
+advance the milestone or authorize source closure. Use
+`sqlite3 -readonly "$store" < services/chat-stream-v2/tools/work_tracking_counts.sql`
+to count distinct accepted helper reports per item and delivered tracking
+notices by cause and delivery type.
 
 ### Lead provisioning and rollout
 

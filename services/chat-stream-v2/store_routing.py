@@ -1898,6 +1898,9 @@ class _RoutingStoreMixin:
                         basis = payload.get("operator_basis_message_ids")
                         if not isinstance(basis, list) or not basis or not all(isinstance(v, str) and v for v in basis):
                             raise ValueError("assistant_lane_decision_basis_required")
+                        if transition == "cancel":
+                            from store_work_lanes import require_finished_routing_lane_conn
+                            require_finished_routing_lane_conn(conn, lane)
                         conn.execute(
                             "UPDATE v2_assistant_composite_lanes SET phase=?,version=version+1,updated_at=? WHERE lane_id=?",
                             (requested_to, _routing_iso_now(), audit_lane_id),
@@ -1913,6 +1916,8 @@ class _RoutingStoreMixin:
                             or str(payload.get("completion_disposition") or "") != "accepted"
                         ):
                             raise ValueError("assistant_lane_close_state_invalid")
+                        from store_work_lanes import require_finished_routing_lane_conn
+                        require_finished_routing_lane_conn(conn, lane)
                         conn.execute(
                             "UPDATE v2_assistant_composite_lanes SET phase='closed',version=version+1,updated_at=? WHERE lane_id=?",
                             (_routing_iso_now(), audit_lane_id),

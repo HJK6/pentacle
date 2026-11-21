@@ -7,7 +7,7 @@ import pytest
 from _shared.specs_parser import parse_work_facts
 from test_work_lane_alert_sink import subject, adopt, drain, facts, notices
 from test_work_lane_episodes import member, seed_observations, episodes
-from test_work_lanes import run
+from test_work_lanes import run, seed_lane_work
 from work_lane_progress import lane_estimate_missing
 
 VALID = "remaining_work_h: 2–4 (median 3) as_of 2026-10-09"
@@ -119,6 +119,7 @@ def test_continuity_membership_lead_presence_unknown_correct_and_recur(tmp_path,
         await env.store.reconcile_work_lane_episodes(None)
         assert [r["sequence"] for r in await episodes(env.store)] == [1, 2]
         # Completing the lane clears even when observations are unavailable.
+        await seed_lane_work(env.store, lid)
         await env.op("set_state", {"to": "done", "outcome": "Disposed"}, lane=lid, version=5)
         await seed_observations(env.store, [], available=False)
         await env.store.reconcile_work_lane_episodes(None)
