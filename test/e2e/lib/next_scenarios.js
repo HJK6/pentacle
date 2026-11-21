@@ -45,6 +45,8 @@ async function chatCard(ctx) {
 module.exports = { homeRail: isolated(homeRail), chatCard: isolated(chatCard) };
 async function newChat(ctx) {
   const { session, report } = ctx; await visit(ctx);
+  const catalogFlag = path.join(ctx.runtime.fixtureScratch, 'next-catalog-fixture'); require('fs').writeFileSync(catalogFlag, 'enabled');
+  try {
   await session.eval(`(() => {
     window.__nextRequests=[]; window.__pentacleNextAdmitted=[]; window.__nextReply={ok:false,error:'Fixture refusal'};
     window.cc.chatSpawnV2=async req=>{window.__nextRequests.push(req);const reply=window.__nextReply;if(reply.ok&&reply.streamId)window.__pentacleNextAdmitted.push(reply.streamId);return reply}; return true;
@@ -72,10 +74,12 @@ async function newChat(ctx) {
   await session.eval(`window.__nextReply={ok:true,streamId:'local:web-gate-empty',session:{...window.PentacleChatStore.getState().sessions.find(s=>s.stream_id==='local:web-gate-empty'),state:'ready'}}; true`);
   await session.click('[data-testid="start-chat"]'); await session.waitFor("window.__pentacleNextAdmitted.includes('local:web-gate-empty') && !!document.querySelector('.card [data-next-composer]')",{timeoutMs:ctx.timeoutMs});
   report.ok('an ordinary ready reply opens the empty session and records its ID',await session.eval("!!document.querySelector('.card-title').textContent && !document.querySelector('.card .thread-inner .slot-chat-row') && !document.querySelector('.new-chat-host:not([hidden])')"));
+  } finally { require('fs').rmSync(catalogFlag, { force:true }); }
 }
 module.exports.newChat = isolated(newChat);
 async function limitsSettings(ctx) {
-  const { session, report } = ctx; await visit(ctx);
+  const { session, report } = ctx; const statsFlag = path.join(ctx.runtime.fixtureScratch, 'next-stats-fixture'); require('fs').writeFileSync(statsFlag, 'enabled');
+  try { await visit(ctx);
   await session.click('[aria-label="Limits and machines"]');
   report.ok('limits popover opens with usage rows and lights its control', await session.eval("!document.querySelector('.popover').hidden && document.querySelector('.popover').textContent.includes('Claude') && document.querySelector('[aria-label=\"Limits and machines\"]').classList.contains('open')"));
   await session.waitFor("document.querySelector('.popover').textContent.includes('fixture-machine')", { timeoutMs: ctx.timeoutMs });
@@ -91,6 +95,7 @@ async function limitsSettings(ctx) {
   report.ok('light and cosmic themes change the page and cosmic type', light !== cosmic.bg && cosmic.bg !== 'rgba(0, 0, 0, 0)' && cosmic.title.includes('Rajdhani') && !cosmic.body.includes('Rajdhani') && cosmic.label.includes('JetBrains Mono') && cosmic.lit !== cosmic.bg && cosmic.idle !== cosmic.bg, { light, cosmic });
   await session.send('Page.reload'); await session.waitFor("document.documentElement.dataset.theme === 'cosmic'", { timeoutMs: ctx.timeoutMs });
   report.ok('theme persists across reload', true);
+  } finally { require('fs').rmSync(statsFlag, { force:true }); }
 }
 module.exports.limitsSettings = isolated(limitsSettings);
 async function composer(ctx) {
