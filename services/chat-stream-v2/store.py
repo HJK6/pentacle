@@ -1559,8 +1559,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000,
-                 archive_path: str | None = None) -> None:
+                 archive_path: str | None = None, daemon_start: bool = False) -> None:
         self._path = path
+        self._daemon_start = daemon_start
         # Shared with Sessions: ownership/binding writes cannot outrun a close
         # between its final authoritative admission and process termination.
         self.session_graph_lock = asyncio.Lock()
@@ -2054,6 +2055,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             store_exchange.repair(conn)
             history_path = None if self._path in (':memory:', '') else default_archive_path(Path(self._path).absolute())
             prepare_history_schema(conn, fresh=fresh_history, archive_path=history_path)
+            if self._daemon_start:
+                self._invalidate_satellite_runtime(conn)
             self.schedule_schema_health = "ok"
             conn.commit()
             migrate_route_batch_archive(conn)
@@ -2185,8 +2188,13 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     async def put(self, key: str, value: str) -> None:
         def _op(conn: sqlite3.Connection) -> None:
-            conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)", (key, value))
-            conn.commit()
+            with conn:
+                if key == EVENT_PUSH_TARGET_SHA_KEY:
+                    conn.execute("BEGIN IMMEDIATE")
+                    old = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+                    if old and old[0] != value:
+                        self._invalidate_satellite_runtime(conn, old[0])
+                conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)", (key, value))
 
         await self.submit(_op)
 
@@ -2836,6 +2844,16 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         if not isinstance(value, str) or _FULL_GIT_SHA.fullmatch(value) is None:
             raise ValueError(f"{label} must be an exact 40-character hexadecimal git SHA")
         return value
+
+    @staticmethod
+    def _invalidate_satellite_runtime(conn, previous_target=None):
+        # Keep diagnostic fields on a reboot or pin change. Removing the
+        # generation also prevents an older in-flight completion from publishing.
+        conn.execute("""
+            UPDATE kv SET v=json_remove(json_set(v, '$.admitted', json('false')), '$.observation_generation')
+            WHERE k GLOB 'event_push.runtime.*' AND json_valid(v)
+              AND (? IS NULL OR json_extract(v, '$.sha')=?)
+        """, (previous_target, previous_target))
 
     async def stage_event_push_target_sha(self, target_sha: str) -> str | None:
         """Durably record the current pin, stage ``target_sha``, then read it back.
@@ -5953,8 +5971,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         )
         return int(cur.lastrowid) if cur.rowcount > 0 else None
 
-    async def record_satellite_runtime(self, host, sha, pid, incarnation, *, admitted,
-                                       useful=0, recovery_pending=None, recovery_gaps=None):
+    async def begin_satellite_push(self, host, sha, pid, incarnation, *, version_ok):
+        """Record arrival without renewing the last completed admission."""
         def operation(conn):
             key = f"event_push.runtime.{host}"
             with conn:
@@ -5964,15 +5982,55 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     previous = json.loads(row[0]) if row else {}
                 except (TypeError, ValueError):
                     previous = {}
-                same = previous.get("sha") == sha and previous.get("incarnation") == incarnation
-                runtime = {"sha": sha, "pid": pid if type(pid) is int and pid > 0 else None,
-                    "incarnation": incarnation, "observed_at": iso_now(), "observed_at_epoch": time.time(),
-                    "admitted": admitted, "useful_events": (previous.get("useful_events", 0) if same else 0) + useful,
-                    "useful_observed_at_epoch": time.time() if useful else
-                        previous.get("useful_observed_at_epoch") if same else None,
-                    "recovery_pending": recovery_pending, "recovery_gaps": recovery_gaps}
-                conn.execute("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                             (key, json.dumps(runtime, sort_keys=True)))
+                if not isinstance(previous, dict):
+                    previous = {}
+                target = conn.execute("SELECT v FROM kv WHERE k=?", (EVENT_PUSH_TARGET_SHA_KEY,)).fetchone()
+                valid_pid = pid if type(pid) is int and pid > 0 else None
+                pin = target[0] if target else ""
+                version_matches = version_ok and (not pin or pin == sha)
+                # Reuse this generation across matching pushes. Completing any
+                # of them may add useful events, even when their acks overlap.
+                same = (version_matches and previous.get("target_sha") == pin
+                        and previous.get("sha") == sha and previous.get("pid") == valid_pid
+                        and previous.get("incarnation") == incarnation and previous.get("observation_generation"))
+                now = time.time()
+                if same:
+                    runtime = previous
+                else:
+                    runtime = {"sha": sha, "pid": valid_pid, "incarnation": incarnation,
+                               "target_sha": pin, "observation_generation": uuid.uuid4().hex if version_matches else None,
+                               "admitted": False, "observed_at": iso_now(), "observed_at_epoch": now,
+                               "useful_events": 0, "useful_observed_at_epoch": None,
+                               "recovery_pending": None, "recovery_gaps": None}
+                runtime["last_seen_at_epoch"] = now
+                conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, json.dumps(runtime)))
+                return runtime["observation_generation"]
+        return await self.submit(operation)
+
+    async def finish_satellite_push(self, host, generation, *, useful, recovery_pending, recovery_gaps):
+        """Publish only while the same observation still owns the runtime row."""
+        if not generation:
+            return
+
+        def operation(conn):
+            key = f"event_push.runtime.{host}"
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+                runtime = json.loads(row[0]) if row else {}
+                target = conn.execute("SELECT v FROM kv WHERE k=?", (EVENT_PUSH_TARGET_SHA_KEY,)).fetchone()
+                pin = target[0] if target else ""
+                if runtime.get("observation_generation") != generation or runtime.get("target_sha") != pin:
+                    return
+                now = time.time()
+                # Unpinned and legacy frames still contribute delivery statistics.
+                admitted = bool(pin and pin == runtime["sha"] and runtime["pid"] and runtime["incarnation"])
+                runtime.update(admitted=admitted, observed_at=iso_now(), observed_at_epoch=now,
+                               useful_events=runtime["useful_events"] + useful,
+                               recovery_pending=recovery_pending, recovery_gaps=recovery_gaps)
+                if useful:
+                    runtime["useful_observed_at_epoch"] = now
+                conn.execute("UPDATE kv SET v=? WHERE k=?", (json.dumps(runtime), key))
         await self.submit(operation)
 
     async def bind_chat_checkpoints(self, host, sources):
