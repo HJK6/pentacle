@@ -2,13 +2,38 @@
 from __future__ import annotations
 
 import ast
+import base64
 import configparser
+import json
 from pathlib import Path
 import re
+import subprocess
 
 
 def effective_tests(checkout):
     root = Path(checkout)
+    inventory = root / "scripts/quarantine.json"
+    if inventory.exists():
+        if (root / ".git").exists():
+            # The runtime checkout may lag a newly relayed list. Read public
+            # main through the scorecard's existing read-only GitHub transport.
+            from .reliability_hosted import download
+            try:
+                response = json.loads(download("HJK6/pentacle", "contents/scripts/quarantine.json?ref=main"))
+            except subprocess.TimeoutExpired as exc:
+                raise ValueError("effective quarantine GET timed out") from exc
+            if (not isinstance(response, dict) or response.get("encoding") != "base64"
+                    or not isinstance(response.get("content"), str)):
+                raise ValueError("invalid effective quarantine response")
+            data = json.loads(base64.b64decode("".join(response["content"].split()), validate=True))
+        else:
+            data = json.loads(inventory.read_text())
+        tests = data.get("nonblocking_tests") if isinstance(data, dict) else None
+        if (not isinstance(data, dict) or data.get("version") != 1 or not isinstance(tests, list)
+                or any(not isinstance(test, str) or not test or "::" not in test for test in tests)
+                or len(set(tests)) != len(tests)):
+            raise ValueError("invalid effective quarantine list")
+        return set(tests)
     daemon = root / "services/chat-stream-v2"
     ini = configparser.ConfigParser(interpolation=None)
     ini.read(daemon / "pytest.ini")

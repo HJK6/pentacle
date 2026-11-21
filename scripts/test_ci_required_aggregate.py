@@ -91,12 +91,8 @@ class WorkflowControls(unittest.TestCase):
             bound = 40 if job_id in ('daemon-unit', 'daemon') else 50
             self.assertLessEqual(int(job['timeout-minutes']), bound)
             self.assertTrue(any(step.get('uses') == 'actions/checkout@v4' for step in job['steps']))
-            advisory = {
-                'frontend': [('Advisory web-server quarantine', '${{ !cancelled() }}')],
-                'daemon-unit': [('Advisory daemon quarantine', '${{ !cancelled() && matrix.shard == 0 }}')],
-            }
             nonblocking = [step for step in job['steps'] if 'continue-on-error' in step]
-            self.assertEqual([(step['name'], step.get('if')) for step in nonblocking], advisory.get(job_id, []))
+            self.assertEqual(nonblocking, [])
             for step in nonblocking:
                 self.assertIn(step['continue-on-error'], (True, 'true'))
             if job_id == 'checks':
@@ -141,7 +137,7 @@ class WorkflowControls(unittest.TestCase):
                 args = shlex.split(line)
                 targets.append((args[args.index('--target') + 1], args[args.index('--select') + 1] if '--select' in args else None))
         self.assertCountEqual(targets, [('npm-test', None), ('web-gate', None),
-                                      ('v2-unit-ci-shard', None), ('v2-quarantined', None),
+                                      ('v2-unit-ci-shard', None),
                                       ('v2-smoke', None), ('cli-pytest', 'tests'), ('shared-pytest', 'tests')])
         jobs = self.workflow['jobs']
         unit = next(s['run'] for s in jobs['daemon-unit']['steps'] if '--target v2-unit-ci-shard' in s.get('run', ''))

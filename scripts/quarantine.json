@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "nonblocking_tests": [
+    "test/web_server.test.js::two concurrent connections keep their local tmux sessions isolated",
+    "tests/test_store_call_diag.py::test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line",
+    "tests/test_tmux_observation_delimiter.py::test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentinel[status]"
+  ],
+  "history": {
+    "d9ee563d0a230b15f856d703fdcc3a5dd88a224fd8078d8c0f0a412c628ffbd5": {
+      "activation": "seed-pr606",
+      "file": "2597a1933b7312074658e21d0fed00275b60c46e108c5b29f6a4a7d964424d63",
+      "parents": []
+    },
+    "8dd41587b76d8ef625b0662457655b665527c89e6b32f21a535f70805b34de26": {
+      "activation": "seed-pr606",
+      "file": "6bbfcc477dc77a637b578f83dc733296a3cdbcfca0ce21580a7d8e55a852a004",
+      "parents": []
+    },
+    "63172c0b9f70aba4764b30c3b89cab68904d1220a0fd2895f4a456c4b8c265d5": {
+      "activation": "seed-pr606",
+      "file": "3254d6c1b0e7997a9ae006c234ef14e4471543ff9ed6ef0d2cb6aad03875dbf7",
+      "parents": []
+    }
+  }
+}

@@ -191,6 +191,25 @@ def test_lifecycle_and_effective_quarantine_reconcile_beyond_windows(sources):
     assert report(sources, NOW)["conditions"]["open_failure_items"]["passed"]
 
 
+def test_automatic_selection_requires_matching_open_decision(sources, tmp_path):
+    w = sources["work"]
+    test_id = "tests/test_example.py::test_example"
+    inventory = tmp_path / "checkout/scripts/quarantine.json"
+    w["selector_checkout"] = str(inventory.parents[1])
+    make_work(Path(w["work_root"]), "repo__case")
+    record = dict(cause="fixture", item="repo__case", test=test_id,
+                  first_seen="2025-01-01T00:00:00Z")
+    change_json(w["register"], records=[record])
+    write(inventory, {"version": 1, "nonblocking_tests": [test_id]})
+    condition = report(sources, NOW)["conditions"]["open_quarantines"]
+    assert condition["status"] == "fail" and condition["numerator"] == 1
+    write(inventory, {"version": 1, "nonblocking_tests": []})
+    assert report(sources, NOW)["conditions"]["open_quarantines"]["status"] == "incomplete"
+    change_json(w["register"], records=[])
+    condition = report(sources, NOW)["conditions"]["open_quarantines"]
+    assert condition["passed"] and condition["numerator"] == 0
+
+
 def test_inert_command_three_exit_states(sources, tmp_path, capsys):
     config = write(tmp_path/"sources.json", sources)
     args = ["reliability", "score", "--as-of", stamp(NOW), "--sources", config]

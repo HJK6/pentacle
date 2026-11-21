@@ -115,6 +115,7 @@
         },
         "v2-pytest": {
           "kind": "pytest_files",
+          "admission_suite": "daemon",
           "needs": [
             "python",
             "node",
@@ -143,10 +144,8 @@
             "root": "services/chat-stream-v2",
             "pattern": "^tests/test_[A-Za-z0-9_]+\\.py$"
           },
-          "default_patterns": [
-            "tests/test_store_call_diag.py",
-            "tests/test_tmux_observation_delimiter.py"
-          ],
+          "default_patterns": [],
+          "quarantine_defaults": true,
           "pytest_addopts": "-m quarantined",
           "timeout_s": 120,
           "max_timeout_s": 120,
@@ -180,6 +179,7 @@
         },
         "cli-pytest": {
           "kind": "pytest_files",
+          "admission_suite": "cli",
           "pass_env": [
             "AGENT_ORCH_MEMORY_REPO"
           ],
@@ -201,6 +201,7 @@
         },
         "shared-pytest": {
           "kind": "pytest_files",
+          "admission_suite": "shared",
           "needs": [
             "python",
             "tmux"
