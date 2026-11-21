@@ -161,6 +161,7 @@ test('two concurrent connections keep their local tmux sessions isolated', { ski
   const savedEnv = new Map(['HOME', 'TMUX_TMPDIR', 'TMUX'].map((key) => [key, process.env[key]]));
   const timeout = 10000;
   let a, b, host;
+  let serverPid;
   let closing = false;
 
   async function bounded(promise, label) {
@@ -187,6 +188,22 @@ test('two concurrent connections keep their local tmux sessions isolated', { ski
     }
   }
 
+  function readServerPid() {
+    const pid = Number(tmux('read fixture server PID', 'display-message', '-p', '#{pid}'));
+    assert.ok(Number.isSafeInteger(pid) && pid > 1, 'invalid private tmux server PID');
+    return pid;
+  }
+
+  function serverExited(pid) {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      if (error.code === 'ESRCH') return true;
+      throw error;
+    }
+  }
+
   t.after(async () => {
     closing = true;
     try {
@@ -194,22 +211,27 @@ test('two concurrent connections keep their local tmux sessions isolated', { ski
       b?.ws.terminate();
       if (host) await bounded(host.close(), 'close the loopback web host');
     } finally {
+      let stopped = false;
       try {
-        if (fs.existsSync(socket)) {
+        if (serverPid === undefined && fs.existsSync(socket)) serverPid = readServerPid();
+        stopped = serverPid === undefined || serverExited(serverPid);
+        if (!stopped) {
           tmux('stop fixture server', 'kill-server');
           const deadline = Date.now() + timeout;
-          while (fs.existsSync(socket) && Date.now() < deadline) {
+          while (!stopped && Date.now() < deadline) {
+            stopped = serverExited(serverPid);
+            if (stopped) break;
             await new Promise((resolve) => setTimeout(resolve, 20));
           }
-          assert.ok(!fs.existsSync(socket), 'private tmux socket still exists after kill-server');
+          assert.ok(stopped, `private tmux server ${serverPid} still exists after kill-server`);
         }
       } finally {
         for (const [key, value] of savedEnv) {
           if (value === undefined) delete process.env[key]; else process.env[key] = value;
         }
-        // Leave the address available for diagnosis if teardown could not
-        // confirm server exit; unlinking a live socket would orphan it.
-        if (!fs.existsSync(socket)) fs.rmSync(dir, { recursive: true, force: true });
+        // tmux can leave its socket inode behind after the server exits.
+        // Keep the private directory if exit could not be confirmed.
+        if (stopped) fs.rmSync(dir, { recursive: true, force: true });
       }
     }
   });
@@ -227,6 +249,7 @@ test('two concurrent connections keep their local tmux sessions isolated', { ski
     const ready = `${session}-ready`;
     tmux(`start ${session}`, 'new-session', '-d', '-s', session,
       'sh', '-c', 'stty raw -echo && tmux -S "$1" wait-for -S "$2" && exec cat', 'sh', socket, ready);
+    serverPid ??= readServerPid();
     tmux(`wait for ${session} to configure its terminal`, 'wait-for', ready);
     tmux(`check ${session} on the fixture server`, 'has-session', '-t', `=${session}`);
   }
