@@ -1470,9 +1470,29 @@ class Sessions:
     async def _guard_lead_disposition(self, row, close_kind):
         if close_kind not in {"session_close", "manager_close", "idle_reap"}:
             return True
-        if not (row.get("assigned_spec_id") or row.get("spec_ids") or row.get("spec_id")):
-            return False
         return await self.refresh_attendance()
+
+    async def _close_attendance_ids(self, sid, generation, close_kind):
+        if close_kind not in {"session_close", "manager_close", "idle_reap"}:
+            return frozenset()
+        def read(conn):
+            from store_watch_wake import _session
+            from store_lifecycle_authority import configured, front_desk_principal
+            from work_attendance import attendance_ids
+            from work_owed import _close_obligations
+            row = _session(conn, sid)
+            if not row or row.get("status") != "open" or row.get("session_generation") != generation:
+                return frozenset()
+            obligations = {context["spec_id"] for context in _close_obligations(
+                conn, sid, generation, pending_only=False)}
+            try:
+                desk = front_desk_principal(conn, configured(conn)) or {}
+                is_desk = desk.get("stream_id") == sid and desk.get("session_generation") == generation
+            except ValueError:
+                # An unresolved FD principal can make any assigned seat an owner.
+                return frozenset(obligations | attendance_ids(row) | ({row["assigned_spec_id"]} if row.get("assigned_spec_id") else set()))
+            return frozenset(obligations | attendance_ids(row, front_desk=is_desk))
+        return await self.store.submit(read)
 
     async def refresh_attendance(self):
         refresh = getattr(self, "refresh_work_for_close", None)
@@ -1537,71 +1557,96 @@ class Sessions:
                 if hint is not None and str(hint.get("status") or "open") == "open"
                 else None
             )
-        async with self._lifecycle_lock(host, session_name):
-            row = await self.store.fetch_session(host, session_name)
-            self.assistant.guard_close(row, close_kind)
-            if expected_generation is None and row is not None:
-                expected_generation = self._row_generation(row)
-            observation_available = True
-            warnings = []
-            if row and row.get("status") == "open" and (
-                expected_generation is None or self._row_generation(row) == expected_generation
-            ):
-                # Do not hold the shared graph lock during the bounded index
-                # wait. Target generation is rechecked again below before kill.
-                if busy_override_recovery and close_kind == "manager_close":
-                    # The server admits only an explicit current-FD own-child
-                    # force request. Fresh busy proof distinguishes recovery
-                    # from ordinary disposition; unknown capture grants neither.
-                    await self._probe_capture_liveness(host, session_name, row)
-                    operator_override = self._capture_liveness(sid, row) == "idle" and row.get("working") is True
-                observation_available = await self._guard_lead_disposition(row, close_kind)
-            if row and row.get("status") == "open" and row.get("role") in {"lead", "nexus", "planner"}:
+        # Bind even generation-omitting requests before the first slow wait.
+        first = await self.store.fetch_session(host, session_name)
+        self.assistant.guard_close(first, close_kind)
+        if expected_generation is None and first is not None:
+            expected_generation = self._row_generation(first)
+        deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
+        observed = None
+        observation_available = True
+        while True:
+            identities = await self._close_attendance_ids(sid, expected_generation, close_kind)
+            if identities and identities != observed and time.monotonic() < deadline:
                 try:
-                    report = await asyncio.wait_for(self.store.find_report(
-                        sid, statuses=("done", "error", "aborted"),
-                        session_generation=self._row_generation(row)), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
-                    if report is None:
-                        warnings.append({"kind": "report", "status": "missing"})
-                except Exception:
-                    warnings.append({"kind": "report", "status": "unknown"})
-            # Admission and termination share the same graph fence as reparent
-            # and child intent recording. Stale/closed targets keep their existing
-            # outcomes; a child guard never authorizes killing a newer generation.
-            async with self._graph_lock:
+                    preflight_row = await self.store.fetch_session(host, session_name)
+                    observation_available = await asyncio.wait_for(
+                        self._guard_lead_disposition(preflight_row or {}, close_kind),
+                        timeout=max(0.001, deadline - time.monotonic()))
+                except asyncio.TimeoutError:
+                    observation_available = False
+                observed = identities
+            elif identities and identities != observed:
+                observation_available = False
+                observed = identities
+            async with self._lifecycle_lock(host, session_name):
                 row = await self.store.fetch_session(host, session_name)
-                if admission_guard is not None:
-                    await admission_guard(row)
-                if row and row.get("status") == "open":
-                    if expected_generation is not None and self._row_generation(row) != expected_generation:
-                        return await self._stale_close_result(sid, row)
-                    warnings.extend(await self._check_lead_disposition(sid, self._row_generation(row),
-                        observation_available=observation_available))
-                if row is None or row.get("status") == "open":
-                    await self._guard_child_preservation(sid)
-                async def check_attendance(recovery=None):
-                    if not row or close_kind not in {"session_close", "manager_close"}:
-                        return
-                    from work_attendance import departure_conn
-                    deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
-                    def check(conn):
-                        with conn:
-                            return departure_conn(conn, sid, self._row_generation(row), None, close_kind,
-                                observation_available=observation_available, recovery=recovery, deadline=deadline)
-                    warnings.extend(await self.store.submit(check))
+                self.assistant.guard_close(row, close_kind)
+                if expected_generation is None and row is not None:
+                    expected_generation = self._row_generation(row)
+                warnings = []
+                if row and row.get("status") == "open" and (
+                    expected_generation is None or self._row_generation(row) == expected_generation
+                ):
+                    # Capture recovery is generation-checked again before kill.
+                    if busy_override_recovery and close_kind == "manager_close":
+                        # The server admits only an explicit current-FD own-child
+                        # force request. Fresh busy proof distinguishes recovery
+                        # from ordinary disposition; unknown capture grants neither.
+                        await self._probe_capture_liveness(host, session_name, row)
+                        operator_override = self._capture_liveness(sid, row) == "idle" and row.get("working") is True
+                if row and row.get("status") == "open" and row.get("role") in {"lead", "nexus", "planner"}:
+                    try:
+                        report = await asyncio.wait_for(self.store.find_report(
+                            sid, statuses=("done", "error", "aborted"),
+                            session_generation=self._row_generation(row)), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
+                        if report is None:
+                            warnings.append({"kind": "report", "status": "missing"})
+                    except Exception:
+                        warnings.append({"kind": "report", "status": "unknown"})
+                # Admission and termination share the same graph fence as reparent
+                # and child intent recording. Stale/closed targets keep their existing
+                # outcomes; a child guard never authorizes killing a newer generation.
+                async with self._graph_lock:
+                    row = await self.store.fetch_session(host, session_name)
+                    if admission_guard is not None:
+                        await admission_guard(row)
+                    if row and row.get("status") == "open":
+                        if expected_generation is not None and self._row_generation(row) != expected_generation:
+                            return await self._stale_close_result(sid, row)
+                        current_ids = await self._close_attendance_ids(sid, expected_generation, close_kind)
+                        if current_ids and current_ids != observed:
+                            if time.monotonic() >= deadline:
+                                raise VerbError("work_observation_changed", "Attendance changed during close preflight; retry the close")
+                            # Release both fences before obtaining evidence for changed attendance.
+                            continue
+                        warnings.extend(await self._check_lead_disposition(sid, self._row_generation(row),
+                            observation_available=observation_available))
+                    if row is None or row.get("status") == "open":
+                        await self._guard_child_preservation(sid)
+                    async def check_attendance(recovery=None):
+                        if not row or close_kind not in {"session_close", "manager_close"}:
+                            return
+                        from work_attendance import departure_conn
+                        deadline = time.monotonic() + LEAD_CLOSE_REFRESH_TIMEOUT_S
+                        def check(conn):
+                            with conn:
+                                return departure_conn(conn, sid, self._row_generation(row), None, close_kind,
+                                    observation_available=observation_available, recovery=recovery, deadline=deadline)
+                        warnings.extend(await self.store.submit(check))
 
-                result = await self._close_locked(
-                    host, session_name, reason,
-                    expected_generation=expected_generation, close_kind=close_kind,
-                    requires_idle=requires_idle, requires_hidden=requires_hidden,
-                    operator_override=operator_override,
-                    operator_confirm=operator_confirm,
-                    attendance_guard=check_attendance,
-                    defer_if_working=defer_if_working, attribution=attribution,
-                )
-                if warnings:
-                    result["warnings"] = warnings
-                return result
+                    result = await self._close_locked(
+                        host, session_name, reason,
+                        expected_generation=expected_generation, close_kind=close_kind,
+                        requires_idle=requires_idle, requires_hidden=requires_hidden,
+                        operator_override=operator_override,
+                        operator_confirm=operator_confirm,
+                        attendance_guard=check_attendance,
+                        defer_if_working=defer_if_working, attribution=attribution,
+                    )
+                    if warnings:
+                        result["warnings"] = warnings
+                    return result
 
     async def reap_idle(
         self,

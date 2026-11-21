@@ -181,20 +181,31 @@ def codex_observation(binding: Binding, *, rpc_factory=CodexRPC, now=time.time, 
                 "email_verified": expected_email is not None}
 
 
-def _run(argv, *, binding, run=subprocess.run, cwd=None, timeout=90):
+def _run(argv, *, binding, run=subprocess.run, cwd=None, timeout=90, claude_status=False):
     try:
         if run is subprocess.run: run = native_run
         result = run(argv, env=environment(binding), capture_output=True, text=True,
                      cwd=cwd, timeout=timeout, start_new_session=True, umask=0o077)
     except (OSError, subprocess.SubprocessError): raise AccountError("provider_probe_failed") from None
-    if result.returncode: raise AccountError(classify_error((result.stdout or "") + (result.stderr or "")))
+    if result.returncode:
+        if claude_status and result.returncode == 1:
+            try:
+                status = json.loads(result.stdout)
+            except (json.JSONDecodeError, TypeError):
+                status = None
+            if isinstance(status, dict) and status.get("loggedIn") is False:
+                raise AccountError("provider_auth_failed")
+        raise AccountError(classify_error((result.stdout or "") + (result.stderr or "")))
     return result.stdout
 
 
 def claude_identity(binding: Binding, *, run=subprocess.run, expected_email=None) -> dict:
+    output = _run([binding.executable, "auth", "status", "--json"], binding=binding,
+                  run=run, timeout=10, claude_status=True)
     try:
-        status = json.loads(_run([binding.executable, "auth", "status", "--json"], binding=binding, run=run, timeout=10))
-    except ValueError: raise AccountError("provider_response_invalid") from None
+        status = json.loads(output)
+    except (json.JSONDecodeError, TypeError): raise AccountError("provider_response_invalid") from None
+    if not isinstance(status, dict): raise AccountError("provider_response_invalid")
     if status.get("loggedIn") is False: raise AccountError("provider_auth_failed")
     if (status.get("loggedIn") is not True or status.get("authMethod") != "claude.ai"
             or status.get("apiProvider") != "firstParty" or status.get("configDirectory") != binding.home

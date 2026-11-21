@@ -45,11 +45,11 @@ const catalog = {
 
 const accountLabels = {
   claude: {
-    ours: 'operator@example.test',
-    spare: 'second@example.test',
-    remote: 'remote-user@example.test',
+    ours: 'Fixture primary',
+    spare: 'Fixture second',
+    remote: 'Fixture remote',
   },
-  codex: { 'codex-ours': 'operator@example.test' },
+  codex: { 'codex-ours': 'Fixture Codex account' },
 };
 
 const machineOptions = [
@@ -94,6 +94,7 @@ test('provider tiles use catalog counts and selections reveal catalog-backed cho
   assert.deepEqual(form.getChoices().providers, [
     { id: 'claude', label: 'Claude', modelCount: 2 },
     { id: 'codex', label: 'Codex', modelCount: 2 },
+    { id: 'gemini', label: 'Gemini', modelCount: 1 },
   ]);
   assert.equal(form.getState().machine, 'host-a', 'configured local host is preselected');
   assert.equal(form.getState().canStart, false);
@@ -101,23 +102,23 @@ test('provider tiles use catalog counts and selections reveal catalog-backed cho
   form.select('provider', 'claude');
   assert.deepEqual(form.getChoices().models, ['claude-default', 'claude-fast']);
   assert.deepEqual(form.getChoices().accounts, [
-    { id: 'ours', label: 'operator' },
-    { id: 'spare', label: 'second' },
+    { id: 'ours', label: 'Fixture primary' },
+    { id: 'spare', label: 'Fixture second' },
   ]);
-  assert.equal(form.getState().canStart, false);
+  assert.equal(form.getState().canStart, false, 'a model and effort are still required');
 
   form.select('model', 'claude-default');
   assert.equal(form.getState().effort, 'medium', 'model choice applies the provider profile effort');
   assert.deepEqual(form.getChoices().efforts, ['low', 'medium', 'high']);
-  assert.equal(form.getState().canStart, false, 'account is also required');
+  assert.equal(form.getState().canStart, true, 'the host default account needs no explicit selection');
 
   form.select('account', 'ours');
   assert.equal(form.getState().canStart, true);
   form.select('machine', 'host-b');
   assert.equal(form.getState().machine, 'host-b');
   assert.equal(form.getState().account, null, 'a machine change clears an account unavailable there');
-  assert.deepEqual(form.getChoices().accounts, [{ id: 'remote', label: 'remote-user' }]);
-  assert.equal(form.getState().canStart, false);
+  assert.deepEqual(form.getChoices().accounts, [{ id: 'remote', label: 'Fixture remote' }]);
+  assert.equal(form.getState().canStart, true);
 });
 
 test('changing provider clears model, effort and account while preserving machine', () => {
@@ -141,15 +142,14 @@ test('changing provider clears model, effort and account while preserving machin
   assert.equal(form.getState().canStart, false);
 });
 
-test('mounted form shows only Claude and Codex tiles, counts and the selected machine', () => {
+test('mounted form shows profile-backed provider tiles, counts and the selected machine', () => {
   const dom = new JSDOM('<main id="form"></main>');
   const root = dom.window.document.getElementById('form');
   const view = mountNewChatForm(root, formOptions());
 
   assert.equal(root.querySelector('.page.setup .scol h1').textContent, 'New chat');
-  assert.deepEqual([...root.querySelectorAll('[data-set="provider"] b')].map(node => node.textContent), ['Claude', 'Codex']);
-  assert.deepEqual([...root.querySelectorAll('[data-set="provider"] span')].map(node => node.textContent), ['2 models', '2 models']);
-  assert.equal(root.querySelector('[data-set="provider"][data-val="gemini"]'), null);
+  assert.deepEqual([...root.querySelectorAll('[data-set="provider"] b')].map(node => node.textContent), ['Claude', 'Codex', 'Gemini']);
+  assert.deepEqual([...root.querySelectorAll('[data-set="provider"] span')].map(node => node.textContent), ['2 models', '2 models', '1 model']);
   assert.equal(root.querySelector('[data-testid="start-chat"]').disabled, true);
 
   clickTestId(root, 'set-provider-claude');
@@ -157,10 +157,113 @@ test('mounted form shows only Claude and Codex tiles, counts and the selected ma
   assert.ok(root.querySelector('[data-set="account"]'));
   assert.ok(root.querySelector('[data-set="host"][data-val="host-a"].on'));
   assert.equal(root.textContent.includes('ours'), false, 'account aliases never appear in the view');
-  assert.equal(root.textContent.includes('operator'), true, 'configured username is shown');
+  assert.equal(root.textContent.includes('Fixture primary'), true, 'configured account label is shown');
 
   view.destroy();
   assert.equal(root.childElementCount, 0);
+});
+
+test('current-web availability and account filters drive provider, model, effort and machine choices', async () => {
+  const parityCatalog = {
+    catalog_version: 'fixture-availability-v1',
+    profiles: { desktop_manual: {
+      cursor: ['cursor-auto', 'default'],
+      claude: ['claude-visible', 'medium'],
+      codex: ['codex-visible', 'high'],
+      gemini: ['gemini-hidden', 'default'],
+    } },
+    models: {
+      cursor: { 'cursor-auto': { efforts: ['default'] } },
+      claude: {
+        'claude-hidden': { efforts: ['high'] },
+        'claude-visible': { efforts: ['low', 'medium'] },
+      },
+      codex: {
+        'codex-hidden': { efforts: ['max'] },
+        'codex-visible': { efforts: ['low', 'high'] },
+      },
+      gemini: { 'gemini-hidden': { efforts: ['default'] } },
+    },
+    available_models: {
+      cursor: { 'cursor-auto': { efforts: ['default'] } },
+      claude: { 'claude-visible': { efforts: ['low', 'medium'] } },
+      codex: { 'codex-visible': { efforts: ['low', 'high'] } },
+    },
+    account_status: {
+      defaults: [
+        { host: 'fixture-host-a', provider: 'codex', alias: 'default-fixture' },
+        { host: 'fixture-host-b', provider: 'codex', alias: 'remote-fixture' },
+      ],
+      accounts: [
+        { host: 'fixture-host-a', provider: 'codex', alias: 'default-fixture', active: 1, enabled: 'yes', health: 'healthy' },
+        { host: 'fixture-host-a', provider: 'codex', alias: 'alternate-fixture', active: true, enabled: true, health: 'healthy' },
+        { host: 'fixture-host-a', provider: 'codex', alias: 'disabled-fixture', active: false, enabled: true, health: 'healthy' },
+        { host: 'fixture-host-a', provider: 'codex', alias: 'stale-fixture', active: true, enabled: true, health: 'stale' },
+        { host: 'fixture-host-b', provider: 'codex', alias: 'remote-fixture', active: true, enabled: true, health: 'healthy' },
+        { host: 'fixture-host-a', provider: 'gemini', alias: 'unused-fixture', active: true, enabled: true, health: 'healthy' },
+      ],
+    },
+  };
+  const requests = [];
+  const form = createNewChatForm({
+    catalog: parityCatalog,
+    machineOptions: [
+      { id: 'fixture-host-a', label: 'Fixture host A' },
+      { id: 'fixture-host-b', label: 'Fixture host B' },
+    ],
+    localHostId: 'fixture-host-a',
+    accountLabels: { codex: { 'alternate-fixture': 'Fixture alternate' } },
+    spawn: async request => { requests.push(request); return { ok: false, error: 'fixture-only refusal' }; },
+  });
+
+  assert.deepEqual(form.getChoices().providers, [
+    { id: 'cursor', label: 'Cursor', modelCount: 1 },
+    { id: 'claude', label: 'Claude', modelCount: 1 },
+    { id: 'codex', label: 'Codex', modelCount: 1 },
+  ], 'only providers with a desktop profile and advertised models are visible, in catalog order');
+  form.select('provider', 'codex');
+  assert.deepEqual(form.getChoices().models, ['codex-visible'], 'models hidden by available_models stay hidden');
+  assert.equal(form.getState().account, 'default-fixture', 'the eligible host default is selected');
+  assert.deepEqual(form.getChoices().accounts, [
+    { id: 'default-fixture', label: 'default-fixture' },
+    { id: 'alternate-fixture', label: 'Fixture alternate' },
+  ], 'only healthy enabled accounts for the selected host and provider are shown');
+  form.select('model', 'codex-visible');
+  assert.equal(form.getState().effort, 'high');
+  assert.deepEqual(form.getChoices().efforts, ['low', 'high']);
+  assert.equal(form.getState().canStart, true);
+
+  await form.start();
+  assert.equal(Object.hasOwn(requests[0], 'account'), false, 'the host default is not sent as an explicit override');
+  assert.deepEqual(requests[0], {
+    hostId: 'fixture-host-a', provider: 'codex', model: 'codex-visible', effort: 'high',
+    spawnProfile: 'desktop_manual', catalogVersion: 'fixture-availability-v1', resolutionSource: 'profile_default',
+  });
+
+  form.select('account', 'alternate-fixture');
+  await form.start();
+  assert.equal(requests[1].account, 'alternate-fixture', 'a non-default eligible account is an explicit override');
+  form.select('machine', 'fixture-host-b');
+  assert.deepEqual(form.getChoices().accounts, [{ id: 'remote-fixture', label: 'remote-fixture' }]);
+  assert.equal(form.getState().account, 'remote-fixture', 'changing machines uses that host default');
+  assert.equal(form.getState().canStart, true);
+
+  form.select('provider', 'cursor');
+  assert.deepEqual(form.getChoices().models, ['cursor-auto']);
+  assert.deepEqual(form.getChoices().accounts, [], 'the current web does not show account controls for Cursor');
+  form.select('model', 'cursor-auto');
+  assert.equal(form.getState().effort, 'default');
+  assert.equal(form.getState().canStart, true, 'an account is optional when the provider has no account control');
+
+  const explicitlyEmpty = createNewChatForm({
+    catalog: {
+      profiles: { desktop_manual: { codex: ['codex-hidden', 'high'] } },
+      models: { codex: { 'codex-hidden': { efforts: ['high'] } } },
+      available_models: {},
+    },
+    machineOptions: ['fixture-host-a'],
+  });
+  assert.deepEqual(explicitlyEmpty.getChoices().providers, [], 'an explicit empty availability map hides full-catalog models');
 });
 
 test('start sends one exact desktop spawn request and records the stream before mounting the chat', async () => {
