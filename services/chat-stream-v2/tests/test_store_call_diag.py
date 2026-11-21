@@ -138,6 +138,9 @@ async def test_unusable_name_is_unnamed_and_lines_carry_no_payload(store, caplog
     caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
     secret = "PRIVATE_PAYLOAD_7f3a"
     assert await store.submit(functools.partial(slow_payload_op, payload=secret)) == secret
+    # The worker logs each call before it starts the next queued call.
+    # Wait for that next call to complete before checking the prior log.
+    assert await asyncio.wait_for(store.submit(fast_op), timeout=1.0) == "fast"
     assert [line["name"] for line in lines(caplog, "store_call_slow")] == ["unnamed"]
     assert secret not in caplog.text and "partial" not in caplog.text
 
