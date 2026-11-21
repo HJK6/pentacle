@@ -62,7 +62,7 @@ def fixture_native(tmp_path, monkeypatch):
     write()
     def collect(selected, env):
         assert selected == account and env['CLAUDE_CONFIG_DIR'] == account.home
-        calls.append(('collect',clock.wall()))
+        calls.append(('collect',clock.wall(),env.get('PENTACLE_USAGE_FRESH_SINCE')))
         stamp=json.loads(cache_path.read_text())['cachedUsageUtilization']['fetchedAtMs']
         if clock.wall()-stamp/1000 >= 60: write(clock.wall())
         clock.value += .1
@@ -82,7 +82,8 @@ def test_real_host_probe_waits_for_throttled_cache_and_collects_once(tmp_path,mo
     f.clock.on_sleep=waiting
     result=f.host.handle('observe',provider='claude',alias='primary',expected_generation='login-a',operation_id='probe')
     assert result['outcome']=='ok' and result['observation']['observed_at']>=1000
-    assert len([x for x in f.calls if x[0]=='collect'])==1
+    call, = [x for x in f.calls if x[0]=='collect']
+    assert call[1]>1000 and float(call[2])==1000
     assert 59 <= sum(f.clock.sleeps) <= 61
     assert all(x[2]==10 for x in f.calls if x[0]=='status')
 
