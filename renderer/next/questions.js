@@ -169,7 +169,7 @@ function placementFor(notification, lanes, laneReads, listedSessions) {
   const retryReads = [];
   for (const lane of lanes) {
     const memberState = laneMembers(lane, laneReads);
-    if (!memberState.known && memberState.read?.status === 'failed') {
+    if (memberState.read?.status === 'failed') {
       retryReads.push({ laneId: text(lane?.lane_id), kind: 'members' });
     }
   }

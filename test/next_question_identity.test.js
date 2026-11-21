@@ -33,6 +33,15 @@ test('same-revision cached goal and member replies remain usable during refresh 
   assert.equal(result.questions[0].placement.kind, 'lane_goal');
 });
 
+test('an unresolved question offers Retry after a failed refresh even when cached members remain available', () => {
+  const lane = { lane_id: 'lane', title: 'Lane', detail_revision: 'r1', goals: [], progress: { members: [], members_total: 2 } };
+  const reads = { getRead() { return { status: 'failed', detailRevision: 'r1', reply: { projection: { members: [{ spec_id: 'other' }], goals: [] } } }; } };
+  const item = notice('q1'); item.question.spec_id = 'missing';
+  const result = buildQuestionPlacement({ inventory: { lanes: [lane] }, notifications: [item], laneReads: reads });
+  assert.equal(result.questions[0].placement.kind, 'unplaced');
+  assert.deepEqual(result.questions[0].placement.retryReads, [{ laneId: 'lane', kind: 'members' }]);
+});
+
 test('a production-normalized complete preview places its question without a members read', () => {
   const goalId = 'g_0123456789abcdef01234567';
   const frame = { type: 'work_lanes.inventory', lanes: [{ lane_id: 'lane', title: 'Lane', state: 'active',
