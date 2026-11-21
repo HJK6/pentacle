@@ -536,3 +536,175 @@ def test_close_racing_assignment_removal_at_final_fence_retains_obligation(assig
                 await asyncio.gather(mutation, return_exceptions=True)
             store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("hold_tail", [False, True])
+@pytest.mark.parametrize("front_desk", [False, True], ids=["parent", "front-desk"])
+def test_parent_qa_close_does_not_wait_for_unrelated_projection_tail(tmp_path, hold_tail, front_desk):
+    from test_work_lane_goals import scanner, write_item
+    from work_lanes_projection import WorkLanesInventory
+
+    async def run():
+        store = Store(); store.start()
+        tmux = IdleTmux()
+        sessions = Sessions(store, tmux=tmux, local_host=HOST)
+        server = Server(store=store, sessions=sessions, local_host=HOST, port=0)
+        parent, target = f"{HOST}:parent", f"{HOST}:qa"
+        source = scanner(tmp_path)
+        write_item(tmp_path, "item_00", status="in_progress")
+        inv = WorkLanesInventory(store, sessions, server.broadcast, specs=source, settle_s=0, refresh_min_s=0)
+        inv._running = True
+        reached_tail, release_tail = asyncio.Event(), asyncio.Event()
+        original_lifecycle = store.reconcile_lane_lifecycle
+        async def hold_lifecycle():
+            reached_tail.set()
+            await release_tail.wait()
+            return await original_lifecycle()
+        store.reconcile_lane_lifecycle = hold_lifecycle
+        async def refresh():
+            await inv.refresh_for_close()
+        sessions.refresh_work_for_close = refresh
+        try:
+            parent_row = await store.open_session(HOST, "parent", role="worker")
+            if front_desk:
+                from assistant_composite import AssistantComposite, AssistantCompositeConfig
+                composite = AssistantComposite(store, config=AssistantCompositeConfig.from_env({
+                    "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+                    "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": f"{HOST}:assistant",
+                    "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": parent,
+                    "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": parent_row["session_generation"],
+                }))
+                server.assistant_composite = composite
+                sessions.assistant.front_desk = composite
+            row = await store.open_session(HOST, "qa", role="qa", parent_stream_id=parent,
+                assigned_spec_id="spec_demo__item_00", spec_ids=["spec_demo__item_00"], pane_status="pane_alive")
+            from ledger import Ledger
+            snapshot = await Ledger(store, sessions=sessions)._report_routing_snapshot(target)
+            await store.put_report({"report_id": "qa-done", "from_stream_id": target, "to_stream_id": parent,
+                "msg_id": 0, "status": "done", "summary": "Fixture complete", "findings": [],
+                "no_findings": True, "next_action": "Review", "ingested_at": "2026-11-21T00:00:00Z"}, routing_snapshot=snapshot, announce=False)
+            await store.grant_stream_token(HOST, "parent", hashlib.sha256(b"parent-token").hexdigest(), STREAM_TOKEN_HASH_VERSION)
+            await sessions.refresh()
+            inv.refresh()
+            await asyncio.wait_for(reached_tail.wait(), 3)
+            if not hold_tail:
+                release_tail.set()
+            port = await server.bind()
+            async with connect(f"ws://127.0.0.1:{port}", close_timeout=0) as ws:
+                await ws.send(json.dumps({"type": "hello", "from_stream_id": parent, "stream_token": "parent-token",
+                    "subscribe": {"snapshot": False, "mode": "rpc"}}))
+                await ws.send(json.dumps({"type": "close", "request_id": "parent-qa", "stream_id": target,
+                    "expected_generation": row["session_generation"], "reason": "Review finished"}))
+                async with asyncio.timeout(1):
+                    while True:
+                        reply = json.loads(await ws.recv())
+                        if reply.get("request_id") == "parent-qa":
+                            break
+            assert reply["type"] == "close.ok", reply
+            audit = await store.latest_close_audit(target)
+            assert audit["disposition"] == "closed" and audit["actor_kind"] == ("front_desk" if front_desk else "parent")
+            assert audit["request_id"] == "parent-qa" and tmux.kills == 1
+            if front_desk:
+                records = await store.lifecycle_authority_audit_rows(target_stream_id=target, limit=20)
+                events = [r for r in records if r["request_id"] == "parent-qa" and r["action"] == "manager_close"]
+                assert {r["result"] for r in events} == {"admitted", "applied"}
+                assert all(r["target_generation"] == row["session_generation"] for r in events)
+            if hold_tail is True:
+                assert not release_tail.is_set()
+        finally:
+            release_tail.set()
+            await inv.stop()
+            await server.close()
+            store.stop()
+    asyncio.run(run())
+
+
+def test_attending_close_refresh_releases_target_lock_and_rechecks_changed_eligibility(tmp_path):
+    async def run():
+        store, sessions, server, tmux, row = await environment(role="qa")
+        from test_work_attendance import accept
+        folder = tmp_path / "work/in_progress/demo__item_00"
+        folder.mkdir(parents=True)
+        (folder / "spec.md").write_text("---\nid: spec_demo__item_00\ntitle: Active fixture\n---\n")
+        (folder / "summary.md").write_text("Working.\n")
+        await accept(store, folder, "spec_demo__item_00")
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = sessions._close_attendance_ids
+        checks = 0
+        async def eligibility(*args):
+            nonlocal checks
+            result = await original(*args)
+            checks += 1
+            if checks == 1:
+                # A same-generation role change after the first preflight must
+                # trigger an observation rather than inherit non-attendance.
+                await store.update_session(HOST, row["session_name"], role="lead")
+            return result
+        async def refresh():
+            entered.set()
+            await release.wait()
+        sessions._close_attendance_ids = eligibility
+        sessions.refresh_work_for_close = refresh
+        close = asyncio.create_task(server._on_close(request(row)))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            async with asyncio.timeout(1):
+                async with sessions._lifecycle_lock(HOST, row["session_name"]):
+                    assert not sessions._graph_lock.locked()
+            assert tmux.kills == 0
+            release.set()
+            with pytest.raises(VerbError) as error:
+                await close
+            assert error.value.code == "work_last_owner" and checks >= 3
+            assert tmux.kills == 0 and (await store.fetch_session(HOST, row["session_name"]))["status"] == "open"
+        finally:
+            release.set()
+            await asyncio.gather(close, return_exceptions=True)
+            store.stop()
+    asyncio.run(run())
+
+
+def test_close_index_refresh_waits_for_apply_but_not_projection_tail(tmp_path):
+    from test_work_lane_goals import scanner, write_item
+    from work_lanes_projection import WorkLanesInventory
+
+    async def run():
+        store = Store(); store.start()
+        sessions = Sessions(store, tmux=IdleTmux(), local_host=HOST)
+        server = Server(store=store, sessions=sessions, local_host=HOST, port=0)
+        source = scanner(tmp_path)
+        write_item(tmp_path, "item_00", status="in_progress")
+        inv = WorkLanesInventory(store, sessions, server.broadcast, specs=source, settle_s=0, refresh_min_s=0)
+        inv._running = True
+        tail, release_tail, apply, release_apply = (asyncio.Event() for _ in range(4))
+        lifecycle = store.reconcile_lane_lifecycle
+        async def hold_tail():
+            tail.set()
+            await release_tail.wait()
+            await lifecycle()
+        store.reconcile_lane_lifecycle = hold_tail
+        original_apply = store.reconcile_work_observations
+        async def hold_apply(*args, **kwargs):
+            apply.set()
+            await release_apply.wait()
+            return await original_apply(*args, **kwargs)
+        try:
+            inv.refresh()
+            await asyncio.wait_for(tail.wait(), 2)
+            store.reconcile_work_observations = hold_apply
+            refresh = asyncio.create_task(inv.refresh_for_close())
+            await asyncio.wait_for(apply.wait(), 2)
+            assert not refresh.done() and not release_tail.is_set()
+            release_apply.set()
+            await asyncio.wait_for(refresh, 2)
+            assert not release_tail.is_set() and inv._task is not None and not inv._task.done()
+            observed = await store.submit(lambda c: c.execute(
+                "SELECT COUNT(*) FROM v2_work_item_observations WHERE spec_id=?", ("spec_demo__item_00",)).fetchone()[0])
+            assert observed == 1
+        finally:
+            release_apply.set()
+            release_tail.set()
+            await inv.stop()
+            await server.close()
+            store.stop()
+    asyncio.run(run())

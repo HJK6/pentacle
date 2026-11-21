@@ -446,15 +446,15 @@ class WorkLanesInventory:
                                   Path(root) / "work" if root else None, changed=self.refresh)
 
     async def refresh_for_close(self):
-        """One caller waits on the existing coalesced drain, bounded by close."""
+        """Apply a fresh index observation without waiting for projection tails."""
         self._index_dirty = True
-        self.refresh()
-        if self._task is not None:
-            await asyncio.shield(self._task)
-        # The ordinary drain isolates errors from inventory consumers. A close
-        # caller needs positive refresh evidence before using a cached status.
-        if self.specs is not None and self._index_dirty:
-            raise RuntimeError("work_index_refresh_pending")
+        try:
+            await self.reconcile_index()
+            if self.specs is not None and self._index_dirty:
+                raise RuntimeError("work_index_refresh_pending")
+        finally:
+            # Preserve ordinary asynchronous lane reconciliation and emission.
+            self.refresh()
 
     def refresh(self) -> None:
         """Coalesced, non-blocking: reconcile lead loss then emit if changed.
