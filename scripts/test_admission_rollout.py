@@ -52,7 +52,7 @@ def test_every_unchanged_daemon_case_matches_rollout_inventory():
     installed = Path(os.environ['PENTACLE_ROLLOUT_INSTALLED_EVIDENCE'])
     baseline = evidence/'source/services/chat-stream-v2'
     nodes = {
-        'linux': _text_nodes(evidence/'amaterasu-unit-collection.txt') + _text_nodes(evidence/'amaterasu-smoke-collection.txt'),
+        'linux': _text_nodes(evidence/'linux-unit-collection.txt') + _text_nodes(evidence/'linux-smoke-collection.txt'),
         'darwin': _xml_nodes(installed/'v2-merge-repaired/gate/unit.junit.xml', baseline) + _xml_nodes(installed/'v2-merge-repaired/gate/smoke.junit.xml', baseline),
     }
     inventory = json.loads((ROOT/'scripts/test-admission-inventory.json').read_text())['python']['daemon']
