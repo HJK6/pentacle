@@ -55,8 +55,10 @@ async function questionEvidence(session, questionId) {
     if (!row) return null;
     const link = row.querySelector('.next-question-heading-link');
     return {
+      visible: !row.closest('[hidden]'),
       ownTitle: row.querySelector('.next-question-heading-title')?.textContent || null,
       linkTitle: link?.textContent.trim() || null,
+      laneTitle: link?.querySelector('.next-question-lane-title')?.textContent || null,
       goalTitle: link?.querySelector('.next-question-goal-title')?.textContent || null,
       isChatLink: !!row.querySelector('.next-question-chat-link'),
       retry: !!row.querySelector('.next-question-retry'),
@@ -143,10 +145,12 @@ async function startQuestionHeadingObserver(session, questionIds) {
           questionId,
           surface,
           present: true,
+          visible: !row.closest('[hidden]'),
           headingText: heading?.textContent?.trim() || null,
           ownTitle: row.querySelector('.next-question-heading-title')?.textContent?.trim() || null,
           linkText: row.querySelector('.next-question-heading-link')?.textContent?.trim() || null,
           chatLink: !!row.querySelector('.next-question-chat-link'),
+          retry: !!row.querySelector('.next-question-retry'),
         };
         const serialized = JSON.stringify(state);
         if (previous.get(key) !== serialized) {
@@ -170,11 +174,13 @@ async function startQuestionHeadingObserver(session, questionIds) {
     observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
     capture('initial');
     window.__nextLanesQuestionHeadingGuard = {
-      stop() {
-        if (observer.takeRecords().length) capture('queued-mutations');
-        observer.disconnect();
-        capture('stop');
+      snapshot() {
+        capture('snapshot');
         return history.slice();
+      },
+      stop() {
+        observer.disconnect();
+        return this.snapshot();
       },
     };
     return { installed: true, observedIds: [...ids] };
@@ -361,10 +367,14 @@ async function cleanupEvidence(ctx, ownedIds) {
       };
     })()`);
   } catch (error) { captureErrors.push({ source: 'lane-read-state', error: errorDetail(error) }); }
+  let headingHistory = null;
+  try { headingHistory = await ctx.session.eval('window.__nextLanesQuestionHeadingGuard?.snapshot() ?? null'); }
+  catch (error) { captureErrors.push({ source: 'question-heading-history', error: errorDetail(error) }); }
   const frame = evidence?.rawFrame;
   return {
     frameSequence: evidence?.frameSequence ?? null,
     flushSequence: evidence?.renderFrame ?? null,
+    headingHistory,
     sourceOwned: evidence?.sourceOwned ?? null,
     sourceEvents: evidence?.sourceEvents || [],
     frames: (evidence?.acceptedFrames || []).map(item => ({
@@ -802,8 +812,7 @@ async function runDataRecovery(ctx, { ownedIds, hooks }) {
     { noRoadAfterRead, zuluIndex, alphaIndex, allNoRoadIds });
 }
 
-async function runDataEvidence(ctx, { ownedIds, hooks }) {
-  const { session, report } = ctx;
+function createE9Fixture() {
   const parkedKey = 'e9-parked-ninth';
   const ordinaryKey = 'e9-ordinary-preview';
   const lateKey = 'e9-late-member';
@@ -816,20 +825,6 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const hiddenQuestionId = questionIdForKey(excludedKey);
   const parkedBase = makeParkedLane({ questionIds: [parkedQuestionId] });
   const parked = staleQuestionPreview(parkedBase, parkedBase.questionSpecId);
-  const parkedQuestionMember = parked.members.find(member => member.spec_id === parked.questionSpecId);
-  check(report, 'E9(a): parked fixture omits its ninth question member from the zero-count preview while retaining exact detail attribution',
-    parked.members.length === 12
-      && parked.members[8]?.spec_id === parked.questionSpecId
-      && parkedQuestionMember?.open_questions?.count === 1
-      && parkedQuestionMember.open_questions.first_question_id === parkedQuestionId
-      && parked.inventory.activity == null
-      && parked.inventory.members.length === 8
-      && !parked.inventory.members.some(member => member.spec_id === parked.questionSpecId)
-      && parked.inventory.members.every(member => Number(member.open_questions?.count || 0) === 0),
-    { memberCount: parked.members.length, questionSpecId: parked.questionSpecId,
-      detailQuestionMember: parkedQuestionMember, activity: parked.inventory.activity,
-      previewSpecIds: parked.inventory.members.map(member => member.spec_id),
-      previewQuestionCounts: parked.inventory.members.map(member => member.open_questions?.count || 0) });
   const ordinaryBase = makeOrdinaryLane({ laneId: ORDINARY_A_ID, title: 'Fixture ordinary lane' });
   const ordinaryMembers = ordinaryBase.members.map((member, index) => index === 0
     ? { ...member, open_questions: { count: 1, first_question_id: ordinaryQuestionId } }
@@ -863,10 +858,6 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   hidden.inventory.state_at = hidden.inventory.updated_at;
   const lateSpecId = 'spec_gate__next_lanes_late_question';
   const lateGoalId = lateA.goals[0].goal_id;
-  const movedMember = {
-    ...l11A.members.find(member => member.spec_id === movedSpecId),
-    goal_id: lateGoalId,
-  };
   const lateQuestionMember = makeMember(lateSpecId, lateGoalId, {
     title: 'Fixture late-added spec',
     open_questions: { count: 1, first_question_id: lateQuestionId },
@@ -883,17 +874,55 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
     ],
   });
   const versions = laneDetailVersions([parked, ordinary, lateA, lateB, hidden, l11A, l11B, movedLane]);
-  versions[ORDINARY_B_ID] = { [REVISION_A]: lateA, [REVISION_B]: lateB };
-  versions[L11_ID] = { [REVISION_A]: l11A, [REVISION_B]: l11B };
-  versions[movedLaneId] = { [REVISION_B]: movedLane };
 
+  const questions = [
+    { key: parkedKey, specId: parked.questionSpecId, title: 'Synthetic parked ninth-member question' },
+    { key: ordinaryKey, specId: ordinary.members[0].spec_id, title: 'Synthetic ordinary preview question' },
+    { key: lateKey, specId: lateSpecId, title: 'Synthetic late-member question' },
+    { key: excludedKey, specId: hiddenSpecId, title: 'Synthetic truncated-hidden question', producerStreamId: PRODUCER },
+    { key: movedKey, specId: movedSpecId, title: 'Synthetic revision-moved question' },
+  ];
+  const bridge = {
+    versions,
+    holdRules: [
+      { laneId: PARKED_ID, goalId: null, membersLimit: 32, remaining: 1 },
+      { laneId: movedLaneId, goalId: null, membersLimit: 32, remaining: 1 },
+      { laneId: L11_ID, goalId: null, membersLimit: 32, remaining: 2 },
+      { laneId: L11_ID, goalId: l11A.members.find(member => member.spec_id === movedSpecId).goal_id,
+        revision: REVISION_B, membersLimit: 32, remaining: 1 },
+    ],
+  };
+  const ids = questions.map(question => questionIdForKey(question.key));
+  return {
+    questions, ids, bridge, firstFrame: truncatedInventoryFrame([parked, ordinary, lateA], hidden),
+    parked, ordinary, lateB, hidden, l11A, l11B, movedLane, movedSpecId, lateSpecId, lateGoalId,
+  };
+}
+
+async function runDataEvidence(ctx, { ownedIds, hooks }) {
+  const { session, report } = ctx;
+  const fixture = createE9Fixture();
+  const { parked, hidden, firstFrame } = fixture;
+  const [parkedQuestionId, ordinaryQuestionId] = fixture.ids;
+  const parkedQuestionMember = parked.members.find(member => member.spec_id === parked.questionSpecId);
+  check(report, 'E9(a): parked fixture omits its ninth question member from the zero-count preview while retaining exact detail attribution',
+    parked.members.length === 12
+      && parked.members[8]?.spec_id === parked.questionSpecId
+      && parkedQuestionMember?.open_questions?.count === 1
+      && parkedQuestionMember.open_questions.first_question_id === parkedQuestionId
+      && parked.inventory.activity == null
+      && parked.inventory.members.length === 8
+      && !parked.inventory.members.some(member => member.spec_id === parked.questionSpecId)
+      && parked.inventory.members.every(member => Number(member.open_questions?.count || 0) === 0),
+    { memberCount: parked.members.length, questionSpecId: parked.questionSpecId,
+      detailQuestionMember: parkedQuestionMember, activity: parked.inventory.activity,
+      previewSpecIds: parked.inventory.members.map(member => member.spec_id),
+      previewQuestionCounts: parked.inventory.members.map(member => member.open_questions?.count || 0) });
   hooks.push(await enterNext(ctx));
-  const headingGuard = await startQuestionHeadingObserver(session, [parkedQuestionId, ordinaryQuestionId,
-    lateQuestionId, hiddenQuestionId, movedQuestionId]);
+  const headingGuard = await startQuestionHeadingObserver(session, fixture.ids);
   check(report, 'E9: continuous question-heading observation is installed before fixture question seeding',
     headingGuard?.installed === true
-      && [parkedQuestionId, ordinaryQuestionId, lateQuestionId, hiddenQuestionId, movedQuestionId]
-        .every(questionId => headingGuard.observedIds.includes(questionId)),
+      && fixture.ids.every(questionId => headingGuard.observedIds.includes(questionId)),
     headingGuard);
   const snapshotBeforeInventory = await session.eval('window.cc.getChatStreamState()');
   const snapshotSessionIds = (snapshotBeforeInventory?.sessions || []).map(row => row?.stream_id).filter(Boolean);
@@ -912,13 +941,8 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
     work_lanes: { counts: { open: 65 }, lanes: [] },
   })`);
   await session.eval('window.cc.getChatStreamState()');
-  const seeded = [
-    await seedQuestion(ctx, ownedIds, { key: parkedKey, specId: parked.questionSpecId, title: 'Synthetic parked ninth-member question' }),
-    await seedQuestion(ctx, ownedIds, { key: ordinaryKey, specId: ordinary.members[0].spec_id, title: 'Synthetic ordinary preview question' }),
-    await seedQuestion(ctx, ownedIds, { key: lateKey, specId: lateSpecId, title: 'Synthetic late-member question' }),
-    await seedQuestion(ctx, ownedIds, { key: excludedKey, specId: hiddenSpecId, title: 'Synthetic truncated-hidden question', producerStreamId: PRODUCER }),
-    await seedQuestion(ctx, ownedIds, { key: movedKey, specId: movedSpecId, title: 'Synthetic revision-moved question' }),
-  ];
+  const seeded = [];
+  for (const question of fixture.questions) seeded.push(await seedQuestion(ctx, ownedIds, question));
   const ids = seeded.map(question => question.question_id);
   const parkedNotification = await notificationFor(ctx, parkedQuestionId);
   if (parkedNotification?.question?.question_id !== parkedQuestionId) {
@@ -934,14 +958,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
     emit(lanePayload);
     return true;
   })()`);
-  await installLaneBridge(ctx, {
-    versions,
-    holdRules: [
-      { laneId: PARKED_ID, goalId: null, membersLimit: 32, remaining: 1 },
-      { laneId: movedLaneId, goalId: null, membersLimit: 32, remaining: 1 },
-      { laneId: L11_ID, goalId: null, membersLimit: 32, remaining: 2 },
-    ],
-  });
+  await installLaneBridge(ctx, fixture.bridge);
   const startupEvidence = await laneBridgeEvidence(session);
   const sourceEvents = startupEvidence.sourceEvents || [];
   const directSnapshot = sourceEvents.find(event => event.source === 'getChatStreamState' && event.hadWorkLanes);
@@ -982,7 +999,6 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
     ][index] && !item.linkTitle && !item.isChatLink && !item.retry),
     beforeFrame);
 
-  const firstFrame = truncatedInventoryFrame([parked, ordinary, lateA], hidden);
   const firstFrameReceipt = await emitInventory(session, firstFrame);
   const firstFrameEvidence = await currentFrameEvidence(session);
   const firstBridgeEvidence = await laneBridgeEvidence(session);
@@ -1063,6 +1079,14 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
       && ordinaryAfterReconnect?.linkTitle?.includes('Fixture ordinary lane'),
     { before: reconnectEvidence.before, replacement: reconnectEvidence.replacement, after: reconnectEvidence.after,
       frameAfterReconnect, parkedStillPending, parkedAfterReconnect, ordinaryAfterReconnect });
+  await verifyE9Placement(ctx, fixture);
+}
+
+async function verifyE9Placement(ctx, fixture) {
+  const { session, report } = ctx;
+  const { ids, parked, ordinary, lateB, hidden, l11A, l11B, movedLane, movedSpecId, lateSpecId, lateGoalId } = fixture;
+  const [parkedQuestionId, , lateQuestionId, , movedQuestionId] = ids;
+  const movedLaneId = movedLane.inventory.lane_id;
   const afterFirstFrame = await Promise.all(ids.map(id => questionEvidence(session, id)));
   const producerListedAfterFrame = await session.eval(`(window.PentacleChatStore?.getState?.()?.sessions || [])
     .some(row => row?.stream_id === ${JSON.stringify(PRODUCER)})`);
@@ -1235,6 +1259,35 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   await session.click('.next-lanes-back');
   await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level === 'all'", { timeoutMs: ctx.timeoutMs });
 
+  // Each lane, stop or Back click can dismiss the list. Reopen the exact row
+  // before delivering a held reply, and keep the observer on it through the flush.
+  async function releaseObservedPage(label, laneId, revision, goalId = null) {
+    const match = { laneId, revision, goalId, membersLimit: 32 };
+    const ownTitle = 'Synthetic revision-moved question';
+    await openQuestionList(ctx);
+    const headingSelector = `.questions-popover:not([hidden]) ${questionSelector(movedQuestionId)} .next-question-list-heading`;
+    await session.waitFor(`!!document.querySelector(${JSON.stringify(headingSelector)})`, { timeoutMs: ctx.timeoutMs });
+    await session.eval(`document.querySelector(${JSON.stringify(headingSelector)}).scrollIntoView({ block: 'nearest' })`);
+    const before = await questionEvidence(session, movedQuestionId);
+    check(report, `E9(d): moved question has its own title before ${label}`,
+      before?.visible && before.ownTitle === ownTitle && !before.linkTitle && !before.isChatLink && !before.retry,
+      { before, match });
+    const start = await session.eval('window.__nextLanesQuestionHeadingGuard.snapshot().length');
+    const receipt = await session.eval(`window.__nextLanesReleaseMatchingAndFlush(${JSON.stringify(match)})`);
+    const after = await questionEvidence(session, movedQuestionId);
+    const changes = await session.eval(`window.__nextLanesQuestionHeadingGuard.snapshot().slice(${start})
+      .filter(item => item.questionId === ${JSON.stringify(movedQuestionId)} && item.surface === 'list')`);
+    const destination = laneId === movedLaneId;
+    const expectedDestination = after?.goalTitle === movedLane.goals[0].title && after.laneTitle === movedLane.inventory.title;
+    check(report, `E9(d): the moved question stays observable through ${label} with its expected heading`,
+      after?.visible && !after.isChatLink && !after.retry
+        && (destination ? expectedDestination : after.ownTitle === ownTitle && !after.linkTitle)
+        && changes.every(item => item.present && item.visible && !item.chatLink && !item.retry
+          && ((item.ownTitle === ownTitle && !item.linkText) || (destination && item.linkText === after.linkTitle))),
+      { before, after, changes, match, receipt });
+    return receipt;
+  }
+
   const evidenceBeforeStaleRelease = await laneBridgeEvidence(session);
   const callsBeforeStaleRelease = (await laneCallEvidence(session, L11_ID)).filter(call => call.membersLimit === 32).length;
   const destinationPendingBeforeStaleRelease = await session.eval(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(movedLaneId)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 32 && item.options.goalId == null)`);
@@ -1249,7 +1302,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
       callsBeforeStaleRelease, destinationPendingBeforeStaleRelease, rootAtB });
 
   // The bridge's renderFrame is a two-rAF flush counter; following DOM reads below establish visible state.
-  const staleRelease = await session.eval(`window.__nextLanesReleaseMatchingAndFlush({ laneId: ${JSON.stringify(L11_ID)}, goalId: null, membersLimit: 32, revision: ${JSON.stringify(REVISION_A)} })`);
+  const staleRelease = await releaseObservedPage('the stale A release', L11_ID, REVISION_A);
   check(report, 'E9(d): the held A page resolves with its requested and answered revision and reaches the frame checkpoint',
     staleRelease?.released === true && staleRelease.status === 'resolved'
       && staleRelease.laneId === L11_ID
@@ -1268,11 +1321,13 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const destinationStillPendingAfterStaleRelease = await session.eval(`window.__nextLanes.pending.some(item => item.laneId === ${JSON.stringify(movedLaneId)} && item.revision === ${JSON.stringify(REVISION_B)} && Number(item.options.membersLimit) === 32 && item.options.goalId == null)`);
   const rootAfterStaleRelease = await laneRootEvidence(session, L11_ID);
   const movedAfterStaleRelease = await questionEvidence(session, movedQuestionId);
+  const openCountAfterStale = await session.eval("document.querySelector('[aria-label^=Questions]')?.dataset.count");
   check(report, 'E9(d): releasing stale A does not change the renderer accepted frame sequence, preview B, or moved-question title',
     evidenceAfterStaleRelease.frameSequence === evidenceBeforeStaleRelease.frameSequence
       && evidenceAfterStaleRelease.frameSequence === staleRelease.frameSequence
       && evidenceAfterStaleRelease.renderFrame === staleRelease.renderFrame
       && normalizedLane(evidenceAfterStaleRelease, L11_ID)?.detail_revision === REVISION_B
+      && openCountAfterStale === String(ids.length)
       && movedAfterStaleRelease?.ownTitle === 'Synthetic revision-moved question'
       && !movedAfterStaleRelease.linkTitle && !movedAfterStaleRelease.isChatLink && !movedAfterStaleRelease.retry,
     { staleRelease, evidenceBeforeStaleRelease: {
@@ -1280,7 +1335,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
     }, evidenceAfterStaleRelease: {
       frameSequence: evidenceAfterStaleRelease.frameSequence, flushSequence: evidenceAfterStaleRelease.renderFrame,
       l11Revision: normalizedLane(evidenceAfterStaleRelease, L11_ID)?.detail_revision,
-    }, movedAfterStaleRelease });
+    }, movedAfterStaleRelease, openCountAfterStale });
   check(report, 'E9(d): the stale A read leaves B pending without adding a member request or showing old root lines',
     frameAfterStaleRelease.revisions?.[L11_ID] === REVISION_B && bStillPending && destinationStillPendingAfterStaleRelease
       && memberCallsAfterStaleRelease.length === callsBeforeStaleRelease
@@ -1306,7 +1361,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
 
   const expectedBRootIds = ['Fixture goal 2', 'Fixture goal 1'].map(title => l11B.goals.find(goal => goal.title === title)?.goal_id);
 
-  const bRelease = await session.eval(`window.__nextLanesReleaseMatchingAndFlush({ laneId: ${JSON.stringify(L11_ID)}, goalId: null, membersLimit: 32, revision: ${JSON.stringify(REVISION_B)} })`);
+  const bRelease = await releaseObservedPage('the B members release', L11_ID, REVISION_B);
   check(report, 'E9(d): the B members reply is separately released and flushed at revision B without injecting another frame',
     bRelease?.released === true && bRelease.status === 'resolved'
       && bRelease.laneId === L11_ID
@@ -1326,21 +1381,26 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
       title:line.querySelector('.next-lanes-attention-goal')?.textContent||'',
       reason:line.querySelector('.next-lanes-attention-reason')?.textContent||'',
     }));
-    return JSON.stringify(lines) === ${JSON.stringify(expectedBRootAttention)}
+    const expected = ${JSON.stringify(expectedBRootAttention)};
+    return lines.length === expected.length && lines.every((line, index) =>
+      line.title === expected[index].title && line.reason === expected[index].reason)
       && row?.querySelector('.next-lanes-more')?.textContent === '+8 more';
   })()`, { timeoutMs: ctx.timeoutMs });
   const rootAfterBRead = await laneRootEvidence(session, L11_ID);
   const actualBRootIds = rootAfterBRead?.attention.map(line => l11B.goals.find(goal => goal.title === line.title)?.goal_id) || [];
   const evidenceAfterBRead = await laneBridgeEvidence(session);
+  const bContinuation = evidenceAfterBRead.calls.find(call => call.laneId === L11_ID
+    && call.revision === REVISION_B && call.options.goalId == null && Number(call.options.membersLimit) === 32
+    && call.options.membersAfter && call.status === 'resolved' && call.answeredRevision === REVISION_B);
   check(report, 'E9(d): the held B members read supplies the exact B root goal IDs after release',
     actualBRootIds.join('|') === expectedBRootIds.join('|')
       && JSON.stringify(rootAfterBRead.attention.map(line => ({ title: line.title, reason: line.reason })))
         === JSON.stringify(expectedBRootAttention)
-      && rootAfterBRead.more === '+8 more'
+      && rootAfterBRead.more === '+8 more' && bContinuation
       && evidenceAfterBRead.frameSequence === frameBReceipt.frameSequence
       && normalizedLane(evidenceAfterBRead, L11_ID)?.detail_revision === REVISION_B,
     { rootAfterBRead, expectedBRootIds, expectedBRootAttention, actualBRootIds, frameSequence: evidenceAfterBRead.frameSequence,
-      flushSequence: evidenceAfterBRead.renderFrame, bRelease });
+      flushSequence: evidenceAfterBRead.renderFrame, bRelease, continuationCursor: bContinuation?.options.membersAfter });
 
   await session.click(`.next-lanes-row-open[data-lane-id=${JSON.stringify(L11_ID)}]`);
   await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane'", { timeoutMs: ctx.timeoutMs });
@@ -1356,6 +1416,16 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const expectedFormerGoalSpecIds = l11B.members.filter(member => member.goal_id === formerGoalId)
     .map(member => member.spec_id);
   await session.click(`.next-lanes-stop-open[data-goal-id=${JSON.stringify(formerGoalId)}]`);
+  await session.waitFor(`window.__nextLanes.pending.some(call => call.laneId === ${JSON.stringify(L11_ID)}
+    && call.options.goalId === ${JSON.stringify(formerGoalId)} && call.revision === ${JSON.stringify(REVISION_B)})`,
+  { timeoutMs: ctx.timeoutMs });
+  const formerGoalRelease = await releaseObservedPage('the former-goal reply', L11_ID, REVISION_B, formerGoalId);
+  check(report, 'E9(d): the held former-goal page resolves on the same B frame',
+    formerGoalRelease.released && formerGoalRelease.status === 'resolved' && formerGoalRelease.frameProcessed
+      && formerGoalRelease.laneId === L11_ID
+      && formerGoalRelease.requestedRevision === REVISION_B && formerGoalRelease.answeredRevision === REVISION_B
+      && formerGoalRelease.frameSequenceBefore === frameBReceipt.frameSequence
+      && formerGoalRelease.frameSequenceAfter === frameBReceipt.frameSequence, flushReceipt(formerGoalRelease));
   await session.waitFor(`(() => {
     return document.querySelector('.next-lanes-scroll')?.dataset.level === 'goal'
       && document.querySelector('.next-lanes-goal-title')?.textContent.trim() === ${JSON.stringify(formerGoalB?.title)}
@@ -1393,14 +1463,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   await session.click('.next-lanes-back');
   await session.waitFor("document.querySelector('.next-lanes-scroll')?.dataset.level === 'all'", { timeoutMs: ctx.timeoutMs });
 
-  await openQuestionList(ctx);
-  await waitForQuestion(ctx, movedQuestionId);
-  const movedStillOwnTitle = await questionEvidence(session, movedQuestionId);
-  check(report, 'E9(d): the moved question remains unplaced while its destination-lane read is held',
-    movedStillOwnTitle?.ownTitle === 'Synthetic revision-moved question'
-      && !movedStillOwnTitle.linkTitle && !movedStillOwnTitle.isChatLink,
-    movedStillOwnTitle);
-  const releasedCurrentLane = await session.eval(`window.__nextLanesReleaseMatchingAndFlush({ laneId: ${JSON.stringify(movedLaneId)}, goalId: null, membersLimit: 32, revision: ${JSON.stringify(REVISION_B)} })`);
+  const releasedCurrentLane = await releaseObservedPage('the destination release', movedLaneId, REVISION_B);
   check(report, 'E9(d): the destination lane reply is released and processed at revision B',
     releasedCurrentLane?.released === true && releasedCurrentLane.status === 'resolved'
       && releasedCurrentLane.laneId === movedLaneId
@@ -1497,8 +1560,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
   const movedOldLaneHeadings = headingHistory.filter(item => item.questionId === movedQuestionId
     && [item.headingText, item.ownTitle, item.linkText].some(value => value?.includes('Fixture lane eleven')));
   check(report, 'E9: the continuous heading guard saw every owned question and recorded no chat link or stale lane-eleven heading',
-    [parkedQuestionId, ordinaryQuestionId, lateQuestionId, hiddenQuestionId, movedQuestionId]
-      .every(questionId => observedQuestionIds.has(questionId))
+    ids.every(questionId => observedQuestionIds.has(questionId))
       && chatLinkedQuestions.length === 0 && movedOldLaneHeadings.length === 0,
     { headingHistory, observedQuestionIds: [...observedQuestionIds], chatLinkedQuestions, movedOldLaneHeadings });
 }
@@ -1506,4 +1568,7 @@ async function runDataEvidence(ctx, { ownedIds, hooks }) {
 const nextLaneDataRecovery = isolated(runDataRecovery);
 const nextLaneDataEvidence = isolated(runDataEvidence);
 
-module.exports = { nextLaneDataRecovery, nextLaneDataEvidence };
+module.exports = {
+  nextLaneDataRecovery, nextLaneDataEvidence,
+  createE9Fixture, startQuestionHeadingObserver, verifyE9Placement, cleanupEvidence,
+};
