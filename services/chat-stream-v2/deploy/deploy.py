@@ -2364,14 +2364,15 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
                     boot_wait_seconds=boot_wait_seconds, log_guard_dir=log_guard_dir,
                     read_timing_receipt=read_timing_receipt)
                 transaction = coordinated.Transaction(adapter, root)
+                qualification_args = (
+                    {"first_qualification_go": first_qualification_go} if first_qualification_go is not None else {}
+                )
                 if rollback:
                     return transaction.rollback(coordinated_receipt, authorization=recovery_authorization,
-                                                go_tell_id=recovery_go_tell_id,
-                                                first_qualification_go=first_qualification_go)
+                                                go_tell_id=recovery_go_tell_id, **qualification_args)
                 if prepare_only:
                     return transaction.prepare(coordinated_plan, coordinated_receipt)
-                return transaction.apply(coordinated_plan, coordinated_receipt,
-                                         first_qualification_go=first_qualification_go)
+                return transaction.apply(coordinated_plan, coordinated_receipt, **qualification_args)
             return _deploy_ordinary(service, release_checkout=repo, ref=ref, rollback=rollback,
                 gate_evidence=gate_evidence, deployer_stream_id=deployer_stream_id,
                 skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
