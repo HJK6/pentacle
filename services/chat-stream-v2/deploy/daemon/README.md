@@ -385,6 +385,50 @@ and forward apply stays pinned to the receipt controller. The journal records
 the authorization digest, replacement SHA, `authorized_by`, `fd_gate_reference`
 and the GO tell id.
 
+### First qualification of the sole optional host
+
+Use the coordinated transaction with a private `first_qualification` object in
+the intent. The installed catalog must describe one local host, a second
+required host, and one optional remote host. Name the optional host in
+`prior_exclusion` with its exact historical `reason` and `authority`. The
+qualified prior stamp must carry four declared skips for this host and its
+sealed receipt must cover the two required hosts. Pass an empty
+`excluded_hosts` for the target and explicit `smoke_accounts` selecting
+`ours` for both providers on the optional host.
+
+The private intent object also carries `prior_stamp_sha256`,
+`catalog_sha256`, `expected_live` with `sha`, `pid` and `birth`,
+`fd_gate_reference`, and a timezone-qualified `expires_at`. When the
+installed catalog requires an approved change, include `catalog_change`
+with the owner-only `postimage` path, its `sha256`, and its separate
+`fd_gate_reference`. The postimage may remove the one sealed exclusion.
+Prepare captures both catalog images and verifies the target's account,
+interpreter, native login, pin and helper closure before switching any
+executor.
+
+Apply and applied rollback each take `--first-qualification-go` with a
+separate owner-only JSON file in the transaction directory. The front desk
+decision binds `operation` (`apply` or `rollback`), `transaction_id`,
+`receipt_sha256`, `controller_sha`, `prior_sha`, `target_sha`, the exact
+`expected_live` identity, a timezone-qualified `expires_at`, and the
+`go_tell_id`. Rollback of a down daemon uses null `pid` and `birth` with
+the observed checkout SHA. The apply and rollback decisions use distinct
+tell disposition records. A prepared receipt can still be discarded directly.
+
+The switch fences new work on the optional host before publishing its target
+executor. Only four pre-sealed smoke spawns can cross both the reservation and
+account fences on the verified target process. Each request has one claim and
+uses the configured low-effort test model. The first fleet result and activation
+checks must pass before the qualified stamp is written and the hold is released.
+The subsequent forward can verify that stamp using the committed journal and
+normal qualification checks.
+
+A failed or interrupted apply retains the receipt and requires FD-authorized
+rollback. Rollback revokes qualification admission and restores the original
+catalog with a guarded compare and swap before booting the covered prior scope.
+The original policy, executor pointer and stamp are restored from their
+preimages. The optional host stays held until a later successful qualification.
+
 Remote-creation witness rollout requires a qualified compatible reader before
 any writer-enabled release. Seal that exact live reader as the writer release's
 prior and record the actual deploy-controller checkout/SHA separately from the

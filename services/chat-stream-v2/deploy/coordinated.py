@@ -163,7 +163,7 @@ def validate_intent(path):
     intent = read_json(path)
     fields = {"schema", "transaction_id", "controller_sha", "target_sha", "prior_sha",
               "machines_file", "policy_file", "excluded_hosts", "gate_evidence", "prior_gate_evidence"}
-    if set(intent) - {'smoke_accounts'} != fields or intent.get("schema") != INTENT_SCHEMA:
+    if set(intent) - {'smoke_accounts', 'first_qualification'} != fields or intent.get("schema") != INTENT_SCHEMA:
         raise Invalid("unsupported coordinated intent schema or fields")
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{7,95}", str(intent["transaction_id"])):
         raise Invalid("invalid transaction id")
@@ -175,6 +175,9 @@ def validate_intent(path):
     private_file(intent["policy_file"])
     scope = host_scope(intent["machines_file"], intent["excluded_hosts"])
     smoke_account_map(intent.get('smoke_accounts', []), scope)
+    if "first_qualification" in intent:
+        from deploy.first_qualification import validate_intent as validate_qualification_intent
+        validate_qualification_intent(intent, scope)
     return intent
 
 
@@ -371,10 +374,16 @@ class Transaction:
         finally:
             self.adapter.helper_wait_observer = previous
 
-    def apply(self, intent_path, receipt_path, authorization=None):
+    def apply(self, intent_path, receipt_path, authorization=None, first_qualification_go=None):
         if authorization is not None:
             raise Invalid("recovery authorization is accepted only by --rollback --coordinated-receipt")
         receipt, journal = self.load(receipt_path)
+        if "prior_scope" in receipt:
+            from deploy.first_qualification import operation_authorization
+            journal["apply_authorization"] = operation_authorization(first_qualification_go, receipt, "apply")
+            self.adapter.first_qualification_authorization = journal["apply_authorization"]
+        elif first_qualification_go is not None:
+            raise Invalid("first qualification GO requires a first qualification receipt")
         with self.helper_wait_journal(journal):
             return self._apply(intent_path, receipt, journal)
 
@@ -397,11 +406,15 @@ class Transaction:
             raise
         # This readback is persisted before the stop: recovery does not need RPC.
         before = self.adapter.current(receipt)
+        if "prior_scope" in receipt:
+            self.adapter.check_first_qualification_authorization()
         journal["before_stop"] = before
         journal["stop_provenance"] = self.adapter.provenance(receipt)
         self.phase(journal, "stopping")
         try:
-            self.adapter.stop(receipt, provenance=journal["stop_provenance"])
+            bootstrap = receipt["intent"].get("first_qualification")
+            self.adapter.stop(receipt, provenance=journal["stop_provenance"],
+                **({"expected_identity": bootstrap["expected_live"]} if bootstrap is not None else {}))
             self.phase(journal, "stopped")
             self.adapter.revalidate_stopped(receipt)
             self.phase(journal, "switching")
@@ -428,7 +441,13 @@ class Transaction:
                 self.phase(journal, journal["phase"])
             except Exception as journal_exc:
                 journal["journal_failure"] = type(journal_exc).__name__
-            self.recover(receipt, journal, automatic=True)
+            if "prior_scope" in receipt:
+                try:
+                    self.phase(journal, "recovery_required")
+                except OSError as journal_exc:
+                    journal["journal_failure"] = type(journal_exc).__name__
+            else:
+                self.recover(receipt, journal, automatic=True)
             return self.result(receipt, journal)
         try:
             self.phase(journal, "committed", result=result, postimage=self.adapter.current(receipt))
@@ -437,6 +456,8 @@ class Transaction:
             # authority to stop the proven candidate.
             journal.update(phase="committed", result={**result, "outcome": "failed"},
                            journal_failure=type(exc).__name__)
+            return self.result(receipt, journal)
+        if "prior_scope" in receipt:
             return self.result(receipt, journal)
         # The commit is outside the automatic recovery region. Late failures,
         # including exceptions and report persistence failures, never stop it.
@@ -458,9 +479,19 @@ class Transaction:
             journal["result"]["outcome"] = "failed"
         return self.result(receipt, journal)
 
-    def rollback(self, receipt_path, authorization=None, go_tell_id=None):
+    def rollback(self, receipt_path, authorization=None, go_tell_id=None, first_qualification_go=None):
         receipt, journal = self.load(receipt_path)
         record = None
+        if "prior_scope" in receipt and journal["phase"] not in {"prepared", "discarded", "rolled_back"}:
+            from deploy.first_qualification import operation_authorization
+            if authorization is not None or go_tell_id is not None:
+                raise Invalid("first qualification recovery stays bound to its controller")
+            record = operation_authorization(first_qualification_go, receipt, "rollback")
+            if record["go_tell_id"] == journal.get("apply_authorization", {}).get("go_tell_id"):
+                raise Invalid("first qualification rollback requires its own FD decision")
+            self.adapter.first_qualification_authorization = record
+        elif first_qualification_go is not None:
+            raise Invalid("first qualification rollback GO requires an applied first qualification receipt")
         if authorization is not None or go_tell_id is not None:
             if journal["phase"] in {"prepared", "discarded", "rolled_back"}:
                 raise Invalid("recovery authorization requires an unfinished applied transaction")
@@ -498,7 +529,8 @@ class Transaction:
             if authorization is not None:
                 journal["recovery_authorization"] = authorization
             self.phase(journal, "rolling_back")
-            self.adapter.stop(receipt, provenance=journal.get("stop_provenance"))
+            self.adapter.stop(receipt, provenance=journal.get("stop_provenance"),
+                **({"expected_identity": authorization["expected_live"]} if "prior_scope" in receipt else {}))
             self.adapter.revalidate_stopped(receipt, rollback=True)
             self.adapter.switch(receipt, rollback=True)
             try:
@@ -549,7 +581,7 @@ class Transaction:
 
     @staticmethod
     def result(receipt, journal, *, explicit_rollback=False):
-        scoped = bool(receipt["intent"]["excluded_hosts"])
+        scoped = bool(receipt["intent"]["excluded_hosts"] or explicit_rollback and receipt.get("prior_scope"))
         active = journal["phase"] == "committed"
         checks_passed = journal.get("result", {}).get("outcome") == "passed"
         success = (journal["phase"] == "rolled_back" if explicit_rollback else active and checks_passed)
@@ -557,6 +589,12 @@ class Transaction:
             "target not active, prior restored" if journal["phase"] == "rolled_back" else "target not active, restore unproven")
         if explicit_rollback and success:
             disposition = "active and checks passed"
+        elif (not explicit_rollback and "prior_scope" in receipt and journal["phase"] == "recovery_required"
+              and journal.get("partial_result", {}).get("runtime", {}).get("sha") == receipt["intent"]["target_sha"]):
+            disposition = "active with failed checks"
+        verification = journal.get("rollback_result" if explicit_rollback else "result")
+        if verification is None and "prior_scope" in receipt and not explicit_rollback:
+            verification = journal.get("partial_result")
         return {"coordinated_receipt": receipt["receipt_path"], "receipt_sha256": receipt["receipt_sha256"],
                 "phase": journal["phase"], "outcome": "passed" if success else "failed", "disposition": disposition,
                 "scope": "declared_optional_exclusions" if scoped else "full_matrix",
@@ -564,4 +602,4 @@ class Transaction:
                 "verification_kind": "restoration" if explicit_rollback else "model_canary",
                 "forward_failure": journal.get("forward_failure"), "rollback_failure": journal.get("rollback_failure"),
                 "journal_failure": journal.get("journal_failure"),
-                "verification": journal.get("rollback_result" if explicit_rollback else "result")}
+                "verification": verification}

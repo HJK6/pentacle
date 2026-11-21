@@ -1833,7 +1833,10 @@ def _declared_release_scope(declarations, *, historical=False):
 
 def release_exclusions(service, repo, *, now=None):
     """Evaluate exclusions from the installed catalog at this occurrence."""
-    machines = _release_machines_file(service, repo)
+    return _catalog_release_exclusions(_release_machines_file(service, repo), now=now)
+
+
+def _catalog_release_exclusions(machines, *, now=None):
     try:
         value = json.loads(Path(machines).read_text()) if machines else {}
     except (OSError, ValueError):
@@ -2311,6 +2314,7 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
            coordinated_plan: Path | None = None, coordinated_receipt: Path | None = None,
            prepare_only: bool = False, smoke_accounts: Sequence[str] | None = None,
            recovery_authorization: Path | None = None, recovery_go_tell_id: str | None = None,
+           first_qualification_go: Path | None = None,
            read_timing_receipt: Path | None = None,
            ordinary_recovery_bundle: Path | None = None, recover_ordinary: Path | None = None,
            ordinary_recovery_authorization: Path | None = None, ordinary_recovery_status: Path | None = None,
@@ -2330,6 +2334,8 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
             or recovery_authorization is None or not recovery_go_tell_id):
         raise DeployError("recovery controller authorization requires --rollback --coordinated-receipt and --recovery-go-tell-id")
     coordinated_mode = coordinated_plan is not None or coordinated_receipt is not None or prepare_only
+    if first_qualification_go is not None and (not coordinated_mode or prepare_only or recover_ordinary or ordinary_read):
+        raise DeployError("first qualification GO requires coordinated apply or rollback")
     if smoke_accounts is not None and coordinated_mode:
         raise DeployError('account mapping belongs in coordinated intent')
     if coordinated_mode and (service.name != "chat-streamd-v2" or skip_kickstart):
@@ -2360,10 +2366,12 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
                 transaction = coordinated.Transaction(adapter, root)
                 if rollback:
                     return transaction.rollback(coordinated_receipt, authorization=recovery_authorization,
-                                                go_tell_id=recovery_go_tell_id)
+                                                go_tell_id=recovery_go_tell_id,
+                                                first_qualification_go=first_qualification_go)
                 if prepare_only:
                     return transaction.prepare(coordinated_plan, coordinated_receipt)
-                return transaction.apply(coordinated_plan, coordinated_receipt)
+                return transaction.apply(coordinated_plan, coordinated_receipt,
+                                         first_qualification_go=first_qualification_go)
             return _deploy_ordinary(service, release_checkout=repo, ref=ref, rollback=rollback,
                 gate_evidence=gate_evidence, deployer_stream_id=deployer_stream_id,
                 skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
@@ -2716,6 +2724,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recovery-controller-authorization", type=Path,
                         help="Private FD authorization for recovering the receipt from a replacement controller (rollback only).")
     parser.add_argument("--recovery-go-tell-id", help="Ledger id of the FD GO tell quoting the authorization digest.")
+    parser.add_argument("--first-qualification-go", type=Path,
+                        help="Private FD authorization for this sealed bootstrap host apply or rollback.")
     parser.add_argument('--account', action='append', default=None, help='PROVIDER=ALIAS or HOST/PROVIDER=ALIAS for ordinary full-matrix smoke')
     parser.add_argument("--deployer-stream-id", default=None)
     parser.add_argument("--log-guard-dir", default=None, help="Override the service log guard directory checked before deploy.")
@@ -2763,6 +2773,7 @@ def main(argv: list[str] | None = None) -> int:
             smoke_accounts=args.account,
             recovery_authorization=args.recovery_controller_authorization,
             recovery_go_tell_id=args.recovery_go_tell_id,
+            first_qualification_go=args.first_qualification_go,
             read_timing_receipt=args.read_timing_receipt,
             ordinary_recovery_bundle=args.ordinary_recovery_bundle,
             recover_ordinary=args.recover_ordinary,
