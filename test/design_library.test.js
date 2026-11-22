@@ -299,3 +299,31 @@ test('an unnamed legacy gallery frame keeps ordinary key behavior', async t => {
   assert.equal(key.defaultPrevented, false);
   assert.deepEqual(forwarded, []);
 });
+
+test('Design send preview resolves the current verified board or a named screen', async t => {
+  const root = scratch(t), library = path.join(root, 'library');
+  const record = await fixture.revision(root, { configure(descriptor) {
+    descriptor.views.push({ ...descriptor.views[0], id: 'phone', title: 'Phone' });
+    descriptor.designs = [{
+      id: 'orders', title: 'Orders',
+      nodes: [{ type: 'screen', view: 'phone' }, { type: 'screen', view: 'home' }],
+    }];
+  } });
+  L.publishRevision({ dir: record.dir, library });
+  const resolve = (...flags) => require('../scripts/design-library.cjs').run(
+    ['link-preview', '--library', library, '--project', 'example', '--design', ...flags]);
+  const board = await resolve('orders');
+  assert.deepEqual(board.dashboard_link.target, { project_id: 'example', design_id: 'orders' });
+  assert.equal(board.dashboard_link.title, 'Orders');
+  assert.equal(board.dashboard_link.revision_id, record.manifest.revision_id);
+  assert.equal(path.basename(board.path), 'phone.png');
+  assert.equal(board.sha256, L.sha256(fixture.PNG));
+  const screen = await resolve('orders', '--view', 'home');
+  assert.equal(screen.dashboard_link.target.view_id, 'home');
+  assert.equal(screen.dashboard_link.title, 'Home');
+  assert.equal(path.basename(screen.path), 'home.png');
+  await assert.rejects(resolve('unknown'), /Design board was not found/);
+  await assert.rejects(resolve('orders', '--view', 'unavailable'), /Design screen was not found/);
+  fs.writeFileSync(screen.path, 'changed fixture');
+  await assert.rejects(resolve('orders'), /No verified current revision/);
+});

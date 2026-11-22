@@ -84,6 +84,7 @@ log = logging.getLogger("chat_streamd_v2.comms")
 ROUTE_MAX_DEPTH = 8
 
 from chat_attachment_types import ATTACHMENT_MAX_BYTES
+from design_links import PNG_SIGNATURE, require_design_png
 ATTACHMENT_ROOT = Path.home() / ".local/share/pentacle-stream/attachments"
 SUPPORTED_ATTACHMENT_MIME = {"image/jpeg": "jpg", "image/png": "png"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -2477,6 +2478,7 @@ class Comms:
         request_id: str,
         broadcast: Any,
         recent_limit: int,
+        dashboard_link: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Attach an already-uploaded image blob to the caller's OWN conversation
         as an agent-authored (ASSIST) transcript event.
@@ -2501,6 +2503,9 @@ class Comms:
         except AttachmentValidationError as exc:
             raise VerbError("attachment_invalid", str(exc)) from exc
 
+        if dashboard_link is not None:
+            require_design_png(attachments)
+
         # Prove every referenced blob is actually present and within the limit;
         # a path or a dangling ref is never treated as a delivered image.
         blob_store = self.blob_store
@@ -2509,13 +2514,15 @@ class Comms:
         for attachment in attachments:
             sha = str(attachment["key"])
             try:
-                await blob_store.read_verified(sha, max_bytes=ATTACHMENT_MAX_BYTES)
+                data = await blob_store.read_verified(sha, max_bytes=ATTACHMENT_MAX_BYTES)
             except KeyError as exc:
                 raise VerbError("attachment_missing", f"blob {sha} was not uploaded") from exc
             except ValueError as exc:
                 raise VerbError("attachment_invalid", str(exc)) from exc
             except Exception as exc:  # noqa: BLE001 - stable public error surface
                 raise VerbError("attachment_fetch_failed", str(exc)) from exc
+            if dashboard_link is not None and not data.startswith(PNG_SIGNATURE):
+                raise VerbError("dashboard_link_png_required", "A Design link requires one recorded PNG")
 
         host, name = self.sessions.split(stream_id)
         row = self.sessions.get(stream_id) or await self.store.fetch_session(host, name) or {}
@@ -2535,6 +2542,8 @@ class Comms:
             "content_kind": content_kind,
             "raw": {"source": "agent_image", "request_id": request_id},
         }
+        if dashboard_link is not None:
+            event["raw"]["dashboard_link"] = dashboard_link
         identity = f"send_image:{stream_id}:{request_id}"
         seq = await self.store.append_session_event(
             stream_id, event, identity=identity, limit=recent_limit,

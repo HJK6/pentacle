@@ -14,6 +14,7 @@ import {
   parseServerEventTimeStrict,
 } from './optimisticMatch';
 import { isHelperSuggestionEvent, isTerminalDividerText, isTransientTranscriptNoise } from './pentacleEventInterpreter';
+import { parseDashboardLinkEvent } from './dashboardLinks';
 import { normalizePentacleHost } from './pentacleHosts';
 import { logTelemetry } from '../utils/telemetry';
 import { TELEMETRY_EVENTS } from '../utils/telemetryEvents';
@@ -2062,6 +2063,10 @@ function preserveSnapshotWorkingStates(
   return !changed ? previousStates : workingStates;
 }
 
+function hasDesignLink(event: PentacleEvent): boolean {
+  return (event.kind === 'ASSIST' || event.kind === 'ASSIST_TEXT') && parseDashboardLinkEvent(event) !== null;
+}
+
 export function applyPentacleEvent(
   state: PentacleStreamState,
   rawEvent: PentacleEvent,
@@ -2111,13 +2116,12 @@ export function applyPentacleEvent(
   if (
     !isClaudeJsonlEvent(event) &&
     (event.attachments?.length ?? 0) === 0 &&
+    !hasDesignLink(event) &&
     (event.kind === 'ASSIST' || event.kind === 'TOOL' || event.kind === 'TOOL-OUT') &&
     isTransientTranscriptNoise(event.text)
   ) {
-    // An attachment-bearing event (an operator or agent image, incl. a
-    // caption-less one with empty text) is durable content, never transient
-    // noise — mirror the USER/ASSIST attachment exemption in the interpreter
-    // and in the fetched/snapshot filters below.
+    // Attachments and typed Design links are durable even without a caption.
+    // The fetched and snapshot filters use the same exemption.
     return state;
   }
 
@@ -2620,16 +2624,14 @@ function filterCurrentTailRegression(
   };
 }
 
-// Image messages are durable content even when their caption is empty — both an
-// operator's own image (USER) and an agent-authored image (ASSIST, the send_image
-// path). Keep the same exception in snapshot ingestion below; ordinary noise stays filtered.
+// An attachment or a typed Design card can carry the whole message without a caption.
 function normalizeFetchedIncomingEvents(rawEvents: PentacleEvent[] | undefined): PentacleEvent[] {
   if (!Array.isArray(rawEvents)) return [];
   return rawEvents.map(normalizeEvent).filter((event) => (
     event.kind !== 'DRAFT' &&
     event.kind !== 'WORKING' &&
     !isHelperSuggestionEvent(event) &&
-    (isClaudeJsonlEvent(event) || (event.attachments?.length ?? 0) > 0 || !isTransientTranscriptNoise(event.text))
+    (isClaudeJsonlEvent(event) || (event.attachments?.length ?? 0) > 0 || hasDesignLink(event) || !isTransientTranscriptNoise(event.text))
   ));
 }
 
@@ -2831,7 +2833,7 @@ export function applyPentacleSnapshotMessage(
       event.kind !== 'DRAFT' &&
       event.kind !== 'WORKING' &&
       !isHelperSuggestionEvent(event) &&
-      (isClaudeJsonlEvent(event) || (event.attachments?.length ?? 0) > 0 || !isTransientTranscriptNoise(event.text))
+      (isClaudeJsonlEvent(event) || (event.attachments?.length ?? 0) > 0 || hasDesignLink(event) || !isTransientTranscriptNoise(event.text))
     )), limit, uncappedStreamIds(state, sessions)).map(freezeEventInDev)
     : state.events.filter((event) => survivingStreamIds.has(event.stream_id));
   const drafts: Record<string, PentacleEvent> = {};

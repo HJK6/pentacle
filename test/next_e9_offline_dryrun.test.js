@@ -34,6 +34,7 @@ async function openOfflineE9(t) {
   assert.equal(chat.kind, 'chat');
   assert.equal(chat.chatTitle, sessions[0].display_name);
 
+  window.fetch = async () => { throw new Error('Unexpected network in offline E9'); };
   window.innerWidth = 1440;
   window.requestAnimationFrame = callback => setImmediate(() => callback(window.performance.now()));
   window.PentacleChatCore = core;

@@ -1,4 +1,5 @@
 import type { PentacleEvent, PentacleMessageEnvelope } from '../types/pentacle';
+import { parseDashboardLinkEvent } from './dashboardLinks';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 
@@ -1047,6 +1048,11 @@ export function interpretPentacleEvent(
     return promptAsk.notificationId
       ? { ...askRow, notificationId: promptAsk.notificationId }
       : askRow;
+  }
+
+  if ((kind === 'ASSIST' || kind === 'ASSIST_TEXT') && parseDashboardLinkEvent(event)) {
+    const caption = displayTextForEvent(userText);
+    return interpreted(event, 'assistant-message', 'bubble:assistant', 'assistant', assistantLabel, caption, false, 'Typed Design link.');
   }
 
   if (

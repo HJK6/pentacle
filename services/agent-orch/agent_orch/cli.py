@@ -4568,6 +4568,9 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
     import contextlib
     import io
     from .file_delivery import run
+    dashboard_link = getattr(args, "dashboard_link", None)
+    command = "send-design-link" if dashboard_link else "send-image"
+    request_id = getattr(args, "request_id", None) if dashboard_link else None
     explicit = (getattr(args, "to", None) or os.environ.get("PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID", "")).strip()
     bound = False
     bound_composite = ""
@@ -4578,14 +4581,14 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
     except ServiceCredentialUnavailable:
         raise
     except Exception:  # noqa: BLE001 - never echo transport text
-        print("agent-orch send-image: cannot read the assistant binding; nothing was sent", file=sys.stderr)
+        print(f"agent-orch {command}: cannot read the assistant binding; nothing was sent", file=sys.stderr)
         return 1
     if isinstance(binding, dict) and binding.get("type") == "assistant.binding.ok":
         bound = bool(caller) and binding.get("stream_id") == caller
         bound_composite = str(binding.get("composite_stream_id") or "").strip()
     target = explicit or (bound_composite if bound else "")
     if bound and not target:
-        print("agent-orch send-image: this seat is the bound front desk but no assistant composite "
+        print(f"agent-orch {command}: this seat is the bound front desk but no assistant composite "
               "could be resolved; nothing was sent", file=sys.stderr)
         return 1
     if not target:
@@ -4596,8 +4599,9 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
         note_type=getattr(args, "note_type", None), ref=getattr(args, "ref", None),
         why=getattr(args, "why", None), caption=caption, timeout=timeout,
         dispatch_id=None, reply_to_message_id=None, reply_to_question_id=None,
-        evidence_refs_json=None, publish_kind=None, request_id=None,
-        upload_request_id=None, response_state=None,
+        dashboard_link=dashboard_link, expected_image_sha=getattr(args, "expected_image_sha", None),
+        evidence_refs_json=None, publish_kind=None, request_id=request_id,
+        upload_request_id=request_id, response_state=None,
     )
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
@@ -4609,14 +4613,17 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
     except ValueError:
         result = {}
     if rc == 0 and result.get("type") == "assistant.publish.ok":
-        print(json.dumps({**result, "ok": True, "source_path": str(path), "destination": publish_args.to}, indent=2))
+        receipt = {**result, "ok": True, "destination": publish_args.to}
+        if dashboard_link is None:
+            receipt["source_path"] = str(path)
+        print(json.dumps(receipt, indent=2))
         return 0
     code = result.get("error_code")
     if not bound and code not in _SEND_IMAGE_BOUND_PUBLISHER_CODES:
         # Not the bound publisher (or the composite is not reachable from this
         # seat): keep the pre-existing own-conversation behaviour, but say so.
         print(
-            f"agent-orch send-image: could not publish to {publish_args.to} "
+            f"agent-orch {command}: could not publish to {publish_args.to} "
             f"({code or 'publish_failed'}); posting to this seat's own conversation only",
             file=sys.stderr,
         )
@@ -4625,7 +4632,7 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
     if code in {"assistant_publish_note_type_required", "assistant_publish_ref_required",
                 "assistant_publish_reason_required"}:
         print(
-            "agent-orch send-image: the front desk publishes to the operator chat and needs "
+            f"agent-orch {command}: the front desk publishes to the operator chat and needs "
             "--note-type {result,problem,reminder,relay,started,change,other} and --ref "
             "{message|lane|report|wake|tell|owed}:<id> (--why with other)",
             file=sys.stderr,
@@ -4634,46 +4641,111 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
     return rc or 1
 
 
+
+def _resolve_design_preview(project: str, design: str, view: str | None):
+    # The release .pth points _shared at app/services, as in a source checkout.
+    script = Path(_shared.__file__).resolve().parents[2] / "scripts/design-library.cjs"
+    argv = ["node", str(script), "link-preview", "--project", project, "--design", design]
+    if view is not None:
+        argv.extend(("--view", view))
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Cannot read the Design library on this host") from exc
+    if result.returncode:
+        reason = result.stderr.strip()
+        # Known library refusals are useful. Keep machine paths and process diagnostics local.
+        if reason in {
+            "No verified current revision for this Design project on this host",
+            "Design board was not found", "Design board has no screen",
+            "Design screen was not found on this board", "Design screen has no recorded PNG",
+            "Recorded PNG exceeds the attachment limit",
+        }:
+            raise ValueError(reason)
+        raise ValueError("Cannot read the Design library on this host")
+    preview = json.loads(result.stdout)
+    return Path(preview["path"]), preview["sha256"], preview["dashboard_link"]
+
+
+def send_design_link(args: argparse.Namespace) -> int:
+    target = (args.project, args.design) if args.view is None else (args.project, args.design, args.view)
+    if any(not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", part) for part in target):
+        print("agent-orch send-design-link: invalid Design project, board or screen ID", file=sys.stderr)
+        return 2
+    if args.request_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args.request_id):
+        print("agent-orch send-design-link: invalid request ID", file=sys.stderr)
+        return 2
+    try:
+        path, expected_sha, link = _resolve_design_preview(args.project, args.design, args.view)
+    except ValueError as exc:
+        print(f"agent-orch send-design-link: {exc}", file=sys.stderr)
+        return 2
+    return _send_local_image(argparse.Namespace(
+        **{**vars(args), "path": path, "dashboard_link": link, "expected_image_sha": expected_sha,
+           "request_id": "send-design-link:" + (args.request_id or str(uuid.uuid4()))},
+    ))
+
+
 def send_image(args: argparse.Namespace) -> int:
     """Attach a local PNG/JPEG to your OWN conversation so the operator sees the
     real image in Pentacle chat (mobile + desktop), openable in the viewer.
 
     Exit codes: 0 delivered, 1 send error, 2 bad input, 66 not authorized."""
+    return _send_local_image(args)
+
+
+def _send_local_image(args: argparse.Namespace) -> int:
+    dashboard_link = getattr(args, "dashboard_link", None)
+    command = "send-design-link" if dashboard_link else "send-image"
     from_stream_id = getattr(args, "from_stream_id", None) or env_stream_id()
     if not from_stream_id:
         print(
-            "agent-orch send-image: cannot determine your stream id; run inside a "
+            f"agent-orch {command}: cannot determine your stream id; run inside a "
             "seat (AGENT_ORCH_STREAM_ID) or pass --from-stream-id",
             file=sys.stderr,
         )
         return 2
     path = Path(args.path).expanduser()
     try:
-        data = path.read_bytes()
+        if dashboard_link:
+            from .file_delivery import bounded_read
+
+            data = bounded_read(path, SEND_IMAGE_MAX_BYTES)
+        else:
+            data = path.read_bytes()
     except FileNotFoundError:
-        print(f"agent-orch send-image: file not found: {path}", file=sys.stderr)
+        if dashboard_link:
+            print("agent-orch send-design-link: recorded PNG became unavailable", file=sys.stderr)
+            return 2
+        print(f"agent-orch {command}: file not found: {path}", file=sys.stderr)
         return 2
-    except OSError as exc:
-        print(f"agent-orch send-image: cannot read {path}: {exc}", file=sys.stderr)
+    except (OSError, ValueError) as exc:
+        if dashboard_link:
+            print("agent-orch send-design-link: recorded PNG became unavailable", file=sys.stderr)
+            return 2
+        print(f"agent-orch {command}: cannot read {path}: {exc}", file=sys.stderr)
         return 2
     if not data:
-        print("agent-orch send-image: file is empty", file=sys.stderr)
+        print(f"agent-orch {command}: file is empty", file=sys.stderr)
         return 2
     mime = _detect_image_mime(data)
     if mime is None:
         print(
-            "agent-orch send-image: unsupported image type (only PNG and JPEG are accepted)",
+            f"agent-orch {command}: unsupported image type (only PNG and JPEG are accepted)",
             file=sys.stderr,
         )
         return 2
     if len(data) > SEND_IMAGE_MAX_BYTES:
         print(
-            f"agent-orch send-image: image is {len(data)} bytes; the limit is "
+            f"agent-orch {command}: image is {len(data)} bytes; the limit is "
             f"{SEND_IMAGE_MAX_BYTES} bytes",
             file=sys.stderr,
         )
         return 2
     source_sha = hashlib.sha256(data).hexdigest()
+    if dashboard_link and (mime != "image/png" or source_sha != args.expected_image_sha):
+        print("agent-orch send-design-link: recorded PNG failed verification", file=sys.stderr)
+        return 2
     caption = (getattr(args, "caption", "") or "").strip()
     timeout = float(args.timeout)
     config = load_config()
@@ -4685,11 +4757,11 @@ def send_image(args: argparse.Namespace) -> int:
     except ServiceCredentialUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - surface a stable transport error
-        print(f"agent-orch send-image: blob upload failed: {exc}", file=sys.stderr)
+        print(f"agent-orch {command}: blob upload failed: {exc}", file=sys.stderr)
         return 1
     if upload.get("type") != "upload_blob.ok":
         print(
-            f"agent-orch send-image: blob upload failed: "
+            f"agent-orch {command}: blob upload failed: "
             f"{upload.get('error_code') or upload.get('type')}",
             file=sys.stderr,
         )
@@ -4702,15 +4774,20 @@ def send_image(args: argparse.Namespace) -> int:
         "attachments": [{"key": blob_sha, "mime": mime, "bytes": len(data)}],
         "caption": caption,
     }
+    if dashboard_link:
+        if blob_sha != source_sha:
+            print("agent-orch send-design-link: blob receipt did not match the recorded PNG", file=sys.stderr)
+            return 1
+        payload.update(dashboard_link=dashboard_link, request_id=args.request_id)
     try:
         response = asyncio.run(send_image_once(config, payload, timeout=timeout))
     except PermissionError as exc:
-        print(f"agent-orch send-image: not authorized: {exc}", file=sys.stderr)
+        print(f"agent-orch {command}: not authorized: {exc}", file=sys.stderr)
         return 66
     except ServiceCredentialUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - stable transport error surface
-        print(f"agent-orch send-image: {exc}", file=sys.stderr)
+        print(f"agent-orch {command}: {exc}", file=sys.stderr)
         return 1
     if response.get("type") == "send_image.ok":
         # `event_id` is the durable transcript row — the retrievable delivery
@@ -4723,7 +4800,7 @@ def send_image(args: argparse.Namespace) -> int:
                 "blob_sha": blob_sha,
                 "content_kind": response.get("content_kind"),
                 "duplicate": response.get("duplicate", False),
-                "source_path": str(path),
+                **({"source_path": str(path)} if dashboard_link is None else {}),
                 "source_sha256": source_sha,
                 "bytes": len(data),
             },
@@ -5963,6 +6040,27 @@ def build_parser() -> argparse.ArgumentParser:
     send_image_parser.add_argument("--why", help="With --note-type other: the one-line reason.")
     send_image_parser.add_argument("--timeout", type=float, default=30.0)
     send_image_parser.set_defaults(func=send_image)
+
+    design_link_parser = subparsers.add_parser(
+        "send-design-link",
+        help="Post a Design preview from the host that has the local Design library.",
+        description=("Post the verified current revision's recorded PNG to your own chat. "
+                     "Run on the Design library host with Node available. The bound front desk publishes "
+                     "to its assistant chat using the same note type and reference as send-image."),
+    )
+    design_link_parser.add_argument("project", help="Design project ID.")
+    design_link_parser.add_argument("design", help="Design board ID.")
+    design_link_parser.add_argument("view", nargs="?", help="Screen ID. Defaults to the first board screen for the preview.")
+    design_link_parser.add_argument("--caption", default="", help="Optional plain caption.")
+    design_link_parser.add_argument("--request-id", help="Reuse this ID when resuming the same send.")
+    design_link_parser.add_argument("--from-stream-id", help="Caller stream ID (defaults to your seat).")
+    design_link_parser.add_argument("--to", help="Front desk assistant composite.")
+    design_link_parser.add_argument("--note-type", choices=NOTE_TYPES, help="Front desk publication note type.")
+    design_link_parser.add_argument("--ref", type=_publication_ref, help="Front desk publication reference.")
+    design_link_parser.add_argument("--why", help="Front desk reason with --note-type other.")
+    design_link_parser.add_argument("--timeout", type=float, default=30.0)
+    design_link_parser.set_defaults(func=send_design_link)
+
 
     send_receipt_parser = subparsers.add_parser(
         "send-receipt", help="read one durable latest receipt for a sent request",

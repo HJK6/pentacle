@@ -15,7 +15,7 @@ function parse(argv) {
 }
 async function run(argv) {
   const { command, options: o } = parse(argv);
-  if (!o.library && ['publish', 'record', 'verify', 'rollback'].includes(command)) o.library = process.env.PENTACLE_DESIGN_LIBRARY_ROOT || path.join(os.homedir(), 'agent-workspace', 'design-library');
+  if (!o.library && ['publish', 'record', 'verify', 'rollback', 'link-preview'].includes(command)) o.library = process.env.PENTACLE_DESIGN_LIBRARY_ROOT || path.join(os.homedir(), 'agent-workspace', 'design-library');
   const need = key => { if (!o[key]) throw new Error(`--${key} is required`); return path.resolve(o[key]); };
   if (command === 'import') {
     const result = library.importDrop({ drop: need('drop'), staging: need('staging'), dependencies: o.dependencies ? library.readJson(need('dependencies')) : {}, library: o.library ? need('library') : null });
@@ -50,6 +50,25 @@ async function run(argv) {
     }
     return { dir, state: manifest.state };
   }
+  if (command === 'link-preview') {
+    if (!o.project || !o.design) throw new Error('Design project and board IDs are required');
+    for (const id of [o.project, o.design, ...(o.view ? [o.view] : [])]) library.assertId(id);
+    const record = library.createLibraryReader(need('library')).selected(o.project);
+    if (record.sync !== 'verified') throw new Error('No verified current revision for this Design project on this host');
+    const { design, view, file } = library.designLinkPreview(record, o.design, o.view);
+    if (file.size > 25 * 1024 * 1024) throw new Error('Recorded PNG exceeds the attachment limit');
+    return {
+      path: library.contained(record.dir, file.path),
+      sha256: file.sha256,
+      dashboard_link: {
+        dashboard: 'design',
+        target: { project_id: o.project, design_id: o.design, ...(o.view ? { view_id: o.view } : {}) },
+        title: o.view ? view.title : design.title,
+        subtitle: design.title,
+        revision_id: record.manifest.revision_id,
+      },
+    };
+  }
   if (command === 'verify') {
     if (o.dir) { const m = library.verifyRevision(need('dir')); return { verified: true, project_id: m.project_id, revision_id: m.revision_id }; }
     const reader = library.createLibraryReader(need('library'));
@@ -80,7 +99,7 @@ async function run(argv) {
     return library.publishRevision({ dir: imported.dir, library: root });
   }
   if (command === 'rollback') return library.rollback({ library: need('library'), project: o.project, revision: o.revision });
-  throw new Error('usage: design-library.cjs import|board|prepare|record|verify|publish|rollback --name value; see docs/design-library.md');
+  throw new Error('usage: design-library.cjs import|board|prepare|record|verify|publish|rollback|link-preview --name value; see docs/design-library.md');
 }
 if (require.main === module) run(process.argv.slice(2)).then(result => console.log(JSON.stringify(result))).catch(error => { console.error(error.message); process.exitCode = 1; });
 module.exports = { parse, run };

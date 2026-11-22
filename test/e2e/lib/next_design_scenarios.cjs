@@ -7,6 +7,8 @@ const { fork } = require('node:child_process');
 const { once } = require('node:events');
 const { rollback, createLibraryReader } = require('../../../lib/design_library.cjs');
 const { stageFixture, project, prototype, phone, legacy, route, label } = require('./next_design_fixture.cjs');
+const { PNG } = require('../../fixtures/design_library.cjs');
+const { createHash } = require('node:crypto');
 
 const design = '/next/design';
 const embed = '/next/embed/design';
@@ -550,6 +552,155 @@ async function standalone(ctx) {
   }
 }
 
+const linkAssistant = 'link-fixture:assistant';
+const linkChat = 'link-fixture:review';
+const linkSelector = path => `[data-next-design-link="${path}"]`;
+const pinnedPhone = design + '/' + project + '/phone-orders/' + phone;
+const pinnedScreen = design + route + '/' + prototype;
+
+async function seedDesignLinks(ctx) {
+  if (ctx.fixture) {
+    await wait(ctx, `window.PentacleChatStore?.getState().sessions.some(
+      row => row.stream_id === ${JSON.stringify(ctx.fixture.streamId)})`, 'workspace snapshot before link seed');
+  }
+  const { revision } = await ctx.runtime.nextDesignFixture;
+  const pngKey = createHash('sha256').update(PNG).digest('hex');
+  const target = (design_id, view_id) => ({ project_id: project, design_id, ...(view_id ? { view_id } : {}) });
+  const link = (target, title, revision_id = revision) => ({
+    dashboard: 'design', ...(target ? { target, revision_id, title, subtitle: label } : {}),
+  });
+  const session = (stream_id, session_name, session_kind, display_name) => ({
+    stream_id, session_name, session_kind, display_name, host: 'link-fixture', visibility: 'default',
+    provider: session_kind === 'assistant_composite' ? 'composite' : 'codex',
+    online: true, draft: '', last_text: '', last_kind: 'ASSIST',
+    last_activity: '2026-01-01T12:00:00Z',
+  });
+  const sessions = [
+    session(linkAssistant, 'assistant', 'assistant_composite', 'Assistant'),
+    session(linkChat, 'review', 'session', 'Design review fixture'),
+  ];
+  const event = (seq, stream, dashboard_link, withoutAttachment = false) => ({
+    stream_id: stream, host: 'link-fixture', session_id: stream, session_name: stream.split(':')[1],
+    kind: 'ASSIST', provider: 'codex', daemon_seq: seq, timestamp: '2026-01-01T12:00:00Z',
+    text: seq === 1 ? 'Review the order prototype.' : '',
+    raw: { dashboard_link },
+    ...(withoutAttachment ? {} : { attachments: [{ mime: 'image/png', key: pngKey, bytes: PNG.length }] }),
+  });
+  const events = [
+    event(1, linkAssistant, link(target('delivery-board', prototype), 'Order prototype')),
+    event(2, linkAssistant, link(null), true),
+    event(3, linkAssistant, link(target('delivery-board', 'missing-screen'), 'Removed screen')),
+    event(4, linkAssistant, link(target('missing-board'), 'Removed board')),
+    event(5, linkChat, link(target('phone-orders', phone), 'Phone order', 'f'.repeat(64))),
+  ];
+  const image = PNG.toString('base64');
+  await ctx.session.eval(`(() => {
+    const previous = window.cc.chatFetchBlob;
+    window.cc.chatFetchBlob = key => key === ${JSON.stringify(pngKey)}
+      ? Promise.resolve({ ok: true, content_b64: ${JSON.stringify(image)} }) : previous(key);
+    window.PentacleChatStore.applyFrame({type:'snapshot', sessions:${JSON.stringify(sessions)}, events:[], drafts:{}});
+    for (const event of ${JSON.stringify(events)}) window.PentacleChatStore.applyFrame({type:'chat.event', event});
+    return true;
+  })()`);
+}
+
+async function designLinkJourney(ctx) {
+  const preview = linkSelector(pinnedScreen);
+  for (const width of [1440, 1010, 702]) {
+    await open(ctx, '/next/', width);
+    await seedDesignLinks(ctx);
+    await wait(ctx, `document.querySelector('${preview} img')?.naturalWidth > 0`, 'recorded preview loaded');
+    await check(ctx, `preview caption, titles and size at ${width} px`, `(() => {
+      const card = document.querySelector('${preview}');
+      const size = card.getBoundingClientRect().width;
+      return innerWidth === ${width} && size > 0 && size <= 296.5 &&
+        card.closest('article.slot-chat-row').textContent.includes('Review the order prototype.') &&
+        card.querySelector('strong').textContent === 'Order prototype' &&
+        card.textContent.includes('Design · Delivery board') &&
+        new URL(card.querySelector('img').src).pathname.includes('/design-preview/');
+    })()`);
+  }
+  await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await click(ctx, preview);
+  await atPath(ctx, pinnedScreen);
+  await boardReady(ctx);
+  await check(ctx, 'Assistant and the selected screen are visible, with the link outlined',
+    `!document.querySelector('.pane').hidden &&
+      document.querySelector('${preview}').getAttribute('aria-pressed') === 'true' &&
+      !!document.querySelector('.design-screen.is-current[data-view="${prototype}"]')`);
+  await click(ctx, '.design-step [aria-label="Previous screen"]');
+  await atPath(ctx, design + route + '/home');
+  await check(ctx, 'stepping clears the outline', `document.querySelector('${preview}').getAttribute('aria-pressed') === 'false'`);
+  await click(ctx, preview);
+  await atPath(ctx, pinnedScreen);
+  await click(ctx, preview);
+  await atPath(ctx, '/next/');
+  await check(ctx, 'second click closes the exact target', 'document.querySelector(".design-card").hidden');
+
+  await click(ctx, linkSelector(design + route + '/missing-screen'));
+  await atPath(ctx, design + route);
+  await boardReady(ctx);
+  await check(ctx, 'a missing screen opens its board', '!document.querySelector(".design-screen.is-current")');
+  await click(ctx, linkSelector(design + '/' + project + '/missing-board'));
+  await atPath(ctx, design);
+  await check(ctx, 'a missing board opens Home with its notice',
+    'document.querySelector(".design-home").textContent.includes("This design is no longer available.")');
+  await click(ctx, '.design-card [aria-label="Close"]');
+  await click(ctx, linkSelector(design));
+  await atPath(ctx, design);
+  await homeReady(ctx);
+  await click(ctx, linkSelector(design));
+  await atPath(ctx, '/next/');
+
+  await click(ctx, '.rail-button[aria-label="Chats"]');
+  await click(ctx, `.popover [data-stream-id="${linkChat}"]`);
+  const phonePreview = linkSelector(pinnedPhone);
+  await wait(ctx, `document.querySelector('${phonePreview} img')?.src.startsWith('data:image/png') &&
+    document.querySelector('${phonePreview} img').naturalWidth > 0`, 'attached PNG fallback');
+  await click(ctx, phonePreview);
+  await atPath(ctx, pinnedPhone);
+  await boardReady(ctx);
+  await check(ctx, 'Design follows the other chat while Assistant steps aside',
+    `document.querySelector('.pane').hidden && !document.querySelector('.card:not(.design-card):not(.lanes-card)').hidden`);
+  await click(ctx, '.design-card [aria-label="Close"]');
+  await check(ctx, 'Assistant returns after Design closes', '!document.querySelector(".pane").hidden');
+
+  await ctx.session.send('Page.navigate', { url: ctx.url });
+  await wait(ctx, 'document.readyState === "complete" && !!document.getElementById("session-list")', 'old web workspace');
+  await seedDesignLinks(ctx);
+  await check(ctx, 'the same event in the old web bundle remains caption plus ordinary image', `(() => {
+    const element = document.createElement('div');
+    window.PentacleChatView.renderStreamTranscript(${JSON.stringify(linkAssistant)}, element);
+    return !element.querySelector('[data-next-design-link]') && !!element.querySelector('.slot-chat-media-img') &&
+      element.textContent.includes('Review the order prototype.');
+  })()`);
+}
+
+async function designLinkPhone(ctx) {
+  await open(ctx, '/next/', 440);
+  await seedDesignLinks(ctx);
+  const selector = linkSelector(pinnedScreen);
+  await wait(ctx, `document.querySelector('${selector} img')?.naturalWidth > 0`, 'phone Design preview');
+  await ctx.session.eval(`document.querySelector('${selector}').scrollIntoView({ block: 'center' })`);
+  await ctx.session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+  try {
+    const pt = await point(ctx, selector, 0.5, 0.85);
+    await touch(ctx, 'touchStart', [[pt.x, pt.y]]);
+    await touch(ctx, 'touchEnd', []);
+    await atPath(ctx, pinnedScreen);
+    await boardReady(ctx);
+    await check(ctx, 'one tap opens the full-width Design screen', `innerWidth === 440 &&
+      document.querySelector('.pane').hidden &&
+      document.querySelector('.design-card').getBoundingClientRect().width === 440 &&
+      !!document.querySelector('.design-screen.is-current[data-view="${prototype}"]')`);
+  } finally {
+    await ctx.session.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  }
+  await click(ctx, '.design-card [aria-label="Close"]');
+  await atPath(ctx, '/next/');
+  await check(ctx, 'closing Design restores the phone chat', '!document.querySelector(".pane").hidden');
+}
+
 function isolated(run) {
   return async ctx => {
     assert.ok(ctx.runtime.fixtureScratch, 'Design scenarios require the isolated web fixture');
@@ -574,4 +725,6 @@ module.exports = [
   ['next-design-phone', isolated(phoneJourney)],
   ['next-design-address', isolated(linkAddresses)],
   ['next-design-embed', isolated(standalone)],
+  ['next-design-link', isolated(designLinkJourney)],
+  ['next-design-link-phone', isolated(designLinkPhone)],
 ];

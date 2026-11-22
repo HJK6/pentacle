@@ -337,6 +337,18 @@
     "not_applicable": null
   },
   {
+    "command": "send-design-link",
+    "argv": [
+      "send-design-link",
+      "fixture",
+      "board",
+      "screen"
+    ],
+    "handler": "agent_orch.cli.send_design_link",
+    "network_entry": "assistant_once / upload_blob_once / send_image_once",
+    "not_applicable": null
+  },
+  {
     "command": "send-file",
     "argv": [
       "send-file",

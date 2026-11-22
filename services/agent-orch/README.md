@@ -1817,3 +1817,22 @@ prior model, invalid target or stale principal fails without applying the update
 Read authority status again to verify the new `session_shape.model`. The bound
 advisor identity and running process are unchanged. No direct database access
 is needed.
+
+### Send a Design link
+
+Run this on the host with the current Design library and Node available.
+
+```sh
+agent-orch send-design-link sample orders phone \
+  --caption "Review the phone screen" --request-id review-orders-phone
+```
+
+The command reads `PENTACLE_DESIGN_LIBRARY_ROOT` or
+`~/agent-workspace/design-library`, verifies the selected revision, and
+attaches the screen's recorded PNG. Omit the screen argument to link to the
+board and use its first screen as the preview. The command refuses missing
+targets and missing or unreadable PNGs. Reuse the request ID when retrying the
+same post. If an ID is omitted, the command generates one for that invocation.
+
+A regular seat posts to its own chat. The bound front desk uses the assistant
+publication path and supplies `--note-type` and `--ref` as for `send-image`.

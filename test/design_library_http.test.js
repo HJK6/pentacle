@@ -114,3 +114,24 @@ test('catalog resolves boards, tracks selected lineage and revalidates with an a
   assert.equal(restored.revision_id, original.revision_id);
   assert.deepEqual(restored.designs.map(design => design.changed_at), [dates[0], dates[0]]);
 });
+
+test('Design link media resolves a board or screen inside its pinned revision', async t => {
+  const h = await start(t, 'token', { configure(descriptor) {
+    descriptor.designs = [{ id: 'orders', title: 'Orders', nodes: [{ type: 'screen', view: 'home' }] }];
+  } });
+  const url = h.url + '/design-media/example/' + h.r.manifest.revision_id + '/design-preview/';
+  const denied = await fetch(url + 'orders', { redirect: 'manual' });
+  assert.ok([302, 401].includes(denied.status));
+  const direct = await fetch(url.replace('/design-preview/', '/screenshots/') + 'home.png', { headers: h.headers });
+  const expected = Buffer.from(await direct.arrayBuffer());
+  assert.ok(expected.length > 8);
+  for (const target of ['orders', 'orders/home']) {
+    const response = await fetch(url + target, { headers: h.headers });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
+  }
+  for (const target of ['missing', 'orders/no-view', 'orders/', 'orders/%68ome', 'orders/home/extra']) {
+    assert.equal((await fetch(url + target, { headers: h.headers })).status, 404);
+  }
+});

@@ -15,6 +15,8 @@ const { createTerminalPaste } = require('../terminal_paste');
 const layout = require('./layout');
 const { createDesignViewer } = require('./design_viewer');
 const { initialDesignRoute, replaceDesignAddress } = require('./design_location');
+const { hydrateDesignPreviews, markDesignLinks } = require('./design_links');
+const { parseDesignRoute } = require('../../lib/design_routes.cjs');
 const { mountComposer } = require('./composer');
 const { mountNewChatForm } = require('./new_chat');
 const { mountLimitsView } = require('./limits_view');
@@ -100,11 +102,12 @@ const newChatMount = node('div', 'new-chat-host', card); newChatMount.hidden = t
 const designCard = node('section', 'card design-card', stage); designCard.hidden = true;
 designCard.setAttribute('aria-label', 'Design');
 const designViewer = createDesignViewer(designCard, {
-  onNavigate: target => replaceDesignAddress(window, target, 'workspace'),
+  onNavigate: onDesignNavigate,
   onFullScreen: () => { state.layout = layout.toggleFullScreen(state.layout, 'dash', innerWidth); syncLayout(); },
   onClose: closeDesign,
 });
 let designOpen = false;
+let currentDesignPath = null;
 const lanesCard = node('section', 'card lanes-card', stage); lanesCard.hidden = true;
 const brand = button('Assistant', '<span class="logo"></span>', 'rail-button brand on'); const group = node('div', 'rail-group', rail); const lanesButton = button('Lanes', icons.lanes, 'rail-button'); const dashboardsButton = button('Dashboards', icons.dashboards, 'rail-button'); const chatsButton = button('Chats', icons.chats, 'rail-button'); const questionsButton = button('Questions', icons.questions, 'rail-button'); group.append(lanesButton, dashboardsButton, chatsButton, questionsButton); rail.prepend(brand); node('div', 'rail-spacer', rail); const limitsButton = button('Limits and machines', icons.limits, 'rail-button'); const settingsButton = button('Settings', icons.settings, 'rail-button'); rail.append(limitsButton, settingsButton);
 const popover = node('div', 'popover', root.querySelector('.next-app')); popover.hidden = true;
@@ -134,12 +137,33 @@ function paintTranscript(element, id) {
   element.dataset.streamId = id || '';
   if (!id) { element.textContent = 'Loading chat…'; return; }
   const detail = store.selectSessionDetail(id, { visibleCount: 120, includeDraft: false });
-  const html = view.renderTranscriptTimelineHtml(detail);
+  const html = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true });
   const targets = element === assistantInner ? laneNameTargets() : [];
   const linkVersion = JSON.stringify(targets);
-  if (element.dataset.rendered !== html || element.dataset.linkVersion !== linkVersion) { const scroller = element.parentElement; const stick = !element.dataset.rendered || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; element.innerHTML = html || '<div class="empty">No messages yet.</div>'; element.dataset.rendered = html; element.dataset.linkVersion = linkVersion; if (element === assistantInner) { linkAssistantNames(element, targets); for (const update of element.querySelectorAll('.slot-chat-lane-update[data-lane-id]')) { update.tabIndex = 0; update.setAttribute('role', 'button'); } } void view.hydrateFileAttachments(element); if (stick) scroller.scrollTop = scroller.scrollHeight; }
+  if (element.dataset.rendered === html && element.dataset.linkVersion === linkVersion) return;
+  const scroller = element.parentElement;
+  const stick = !element.dataset.rendered || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  element.innerHTML = html || '<div class="empty">No messages yet.</div>';
+  element.dataset.rendered = html;
+  element.dataset.linkVersion = linkVersion;
+  if (element === assistantInner) {
+    linkAssistantNames(element, targets);
+    for (const update of element.querySelectorAll('.slot-chat-lane-update[data-lane-id]')) {
+      update.tabIndex = 0;
+      update.setAttribute('role', 'button');
+    }
+  }
+  markDesignLinks(element, designCard.hidden ? null : currentDesignPath);
+  hydrateDesignPreviews(element, key => cc.chatFetchBlob(key));
+  void view.hydrateFileAttachments(element);
+  if (stick) scroller.scrollTop = scroller.scrollHeight;
 }
 for (const transcript of [assistantInner, cardInner]) transcript.addEventListener('click', event => {
+  const designLink = event.target.closest('[data-next-design-link]');
+  if (designLink) {
+    followDesignLink(transcript === assistantInner ? 'assistant' : 'chat', designLink.dataset.nextDesignLink);
+    return;
+  }
   const laneLink = event.target.closest('.next-lane-name-link');
   if (laneLink && transcript === assistantInner) { openLaneTarget(laneLink.dataset.laneId, laneLink.dataset.goalId); return; }
   const laneUpdate = event.target.closest('.slot-chat-lane-update[data-lane-id]');
@@ -220,7 +244,7 @@ function syncLayout() {
   const visible = layout.fits(state.layout, innerWidth);
   assistant.hidden = !visible.assistant;
   card.hidden = !visible.cards.includes('chat');
-  designCard.hidden = !visible.cards.includes('dash');
+  designCard.hidden = !visible.cards.includes('dash') || !state.layout.dash.startsWith('design:');
   stage.classList.toggle('has-design', !designCard.hidden);
   const full = designCard.querySelector('.design-full');
   const fullLabel = state.layout.solo === 'dash' ? 'Leave full screen' : 'Full screen';
@@ -237,16 +261,49 @@ function syncLayout() {
   dashboardsButton.classList.toggle('on', !designCard.hidden);
   dashboardsButton.setAttribute('aria-pressed', String(!designCard.hidden));
   lanesButton.classList.toggle('on', !lanesCard.hidden);
-  if (designOpen && !state.layout.dash) {
+  if (designOpen && !state.layout.dash?.startsWith('design:')) {
     designOpen = false;
+    currentDesignPath = null;
     designViewer.close();
     history.replaceState(history.state, '', '/next/');
   }
+  syncDesignLinkMarks();
+}
+
+function syncDesignLinkMarks() {
+  const path = designCard.hidden ? null : currentDesignPath;
+  markDesignLinks(assistantInner, path);
+  markDesignLinks(cardInner, path);
+}
+
+function onDesignNavigate(target) {
+  const path = core.buildDesignPath(target ?? undefined, 'workspace');
+  currentDesignPath = path;
+  // Keep the shared slot keyed to what the viewer actually shows after stepping,
+  // going Home or following a link whose screen no longer exists.
+  state.layout = { ...state.layout, dash: 'design:' + path };
+  replaceDesignAddress(window, target, 'workspace');
+  syncDesignLinkMarks();
 }
 
 function openDesign(target = null) {
+  const path = core.buildDesignPath(target ?? undefined, 'workspace');
   closePopover();
-  state.layout = layout.show(state.layout, 'dash', 'design', innerWidth);
+  state.layout = layout.show(state.layout, 'dash', 'design:' + path, innerWidth);
+  openDesignViewer(target);
+}
+
+function followDesignLink(source, path) {
+  const route = parseDesignRoute(path);
+  if (route?.mode !== 'workspace') return;
+  closePopover();
+  state.layout = layout.follow(state.layout, source, 'design:' + path, innerWidth);
+  if (state.layout.dash) openDesignViewer(route.target);
+  else syncLayout();
+}
+
+function openDesignViewer(target) {
+  currentDesignPath = null;
   syncLayout();
   designOpen = true;
   void designViewer.open(target);
