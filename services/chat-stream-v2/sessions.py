@@ -297,7 +297,7 @@ class Sessions:
         # graph. Real Store instances share their fence with ownership writes.
         self._graph_lock = getattr(store, "session_graph_lock", None) or asyncio.Lock()
         if store is not None:
-            store.lane_presence_reader = self.list_open
+            store.lane_presence_reader = self.lane_presence
         #: Ledger callback for confirmed-dead close resolution. The callback is
         #: optional so the registry remains usable in focused lifecycle tests.
         self._awaiter_resolver: Any = None
@@ -606,6 +606,11 @@ class Sessions:
             self._replace_inventory_locked(rebuilt)
         with self._inventory_context():
             return len(self._inv)
+
+    def lane_presence(self) -> list[dict[str, Any]]:
+        """Copy actual observer rows, without the wire inventory's fallbacks."""
+        with self._inventory_context():
+            return [dict(row) for row in self._inv.values()]
 
     def list_open(self) -> list[dict[str, Any]]:
         from agents_roster import project

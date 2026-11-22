@@ -761,7 +761,12 @@ def test_paused_lane_resumes_for_live_assigned_worker(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
         lane = await build_lane(env, root, key='stream:resume', goal='resume', items=[('i1', 'in_progress')])
-        await env.store.open_session('host-a', 'resume-worker', role='worker', assigned_spec_id='spec_demo__i1')
+        from test_work_lanes import _lane_activity
+        row = await env.store.open_session('host-a', 'resume-worker', role='worker', assigned_spec_id='spec_demo__i1')
+        target = ('host-a:resume-worker', row['session_generation'])
+        env.store.lane_presence_reader = lambda: [_lane_activity(*target)]
+        assert (await lifecycle(env))['resumed'] == []
+        env.store.lane_presence_reader = lambda: [_lane_activity(*target, working=True)]
         result = await lifecycle(env)
         assert lane['lane_id'] in result['resumed']
         current = await lane_now(env, lane['lane_id'])
@@ -779,7 +784,10 @@ def test_resume_seat_eligibility(tmp_path, role, pane, expected):
     root = tmp_path / 'memory'
     async def body(env):
         lane = await build_lane(env, root, key='stream:seat', goal='seat', items=[('i1', 'in_progress')])
-        await env.store.open_session('host-a', 'seat', role=role, pane_status=pane, assigned_spec_id='spec_demo__i1')
+        from test_work_lanes import _lane_activity
+        row = await env.store.open_session('host-a', 'seat', role=role, pane_status=pane, assigned_spec_id='spec_demo__i1')
+        env.store.lane_presence_reader = lambda: [_lane_activity('host-a:seat', row['session_generation'],
+            working=role != 'planner', dead=pane == 'pane_dead')]
         result = await lifecycle(env)
         assert (lane['lane_id'] in result['resumed']) is expected
     run(body, str(tmp_path / 'seat.db'))
@@ -868,7 +876,9 @@ def test_resume_version_conflict_keeps_lane_paused(tmp_path):
     root = tmp_path / 'memory'
     async def body(env):
         lane = await build_lane(env, root, key='stream:conflict', goal='conflict', items=[('i1', 'in_progress')])
-        await env.store.open_session('host-a', 'worker', role='worker', assigned_spec_id='spec_demo__i1')
+        from test_work_lanes import _lane_activity
+        row = await env.store.open_session('host-a', 'worker', role='worker', assigned_spec_id='spec_demo__i1')
+        env.store.lane_presence_reader = lambda: [_lane_activity('host-a:worker', row['session_generation'], working=True)]
         def conflict(conn):
             conn.execute("CREATE TRIGGER reject_resume BEFORE UPDATE OF work_state ON v2_assistant_composite_lanes WHEN NEW.work_state='active' BEGIN SELECT RAISE(IGNORE); END")
         await env.store.submit(conflict)
