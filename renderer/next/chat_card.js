@@ -5,20 +5,31 @@ const { mountNewChatForm } = require('./new_chat');
 const { statusRollup, nextMode } = require('./status_card');
 const { createTerminalView, disposeTerminalView } = require('../terminal_view');
 const { createTerminalPaste } = require('../terminal_paste');
+const { mountWorkingRow, modelAndEffort } = require('./chat_status');
 const NEW_CHAT = '__new__';
 
 // One card owns its DOM, recorder, form generation and PTY slot. The shared
 // store remains the source for transcript/status, and drafts stay per stream.
 function mountChatCard(stage, { key, slot, icons, node, button, sessions, store, cc, config,
   drafts, history, paintTranscript, attachTranscript, requestHistory, catalogLoader,
-  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse }) {
+  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor }) {
   const env = stage.ownerDocument.defaultView;
   const card = node('section', 'card chat-card', stage);
   card.dataset.pane = key;
   card.hidden = true;
   const head = node('header', 'card-head', card);
   head.dataset.grab = key;
-  const title = node('div', 'card-title', head);
+  const heading = node('div', 'card-title', head);
+  const title = button('Switch chat', '', 'next-chat-title');
+  const titleName = node('span', '', title);
+  const chevron = node('i', 'next-title-chevron', title);
+  chevron.setAttribute('aria-hidden', 'true');
+  heading.append(title);
+  title.setAttribute('aria-expanded', 'false');
+  title.setAttribute('aria-controls', 'next-workspace-popover');
+  const model = node('div', 'next-chat-model', heading);
+  model.hidden = true;
+  title.onclick = () => onSwitch(key);
   const statusButton = button('Status', icons.status, 'icon-button');
   const terminalButton = button('Terminal', icons.terminal, 'icon-button');
   const fullButton = button('Full screen', icons.full, 'icon-button fullscreen');
@@ -32,6 +43,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   const statusMount = node('div', 'status', card);
   const composerMount = node('div', 'composer-host', card);
   const newChatMount = node('div', 'new-chat-host', card);
+  const showWorking = mountWorkingRow(composerMount);
   for (const el of [terminalMount, statusMount, newChatMount]) el.hidden = true;
 
   let selected = null, admitted = null, mode = 'thread', composer = null;
@@ -39,7 +51,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   let terminal = null, terminalGeneration = 0, terminalQueue = Promise.resolve();
   const session = () => sessions().find(s => s.stream_id === selected) ??
     (admitted?.stream_id === selected ? admitted : null);
-  const getSessionName = s => s.display_name || s.title || s.session_name;
+  const getSessionName = s => nameFor(s);
 
   function disposeTerminal() {
     terminalGeneration++;
@@ -121,7 +133,11 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   function render() {
     const s = selected && selected !== NEW_CHAT ? session() : null;
     if (mode !== 'new' && s) {
-      title.textContent = getSessionName(s);
+      titleName.textContent = getSessionName(s);
+      title.setAttribute('aria-label', getSessionName(s));
+      title.title = getSessionName(s);
+      model.textContent = modelAndEffort(s);
+      model.hidden = !model.textContent;
       statusButton.hidden = !s.status_card;
       paintTranscript(inner, s.stream_id);
       if (restoredScroll !== null && !card.hidden && mode === 'thread') {
@@ -186,12 +202,15 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     }
   }
 
-  function setStream(id, seed) {
-    if (id === selected) return;
-    ++selection;
+  function saveHistory() {
     if (selected && selected !== NEW_CHAT) history.set(selected, {
       scroll: mode === 'thread' && !card.hidden ? body.scrollTop : history.get(selected)?.scroll ?? null,
     });
+  }
+
+  function setStream(id, seed) {
+    if (id === selected) return;
+    ++selection;
     newChatControl?.destroy();
     newChatControl = null;
     disposeTerminal();
@@ -200,7 +219,10 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     composer = null;
     selected = id;
     admitted = seed;
-    title.textContent = '';
+    titleName.textContent = id === NEW_CHAT ? 'New chat' : '';
+    title.hidden = !id || id === NEW_CHAT;
+    model.hidden = true;
+    showWorking(false, '');
     inner.replaceChildren();
     delete inner.dataset.rendered;
     delete inner.dataset.linkVersion;
@@ -239,7 +261,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   statusButton.onclick = () => setMode('status');
   terminalButton.onclick = () => setMode('terminal');
 
-  return { element: card, transcript: inner, render, setStream, setVisible,
+  return { element: card, transcript: inner, title, render, setStream, setVisible, showWorking, session, saveHistory,
     focus() { composer?.focus(); }, get id() { return selected; } };
 }
 

@@ -28,6 +28,10 @@ const { createQuestions } = require('./questions');
 const { createQuestionNotifications } = require('./question_notifications');
 const { mountLanesCard, renderLaneIcon } = require('./lanes');
 const { applyVersionedConnectionState } = require('../chat_stream_connection_state');
+const { mountChatList } = require('./chat_list');
+const { isProtectedAssistant } = require('../chat_presentation');
+const { configuredAssistantRole } = require('../assistant_role');
+const { isWorking, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines } = require('./chat_status');
 const store = window.PentacleChatStore;
 const view = window.PentacleChatView;
 const core = window.PentacleChatCore;
@@ -71,9 +75,19 @@ function applyLaneFrame(frame) {
     pendingLaneLink = null;
   }
 }
-function readSetting(key) {
-  try { return window.localStorage.getItem(key); } catch { return null; }
-}
+let storage;
+try { storage = window.localStorage; } catch {}
+const readSetting = key => { try { return storage?.getItem(key); } catch { return null; } };
+const seen = createSeenMarks(storage);
+const clock = workingClock();
+const pendingNames = new Map();
+const pendingDeletes = new Set();
+const hiddenClosed = new Set();
+const role = configuredAssistantRole(config.features);
+const isProtected = session => isProtectedAssistant([session], role);
+let chatList = null;
+let switchSeat = null;
+let inventorySeen = false;
 const railKey = 'pentacle.next.rail';
 const state = { layout: layout.createLayoutState(innerWidth, readSetting(railKey)), popover: null, hosts: {}, connected: false };
 const icons = {
@@ -106,6 +120,7 @@ const assistantThread = node('div', 'thread', assistant);
 const assistantInner = node('div', 'thread-inner', assistantThread);
 const assistantVoice = node('div', 'voice-host', assistantThread);
 const assistantComposer = node('div', 'composer-host', assistant);
+const showAssistantWorking = mountWorkingRow(assistantComposer);
 const chatHistory = new Map();
 const usePane = key => { state.layout = layout.markUsed(state.layout, key); };
 const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, mountChatCard(stage, {
@@ -113,6 +128,7 @@ const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, moun
   paintTranscript, attachTranscript, requestHistory, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
+  onSwitch: openChatSwitch, nameFor: chatName,
 })]));
 const designCard = node('section', 'card design-card', stage); designCard.hidden = true;
 designCard.setAttribute('aria-label', 'Design');
@@ -132,13 +148,136 @@ let designOpen = false;
 let currentDesignPath = null;
 const lanesCard = node('section', 'card lanes-card', stage); lanesCard.hidden = true; lanesCard.dataset.pane = 'lanes';
 const brand = button('Assistant', '<span class="logo"></span>', 'rail-button brand on'); const group = node('div', 'rail-group', rail); const lanesButton = button('Lanes', icons.lanes, 'rail-button'); const dashboardsButton = button('Dashboards', icons.dashboards, 'rail-button'); const chatsButton = button('Chats', icons.chats, 'rail-button'); const questionsButton = button('Questions', icons.questions, 'rail-button'); group.append(lanesButton, dashboardsButton, chatsButton, questionsButton); rail.prepend(brand); node('div', 'rail-spacer', rail); const limitsButton = button('Limits and machines', icons.limits, 'rail-button'); const settingsButton = button('Settings', icons.settings, 'rail-button'); rail.append(limitsButton, settingsButton);
-const popover = node('div', 'popover', root.querySelector('.next-app')); popover.hidden = true;
+const popover = node('div', 'popover', root.querySelector('.next-app')); popover.hidden = true; popover.id = 'next-workspace-popover';
+chatsButton.classList.add('chats-button');
+chatsButton.setAttribute('aria-expanded', 'false');
+chatsButton.setAttribute('aria-controls', popover.id);
 let assistantComposerControl = null; let assistantComposerStream = null; let limitsControl = null;
 let unmountQuestionList = null;
 function mountAssistantComposer(id) { if (!id || id === assistantComposerStream) return; assistantComposerControl?.dispose(); assistantComposerStream = id; assistantComposerControl = mountComposer({ host: assistantComposer, transcript: assistantVoice, streamId: id, drafts, cc, chatStore: store }); }
-function closePopover() { unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
-function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
+function closePopover() {
+  chatList?.destroy(); chatList = null;
+  if (switchSeat) cards[switchSeat].title.setAttribute('aria-expanded', 'false');
+  switchSeat = null;
+  chatsButton.setAttribute('aria-expanded', 'false');
+  unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
+function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; popover.classList.remove('chat-switch'); ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
 function sessions() { return store.getState().sessions || []; }
+function visibleChats() {
+  return filterSidebarSessions(sessions()).filter(s => s.session_kind !== 'assistant_composite' &&
+    !hiddenClosed.has(s.stream_id) && !s.closed && s.status !== 'closed' && s.session_state !== 'closed' && s.state !== 'closed');
+}
+function chatName(s) { return pendingNames.get(s.stream_id)?.name || s.display_name || s.title || s.session_name; }
+function draftFor(s) { return s ? store.getState().drafts?.[s.stream_id] : undefined; }
+function working(s) { return s && isWorking(s, draftFor(s), store.getTurnPhase?.(s.stream_id)); }
+function target(s) {
+  const hostId = (config.hostIds || ['local']).find(id =>
+    hostPresentation.streamHost(config, id).toLowerCase() === String(s.host || '').toLowerCase())
+    || s.hostId || s.host;
+  return [hostId, s.session_name];
+}
+async function renameChat(id, name) {
+  const s = visibleChats().find(row => row.stream_id === id);
+  if (!s || isProtected(s) || pendingNames.has(id) || pendingDeletes.has(id)) return;
+  const args = target(s);
+  if (!args.every(Boolean)) return;
+  const pending = { name, confirmed: false, complete: false };
+  pendingNames.set(id, pending);
+  render();
+  try {
+    if (!(await cc.chatRename(...args, name))?.ok) pendingNames.delete(id);
+    else { pending.complete = true; if (pending.confirmed) pendingNames.delete(id); }
+  } catch { pendingNames.delete(id); }
+  render();
+}
+async function deleteChat(id) {
+  const s = visibleChats().find(row => row.stream_id === id);
+  if (!s || isProtected(s) || pendingNames.has(id) || pendingDeletes.has(id)) return;
+  const [hostId, sessionName] = target(s);
+  if (!hostId || !sessionName) return;
+  pendingDeletes.add(id);
+  render();
+  try {
+    if ((await cc.chatClose(hostId, sessionName, { operatorConfirm: true, force: true }))?.ok) {
+      if (sessions().some(row => row.stream_id === id)) hiddenClosed.add(id);
+      seen.forget(id);
+      const seat = Object.keys(cards).find(key => cards[key].id === id);
+      if (seat) closeCard(seat);
+    }
+  } catch {
+    // A refusal or failed transport leaves the row and its card alone.
+  } finally {
+    pendingDeletes.delete(id);
+    render();
+  }
+}
+function beforeStoreFrame(frame) {
+  if (!frame || frame.connected === false || !Array.isArray(frame.sessions) ||
+      !['snapshot', 'session.inventory'].includes(frame.type)) return;
+  const rows = frame.sessions;
+  const ids = new Set(rows.map(s => s.stream_id));
+  for (const id of hiddenClosed) if (!ids.has(id)) hiddenClosed.delete(id);
+  for (const s of rows) {
+    const p = pendingNames.get(s.stream_id);
+    if (p && (s.display_name || s.title || s.session_name) === p.name) {
+      p.confirmed = true;
+      if (p.complete) pendingNames.delete(s.stream_id);
+    }
+  }
+  inventorySeen ||= rows.length > 0;
+}
+function paintChatStatus() {
+  const a = assistantSession();
+  const active = new Set(Object.values(cards).filter(card => !card.element.hidden && card.id !== NEW_CHAT).map(card => card.id));
+  if (a && !assistant.hidden) active.add(a.stream_id);
+  seen.update(sessions().filter(s => !hiddenClosed.has(s.stream_id)), active, !document.hidden, inventorySeen);
+  const unread = visibleChats().filter(s => seen.unread(s)).length;
+  if (unread) chatsButton.dataset.count = String(unread); else delete chatsButton.dataset.count;
+  chatsButton.setAttribute('aria-label', unread ? 'Chats, ' + unread + ' unread' : 'Chats');
+  brand.classList.toggle('assistant-unread', assistant.hidden && seen.unread(a));
+  clock.retain(new Set(sessions().map(s => s.stream_id)));
+  paintWorking();
+  if (chatList) paintChatList();
+}
+function paintWorking() {
+  const a = assistantSession();
+  brand.classList.toggle('assistant-working', !!working(a));
+  const tick = (s, draw) => {
+    const now = Date.now();
+    draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnPhase?.(s.stream_id) : undefined,
+      s ? store.getWorkingElapsedMs?.(s.stream_id, now) : null, now));
+  };
+  tick(a, showAssistantWorking);
+  for (const card of Object.values(cards)) tick(card.session(), card.showWorking);
+}
+function paintChatList() {
+  const selected = switchSeat ? [cards[switchSeat].id] : Object.values(cards).filter(c => !c.element.hidden).map(c => c.id);
+  chatList.update(visibleChats().sort((a,b) => String(b.last_activity || b.last_event_at || '').localeCompare(String(a.last_activity || a.last_event_at || '')))
+    .map(s => ({ id: s.stream_id, name: chatName(s), working: !!working(s), unread: seen.unread(s),
+      selected: selected.includes(s.stream_id), protectedRow: isProtected(s),
+      pending: pendingNames.has(s.stream_id) || pendingDeletes.has(s.stream_id) })));
+}
+function openChatSwitch(seat) {
+  if (switchSeat === seat) { closePopover(); return; }
+  closePopover();
+  switchSeat = seat;
+  state.popover = 'switch';
+  cards[seat].title.setAttribute('aria-expanded', 'true');
+  popover.hidden = false;
+  popover.classList.remove('bottom', 'limits-popover', 'questions-popover');
+  popover.classList.add('chat-switch');
+  renderPopover();
+  anchorPopover();
+}
+function chooseChat(id) {
+  const seat = switchSeat;
+  closePopover();
+  if (!seat) { openChat(id || NEW_CHAT); return; }
+  state.layout = layout.switchChat(state.layout, seat, id || NEW_CHAT);
+  syncLayout();
+  cards[seat].focus();
+  render();
+}
 function assistantSession() { return uniqueAssistantComposite(sessions()); }
 function requestHistory(id) { if (id) cc.requestStreamEvents({ streamId: id }).catch(() => {}); }
 function laneNameTargets() {
@@ -157,13 +296,17 @@ function paintTranscript(element, id) {
   element.dataset.streamId = id || '';
   if (!id) { element.textContent = 'Loading chat…'; return; }
   const detail = store.selectSessionDetail(id, { visibleCount: 120, includeDraft: false });
-  const html = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true });
+  const html = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, streamId: id, allowQueuedSendNow: true });
   const targets = element === assistantInner ? laneNameTargets() : [];
   const linkVersion = JSON.stringify(targets);
-  if (element.dataset.rendered === html && element.dataset.linkVersion === linkVersion) return;
+  if (element.dataset.rendered === html && element.dataset.linkVersion === linkVersion) {
+    decorateSendLines(element, store);
+    return;
+  }
   const scroller = element.parentElement;
   const stick = !element.dataset.rendered || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
   element.innerHTML = html || '<div class="empty">No messages yet.</div>';
+  decorateSendLines(element, store);
   element.dataset.rendered = html;
   element.dataset.linkVersion = linkVersion;
   if (element === assistantInner) {
@@ -194,11 +337,20 @@ function attachTranscript(transcript, source) { transcript.addEventListener('cli
   const retry = event.target.closest('.slot-chat-send-retry');
   if (retry) store.retryOptimisticSend(retry.dataset.optimisticId);
   const sendNow = event.target.closest('.slot-chat-send-now');
-  if (sendNow) store.sendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId);
+  if (sendNow && store.canSendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId)) store.sendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId);
 }); }
 attachTranscript(assistantInner, 'assistant');
 assistantInner.addEventListener('keydown', event => { const update = event.target.closest('.slot-chat-lane-update[data-lane-id]'); if (update && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openLaneTarget(update.dataset.laneId); } });
 function renderPopover() {
+  if (state.popover === 'chats' || state.popover === 'switch') {
+    if (!chatList) {
+      popover.replaceChildren();
+      chatList = mountChatList(popover, { choose: chooseChat, rename: renameChat, remove: deleteChat });
+    }
+    if (!switchSeat) chatsButton.setAttribute('aria-expanded', 'true');
+    paintChatList();
+    return;
+  }
   if (state.popover === 'limits' && limitsControl) { limitsControl.update({ limits: store.getLimits(), hosts: state.hosts }); return; }
   popover.replaceChildren();
   if (state.popover === 'dashboards') {
@@ -207,12 +359,6 @@ function renderPopover() {
       row.onclick = () => open();
       popover.append(row);
     }
-  } else if (state.popover === 'chats') {
-    const newChat = button('New chat', 'New chat'); newChat.onclick = () => { closePopover(); openNewChat(); }; popover.append(newChat);
-    const visible = filterSidebarSessions(sessions()).filter(s => s.session_kind !== 'assistant_composite').sort ( (a,b) => String(b.last_activity || b.last_event_at || '').localeCompare(String(a.last_activity || a.last_event_at || '')) );
-    if (!visible.length) { const empty = node('div', 'empty', popover); empty.textContent = 'No chats yet.'; }
-    const draftsByStream = store.getState().drafts || {};
-    for (const session of visible) { const row = button(session.display_name || session.title || session.session_name, ''); row.dataset.streamId = session.stream_id; if (session.working || draftsByStream[session.stream_id]?.raw?.working) node('span', 'live-dot', row); row.append(document.createTextNode(session.display_name || session.title || session.session_name)); row.onclick = () => { closePopover(); openChat(session.stream_id); }; popover.append(row); }
   } else if (state.popover === 'questions') {
     unmountQuestionList = questionsControl?.mountList(popover) || null;
   } else if (state.popover === 'settings') {
@@ -251,6 +397,7 @@ function render() {
   keepButton.setAttribute('aria-label', `Keep ${assistantName} on screen`);
   keepButton.title = keepButton.getAttribute('aria-label');
   for (const card of Object.values(cards)) card.render();
+  paintChatStatus();
   const meters = document.createElement('span'); meters.className = 'rail-meters'; meters.setAttribute('aria-hidden', 'true'); for (const limit of store.getLimits()) { const bar = document.createElement('i'); bar.style.height = `${Math.max(3, Math.round((limit.pct || 0) * 0.13) + 3)}px`; meters.append(bar); } limitsButton.replaceChildren(meters);
   if (state.popover && state.popover !== 'questions') renderPopover();
 }
@@ -263,6 +410,7 @@ function syncLayout(admitted = null) {
   assistant.hidden = !visible.assistant && !overlay;
   assistant.classList.toggle('assistant-overlay', overlay);
   keepButton.hidden = !overlay;
+  for (const [key, card] of Object.entries(cards)) if (card.id !== state.layout[key]) card.saveHistory();
   for (const [key, card] of Object.entries(cards)) {
     const id = state.layout[key];
     card.setStream(id, id && admitted?.stream_id === id ? admitted : null);
@@ -309,6 +457,8 @@ function syncLayout(admitted = null) {
   if (state.layout.dash !== 'melody' && location.hash === '#melody') {
     history.replaceState(history.state, '', '/next/');
   }
+  if (switchSeat && cards[switchSeat].element.hidden) closePopover();
+  paintChatStatus();
   anchorPopover();
   syncDesignLinkMarks();
 }
@@ -383,6 +533,13 @@ function dismissOverlay() {
 }
 function anchorPopover() {
   if (!state.popover) return;
+  if (switchSeat) {
+    const rect = cards[switchSeat].title.getBoundingClientRect();
+    const low = cards[switchSeat].title.parentElement.getBoundingClientRect().bottom;
+    popover.style.setProperty('--switch-x', Math.max(8, Math.min(rect.left - 8, innerWidth - 324)) + 'px');
+    popover.style.setProperty('--switch-y', Math.min(low + 6, innerHeight - 70) + 'px');
+    return;
+  }
   const anchor = ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton,
     limits: limitsButton, settings: settingsButton })[state.popover].getBoundingClientRect();
   const top = rail.getBoundingClientRect().bottom;
@@ -443,6 +600,11 @@ questionsButton.onclick = () => togglePopover('questions');
 limitsButton.onclick = () => togglePopover('limits');
 settingsButton.onclick = () => togglePopover('settings');
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && state.popover && chatList) {
+    if (chatList.escape()) return;
+    const anchor = switchSeat ? cards[switchSeat].title : chatsButton;
+    closePopover(); anchor.focus(); return;
+  }
   if (event.key === 'Escape' && state.layout.overlay) { event.preventDefault(); dismissOverlay(); return; }
   if (state.popover && event.key === 'Escape') { closePopover(); return; }
   if (!designCard.hidden && (designCard.contains(event.target) || event.target === document.body) && designViewer.handleKey(event)) {
@@ -454,7 +616,7 @@ document.addEventListener('keydown', event => {
     syncLayout();
   }
 });
-document.addEventListener('click', event => { const path = event.composedPath?.() || []; if (state.popover && !path.includes(popover) && !path.includes(rail) && !popover.contains(event.target) && !rail.contains(event.target)) closePopover(); });
+document.addEventListener('click', event => { const path = event.composedPath?.() || []; if (state.popover === 'switch') { if (!path.includes(cards[switchSeat].title) && !path.includes(popover)) closePopover(); return; } if (state.popover && !path.includes(popover) && !path.includes(rail) && !popover.contains(event.target) && !rail.contains(event.target)) closePopover(); });
 document.addEventListener('pointerdown', event => {
   if (state.layout.overlay && !event.composedPath().includes(assistant) && !event.composedPath().includes(brand)) dismissOverlay();
 });
@@ -481,14 +643,14 @@ store.subscribe(() => { const id = assistantSession()?.stream_id; if (id && id !
 laneListeners.add(() => { questionsControl.update({ inventory: laneInventory }); lanesControl?.render(); render(); });
 laneReads.subscribe(() => render());
 let recoveryEpoch = null; let recoveryPending = false; let readySignals = 0;
-cc.onChatStreamFrame(frame => { store.applyFrame(frame); applyLaneFrame(frame); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
+cc.onChatStreamFrame(frame => { beforeStoreFrame(frame); store.applyFrame(frame); applyLaneFrame(frame); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
 async function loadSnapshot() {
   if (recoveryPending) return; recoveryPending = true;
   const signal = readySignals;
   try {
     const connection = cc.webConnectionState?.(); const snapshot = await cc.getChatStreamState();
     const current = cc.webConnectionState?.(); if (connection && (!current?.open || current.epoch !== connection.epoch)) return;
-    state.connected = !!snapshot?.connected; state.hosts = snapshot?.hosts_stats || {}; store.applyFrame({ type: 'snapshot', ...(snapshot || {}) }); applyLaneFrame({ type: 'snapshot', ...(snapshot || {}) }); questionNotifications.frame(snapshot);
+    state.connected = !!snapshot?.connected; state.hosts = snapshot?.hosts_stats || {}; const snapshotFrame = { type: 'snapshot', ...(snapshot || {}) }; beforeStoreFrame(snapshotFrame); store.applyFrame(snapshotFrame); applyLaneFrame({ type: 'snapshot', ...(snapshot || {}) }); questionNotifications.frame(snapshot);
     void questionNotifications.refreshIdentities();
     if (typeof cc.notificationList === 'function') void cc.notificationList({ states: ['open'] }).then(reply => { if (Array.isArray(reply?.notifications)) questionNotifications.ingest(reply.notifications); }).catch(() => {});
     if (snapshot?.connected && recoveryEpoch !== null && current?.epoch === recoveryEpoch) {
@@ -513,4 +675,6 @@ const designRoute = initialDesignRoute(window, 'workspace');
 if (designRoute) openDesign(designRoute.target);
 else if (location.hash === '#melody') openMelody();
 else syncLayout();
+document.addEventListener('visibilitychange', paintChatStatus);
+window.setInterval(paintWorking, 1000);
 void loadSnapshot().catch(() => render());
