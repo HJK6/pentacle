@@ -57,6 +57,7 @@ except ImportError:  # pragma: no cover
 
 from _shared import operator_auth
 from _shared.asset_schema import hosted_dashboard_policy
+from _shared.report_payload_v1 import is_advisor_rule_report
 from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
 from tmux_transport import sanitize_injectable
 import store_lifecycle_authority as lifecycle_authority
@@ -2651,7 +2652,11 @@ class Server:
                     await self.store.require_current_actor(*actor)
                     if self._rejected_rpc(websocket, verb):
                         return [self._auth_error_frame(verb, request_id, "authentication_required")]
-                    reply = await handler(dispatch_msg)
+                    if (handler == self._on_report and websocket in self._clients
+                            and is_advisor_rule_report(dispatch_msg)):
+                        reply = await self._on_report(dispatch_msg, connected_seat=True)
+                    else:
+                        reply = await handler(dispatch_msg)
             else:
                 if self._rejected_rpc(websocket, verb):
                     return [self._auth_error_frame(verb, request_id, "authentication_required")]
@@ -5298,12 +5303,14 @@ class Server:
             "type", "request_id", "report_id", "from_stream_id", "stream_token",
         } for key in msg):
             raise VerbError("invalid_report_lookup", "report_id is the only lookup argument")
+        from _shared.advisor_rule import ACCEPT_KEY
         if not isinstance(report_id, str) or not report_id.strip() or len(report_id) > 200:
             raise VerbError("invalid_report_id", "report_id must be a nonempty string of at most 200 characters")
         # Only ingestion is authoritative. Rejection history and live reporter
         # sessions have no bearing on this immutable accepted row.
         try:
-            report = await self.store.get_report(report_id)
+            report = (await self.store.get_report(report_id, include_advisor_rule=True)
+                      if service_reader else await self.store.get_report(report_id))
         except Exception as exc:
             raise VerbError("unavailable", "report store is unavailable") from exc
         if report is None:
@@ -5313,6 +5320,8 @@ class Server:
         )}}
         if report.get("completion_kind") == "seat_only":
             response.update(completion_kind="seat_only", provenance_qualified_spec_ids=[])
+        if service_reader and ACCEPT_KEY in report:
+            response.update({ACCEPT_KEY: report[ACCEPT_KEY], "session_generation": report["session_generation"]})
         # The dedicated reader may verify protected releases. Other metadata
         # readers retain their original response, and opaque payload stays private.
         extras = report.get("extras")
@@ -5660,10 +5669,13 @@ class Server:
     async def _on_inbound_audit(self, msg: dict[str, Any]) -> dict[str, Any]:
         return await self.ledger.inbound_audit(msg)
 
-    async def _on_report(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _on_report(self, msg: dict[str, Any], *, connected_seat: bool = False) -> dict[str, Any]:
         # Snapshot the authenticated generation before persistence can yield to
         # a close/reopen. The current session is not a replacement credential.
         auth = dict(msg.get("_auth_context") or {})
+        if is_advisor_rule_report(msg):
+            binding_conn = self.lane_rulings.binding_conn if connected_seat and self.lane_rulings else None
+            return await self.ledger.report(msg, advisor_binding_conn=binding_conn)
         extras = msg.get("extras")
         correlation = extras.get("assistant_composite") if isinstance(extras, dict) else None
         composite = self._composite_for(

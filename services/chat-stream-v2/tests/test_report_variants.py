@@ -807,3 +807,225 @@ def test_no_findings_marker_keeps_request_hash(monkeypatch: pytest.MonkeyPatch) 
             store.stop()
 
     asyncio.run(go())
+
+
+def test_advisor_progress_with_unstamped_tell_cannot_attest(tmp_path):
+    from test_advisor_rule_forward import rule_fixture, seat, rule_report, SEAT_A, SEAT_B, WORDS, TELL_ID
+
+    async def run():
+        async with rule_fixture(tmp_path) as (h, _):
+            async with seat(h, SEAT_A) as fd, seat(h, SEAT_B) as advisor:
+                ordinary = await fd("tell", to_stream_id=SEAT_B, text=WORDS, tell_id=TELL_ID)
+                assert ordinary["delivery_status"] == "delivered"
+                report = await advisor("report", **rule_report())
+                assert report.get("error_code") == "advisor_rule_event_unverified"
+                assert await h.store.get_report("fixture-rule-report") is None
+    asyncio.run(run())
+
+
+def test_advisor_accept_reports_validate_strict_shape_before_any_write(tmp_path):
+    from test_advisor_rule_forward import rule_fixture, rule_report, seat, SEAT_B
+
+    invalid_reviews = [
+        {"version": True}, {"version": 2}, {"verdict": "reject"},
+        {"operator_message_id": ""}, {"operator_message_id": "wrong\ninput"},
+        {"fd_event_id": 12}, {"fd_event_id": "x" * 201}, {"path": "docs/reference/alternate.md"},
+        {"base_revision": "A" * 64}, {"new_bytes_sha256": "b" * 63},
+        {"scope": {"mode": "other", "removed": [], "added": []}},
+        {"scope": {"mode": "single", "removed": [], "added": []}},
+        {"scope": {"mode": "single", "removed": [], "added": ["c" * 64] * 2}},
+        {"scope": {"mode": "batch", "removed": ["b" * 64, "a" * 64], "added": []}},
+        {"scope": {"mode": "batch", "removed": ["z" * 64], "added": []}},
+        {"scope": {"mode": "reorganize", "removed": [], "added": [], "other": "forged"}},
+        {"fd_binding_revision": 0}, {"operator_text_sha256": "a" * 64},
+    ]
+
+    async def run():
+        async with rule_fixture(tmp_path) as (h, _), seat(h, SEAT_B) as advisor:
+            frames = [rule_report(**review) for review in invalid_reviews]
+            for key in rule_report()["extras"]["advisor_rule"]:
+                missing = rule_report()
+                missing["extras"]["advisor_rule"].pop(key)
+                frames.append(missing)
+            frames += [{**rule_report(), **claims} for claims in (
+                {"status": "done"}, {"msg_id": False}, {"msg_id": 6}, {"report_id": None},
+                {"terminate": True}, {"close_on_ingest": True}, {"operator_confirm": True},
+                {"discharges": ["one"]}, {"qa_verdict": "accept"}, {"completion_kind": "implementation_ready"},
+                {"advisor_rule_accept": {}}, {"session_generation": "forged"},
+                {"details": {"nested": [{"fd_generation": "forged"}]}},
+                {"extras": {"advisor_rule_accept": {}}}, {"extras": {"advisor_rule": None}},
+            )]
+            for fields in frames:
+                refused = await advisor("report", **fields)
+                assert refused.get("error_code") == "advisor_rule_invalid", refused.get("error_code")
+            assert await h.store.get_report("fixture-rule-report") is None
+            side_effects = await h.store.submit(lambda conn: tuple(
+                conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (
+                    "v2_report_rejections", "v2_outbound_notices", "v2_assistant_composite_terminal_reports",
+                )))
+            assert side_effects == (0, 0, 0)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("commit_first", [False, True])
+def test_live_retained_advisor_rebind_serializes_with_accept_insert(tmp_path, monkeypatch, commit_first):
+    from test_advisor_rule_forward import (
+        admit, forward, operator, rule_fixture, rule_report, seat, SEAT_A, SEAT_B, SENDER,
+    )
+
+    async def run():
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            assert (await admit(socket))["type"] == "send.result"
+            async with seat(h, SEAT_A) as fd, seat(h, SEAT_B) as advisor, seat(h, SENDER) as successor:
+                assert (await forward(fd))["delivery_status"] == "delivered"
+                report = rule_report()
+                entered, release = asyncio.Event(), asyncio.Event()
+                submit = h.store._submit_spec_commit
+
+                async def at_insert(callback, *, cancel_owner=None):
+                    if commit_first:
+                        result = await submit(callback, cancel_owner=cancel_owner)
+                    entered.set()
+                    await release.wait()
+                    return result if commit_first else await submit(callback, cancel_owner=cancel_owner)
+
+                monkeypatch.setattr(h.store, "_submit_spec_commit", at_insert)
+                task = asyncio.create_task(advisor("report", **report))
+                try:
+                    await asyncio.wait_for(entered.wait(), 3)
+                    brief = tmp_path / "advisor-brief.md"
+                    brief.write_text("Synthetic advisor transition fixture.")
+                    changed = await fd("assistant.authority", action="set", value=SENDER, brief_file=str(brief))
+                    assert changed["type"] == "assistant.authority.ok", changed.get("error_code")
+                finally:
+                    release.set()
+                result = await task
+                if commit_first:
+                    assert result["type"] == "report.ok"
+                    replay = await advisor("report", **report)
+                    assert replay["ledger_row_id"] == result["ledger_row_id"]
+                    conflict = await advisor("report", **rule_report(new_bytes_sha256="d" * 64))
+                    assert conflict.get("error_code") == "report_id_replay_conflict"
+                else:
+                    assert result.get("error_code") == "advisor_rule_advisor_unverified"
+                    assert await h.store.get_report(report["report_id"]) is None
+                wrong_recipient = await successor("report", **rule_report("fixture-wrong-recipient"))
+                assert wrong_recipient.get("error_code") == "advisor_rule_advisor_unverified"
+                assert await h.store.get_report("fixture-wrong-recipient") is None
+                fresh_tell = "fixture-successor-dispatch"
+                assert (await forward(fd, tell_id=fresh_tell, target=SENDER))["delivery_status"] == "delivered"
+                fresh_report = await successor("report", **rule_report("fixture-successor", fd_event_id=fresh_tell))
+                assert fresh_report["type"] == "report.ok"
+
+    asyncio.run(run())
+
+
+def test_old_fd_evidence_can_attest_and_advances_no_terminal_state(tmp_path):
+    from test_advisor_rule_forward import (
+        admit, forward, operator, rule_fixture, rule_report, seat, SEAT_A, SEAT_B, SENDER,
+    )
+
+    async def run():
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            assert (await admit(socket))["type"] == "send.result"
+            host, name = SENDER.split(":")
+            await h.store.update_session(host, name, phase="qa")
+            await h.sessions.refresh()
+            async with seat(h, SEAT_A) as fd, seat(h, SEAT_B) as advisor, seat(h, SENDER) as unrelated:
+                assert (await forward(fd))["delivery_status"] == "delivered"
+                for rpc in (fd, unrelated):
+                    refused = await rpc("report", **rule_report())
+                    assert refused.get("error_code") == "advisor_rule_advisor_unverified"
+                for wrong_pair in ({"operator_message_id": "fixture-wrong-input"}, {"fd_event_id": "fixture-dispatch"}):
+                    refused = await advisor("report", **rule_report(**wrong_pair))
+                    assert refused.get("error_code") == "advisor_rule_event_unverified"
+                await h.rotate_fd()
+                accepted = await advisor("report", **rule_report())
+                assert accepted["type"] == "report.ok"
+                stored = await h.store.get_report("fixture-rule-report", include_advisor_rule=True)
+                assert stored["advisor_rule_accept"]["fd_stream_id"] == SEAT_A
+                host, name = SEAT_B.split(":")
+                assert (await h.store.fetch_session(host, name))["status"] == "open"
+                terminal, notices, latest = await h.store.submit(lambda conn: tuple(
+                    conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (
+                        "v2_assistant_composite_terminal_reports", "v2_outbound_notices", "v2_work_item_latest_report",
+                    )))
+                assert (terminal, notices, latest) == (0, 0, 0)
+
+    asyncio.run(run())
+
+
+def test_advisor_accept_checks_delivery_proof_and_exact_recipient_generation(tmp_path, monkeypatch):
+    import comms
+    from test_advisor_rule_forward import (
+        admit, forward, operator, record_native, rule_fixture, rule_report, seat, SEAT_A, SEAT_B, TELL_ID,
+    )
+
+    monkeypatch.setattr(comms, "PROOF_FAST_WAIT_S", 0.04)
+
+    async def run():
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            assert (await admit(socket))["type"] == "send.result"
+
+            async def paste_normalized(name, wire, **_options):
+                h.tmux.inputs.append((name, wire))
+                # Normalized provider proof alone is insufficient. Persist
+                # a genuine event with different raw bytes for the first paste.
+                await record_native(h, name, wire.rstrip())
+
+            monkeypatch.setattr(h.tmux, "paste", paste_normalized)
+            async with seat(h, SEAT_A) as fd, seat(h, SEAT_B) as advisor:
+                assert (await forward(fd))["delivery_status"] == "committed_pending_proof"
+                assert (await advisor("report", **rule_report())).get("error_code") == "advisor_rule_event_unverified"
+                await record_native(h, *h.tmux.inputs[-1])
+                assert (await forward(fd))["submission_confirmed"] is True
+                accepted = await advisor("report", **rule_report())
+                assert accepted["type"] == "report.ok"
+
+                host, name = SEAT_B.split(":")
+                await h.store.update_session(host, name, pane_status="pane_dead")
+                assert (await advisor("report", **rule_report("not-ready"))).get("error_code") == "advisor_rule_advisor_unverified"
+                await h.store.update_session(host, name, pane_status="pane_alive")
+
+                def new_generation(conn):
+                    conn.execute("UPDATE v2_session_generations SET generation=? WHERE host=? AND session_name=?",
+                                 ("new-fixture-generation", host, name))
+                    conn.commit()
+
+                await h.store.submit(new_generation)
+                replay = await advisor("report", **rule_report())
+                assert replay.get("error_code") == "advisor_rule_advisor_unverified"
+                wrong_generation = await advisor("report", **rule_report("wrong-generation"))
+                assert wrong_generation.get("error_code") == "advisor_rule_advisor_unverified"
+                assert (await h.store.get_tell_delivery(TELL_ID))["advisor_rule_intent"]["advisor_generation"] == h.gen[SEAT_B]
+                assert await h.store.get_report("wrong-generation") is None
+
+    asyncio.run(run())
+
+
+def test_advisor_fenced_after_connection_auth_is_refused_at_insert(tmp_path, monkeypatch):
+    from test_advisor_rule_forward import admit, forward, operator, rule_fixture, rule_report, seat, SEAT_A, SEAT_B
+
+    async def run():
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            assert (await admit(socket))["type"] == "send.result"
+            async with seat(h, SEAT_A) as fd, seat(h, SEAT_B) as advisor:
+                assert (await forward(fd))["delivery_status"] == "delivered"
+                submit = h.store._submit_spec_commit
+
+                def retire(conn):
+                    conn.execute("INSERT INTO v2_host_transfer_retirements VALUES (?,?,?,?)",
+                                 (SEAT_B, h.gen[SEAT_B], "fixture-retire", 1))
+                    conn.commit()
+
+                async def fence_at_commit(callback, *, cancel_owner=None):
+                    await h.store.submit(retire)
+                    return await submit(callback, cancel_owner=cancel_owner)
+
+                monkeypatch.setattr(h.store, "_submit_spec_commit", fence_at_commit)
+                result = await advisor("report", **rule_report())
+                assert result.get("error_code") == "advisor_rule_advisor_unverified"
+                assert await h.store.get_report("fixture-rule-report") is None
+
+    asyncio.run(run())

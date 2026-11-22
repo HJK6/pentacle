@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any
 
+from . import advisor_rule
+
 
 STATUSES = frozenset({"done", "progress", "error", "aborted"})
 FINDING_SEVERITIES = frozenset({"blocking", "major", "minor", "info"})
@@ -124,6 +126,43 @@ def _nested_key_paths(value: Any, key: str, *, path: str) -> list[str]:
     return found
 
 
+def is_advisor_rule_report(payload):
+    extras = payload.get("extras")
+    return isinstance(extras, dict) and "advisor_rule" in extras
+
+
+def _advisor_rule_error():
+    return SchemaError("advisor_rule_invalid", "invalid advisor rule report")
+
+
+def validate_advisor_rule_envelope(message):
+    if ({advisor_rule.ACCEPT_KEY} | advisor_rule.STAMP_FIELDS) & message.keys():
+        raise _advisor_rule_error()
+    if is_advisor_rule_report(message) and (
+            not advisor_rule.valid_id(message.get("report_id"))
+            or "session_generation" in message
+            or type(message.get("msg_id")) is not int or message["msg_id"] != 0
+            or message.get("status") != "progress"
+            or any(message.get(key) for key in (
+                "terminate", "close_on_ingest", "operator_confirm", "discharges", "result_blob_sha",
+            ))):
+        raise _advisor_rule_error()
+
+
+def _validate_advisor_rule_payload(payload, status):
+    variant = is_advisor_rule_report(payload)
+    reserved = {advisor_rule.ACCEPT_KEY}
+    if variant:
+        extras = payload["extras"]
+        if (status != "progress" or not advisor_rule.valid_review(extras["advisor_rule"])
+                or any(key in payload for key in GOVERNANCE_FIELDS)
+                or {"assistant_composite", "qa_review", "work_checkpoint"} & extras.keys()):
+            raise _advisor_rule_error()
+        reserved.update(advisor_rule.STAMP_FIELDS | {"session_generation"})
+    if any(_nested_key_paths(payload, key, path="payload") for key in reserved):
+        raise _advisor_rule_error()
+
+
 def validate(
     payload: dict[str, Any],
     status: str,
@@ -132,6 +171,8 @@ def validate(
     qa_grade: bool = False,
     reject_placeholders: bool = True,
 ) -> ReportPayloadV1:
+    if isinstance(payload, dict):
+        _validate_advisor_rule_payload(payload, status)
     if status not in STATUSES:
         raise SchemaError("invalid_status", "status must be done, progress, error, or aborted")
     if not isinstance(payload, dict):

@@ -2055,6 +2055,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 conn.execute("UPDATE v2_schedules SET objective_source='explicit' WHERE objective IS NOT NULL")
             if "exchange_json" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
+            if "advisor_rule_accept" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
+                conn.execute("ALTER TABLE v2_reports ADD COLUMN advisor_rule_accept TEXT")
             if "status_freshness" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN status_freshness TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
@@ -4368,7 +4370,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         composite_stream_id, advisor_binding_conn,
     ):
         """Reserve the tell key and freeze both bound principals before provider I/O."""
-        from _shared.advisor_rule import OPERATOR_ORIGIN
+        from _shared.advisor_rule import OPERATOR_ORIGIN, valid_principals
         from retention import RetentionError
         from sessions import VerbError
         from store_lifecycle_authority import configured, front_desk_principal, policy_state
@@ -4395,6 +4397,13 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 if (fd is None or policy_state(conn)["state"] != "enabled"
                         or (fd["stream_id"], fd["session_generation"]) != (sender, generation)):
                     raise VerbError("advisor_rule_fd_unverified", "live front desk principal required")
+                host, _, name = sender.partition(":")
+                fd_seat = conn.execute(
+                    "SELECT closed_at,presumed_dead_at FROM sessions WHERE host=? AND session_name=?",
+                    (host, name),
+                ).fetchone()
+                if fd_seat is None or fd_seat["closed_at"] or fd_seat["presumed_dead_at"]:
+                    raise VerbError("advisor_rule_fd_unverified", "front desk seat is unavailable")
                 advisor = _advisor_rule_principal(conn, advisor_binding_conn)
                 if advisor is None or advisor["stream_id"] != target or target == sender:
                     raise VerbError("advisor_rule_advisor_unverified", "retained advisor recipient required")
@@ -4421,6 +4430,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     "advisor_generation": advisor["generation"],
                     "wire_sha256": hashlib.sha256(wire.encode("utf-8")).hexdigest(),
                 }
+                if not valid_principals(intent):
+                    raise VerbError("advisor_rule_event_unverified", "invalid dispatch provenance")
                 envelope = {
                     "payload_digest": digest, "advisor_rule_intent": intent,
                     "reply": {"tell_id": tell_id, "delivery_status": "proof_unavailable",
@@ -4454,6 +4465,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 target, generation = intent["advisor_stream_id"], intent["advisor_generation"]
                 seat = _seat_conn(conn, target)
                 if (seat is None or seat.get("status") != "open" or seat.get("pane_status") != "pane_alive"
+                        or seat.get("closed_at") or seat.get("presumed_dead_at")
                         or seat.get("session_generation") != generation or authority_state(conn, target, generation)
                         or (delivery["to_stream_id"], delivery["proof_generation"]) != (target, generation)
                         or delivery["proof_session_created_at"] != seat.get("created_at")):
@@ -5492,6 +5504,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         status_context: dict[str, Any] | None = None,
         announce: bool = True,
         _cancel_owner: asyncio.Task | None = None,
+        advisor_actor: tuple[str, str] | None = None,
+        advisor_binding_conn=None,
     ) -> dict[str, Any]:
         """Persist one validated report and return the stored row.
 
@@ -5506,6 +5520,11 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         """
 
         fields, routing_snapshot = copy.deepcopy(fields), copy.deepcopy(routing_snapshot)
+        from _shared.report_payload_v1 import is_advisor_rule_report
+        from sessions import VerbError
+        advisor_variant = is_advisor_rule_report(fields)
+        if advisor_variant and (advisor_actor is None or advisor_binding_conn is None):
+            raise VerbError("advisor_rule_advisor_unverified", "verified retained advisor required")
 
         def capture(conn):
             reporter = _session_for_stream_conn(conn, str(fields.get("from_stream_id") or ""))
@@ -5520,23 +5539,26 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             row = conn.execute("SELECT * FROM v2_reports WHERE report_id=?", (fields["report_id"],)).fetchone()
             if row is None:
                 return None
-            stored = _report_row(row)
+            stored = _report_row(row, include_advisor_rule=advisor_variant)
             if not _report_replay_matches(stored, fields):
                 raise ReportReplayConflict(str(fields["report_id"]))
+            if advisor_variant:
+                if (stored["from_stream_id"], stored["session_generation"]) != advisor_actor:
+                    raise VerbError("advisor_rule_advisor_unverified", "report authorship generation differs")
+                if stored.pop("advisor_rule_accept", None) is None:
+                    raise VerbError("advisor_rule_event_unverified", "report has no durable advisor acceptance")
             stored["_report_inserted"] = False
             return stored
 
         def _put(conn: sqlite3.Connection) -> dict[str, Any]:
-            existing = conn.execute(
-                "SELECT * FROM v2_reports WHERE report_id=?", (fields["report_id"],)
-            ).fetchone()
+            existing = replay(conn)
             if existing is not None:
-                stored = _report_row(existing)
-                if stored is not None:
-                    if not _report_replay_matches(stored, fields):
-                        raise ReportReplayConflict(str(fields["report_id"]))
-                    stored["_report_inserted"] = False
-                return stored
+                return existing
+            advisor_accept = None
+            if advisor_variant:
+                advisor_accept = _advisor_rule_accept_conn(
+                    conn, fields["extras"]["advisor_rule"], advisor_actor, advisor_binding_conn,
+                )
             if capture(conn) != source:
                 raise SpecInputsUnavailable("spec_inputs_changed")
             if not _complete_report_provenance(routing_snapshot, fields):
@@ -5617,10 +5639,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             stored_fields["qa_attestation_validation"] = validation
             values = [_enc_report(col, stored_fields.get(col)) for col in REPORT_COLUMNS]
             inserted = conn.execute(
-                f"INSERT INTO v2_reports ({','.join(REPORT_COLUMNS)}, created_at)"
-                f" VALUES ({','.join('?' * len(REPORT_COLUMNS))}, ?)"
+                f"INSERT INTO v2_reports ({','.join(REPORT_COLUMNS)}, created_at, advisor_rule_accept)"
+                f" VALUES ({','.join('?' * len(REPORT_COLUMNS))}, ?, ?)"
                 " ON CONFLICT(report_id) DO NOTHING",
-                [*values, accepted_at],
+                [*values, accepted_at, json.dumps(advisor_accept, separators=(",", ":")) if advisor_accept else None],
             ).rowcount == 1
             stored = _report_row(conn.execute(
                 "SELECT * FROM v2_reports WHERE report_id=?", (stored_fields["report_id"],)
@@ -5914,11 +5936,11 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
         return await self.submit(_op)
 
-    async def get_report(self, report_id: str) -> dict[str, Any] | None:
+    async def get_report(self, report_id: str, *, include_advisor_rule: bool = False) -> dict[str, Any] | None:
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
             return _report_row(conn.execute(
                 "SELECT * FROM v2_reports WHERE report_id=?", (report_id,)
-            ).fetchone())
+            ).fetchone(), include_advisor_rule=include_advisor_rule)
 
         return await self.submit(_op)
 
@@ -7569,14 +7591,75 @@ def _advisor_rule_principal(conn, binding_conn):
     return advisor
 
 
-def _report_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+def _advisor_rule_accept_conn(conn, review, actor, binding_conn):
+    from _shared.advisor_rule import STAMP_FIELDS, valid_principals, valid_review
+    from sessions import VerbError
+
+    if not valid_review(review):
+        raise VerbError("advisor_rule_invalid", "invalid advisor rule report")
+    advisor = _advisor_rule_principal(conn, binding_conn)
+    if advisor is None or (advisor["stream_id"], advisor["generation"]) != actor:
+        raise VerbError("advisor_rule_advisor_unverified", "live retained advisor required")
+
+    tell_id = review["fd_event_id"]
+    row = conn.execute(
+        "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+        (tell_id,),
+    ).fetchone()
+    envelope = _decode_tell_envelope(row) or {}
+    intent, reply, delivery = (envelope.get(key) for key in ("advisor_rule_intent", "reply", "delivery"))
+    event_error = VerbError("advisor_rule_event_unverified", "confirmed advisor-rule dispatch required")
+    if (not all(isinstance(part, dict) for part in (intent, reply, delivery))
+            or intent.keys() != STAMP_FIELDS | {"operator_message_id", "wire_sha256"}
+            or not valid_principals(intent) or intent["operator_message_id"] != review["operator_message_id"]):
+        raise event_error
+    for part in (reply, delivery):
+        if (part.get("tell_id") != tell_id or part.get("delivery_status") != "delivered"
+                or part.get("submission_confirmed") is not True
+                or part.get("to_stream_id") != intent["advisor_stream_id"]):
+            raise event_error
+    if (delivery.get("original_to_stream_id") != intent["advisor_stream_id"]
+            or delivery.get("route_hops") != [intent["advisor_stream_id"]]
+            or delivery.get("proof_generation") != intent["advisor_generation"]
+            or delivery.get("proof_state") != "proven"
+            or type(delivery.get("proof_event_id")) is not int
+            or type(delivery.get("proof_watermark")) is not int
+            or delivery["proof_event_id"] <= delivery["proof_watermark"]
+            or delivery.get("sender_kind") != "peer" or delivery.get("sender_verified") is not True
+            or (delivery.get("from_stream_id"), delivery.get("sender_generation"))
+               != (intent["fd_stream_id"], intent["fd_generation"])
+            or not envelope.get("payload_digest") or delivery.get("request_payload_hash") != envelope["payload_digest"]):
+        raise event_error
+    wire = delivery.get("text")
+    if not isinstance(wire, str):
+        raise event_error
+    header, separator, body = wire.partition("\n")
+    if (not separator or not body or header != f"[from {intent['fd_stream_id']}] [tell:{tell_id}]"
+            or hashlib.sha256(wire.encode("utf-8")).hexdigest() != intent["wire_sha256"]
+            or hashlib.sha256(body.encode("utf-8")).hexdigest() != intent["operator_text_sha256"]):
+        raise event_error
+    if (intent["advisor_stream_id"], intent["advisor_generation"]) != actor:
+        raise VerbError("advisor_rule_advisor_unverified", "dispatch belongs to another advisor generation")
+    return {**review, **{key: intent[key] for key in STAMP_FIELDS}}
+
+
+def _report_row(row: sqlite3.Row | None, *, include_advisor_rule: bool = False) -> dict[str, Any] | None:
     if row is None:
         return None
     out = dict(row)
     out.pop("exchange_json", None)
+    raw_accept = out.pop("advisor_rule_accept", None)
     for col in REPORT_JSON_COLUMNS:
         raw = out.get(col)
         out[col] = json.loads(raw) if isinstance(raw, str) and raw else None
+    if include_advisor_rule and raw_accept is not None:
+        from _shared.advisor_rule import valid_accept
+        try:
+            stamp = json.loads(raw_accept)
+        except (TypeError, ValueError):
+            stamp = None
+        if valid_accept(stamp, out):
+            out["advisor_rule_accept"] = stamp
     return out
 
 
