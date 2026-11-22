@@ -467,7 +467,8 @@ class Tmux:
         """Keep a compaction command out of copy mode, including a late mode entry."""
         return await self.paste(name, text, reject_mode=True)
 
-    async def paste(self, name: str, text: str, *, reject_mode: bool = False) -> str | None:
+    async def paste(self, name: str, text: str, *, reject_mode: bool = False,
+                    preserve_newlines: bool = False) -> str | None:
         """Human-equivalent injection (ledger req 1): ONE atomic bracketed
         paste of the whole message, then Enter. No chunking, no readiness
         gating, no stray control sequences. tmux 3.4 does not treat `-` as a
@@ -499,7 +500,10 @@ class Tmux:
             if rc != 0:
                 raise VerbError("paste_failed", out.strip() or "load-buffer failed", phase=phase)
             phase = "body_maybe_pasted"
-            rc, out = await self.run("paste-buffer", "-b", buf, "-t", _target(name), "-d", "-p")
+            command = ("paste-buffer", "-b", buf, "-t", _target(name), "-d", "-p")
+            if preserve_newlines:
+                command += ("-r",)
+            rc, out = await self.run(*command)
             if rc != 0:
                 raise VerbError("paste_failed", out.strip() or "paste-buffer failed", phase=phase)
             # Returning from paste-buffer proves the bytes reached the pty, not

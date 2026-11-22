@@ -756,7 +756,7 @@ class Comms:
                         tell_id, digest, reconcile=True)) or prior
                 reply = {**prior["reply"], "duplicate": True}
             else:
-                route = await self._resolve_route(msg, verb="tell")
+                route = await self._resolve_route({**msg, "stream_id": target}, verb="tell")
                 if route["final_target"] != target or route["original_target"] != target:
                     raise VerbError("advisor_rule_advisor_unverified", "advisor delivery cannot be redirected")
                 async with self._pane_input_lock(target):
@@ -1538,9 +1538,10 @@ class Comms:
         host, name = self.sessions.split(target)
         row = self.sessions.get(target) or await self.store.fetch_session(host, name)
         provider = str((row or {}).get("provider") or "")
+        advisor_rule = msg.get("_advisor_rule_dispatch") is True
         if msg.get("_notification_answer_generation") and provider not in SUBMIT_PREDICATES:
             raise VerbError("bad_request", "answer delivery requires a supported USER-proof provider")
-        if msg.get("_advisor_rule_dispatch") is not None and provider not in SUBMIT_PREDICATES:
+        if advisor_rule and provider not in SUBMIT_PREDICATES:
             raise VerbError("advisor_rule_advisor_unverified", "advisor delivery requires USER-event proof")
         tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
         async def prepare(watermark):
@@ -1555,9 +1556,8 @@ class Comms:
         try:
             confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
                 tmux, name, body, provider, bool(msg.get("urgent")), target,
-                durable_proof=(msg.get("_durable_notice_proof") is True
-                               or msg.get("_advisor_rule_dispatch") is not None),
-                before_paste=prepare,
+                durable_proof=msg.get("_durable_notice_proof") is True or advisor_rule,
+                before_paste=prepare, preserve_newlines=advisor_rule,
             )
         finally: _POOL_INPUT_MESSAGE.reset(token)
         return confirmed, attempts, provider, active_draft, proof, watermark
@@ -1595,7 +1595,7 @@ class Comms:
 
     async def _inject_body(
         self, tmux: Any, name: str, body: str, provider: str, urgent: bool, stream_id: str,
-        *, durable_proof: bool = False, before_paste: Any = None,
+        *, durable_proof: bool = False, before_paste: Any = None, preserve_newlines: bool = False,
     ) -> tuple[bool, int, bool, EventProof, EventWatermark]:
         """Paste once, then perform only the bounded provider recovery."""
         # B6: `urgent` is SENDER-chosen — one Escape, then the message. The
@@ -1606,7 +1606,7 @@ class Comms:
         if provider == "codex":
             before = await tmux.capture(name)
             await self._assert_codex_pane_input_safe(stream_id, before)
-        if urgent:
+        if urgent and not preserve_newlines:
             async with self._account_input_guard(stream_id):
                 await tmux.run("send-keys", "-t", f"={name}:", "Escape")
             before = None
@@ -1625,10 +1625,15 @@ class Comms:
             return confirmed, 1, False, proof, watermark
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._watermark_before_action(stream_id)
-        async with self._account_input_guard(stream_id,claim=True):
+        async with self._account_input_guard(stream_id, claim=True, execution=preserve_newlines):
             if before_paste is not None:
                 await before_paste(watermark)
-            await tmux.paste(name, body)
+            if preserve_newlines:
+                if urgent:
+                    await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+                await tmux.paste(name, body, preserve_newlines=True)
+            else:
+                await tmux.paste(name, body)
         if durable_proof:
             proof = await self._durable_submission_evidence(
                 stream_id, body, watermark=watermark,

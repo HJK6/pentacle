@@ -53,22 +53,41 @@ def load() -> dict[str, str]:
 
 def stamp_message(msg: dict[str, Any]) -> dict[str, Any]:
     """Return `msg` with its body stamped when it came from a mapped desk credential."""
+    return stamp_with_label(msg)[0]
+
+
+def display_body(body: str, label: str | None) -> str:
+    return f"[from {label}]\n{sanitize_injectable(body)}" if label and body else body
+
+
+def route_display_body(route: dict[str, Any]) -> str:
+    """Render the preserved desk label on a canonical route's literal text."""
+    try:
+        payload = json.loads(route.get("route_json") or "{}")
+    except (TypeError, ValueError):
+        payload = None
+    label = payload.get("desk_label") if isinstance(payload, dict) else None
+    return display_body(str(route.get("body") or ""), label)
+
+
+def stamp_with_label(msg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Sample the label once for both the immediate send and durable display."""
     auth = msg.get("_auth_context")
     if not isinstance(auth, dict) or auth.get("operator_authenticated") is not True:
-        return msg
+        return msg, None
     principal = str(auth.get("operator_principal") or "")
     if not principal.startswith("operator:"):
-        return msg
+        return msg, None
     try:
         credential_id = str(uuid.UUID(principal[len("operator:"):]))
     except ValueError:
-        return msg
+        return msg, None
     label = load().get(credential_id)
     if not label:
-        return msg
+        return msg, None
     stamped = dict(msg)
     for field in _BODY_FIELDS:
         body = msg.get(field)
         if isinstance(body, str) and body:
-            stamped[field] = f"[from {label}]\n{sanitize_injectable(body)}"
-    return stamped
+            stamped[field] = display_body(body, label)
+    return stamped, label

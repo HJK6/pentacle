@@ -25,6 +25,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from v2_runtime import primary_assistant_name
 
 from assistant_router import AssistantRouterProcessError
+import desk_stamp
 import voice_answers as voice_answers_v1
 from send_metadata import voice_context_from_route, voice_context_dispatch_block
 from store_work_lanes import PRODUCT_OPERATIONS as WORK_LANE_PRODUCT_OPERATIONS
@@ -48,7 +49,6 @@ def _is_desk_principal(principal: str | None) -> bool:
         credential = str(uuid.UUID(principal.removeprefix("operator:")))
     except ValueError:
         return False
-    import desk_stamp
     return credential in desk_stamp.load()
 
 
@@ -258,7 +258,7 @@ def direct_dispatch_envelope(
         raise ValueError("assistant_attachments_corrupt")
     input_id = str(route.get("input_identity") or "")
     question_id = str(route.get("reply_to_question_id") or "")
-    original_input = {"text": str(route.get("body") or ""), "attachments": attachments}
+    original_input = {"text": desk_stamp.route_display_body(route), "attachments": attachments}
     context = voice_context_from_route(route)
     question_arg = f"--reply-to-question-id {question_id} " if question_id else ""
     command = (
@@ -803,14 +803,22 @@ class AssistantComposite:
             projected.pop("session_generation", None)
         return projected
 
-    async def accept_input(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None, desk_dispatch: bool | None = None, operator_admission: Callable[[], str | None] | None = None) -> dict[str, Any]:
+    async def accept_input(
+        self, msg: dict[str, Any], *, operator_principal: str | None = None,
+        scoped_credential_id: str | None = None, desk_dispatch: bool | None = None,
+        desk_label: str | None = None, operator_admission: Callable[[], str | None] | None = None,
+    ) -> dict[str, Any]:
         """Accept literal operator input once and wake the routing consumer."""
         async with self._binding_lock:
             return await self._accept_input_locked(msg, operator_principal=operator_principal,
-                scoped_credential_id=scoped_credential_id, desk_dispatch=desk_dispatch,
+                scoped_credential_id=scoped_credential_id, desk_dispatch=desk_dispatch, desk_label=desk_label,
                 operator_admission=operator_admission)
 
-    async def _accept_input_locked(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None, desk_dispatch: bool | None = None, operator_admission: Callable[[], str | None] | None = None) -> dict[str, Any]:
+    async def _accept_input_locked(
+        self, msg: dict[str, Any], *, operator_principal: str | None = None,
+        scoped_credential_id: str | None = None, desk_dispatch: bool | None = None,
+        desk_label: str | None = None, operator_admission: Callable[[], str | None] | None = None,
+    ) -> dict[str, Any]:
         if not self.enabled:
             raise ValueError("assistant_composite_disabled")
         body = msg.get("text") if "text" in msg else msg.get("message")
@@ -877,6 +885,7 @@ class AssistantComposite:
             reply_to_question_id=_optional_id(msg.get("reply_to_question_id")),
             actor_stream_id=operator_principal,
             desk_dispatch=_is_desk_principal(operator_principal) if desk_dispatch is None else desk_dispatch,
+            desk_label=desk_label,
             scoped_credential_id=scoped_credential_id,
             direct_primary=self.config.direct_primary,
             direct_target_stream_id=self.config.direct_primary_stream_id if self.config.direct_primary else None,
@@ -906,7 +915,7 @@ class AssistantComposite:
                     # producer pane.
                     if self.question_answer is None:
                         raise ValueError("assistant_question_answer_adapter_unavailable")
-                    answered = await self.question_answer(question_id, body, msg)
+                    answered = await self.question_answer(question_id, desk_stamp.display_body(body, desk_label), msg)
                     if not bool(answered.get("ok")):
                         updated = await self._update_route(
                             str(record["route_id"]), routing_state="routing_failed",
@@ -1366,21 +1375,21 @@ class AssistantComposite:
             )
 
     async def _router_input(self, route: dict[str, Any]) -> dict[str, Any]:
-        body = str(route.get("body") or "")
+        body = desk_stamp.route_display_body(route)
         excerpt = body[:4000]
         unresolved_rows = await self.store.list_assistant_composite_unresolved(
             stream_id=self.config.stream_id, exclude_route_id=str(route.get("route_id") or ""), limit=8,
         )
-        unresolved = [
-            {
+        unresolved = []
+        for item in unresolved_rows:
+            item_body = desk_stamp.route_display_body(item)
+            unresolved.append({
                 "message_id": item.get("input_identity"),
                 "sequence": item.get("event_id"),
                 "state": item.get("routing_state"),
-                "excerpt": str(item.get("body") or "")[:384],
-                "truncated": len(str(item.get("body") or "")) > 384,
-            }
-            for item in unresolved_rows
-        ]
+                "excerpt": item_body[:384],
+                "truncated": len(item_body) > 384,
+            })
         # Keep the public chat tail small for prompt size, but retain enough of
         # the durable tail to find the latest ASSIST_TEXT for every open lane.
         # The event id stamped by ``fetch_session_event_tail`` is the

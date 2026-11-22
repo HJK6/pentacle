@@ -4742,8 +4742,8 @@ class Server:
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
         original_msg = msg
-        msg = desk_stamp.stamp_message(msg)
-        desk_dispatch = msg is not original_msg
+        msg, desk_label = desk_stamp.stamp_with_label(msg)
+        desk_dispatch = desk_label is not None
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
@@ -4784,13 +4784,16 @@ class Server:
                 }
             if auth.get("operator_authenticated") is not True:
                 raise VerbError("assistant_send_unauthorized", "assistant composite send requires authenticated caller")
-            admission = operator_admission if composite is self.assistant_composite else None
+            literal = original_msg.get("text") if "text" in original_msg else original_msg.get("message")
+            admission = (operator_admission if composite is self.assistant_composite
+                         and (literal is None or isinstance(literal, str)) else None)
             try:
                 attachments = await self._validate_assistant_input_attachments(msg.get("attachments"))
                 accepted = await composite.accept_input(
                     {**(original_msg if admission is not None else msg), "attachments": attachments},
                     operator_principal=str(auth.get("operator_principal") or "") or None,
                     desk_dispatch=desk_dispatch,
+                    desk_label=desk_label if admission is not None else None,
                     operator_admission=admission,
                 )
             except ValueError as exc:

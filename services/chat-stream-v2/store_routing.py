@@ -1024,6 +1024,7 @@ class _RoutingStoreMixin:
         reply_to_question_id: str | None,
         actor_stream_id: str | None,
         desk_dispatch: bool = False,
+        desk_label: str | None = None,
         scoped_credential_id: str | None = None,
         meta: object = None,
         direct_primary: bool = False,
@@ -1061,16 +1062,24 @@ class _RoutingStoreMixin:
         admission_payload = {"admission_mode": "direct_primary"} if direct_primary else {}
         if desk_dispatch:
             admission_payload["desk_dispatch"] = True
+        if desk_label is not None:
+            admission_payload["desk_label"] = desk_label
         if voice_meta.get("voice", {}).get("context_v1") is not None:
             admission_payload["input_meta"] = voice_meta
         canonical_attachments = json.dumps(attachments, sort_keys=True, separators=(",", ":"))
-        material = json.dumps({
-            "body": body,
-            "attachments": attachments,
-            "reply_to_message_id": reply_to_message_id,
-            "reply_to_question_id": reply_to_question_id,
-        }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        from desk_stamp import display_body
+
+        def payload_digest(text):
+            material = json.dumps({
+                "body": text,
+                "attachments": attachments,
+                "reply_to_message_id": reply_to_message_id,
+                "reply_to_question_id": reply_to_question_id,
+            }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+        shown_body = display_body(body, desk_label)
+        digest = payload_digest(shown_body)
         route_id = "assistant-route-" + hashlib.sha256(
             (stream_id + "\x00" + input_identity).encode("utf-8")
         ).hexdigest()[:32]
@@ -1078,7 +1087,8 @@ class _RoutingStoreMixin:
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
 
-        def _ensure_receipt(conn: sqlite3.Connection, stamp: str, frozen_meta: dict | None = None) -> str:
+        def _ensure_receipt(conn: sqlite3.Connection, stamp: str, shown: str,
+                            frozen_meta: dict | None = None) -> str:
             # The canonical USER admission is landed even while its answer is
             # pending. Keep the mobile/desktop transport attempt in the same
             # transaction as the USER row, including a rotated-request retry.
@@ -1095,7 +1105,7 @@ class _RoutingStoreMixin:
             receipt_id = "assistant-receipt-" + hashlib.sha256(
                 (stream_id + "\x00" + input_identity + "\x00" + input_request_id).encode("utf-8"),
             ).hexdigest()[:32]
-            kind = ("image_and_text" if attachments and body else
+            kind = ("image_and_text" if attachments and shown else
                     "attachment_only" if attachments else "text")
             conn.execute(
                 """INSERT INTO v2_send_receipts (
@@ -1104,7 +1114,7 @@ class _RoutingStoreMixin:
                     created_at,actor_stream_id,actor_trusted,meta_json
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (next_receipt_rowid(conn), stream_id, input_request_id, receipt_id, "landed", input_identity,
-                 _send_wire_digest(body), body, kind, canonical_attachments, "landed", 1,
+                 _send_wire_digest(shown), shown, kind, canonical_attachments, "landed", 1,
                  stamp, actor_stream_id, 1, json.dumps({"assistant_composite": True, **(voice_meta if frozen_meta is None else frozen_meta)}, sort_keys=True)),
             )
             return receipt_id
@@ -1147,14 +1157,23 @@ class _RoutingStoreMixin:
                     record = dict(prior)
                     if scoped_credential_id is not None and record["actor_stream_id"] != actor_stream_id:
                         raise ValueError("assistant_request_owner_conflict")
-                    if record["payload_digest"] != digest:
-                        raise ValueError("assistant_input_idempotency_conflict")
                     prior_payload = json.loads(record["route_json"] or "{}")
+                    prior_label = prior_payload.get("desk_label")
+                    retry_digest = digest
+                    if prior_label and operator_admission is not None:
+                        # The digest stays compatible with a prior binary's
+                        # display-body retry. A stamped row also matches literal bytes.
+                        retry_digest = payload_digest(display_body(body, prior_label))
+                        if record["body"] != body:
+                            raise ValueError("assistant_input_idempotency_conflict")
+                    if record["payload_digest"] != retry_digest:
+                        raise ValueError("assistant_input_idempotency_conflict")
                     frozen_meta = prior_payload.get("input_meta")
                     if frozen_meta is None:
                         # Legacy/no-context admission cannot acquire later page visits.
                         frozen_meta = {"voice": {"duration_s": voice_meta["voice"]["duration_s"]}} if voice_meta else {}
-                    record["receipt_id"] = _ensure_receipt(conn, _routing_iso_now(), frozen_meta) if direct_primary else None
+                    record["receipt_id"] = _ensure_receipt(conn, _routing_iso_now(),
+                        display_body(record["body"], prior_label), frozen_meta) if direct_primary else None
                     record["duplicate"] = True
                     conn.commit()
                     return record
@@ -1194,7 +1213,7 @@ class _RoutingStoreMixin:
                     "stream_id": stream_id,
                     "provider": "composite",
                     "kind": "USER",
-                    "text": body,
+                    "text": shown_body,
                     "message_id": input_identity,
                     "optimistic_id": input_identity,
                     "reply_to_message_id": reply_to_message_id,
@@ -1263,7 +1282,7 @@ class _RoutingStoreMixin:
                         timestamp, timestamp, operator_origin,
                     ),
                 )
-                receipt_id = _ensure_receipt(conn, timestamp) if direct_primary else None
+                receipt_id = _ensure_receipt(conn, timestamp, shown_body) if direct_primary else None
                 row = dict(history_query(conn,
                     "SELECT * FROM v2_assistant_composite_routes WHERE route_id=?", (route_id,),
                 ).fetchone())
@@ -1470,7 +1489,8 @@ class _RoutingStoreMixin:
                             if not _route_continuation_conn(conn, origin, binding_guard, transfer_successor=transfer_successor):
                                 raise ValueError("assistant_recovery_successor_unverified")
                         _assistant_actor_conn(conn, binding_guard["stream_id"], binding_guard["generation"])
-                for key in ("direct_binding_origin", "recovery_origin", "desk_dispatch", "unanswered_marker_recorded"):
+                for key in ("direct_binding_origin", "recovery_origin", "desk_dispatch", "desk_label",
+                            "unanswered_marker_recorded"):
                     if key in prior_payload:
                         merged_payload[key] = prior_payload[key]
                 # Admission owns this input; classifier/rebind/retry cannot replace it.
@@ -1551,7 +1571,7 @@ class _RoutingStoreMixin:
             return []
         def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             rows = conn.execute(
-                """SELECT route_id,input_identity,body,routing_state,depends_on_message_id
+                """SELECT route_id,input_identity,body,route_json,routing_state,depends_on_message_id
                    FROM v2_assistant_composite_routes
                    WHERE stream_id=? AND route_id<>?
                      AND routing_state IN ('queued','classifying','fallback_dispatched','deferred')

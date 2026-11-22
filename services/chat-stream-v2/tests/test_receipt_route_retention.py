@@ -14,7 +14,9 @@ from pathlib import Path
 import resource
 import sqlite3
 import statistics
+import subprocess
 import sys
+import tarfile
 import time
 
 import pytest
@@ -857,7 +859,7 @@ def test_populated_pre_batch_archive_migrates_on_store_restart(tmp_path, missing
         for db in (tmp_path / "hot.db", archive):
             with sqlite3.connect(db) as conn:
                 conn.execute("DROP INDEX IF EXISTS idx_v2_assistant_composite_routes_batch")
-                for column in missing_columns:
+                for column in (*missing_columns, "operator_origin"):
                     conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} DROP COLUMN {column}")
         with sqlite3.connect(archive) as conn:
             marker = conn.execute("SELECT * FROM v2_receipt_route_archive").fetchall()
@@ -878,6 +880,7 @@ def test_populated_pre_batch_archive_migrates_on_store_restart(tmp_path, missing
                 names = {x[1]: x[2] for x in conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})")}
                 assert names["batched_into_dispatch_id"] == "TEXT"
                 assert names["answered_by_event_id"] == "INTEGER"
+                assert names["operator_origin"] == "TEXT"
     asyncio.run(run())
 
 
@@ -892,7 +895,7 @@ def test_batch_archive_migration_preserves_read_gap_without_altering_it(tmp_path
         finally:
             store.stop()
         with sqlite3.connect(archive) as conn:
-            for column in ("batched_into_dispatch_id", "answered_by_event_id"):
+            for column in ("batched_into_dispatch_id", "answered_by_event_id", "operator_origin"):
                 conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} DROP COLUMN {column}")
             if defect == "foreign_pair":
                 conn.execute("UPDATE v2_receipt_route_archive SET pair_id='foreign-pair'")
@@ -945,3 +948,140 @@ def test_populated_archive_resumes_interrupted_operator_origin_upgrade(tmp_path)
                 store.stop()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("defect", ["operator_origin_conflict", "unknown_column"])
+def test_origin_pair_strictly_refuses_unrecognized_schema_or_conflicting_copy(tmp_path, defect):
+    async def run():
+        store = running(tmp_path)
+        try:
+            await seed_routes(store, operator_origin="registered_operator_ws_v1")
+            archive = await archive_path(store)
+            assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
+            await seed_routes(store)
+        finally:
+            store.stop()
+        if defect == "unknown_column":
+            with sqlite3.connect(archive) as conn:
+                conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} ADD COLUMN unexpected TEXT")
+        paths = (tmp_path / "hot.db", archive)
+
+        def snapshot():
+            rows = []
+            for path in paths:
+                with sqlite3.connect(path) as conn:
+                    rows.append((conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})").fetchall(),
+                                 conn.execute(f"SELECT * FROM {r.ROUTE_TABLE}").fetchall()))
+            return rows
+
+        before = snapshot()
+        store = running(tmp_path)
+        try:
+            with pytest.raises(r.RetentionError):
+                await store.get_assistant_composite_route(stream_id=TARGET, input_identity="input-0")
+            with pytest.raises(r.RetentionError):
+                await move(store, r.ROUTE_TABLE)
+        finally:
+            store.stop()
+        assert snapshot() == before
+
+    asyncio.run(run())
+
+
+def test_prior_daemon_carries_fully_migrated_history_through_rollback(tmp_path, monkeypatch):
+    repo = Path(__file__).resolve().parents[3]
+    prior_commit = "3c463b4a70d314972f77f70c5c08bf2d5a4546ba"
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    bundle = tmp_path / "prior.tar"
+    with bundle.open("wb") as archive:
+        subprocess.run(["git", "archive", prior_commit, "services", "pentacle-chat-core", "scripts"],
+                       cwd=repo, stdout=archive, check=True, timeout=20)
+    with tarfile.open(bundle) as archive:
+        archive.extractall(prior, filter="data")
+
+    async def seed_candidate():
+        store = running(tmp_path)
+        try:
+            await append(store, "before-rollback")
+            await seed_routes(store, actor_stream_id="operator:fixture", operator_origin="registered_operator_ws_v1")
+            with monkeypatch.context() as archive_fixture:
+                archive_fixture.setattr(r, "_settled_route", lambda conn, row, cutoff: row["input_identity"] == "input-0")
+                assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
+            assert (await move(store, r.RECEIPT_TABLE))["moved"] == 1
+            return await archive_path(store), await combined(store, r.ROUTE_TABLE)
+        finally:
+            store.stop()
+
+    archive, stamped_rows = asyncio.run(seed_candidate())
+
+    def marker():
+        with sqlite3.connect(archive) as conn:
+            return conn.execute("SELECT * FROM v2_receipt_route_archive").fetchall()
+
+    old_marker = marker()
+    prior_code = """
+import asyncio
+import sys
+from pathlib import Path
+from test_receipt_route_retention import append, combined, move, r, running, TARGET, OLD
+
+async def run(root):
+    for index in range(2):
+        store = running(root)
+        try:
+            stamped = await store.get_assistant_composite_route(stream_id=TARGET, input_identity="input-0")
+            assert stamped["operator_origin"] == "registered_operator_ws_v1"
+            receipts = await combined(store)
+            assert receipts[0]["request_id"] == "before-rollback"
+            await store.ensure_assistant_composite_projection(stream_id="fixture:assistant")
+            args = dict(stream_id="fixture:assistant", input_identity="prior-input", input_request_id="prior-send",
+                        body="Synthetic rollback admission.", attachments=[], reply_to_message_id=None,
+                        reply_to_question_id=None, actor_stream_id=None)
+            route = await store.admit_assistant_composite_input(**args)
+            assert route["operator_origin"] is None
+            if index:
+                assert route["duplicate"]
+                continue
+            assert not route["duplicate"]
+            assert (await store.admit_assistant_composite_input(**args))["duplicate"]
+            receipt = await append(store, "prior-receipt")
+            assert receipt["receipt_rowid"] > receipts[0]["rowid"]
+            assert (await move(store, r.RECEIPT_TABLE))["moved"] == 1
+
+            def settle(conn):
+                conn.execute("UPDATE v2_assistant_composite_routes SET created_at=?,updated_at=?,"
+                             "routing_state='resolved',delivery_state='landed' WHERE input_identity='prior-input'",
+                             (OLD, OLD))
+                conn.commit()
+            await store.submit(settle)
+            assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
+        finally:
+            store.stop()
+
+asyncio.run(run(Path(sys.argv[1])))
+"""
+    services = prior / "services"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(path) for path in (
+        services / "chat-stream-v2", services / "chat-stream-v2" / "tests", services,
+        services / "agent-orch", prior / "scripts",
+    ))}
+    subprocess.run([sys.executable, "-c", prior_code, str(tmp_path)], cwd=prior, env=env, check=True, timeout=30)
+
+    async def reupgrade():
+        store = running(tmp_path)
+        try:
+            historian = await combined(store, r.ROUTE_TABLE)
+            assert next(row for row in historian if row["input_identity"] == "input-0") == stamped_rows[0]
+            prior_input = await store.get_assistant_composite_route(
+                stream_id="fixture:assistant", input_identity="prior-input")
+            assert prior_input["operator_origin"] is None
+            receipts = await combined(store)
+            assert [row["request_id"] for row in receipts] == ["before-rollback", "prior-receipt"]
+            after = await append(store, "after-reupgrade")
+            assert after["receipt_rowid"] > max(row["rowid"] for row in receipts)
+        finally:
+            store.stop()
+
+    asyncio.run(reupgrade())
+    assert marker() == old_marker
