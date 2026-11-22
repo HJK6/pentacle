@@ -1115,7 +1115,7 @@ class _LaneActivitySnapshot:
         if self.assignments is None:
             grouped = {}
             for row in self.conn.execute(
-                "SELECT s.host,s.session_name,s.spec_id,s.spec_ids,s.assigned_spec_id,s.pane_status,s.provider,s.role,"
+                "SELECT s.host,s.session_name,s.spec_id,s.spec_ids,s.assigned_spec_id,s.pane_status,s.provider,"
                 "s.offline_since_ts,s.presumed_dead_at,g.generation FROM sessions s "
                 "LEFT JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
                 "WHERE s.status='open' AND (s.assigned_spec_id IS NOT NULL OR s.spec_id IS NOT NULL OR s.spec_ids IS NOT NULL)"
@@ -1172,9 +1172,10 @@ class _LaneActivitySnapshot:
             for identity in sorted(members):
                 for row in self._assignments().get(identity, ()):
                     sid = f"{row['host']}:{row['session_name']}"
-                    # Virtual and control backends are not execution seats.
-                    # A virtual composite cannot be captured at all.
-                    if _is_composite({**row, "stream_id": sid}) or _protected(row) or fd_backend_conn(self.conn, sid):
+                    # A virtual composite has no executing pane. Real
+                    # assigned seats use the shared predicate regardless of
+                    # role; lead eligibility is a separate policy.
+                    if row["provider"] == "composite":
                         continue
                     if not row["generation"]:
                         return (), (), "assignment_generation"

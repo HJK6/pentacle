@@ -893,30 +893,72 @@ def test_resume_version_conflict_keeps_lane_paused(tmp_path):
     run(body, str(tmp_path / 'conflict.db'))
 
 
-@pytest.mark.parametrize('excluded', ['composite', 'protected', 'front_desk'])
-def test_excluded_backend_seat_cannot_resume(tmp_path, monkeypatch, excluded):
-    root = tmp_path / 'memory'
-    if excluded == 'protected':
+async def _assigned_execution_fixture(env, root, role, state):
+    lead = {}
+    if state == 'active':
+        sid, generation = await env.seat('execution-lead', role='lead', parent_stream_id=FD)
+        lead = {'lead': {'stream_id': sid, 'generation': generation}}
+    lane = await build_lane(env, root, key='stream:backend_execution', goal='execution',
+                            items=[('i1', 'in_progress')], state=state, **lead)
+    row = await env.store.open_session(
+        'host-a', 'candidate', provider='composite' if role == 'composite' else 'codex',
+        role='protected_worker' if role == 'protected' else 'worker',
+        assigned_spec_id='spec_demo__i1', pane_status='pane_alive')
+    if role == 'front_desk':
+        def bind(conn):
+            with conn:
+                conn.execute("INSERT INTO v2_assistant_direct_binding"
+                             "(name,stream_id,generation,revision,updated_at) VALUES(?,?,?,?,?)",
+                             ('test-extra', 'host-a:candidate', row['session_generation'], 1,
+                              '2026-01-01T00:00:00Z'))
+        await env.store.submit(bind)
+    return lane, row['session_generation']
+
+
+@pytest.mark.parametrize('role', ['front_desk', 'protected'])
+@pytest.mark.parametrize('transition', ['pause', 'resume'])
+def test_real_assigned_backend_counts_as_actual_work(tmp_path, monkeypatch, role, transition):
+    from test_work_lanes import _lane_activity, _pause_actual
+    if role == 'protected':
         monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'protected_worker')
+
     async def body(env):
-        lead, generation = await env.seat('excluded-lead', role='lead', parent_stream_id=FD)
-        lane = await build_lane(env, root, key='stream:excluded', goal='excluded',
-                               items=[('i1', 'in_progress')], state='active',
-                               lead={'stream_id': lead, 'generation': generation})
-        role = 'protected_worker' if excluded == 'protected' else 'worker'
-        row = await env.store.open_session('host-a', 'candidate', provider='composite' if excluded == 'composite' else 'codex',
-                                           role=role, assigned_spec_id='spec_demo__i1')
-        if excluded == 'front_desk':
-            def bind(conn):
-                conn.execute("INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) VALUES(?,?,?,?,?)",
-                             ('test-extra', 'host-a:candidate', row['session_generation'], 1, '2026-01-01T00:00:00Z'))
-                conn.commit()
-            await env.store.submit(bind)
-        from test_work_lanes import _lane_activity, _pause_actual
-        # FD and protected are genuinely busy; a virtual seat does not
-        # produce pane captures at all and is still known inactive.
-        env.store.lane_presence_reader = lambda: [] if excluded == 'composite' else [
-            _lane_activity('host-a:candidate', row['session_generation'], working=True)]
+        state = 'active' if transition == 'pause' else 'paused'
+        lane, generation = await _assigned_execution_fixture(env, tmp_path / 'memory', role, state)
+        lid = lane['lane_id']
+        working = transition == 'pause'
+        env.store.lane_presence_reader = lambda: [_lane_activity('host-a:candidate', generation, working=working)]
+        before = await env.store.get_work_lane(lid)
+        if transition == 'pause':
+            with pytest.raises(ValueError, match='work_lane_pause_working') as exc:
+                await _pause_actual(env, lane)
+            assert 'spec_demo__i1' in str(exc.value)
+            after = await env.store.get_work_lane(lid)
+            assert after['lane'] == before['lane'] and after['events'] == before['events']
+            working = False
+            assert (await _pause_actual(env, lane))['lane']['work_state'] == 'paused'
+            assert not (await lifecycle(env))['resumed']
+        else:
+            assert not (await lifecycle(env))['resumed']
+            idle = await env.store.get_work_lane(lid)
+            assert idle['lane'] == before['lane'] and idle['events'] == before['events']
+            working = True
+            assert (await lifecycle(env))['resumed'] == [lid]
+            after = await env.store.get_work_lane(lid)
+            assert after['lane']['work_state'] == 'active'
+            assert after['lane']['version'] == before['lane']['version'] + 1
+            assert len(after['events']) == len(before['events']) + 1
+            assert not (await lifecycle(env))['resumed']
+            assert (await env.store.get_work_lane(lid))['events'] == after['events']
+    run(body, str(tmp_path / 'real-backend.db'))
+
+
+def test_virtual_composite_assigned_seat_is_known_inactive(tmp_path):
+    from test_work_lanes import _pause_actual
+
+    async def body(env):
+        lane, _ = await _assigned_execution_fixture(env, tmp_path / 'memory', 'composite', 'active')
+        env.store.lane_presence_reader = lambda: []
         assert (await _pause_actual(env, lane))['lane']['work_state'] == 'paused'
-        assert lane['lane_id'] not in (await lifecycle(env))['resumed']
-    run(body, str(tmp_path / 'excluded.db'))
+        assert not (await lifecycle(env))['resumed']
+    run(body, str(tmp_path / 'virtual-composite.db'))
