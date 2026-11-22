@@ -635,7 +635,7 @@ const SCENARIOS = [
   ...require('./next_design_scenarios.cjs'),
   ['next-melody', require('./next_scenarios').melody],
   ['next-fluid-rail', require('./next_scenarios').fluidRail],
-  ['next-fluid-bart-switch', require('./next_scenarios').fluidBartSwitch],
+  ['next-fluid-assistant-switch', require('./next_scenarios').fluidBartSwitch],
   ['next-fluid-two-chats', require('./next_scenarios').fluidTwoChats],
   ['next-fluid-move', require('./next_scenarios').fluidMove],
   ['next-fluid-sides', require('./next_scenarios').fluidSides],
