@@ -917,3 +917,31 @@ def test_batch_archive_migration_preserves_read_gap_without_altering_it(tmp_path
             assert conn.execute(f"SELECT * FROM {r.ROUTE_TABLE}").fetchall() == before
             assert conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})").fetchall() == schema
     asyncio.run(run())
+
+
+def test_populated_archive_resumes_interrupted_operator_origin_upgrade(tmp_path):
+    async def run():
+        store = running(tmp_path)
+        try:
+            await seed_routes(store)
+            assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
+            archive = await archive_path(store)
+        finally:
+            store.stop()
+        with sqlite3.connect(tmp_path / "hot.db") as conn:
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})")}
+            if "operator_origin" not in columns:
+                conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} ADD COLUMN operator_origin TEXT")
+        with sqlite3.connect(archive) as conn:
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})")}
+            if "operator_origin" in columns:
+                conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} DROP COLUMN operator_origin")
+        for _ in range(2):
+            store = running(tmp_path)
+            try:
+                legacy = await store.get_assistant_composite_route(stream_id=TARGET, input_identity="input-0")
+                assert legacy["body"] == "body" and legacy["operator_origin"] is None
+            finally:
+                store.stop()
+
+    asyncio.run(run())

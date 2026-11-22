@@ -2655,7 +2655,12 @@ class Server:
             else:
                 if self._rejected_rpc(websocket, verb):
                     return [self._auth_error_frame(verb, request_id, "authentication_required")]
-                reply = await handler(dispatch_msg)
+                admission = (
+                    self._registered_operator_admission(websocket, auth)
+                    if websocket is not None and handler == self._on_send else None
+                )
+                reply = (await self._on_send(dispatch_msg, operator_admission=admission)
+                         if admission is not None else await handler(dispatch_msg))
         except (VerbError, StatusCardError, host_transfer.TransferError) as exc:  # expected business failures
             reply = {"type": f"{verb}.error", "error_code": exc.code, "error": str(exc),
                      **getattr(exc, "extra", {})}
@@ -3664,6 +3669,26 @@ class Server:
             and trust.client_kind in operator_auth.CLIENT_KINDS
         )
 
+    def _registered_operator_admission(self, websocket, auth):
+        """Mint an in-process capability whose socket must still be trusted at INSERT."""
+        trust = self._connection_trust.get(websocket)
+        if (websocket not in self._clients or not self._operator_authenticated(websocket)
+                or trust is None or not trust.credential_id
+                or auth.get("token_verified") or auth.get("service_attempted")
+                or auth.get("local_admin_verified")):
+            return None
+        principal = f"operator:{trust.credential_id}"
+        if auth.get("operator_principal") != principal:
+            return None
+
+        def current_principal():
+            if (websocket in self._clients and self._operator_authenticated(websocket)
+                    and self._connection_trust.get(websocket) is trust):
+                return principal
+            return None
+
+        return current_principal
+
     @staticmethod
     def _is_loopback_client(websocket: Any) -> bool:
         """Bootstrap trusts local native tools, never browser-origin requests."""
@@ -4394,6 +4419,9 @@ class Server:
         return composite
 
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if "advisor_rule_message_id" in msg:
+            return await self.comms.tell_advisor_rule(
+                msg, composite=self._front_desk_composite(), lane_rulings=self.lane_rulings)
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_tell(msg)
         host, name = await self.sessions.resolve(msg)
@@ -4708,7 +4736,8 @@ class Server:
         return {**result, "type": "compact.error" if result.get("delivery") == "not_landed" else "compact.ok",
                 "request_id": request_id, "send_request_id": send_request_id}
 
-    async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _on_send(self, msg: dict[str, Any], *,
+                       operator_admission: Callable[[], str | None] | None = None) -> dict[str, Any]:
         from provider_accounts import AccountError, reject_overrides
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
@@ -4755,12 +4784,14 @@ class Server:
                 }
             if auth.get("operator_authenticated") is not True:
                 raise VerbError("assistant_send_unauthorized", "assistant composite send requires authenticated caller")
+            admission = operator_admission if composite is self.assistant_composite else None
             try:
                 attachments = await self._validate_assistant_input_attachments(msg.get("attachments"))
                 accepted = await composite.accept_input(
-                    {**msg, "attachments": attachments},
+                    {**(original_msg if admission is not None else msg), "attachments": attachments},
                     operator_principal=str(auth.get("operator_principal") or "") or None,
                     desk_dispatch=desk_dispatch,
+                    operator_admission=admission,
                 )
             except ValueError as exc:
                 raise VerbError(str(exc), str(exc)) from exc

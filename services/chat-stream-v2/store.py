@@ -41,7 +41,7 @@ import uuid
 
 from retention import (HistoryConnection, prepare_history_schema, history_query,
                        next_receipt_rowid, bind_history_archive, default_archive_path,
-                       migrate_route_batch_archive, DELIVERY_PROOF_VALID,
+                       migrate_route_batch_archive, ROUTE_ADDITIVE_COLUMNS, DELIVERY_PROOF_VALID,
                        DELIVERY_PROOF_TARGET, DELIVERY_PROOF_WIRE)
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
@@ -1911,8 +1911,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     "ALTER TABLE v2_assistant_composite_routes "
                     "ADD COLUMN route_target_generation TEXT"
                 )
-            # Dispatch batching (spec_pentacle__assistant_duplicate_reply_sources_2026_10).
-            for column, ddl in (("batched_into_dispatch_id", "TEXT"), ("answered_by_event_id", "INTEGER")):
+            for column, ddl in ROUTE_ADDITIVE_COLUMNS:
                 if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_routes)")}:
                     conn.execute(f"ALTER TABLE v2_assistant_composite_routes ADD COLUMN {column} {ddl}")
             conn.execute(
@@ -4364,6 +4363,114 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     # -- tell idempotency (QA #6) ------------------------------------------
 
+    async def reserve_advisor_rule_tell(
+        self, tell_id, digest, message_id, body, wire, sender, generation, target,
+        composite_stream_id, advisor_binding_conn,
+    ):
+        """Reserve the tell key and freeze both bound principals before provider I/O."""
+        from _shared.advisor_rule import OPERATOR_ORIGIN
+        from retention import RetentionError
+        from sessions import VerbError
+        from store_lifecycle_authority import configured, front_desk_principal, policy_state
+
+        def reserve(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+                    (tell_id,),
+                ).fetchone()
+                if row is not None:
+                    stored = _decode_tell_envelope(row) or {}
+                    intent = stored.get("advisor_rule_intent")
+                    if (not isinstance(intent, dict) or stored.get("payload_digest") != digest
+                            or (intent.get("fd_stream_id"), intent.get("fd_generation")) != (sender, generation)):
+                        raise VerbError("tell_id_conflict", "tell_id already used with another payload")
+                    return stored if "delivery" in stored else None
+
+                try:
+                    fd = front_desk_principal(conn, configured(conn))
+                except ValueError:
+                    fd = None
+                if (fd is None or policy_state(conn)["state"] != "enabled"
+                        or (fd["stream_id"], fd["session_generation"]) != (sender, generation)):
+                    raise VerbError("advisor_rule_fd_unverified", "live front desk principal required")
+                advisor = _advisor_rule_principal(conn, advisor_binding_conn)
+                if advisor is None or advisor["stream_id"] != target or target == sender:
+                    raise VerbError("advisor_rule_advisor_unverified", "retained advisor recipient required")
+                try:
+                    source = history_query(conn,
+                        "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND input_identity=?",
+                        (composite_stream_id, message_id),
+                    ).fetchone()
+                except RetentionError:
+                    source = None
+                if (source is None or source["operator_origin"] != OPERATOR_ORIGIN
+                        or not str(source["actor_stream_id"] or "").startswith("operator:")
+                        or not source["actor_stream_id"][len("operator:"):] or not source["body"]):
+                    raise VerbError("advisor_rule_operator_unverified", "verified operator admission required")
+                if source["body"].encode("utf-8") != body.encode("utf-8"):
+                    raise VerbError("advisor_rule_words_mismatch", "forward must reproduce exact operator words")
+                intent = {
+                    "operator_message_id": message_id,
+                    "operator_text_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                    "fd_stream_id": sender,
+                    "fd_generation": generation,
+                    "fd_binding_revision": fd["binding_revision"],
+                    "advisor_stream_id": target,
+                    "advisor_generation": advisor["generation"],
+                    "wire_sha256": hashlib.sha256(wire.encode("utf-8")).hexdigest(),
+                }
+                envelope = {
+                    "payload_digest": digest, "advisor_rule_intent": intent,
+                    "reply": {"tell_id": tell_id, "delivery_status": "proof_unavailable",
+                              "to_stream_id": target, "submission_confirmed": False},
+                }
+                conn.execute("INSERT INTO v2_tell_deliveries (tell_id,reply,created_at) VALUES(?,?,?)",
+                             (tell_id, json.dumps(envelope, separators=(",", ":")), time.time()))
+                return None
+
+        return await self.submit(reserve)
+
+    async def prepare_advisor_rule_tell(self, tell_id, envelope):
+        """Record the one possible paste against the original advisor generation."""
+        from sessions import VerbError
+        from store_assistant_binding import _seat_conn
+        from store_host_transfer import authority_state
+
+        def prepare(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+                    (tell_id,),
+                ).fetchone()
+                prior = _decode_tell_envelope(row) or {}
+                intent = prior.get("advisor_rule_intent")
+                if (not isinstance(intent, dict) or "delivery" in prior
+                        or prior.get("payload_digest") != envelope["payload_digest"]):
+                    raise VerbError("tell_id_conflict", "tell_id has no unused matching dispatch")
+                delivery = envelope["delivery"]
+                target, generation = intent["advisor_stream_id"], intent["advisor_generation"]
+                seat = _seat_conn(conn, target)
+                if (seat is None or seat.get("status") != "open" or seat.get("pane_status") != "pane_alive"
+                        or seat.get("session_generation") != generation or authority_state(conn, target, generation)
+                        or (delivery["to_stream_id"], delivery["proof_generation"]) != (target, generation)
+                        or delivery["proof_session_created_at"] != seat.get("created_at")):
+                    raise VerbError("advisor_rule_advisor_unverified", "original advisor generation unavailable")
+                if (hashlib.sha256(delivery["text"].encode("utf-8")).hexdigest() != intent["wire_sha256"]
+                        or delivery["sender_verified"] is not True or delivery["sender_kind"] != "peer"
+                        or (delivery["from_stream_id"], delivery["sender_generation"])
+                           != (intent["fd_stream_id"], intent["fd_generation"])):
+                    raise VerbError("advisor_rule_event_unverified", "delivery does not match dispatch")
+                envelope["advisor_rule_intent"] = intent
+                for part in (envelope["reply"], delivery):
+                    part["ledger_row_id"] = prior["ledger_row_id"]
+                conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                             (json.dumps(envelope, separators=(",", ":")), tell_id))
+
+        await self.submit(prepare)
+
     async def get_tell_delivery(self, tell_id: str) -> dict[str, Any] | None:
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
             row = conn.execute(
@@ -4499,6 +4606,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ).fetchone()
             row_id = int(stored["ledger_row_id"])
             payload = json.loads(stored["reply"])
+            if "advisor_rule_intent" in payload:
+                from sessions import VerbError
+                conn.rollback()
+                raise VerbError("tell_id_conflict", "tell_id is reserved by an advisor rule dispatch")
             changed = False
             reply = payload.get("reply")
             if isinstance(reply, dict) and reply.get("ledger_row_id") != row_id:
@@ -4587,6 +4698,23 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     if completed is None:
                         conn.rollback()
                         return None
+                    if "advisor_rule_intent" in payload:
+                        from tell_proof import retained_proof
+                        completed["advisor_rule_intent"] = payload["advisor_rule_intent"]
+                        if completed["reply"]["submission_confirmed"]:
+                            exact = retained_proof(conn, payload)
+                            for part in (completed["reply"], completed["delivery"]):
+                                for key in ("proof_event_id", "proof_event_at"):
+                                    part.pop(key, None)
+                                if exact is None:
+                                    part.update(delivery_status="committed_pending_proof",
+                                                submission_confirmed=False, proof_state="pending",
+                                                confirmation_pending=True, confirmation_status="pending",
+                                                delivery_ack_at=None, do_not_resubmit=True)
+                                else:
+                                    part.update(exact)
+                            if exact is None:
+                                completed["delivery"]["delivered_at"] = None
                     completed["reply"]["ledger_row_id"] = int(row["ledger_row_id"])
                     completed["delivery"]["ledger_row_id"] = int(row["ledger_row_id"])
                     store_exchange.append(conn, completed["delivery"].get("exchange"))
@@ -4618,6 +4746,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     return None
 
                 resolved_proof = proof
+                if "advisor_rule_intent" in payload and not reconcile:
+                    conn.rollback()
+                    return None
                 if reconcile:
                     from tell_proof import retained_proof
                     resolved_proof = retained_proof(conn, payload)
@@ -7418,6 +7549,24 @@ def _decode_tell_envelope(row: sqlite3.Row | None) -> dict[str, Any] | None:
     payload.setdefault("ledger_row_id", int(row["ledger_row_id"]))
     payload.setdefault("created_at", row["created_at"])
     return payload
+
+
+def _advisor_rule_principal(conn, binding_conn):
+    from store_assistant_binding import _seat_conn
+    from store_host_transfer import authority_state
+
+    try:
+        advisor = binding_conn(conn)
+    except ValueError:
+        return None
+    if advisor["state"] != "ready":
+        return None
+    stream, generation = advisor["stream_id"], advisor["generation"]
+    seat = _seat_conn(conn, stream)
+    if (seat is None or seat.get("closed_at") or seat.get("presumed_dead_at")
+            or authority_state(conn, stream, generation)):
+        return None
+    return advisor
 
 
 def _report_row(row: sqlite3.Row | None) -> dict[str, Any] | None:

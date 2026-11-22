@@ -1776,6 +1776,8 @@ def tell(args: argparse.Namespace) -> int:
         "text": args.text,
         "ttl_seconds": ttl_seconds,
     }
+    if getattr(args, "advisor_rule_message_id", None) is not None:
+        request["advisor_rule_message_id"] = args.advisor_rule_message_id
     if getattr(args, "urgent", False):
         request["urgent"] = True
     if getattr(args, "sanitize", False):
@@ -6088,6 +6090,8 @@ def build_parser() -> argparse.ArgumentParser:
     tell_parser.add_argument("--from", dest="from_stream_id")
     tell_parser.add_argument("--ttl", type=_ttl_arg, default=300)
     tell_parser.add_argument("--tell-id")
+    tell_parser.add_argument("--advisor-rule-message-id",
+                             help="full canonical operator input ID for an exact forward to the retained advisor")
     tell_parser.add_argument(
         "--urgent",
         action="store_true",

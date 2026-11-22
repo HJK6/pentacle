@@ -316,3 +316,22 @@ def test_alias_not_accepted_by_other_stream_commands(monkeypatch, capsys, tmp_pa
         assert args.func(args) == 2, argv
         assert "expected stream id" in capsys.readouterr().err, argv
     assert sent == []
+
+
+def test_advisor_rule_forward_keeps_literal_body_and_full_key(monkeypatch, tmp_path):
+    requests = []
+
+    async def send(_config, request, timeout):
+        requests.append(request)
+        return {"type": "tell.ok"}
+
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://fixture", "", "hostb", tmp_path))
+    monkeypatch.setattr(cli, "tell_once", send)
+    body = "Change the café heading.\r\nUse the draft label.  "
+    args = cli.build_parser().parse_args([
+        "tell", "hostb:advisor", body, "--from", "hostb:desk",
+        "--advisor-rule-message-id", "fixture-input-complete-id",
+    ])
+    assert cli.tell(args) == 0
+    assert requests[0]["advisor_rule_message_id"] == "fixture-input-complete-id"
+    assert requests[0]["text"] == body
