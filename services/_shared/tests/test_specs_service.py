@@ -433,3 +433,214 @@ def test_apply_filters_accepts_status_and_lifecycle_keys(tmp_path):
     assert [r["spec_id"] for r in by_status] == ["a"]
     by_lifecycle = s._apply_filters(rows, {"lifecycle": "completed"})
     assert [r["spec_id"] for r in by_lifecycle] == ["b"]
+
+
+def _drive_watcher_retry(monkeypatch, service, *ticks):
+    """Start the real attach path, then drive its retry worker without threads."""
+    workers = []
+    class Thread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+
+        def start(self):
+            workers.append(self.target)
+
+    class Wait:
+        def __init__(self):
+            self.next_tick = iter(ticks)
+            self.stopped = False
+
+        def wait(self, timeout):
+            assert timeout == 60
+            if self.stopped:
+                return True
+            tick = next(self.next_tick, None)
+            if tick is None:
+                return True
+            tick()
+            return False
+
+        def set(self):
+            self.stopped = True
+
+    monkeypatch.setattr(specs_service_module, "threading", SimpleNamespace(Thread=Thread))
+    service._stop = Wait()
+    service.start()
+    assert len(workers) == 1
+    return workers[0]
+
+
+def _stub_watcher(monkeypatch, failures):
+    """Replace only the two watcher imports, even if watchdog is installed."""
+    import builtins
+
+    attempts = []
+    observers = []
+    started = []
+    stopped = []
+    joined = []
+    original = builtins.__import__
+
+    class Observer:
+        def __init__(self):
+            observers.append(self)
+            self.scheduled = []
+
+        def schedule(self, handler, path, *, recursive):
+            assert not recursive
+            self.scheduled.append((handler, path))
+
+        def start(self):
+            started.append(self)
+            if len(started) == 1 and failures.get("start") is not None:
+                raise failures["start"]
+
+        def stop(self):
+            stopped.append(self)
+
+        def join(self, *, timeout):
+            assert timeout == 2
+            joined.append(self)
+
+    def import_module(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "watchdog.events":
+            attempts.append(name)
+            missing = failures.get("name")
+            if missing == "watchdog" or (len(attempts) == 1 and missing == "transitive_dependency"):
+                raise ModuleNotFoundError(f"No module named {missing!r}", name=missing)
+            return SimpleNamespace(FileSystemEventHandler=object)
+        if name == "watchdog.observers":
+            if len(attempts) == 1 and failures.get("name") == "watchdog.observers":
+                raise ModuleNotFoundError("missing observers", name="watchdog.observers")
+            return SimpleNamespace(Observer=Observer)
+        return original(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_module)
+    return SimpleNamespace(attempts=attempts, observers=observers, started=started, stopped=stopped, joined=joined)
+
+
+def _edit_watcher_spec(folder, before, after):
+    spec = folder / "spec.md"
+    spec.write_text(spec.read_text(encoding="utf-8").replace(before, after), encoding="utf-8")
+    for file in (spec, folder / "summary.md"):
+        os.utime(file, (100, 100))
+
+
+def _assert_watcher_edit_visible(service, identity, title):
+    scan = service.scan_work_observations(now=103)
+    [candidate] = scan["candidates"][identity]
+    assert candidate["facts"]["title"] == title
+    assert service.status_card_metadata(identity)["parsed"]["title"] == title
+
+
+def test_missing_watchdog_logs_once_and_does_not_retry_attach(tmp_path, monkeypatch, caplog):
+    import logging
+
+    root = tmp_path / "memory"
+    folder = root / "work" / "in_progress" / "demo__absent_watchdog"
+    _write_spec(folder, title="Before")
+    monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(root))
+    service = SpecsSubsystem(session_summaries=lambda: [], changed_callback=lambda _: None)
+    probe = _stub_watcher(monkeypatch, {"name": "watchdog"})
+    caplog.set_level(logging.INFO, logger=specs_service_module.log.name)
+    modes = []
+
+    def root_disappears():
+        modes.append(service.state_payload())
+        root.rename(tmp_path / "moved")
+
+    def root_returns():
+        modes.append(service.state_payload())
+        (tmp_path / "moved").rename(root)
+
+    def still_polling():
+        modes.append(service.state_payload())
+
+    retry = _drive_watcher_retry(monkeypatch, service, lambda: None, lambda: None,
+                                 root_disappears, root_returns, still_polling)
+    try:
+        assert service.state_payload() == "polling" and not service.push_enabled
+        retry()
+        assert modes == ["polling", "disabled", "polling"]
+        assert service.state_payload() == "polling" and not service.push_enabled
+        _edit_watcher_spec(folder, "Before", "Polled edit")
+        _assert_watcher_edit_visible(service, "spec_demo__absent_watchdog", "Polled edit")
+        warnings = [r for r in caplog.records if "watcher attach failed" in r.getMessage()]
+        fallback = [r for r in caplog.records if "watchdog" in r.getMessage() and "polling" in r.getMessage()
+                    and r.levelno == logging.INFO]
+        assert (len(probe.attempts), len(warnings), len(fallback)) == (1, 0, 1)
+    finally:
+        service.stop()
+
+
+@pytest.mark.parametrize("fault", ["start", "observer-start-module-error", "watchdog.observers", "transitive_dependency"])
+def test_watcher_retries_transient_failure_and_processes_edit(tmp_path, monkeypatch, caplog, fault):
+    folder = tmp_path / "work" / "in_progress" / "demo__retry_watch"
+    _write_spec(folder, title="Before")
+    changes, timers = [], []
+    clock = [10.0]
+
+    class Timer:
+        def __init__(self, delay, callback, args):
+            self.delay, self.apply = delay, lambda: callback(*args)
+
+        def start(self):
+            timers.append(self)
+
+        def cancel(self):
+            pass
+
+    service = SpecsSubsystem(memory_root=tmp_path, session_summaries=lambda: [], changed_callback=changes.append,
+                             monotonic=lambda: clock[0], timer_factory=Timer)
+    failure = {"start": OSError("synthetic start failure")} if fault == "start" else (
+        {"start": ModuleNotFoundError("synthetic observer-start failure", name="watchdog")}
+        if fault == "observer-start-module-error" else {"name": fault})
+    probe = _stub_watcher(monkeypatch, failure)
+    retry = _drive_watcher_retry(monkeypatch, service, lambda: None, lambda: None)
+    try:
+        assert service.state_payload() == "polling" and len(probe.attempts) == 1
+        assert not service.push_enabled
+        retry()
+        assert service.state_payload() == "watching" and service.push_enabled
+        assert len(probe.attempts) == 2
+        assert sum("watcher attach failed" in msg for msg in caplog.messages) == 1
+        active = probe.observers[-1]
+        handler = next(h for h, path in active.scheduled if Path(path) == folder)
+        _edit_watcher_spec(folder, "Before", "Watched edit")
+        handler.on_any_event(SimpleNamespace(event_type="modified", src_path=str(folder / "spec.md")))
+        assert changes == [] and len(timers) == 1
+        clock[0] += timers[0].delay
+        timers[0].apply()
+        assert changes == [["demo__retry_watch"]]
+        _assert_watcher_edit_visible(service, "spec_demo__retry_watch", "Watched edit")
+    finally:
+        service.stop()
+    assert probe.stopped == probe.joined == [active]
+
+
+def test_watcher_attaches_when_configured_root_appears(tmp_path, monkeypatch):
+    root = tmp_path / "appears"
+    monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(root))
+    service = SpecsSubsystem(session_summaries=lambda: [], changed_callback=lambda _: None)
+    probe = _stub_watcher(monkeypatch, {})
+    folder = root / "work" / "in_progress" / "demo__recovered_root"
+
+    def still_missing():
+        assert service.state_payload() == "disabled" and probe.attempts == []
+
+    def root_appears():
+        still_missing()
+        _write_spec(folder, title="Before recovery")
+
+    retry = _drive_watcher_retry(monkeypatch, service, still_missing, root_appears)
+    try:
+        still_missing()
+        retry()
+        assert service.state_payload() == "watching" and service.push_enabled
+        assert len(probe.attempts) == 1
+        [observer] = probe.observers
+        _edit_watcher_spec(folder, "Before recovery", "After recovery")
+        _assert_watcher_edit_visible(service, "spec_demo__recovered_root", "After recovery")
+    finally:
+        service.stop()
+    assert probe.stopped == probe.joined == [observer]

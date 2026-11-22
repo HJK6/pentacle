@@ -286,6 +286,7 @@ class SpecsSubsystem:
         self.subsystem_state = "disabled" if self.disabled else "polling"
         self.push_enabled = False
         self._observer: Any = None
+        self._watchdog_unavailable = False
         self._stop = threading.Event()
         self._debounce_timer: _TimerLike | None = None
         self._debounce_generation = 0
@@ -551,11 +552,22 @@ class SpecsSubsystem:
         return [work_root / status["name"] for status in self._load_statuses()[0]]
 
     def _attach_or_degrade(self) -> None:
-        if self.disabled or self._observer is not None:
+        if self.disabled or self._observer is not None or self._watchdog_unavailable:
             return
         try:
-            from watchdog.events import FileSystemEventHandler
-            from watchdog.observers import Observer
+            try:
+                from watchdog.events import FileSystemEventHandler
+                from watchdog.observers import Observer
+            except ModuleNotFoundError as exc:
+                if exc.name != "watchdog":
+                    raise
+                # Optional package absent on a standard install. Keep root
+                # health checks and periodic scans; only attachment is latched.
+                self._watchdog_unavailable = True
+                self.push_enabled = False
+                self.subsystem_state = "polling"
+                log.info("specs watcher unavailable: watchdog not installed; using polling")
+                return
 
             subsystem = self
 
