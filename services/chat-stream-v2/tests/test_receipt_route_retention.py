@@ -1009,6 +1009,20 @@ def test_prior_daemon_carries_fully_migrated_history_through_rollback(tmp_path, 
                 archive_fixture.setattr(r, "_settled_route", lambda conn, row, cutoff: row["input_identity"] == "input-0")
                 assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
             assert (await move(store, r.RECEIPT_TABLE))["moved"] == 1
+
+            def seed_tells(conn):
+                reply = {"delivery_status": "delivered", "submission_confirmed": True}
+                protected = {
+                    "payload_digest": "fixture-typed-digest",
+                    "advisor_rule_intent": {"fd_stream_id": "fixture:desk", "fd_generation": "fixture-generation"},
+                    "reply": reply, "delivery": {**reply, "text": "Synthetic protected delivery."},
+                }
+                conn.execute("INSERT INTO v2_tell_deliveries VALUES (?,?,?)",
+                             ("fixture-typed-prior-key", json.dumps(protected), 1))
+                conn.execute("INSERT INTO v2_tell_deliveries VALUES (?,?,?)",
+                             ("fixture-ordinary-preimage", json.dumps({"reply": reply}), 2))
+                conn.commit()
+            await store.submit(seed_tells)
             return await archive_path(store), await combined(store, r.ROUTE_TABLE)
         finally:
             store.stop()
@@ -1024,9 +1038,11 @@ def test_prior_daemon_carries_fully_migrated_history_through_rollback(tmp_path, 
 import asyncio
 import sys
 from pathlib import Path
+import store as prior_store
 from test_receipt_route_retention import append, combined, move, r, running, TARGET, OLD
 
 async def run(root):
+    prior_store.TELL_RETENTION = 1
     for index in range(2):
         store = running(root)
         try:
@@ -1056,6 +1072,13 @@ async def run(root):
                 conn.commit()
             await store.submit(settle)
             assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
+            await store.put_tell_delivery("fixture-ordinary-prior-write", {
+                "payload_digest": "fixture-ordinary-digest", "reply": {"delivery_status": "delivered"},
+            })
+            expired = await store.get_tell_delivery("fixture-typed-prior-key")
+            assert expired["advisor_rule_tombstone"]["fd_stream_id"] == "fixture:desk"
+            assert "delivery" not in expired
+            assert await store.get_tell_delivery("fixture-ordinary-preimage") is None
         finally:
             store.stop()
 
@@ -1080,6 +1103,9 @@ asyncio.run(run(Path(sys.argv[1])))
             assert [row["request_id"] for row in receipts] == ["before-rollback", "prior-receipt"]
             after = await append(store, "after-reupgrade")
             assert after["receipt_rowid"] > max(row["rowid"] for row in receipts)
+            expired = await store.get_tell_delivery("fixture-typed-prior-key")
+            assert expired["advisor_rule_tombstone"]["fd_generation"] == "fixture-generation"
+            assert "delivery" not in expired
         finally:
             store.stop()
 

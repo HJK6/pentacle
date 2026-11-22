@@ -832,13 +832,39 @@ STREAM_RESERVATION_IDEMPOTENCY_INDEX_DDL = (
 # v2-only. `tell_id` is the caller's idempotency key (QA #6): a retried tell
 # must not inject twice, so the durable delivery envelope is remembered and
 # replayed (including a Codex ``pasted_unsubmitted`` outcome).
-# Bounded by TELL_RETENTION rows — this is a dedupe window, not a ledger.
+# Ordinary delivery evidence has a bounded dedupe window.
 TELL_DELIVERY_DDL = """
 CREATE TABLE IF NOT EXISTS v2_tell_deliveries (
     tell_id TEXT PRIMARY KEY,
     reply TEXT NOT NULL,
     created_at REAL NOT NULL
 )
+"""
+
+# The delete boundary also applies to the prior binary's retention query.
+# Keep only the protected key's retry identity when its delivery expires.
+TELL_ADVISOR_RULE_TOMBSTONE_DDL = """
+CREATE TRIGGER IF NOT EXISTS v2_tell_keep_advisor_rule_key
+AFTER DELETE ON v2_tell_deliveries
+WHEN CASE WHEN json_valid(OLD.reply) THEN
+    json_type(OLD.reply,'$.advisor_rule_intent')='object'
+    OR json_type(OLD.reply,'$.advisor_rule_tombstone')='object'
+END
+BEGIN
+    INSERT INTO v2_tell_deliveries(rowid,tell_id,reply,created_at)
+    VALUES(OLD.rowid, OLD.tell_id,
+        CASE WHEN json_type(OLD.reply,'$.advisor_rule_tombstone')='object' THEN OLD.reply ELSE
+            json_object(
+                'payload_digest', json_extract(OLD.reply,'$.payload_digest'),
+                'advisor_rule_tombstone', json_object(
+                    'fd_stream_id', json_extract(OLD.reply,'$.advisor_rule_intent.fd_stream_id'),
+                    'fd_generation', json_extract(OLD.reply,'$.advisor_rule_intent.fd_generation')
+                ),
+                'reply', json_object('tell_id',OLD.tell_id, 'delivery_status','proof_unavailable',
+                                     'submission_confirmed',json('false'))
+            )
+        END, OLD.created_at);
+END
 """
 
 # v2-only. Post-hoc role provenance. `role` itself stays on the sessions row —
@@ -1818,6 +1844,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.execute(MAINTENANCE_DELEGATIONS_DDL)
             conn.execute(SPAWN_OUTCOME_REQUEST_INDEX_DDL)
             conn.execute(TELL_DELIVERY_DDL)
+            conn.execute(TELL_ADVISOR_RULE_TOMBSTONE_DDL)
             conn.execute(SESSION_ROLE_DDL)
             conn.execute(NUDGE_STATE_DDL)
             conn.execute(SESSION_REAP_DDL)
@@ -4384,10 +4411,13 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 ).fetchone()
                 if row is not None:
                     stored = _decode_tell_envelope(row) or {}
-                    intent = stored.get("advisor_rule_intent")
+                    tombstone = stored.get("advisor_rule_tombstone")
+                    intent = stored.get("advisor_rule_intent") or tombstone
                     if (not isinstance(intent, dict) or stored.get("payload_digest") != digest
                             or (intent.get("fd_stream_id"), intent.get("fd_generation")) != (sender, generation)):
                         raise VerbError("tell_id_conflict", "tell_id already used with another payload")
+                    if tombstone is not None:
+                        raise VerbError("advisor_rule_event_unverified", "protected tell delivery proof expired")
                     return stored if "delivery" in stored else None
 
                 try:
@@ -4618,7 +4648,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ).fetchone()
             row_id = int(stored["ledger_row_id"])
             payload = json.loads(stored["reply"])
-            if "advisor_rule_intent" in payload:
+            if "advisor_rule_intent" in payload or "advisor_rule_tombstone" in payload:
                 from sessions import VerbError
                 conn.rollback()
                 raise VerbError("tell_id_conflict", "tell_id is reserved by an advisor rule dispatch")
@@ -4710,6 +4740,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     if completed is None:
                         conn.rollback()
                         return None
+                    completed.pop("advisor_rule_intent", None)
+                    completed.pop("advisor_rule_tombstone", None)
                     if "advisor_rule_intent" in payload:
                         from tell_proof import retained_proof
                         completed["advisor_rule_intent"] = payload["advisor_rule_intent"]

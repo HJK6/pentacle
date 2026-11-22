@@ -596,6 +596,8 @@ class Comms:
 
         prior = await self.store.get_tell_delivery(tell_id)
         if prior is not None:
+            if "advisor_rule_intent" in prior or "advisor_rule_tombstone" in prior:
+                raise self._conflict(tell_id)
             # A logical FD retry after a rebind returns the original committed
             # outcome; an attempt is reconciled at the seat it was made on.
             matched = self._same_logical_payload(tell_id, digest, prior, logical, body) if logical else digest

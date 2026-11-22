@@ -63,6 +63,11 @@ outside the lookup response. An identical authenticated replay returns the
 stored report. Its attestation survives seat changes, tell expiry, and daemon
 restart.
 
+A protected tell ID stays reserved after delivery retention removes its proof.
+Repeating that forward returns `advisor_rule_event_unverified`. A changed
+payload or an ordinary tell with the same ID returns `tell_id_conflict`.
+A fresh protected tell can reference the original stamped input with a new ID.
+
 For a publisher that cannot traverse the daemon user's home, install the
 read-only consumer at `/usr/local/libexec/pentacle-work-report/agent-orch`.
 The deployment owner runs the reviewed `install_fleet_spawn_tooling.py` with

@@ -290,8 +290,9 @@ def test_reader_projects_exact_advisor_accept_and_keeps_opaque_fields_private(tm
 
 
 def test_advisor_accept_survives_restart_and_tell_retention(tmp_path, monkeypatch):
+    import store as store_module
     from test_advisor_rule_forward import (
-        _connection, admit, forward, operator, rule_fixture, rule_report, seat, SEAT_A, SEAT_B, TELL_ID,
+        _connection, admit, forward, operator, rule_fixture, rule_report, seat, SEAT_A, SEAT_B, TELL_ID, WORDS,
     )
 
     token = tmp_path / "reader-token"
@@ -307,12 +308,27 @@ def test_advisor_accept_survives_restart_and_tell_retention(tmp_path, monkeypatc
                 assert (await forward(fd))["delivery_status"] == "delivered"
                 assert (await advisor("report", **report))["type"] == "report.ok"
                 stamp = (await h.store.get_report(report["report_id"], include_advisor_rule=True))["advisor_rule_accept"]
+                monkeypatch.setattr(store_module, "TELL_RETENTION", 1)
+                ordinary = await fd("tell", to_stream_id=SEAT_B, text="Synthetic retention sweep.",
+                                    tell_id="fixture-expire-old-tell")
+                assert ordinary["delivery_status"] == "delivered"
+                expired = await h.store.get_tell_delivery(TELL_ID)
+                assert expired is not None and "advisor_rule_tombstone" in expired
+                assert "delivery" not in expired and "advisor_rule_intent" not in expired
+                assert expired["reply"]["submission_confirmed"] is False
+                assert WORDS not in json.dumps(expired, ensure_ascii=False)
 
-                def expire(conn):
+                def prune_again(conn):
                     conn.execute("DELETE FROM v2_tell_deliveries WHERE tell_id=?", (TELL_ID,))
                     conn.commit()
 
-                await h.store.submit(expire)
+                await h.store.submit(prune_again)
+                assert await h.store.get_tell_delivery(TELL_ID) == expired
+                assert (await forward(fd)).get("error_code") == "advisor_rule_event_unverified"
+                assert (await forward(fd, body=WORDS + "edited")).get("error_code") == "tell_id_conflict"
+                ordinary_reuse = await fd("tell", to_stream_id=SEAT_B, text=WORDS, tell_id=TELL_ID)
+                assert ordinary_reuse.get("error_code") == "tell_id_conflict"
+                assert len(h.tmux.inputs) == 2
                 assert (await advisor("report", **report))["type"] == "report.ok"
                 assert (await advisor("report", **rule_report("fixture-expired"))).get("error_code") == "advisor_rule_event_unverified"
                 await h.rotate_fd()
@@ -322,6 +338,7 @@ def test_advisor_accept_survives_restart_and_tell_retention(tmp_path, monkeypatc
         store.start()
         server = Server(host="127.0.0.1", port=0, store=store)
         try:
+            assert await store.get_tell_delivery(TELL_ID) == expired
             await server.bind()
             async with _connection(server) as reader:
                 assert (await reader.hello(from_stream_id="work-report-reader",
