@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 
+import pytest
+
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from notification_answer_fixture import fixture
 from server import Server
@@ -13,7 +15,8 @@ from test_front_desk_digest import _production_dispatcher
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 
 
-def test_socket_send_image_reaches_composite_for_bound_seat_only(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("typed", [False, True], ids=["image", "design-link"])
+def test_socket_send_image_reaches_composite_for_bound_seat_only(tmp_path, monkeypatch, capsys, typed):
     from agent_orch import cli
     from agent_orch.config import Config
 
@@ -47,6 +50,14 @@ def test_socket_send_image_reaches_composite_for_bound_seat_only(tmp_path, monke
             port = await server.bind()
             png = tmp_path / 'shot.png'
             png.write_bytes(PNG)
+            sha = hashlib.sha256(PNG).hexdigest()
+            link = {
+                'dashboard': 'design', 'target': {'project_id': 'fixture', 'design_id': 'board'},
+                'title': 'Fixture board', 'subtitle': 'Fixture board', 'revision_id': 'a' * 64,
+            }
+            if typed:
+                monkeypatch.setattr(cli, '_resolve_design_preview', lambda *args: (png, sha, link))
+            command = ['send-design-link', 'fixture', 'board', '--request-id', 'fixture-link'] if typed else ['send-image', str(png)]
             monkeypatch.setattr(cli, 'load_config', lambda: Config(f'ws://127.0.0.1:{port}', '', 'fixture-host', tmp_path))
             monkeypatch.setattr('agent_orch.send_boundary.stream_token_from_env', lambda: 'fd-token')
             monkeypatch.setattr('agent_orch.send_boundary._stream_token_from_file', lambda *a, **k: 'fd-token')
@@ -56,19 +67,26 @@ def test_socket_send_image_reaches_composite_for_bound_seat_only(tmp_path, monke
             parse = cli.build_parser().parse_args
             try:
                 # Bound seat without note fields: loud failure, nothing posted.
-                code = await asyncio.to_thread(cli.send_image, parse(['send-image', str(png), '--caption', 'send-image test']))
+                args = parse([*command, '--caption', 'send-image test'])
+                code = await asyncio.to_thread(args.func, args)
                 first = capsys.readouterr()
                 assert code == 2, first
                 # Bound seat with note fields: one attachment event on the composite.
-                code = await asyncio.to_thread(cli.send_image, parse([
-                    'send-image', str(png), '--caption', 'send-image test',
-                    '--note-type', 'result', '--ref', 'tell:real-tell']))
+                args = parse([*command, '--caption', 'send-image test',
+                              '--note-type', 'result', '--ref', 'tell:real-tell'])
+                code = await asyncio.to_thread(args.func, args)
                 cap = capsys.readouterr()
                 out = cap.out + cap.err
                 assert code == 0, out
                 events = [e for e in await store.fetch_session_event_tail(chat, limit=20) if e.get('attachments')]
                 assert len(events) == 1 and events[0]['text'] == 'send-image test', events
-                assert events[0]['attachments'][0]['key'] == hashlib.sha256(PNG).hexdigest()
+                assert events[0]['attachments'][0]['key'] == sha
+                if typed:
+                    assert events[0]['raw']['dashboard_link'] == link
+                    assert await asyncio.to_thread(args.func, args) == 0
+                    receipt = json.loads(capsys.readouterr().out)
+                    assert receipt['duplicate'] is True
+                    assert len([e for e in await store.fetch_session_event_tail(chat, limit=20) if e.get('attachments')]) == 1
                 # An unbound seat is refused the composite publish and never lands on it.
                 await sessions.open('fixture-host', 'v2-other', provider='codex')
                 await store.grant_stream_token('fixture-host', 'v2-other', hashlib.sha256(b'other-token').hexdigest(),
@@ -77,11 +95,14 @@ def test_socket_send_image_reaches_composite_for_bound_seat_only(tmp_path, monke
                 monkeypatch.setattr('agent_orch.send_boundary._stream_token_from_file', lambda *a, **k: 'other-token')
                 monkeypatch.setenv('AGENT_ORCH_STREAM_ID', 'fixture-host:v2-other')
                 monkeypatch.setenv('PENTACLE_STREAM_ID', 'fixture-host:v2-other')
-                code = await asyncio.to_thread(cli.send_image, parse([
-                    'send-image', str(png), '--caption', 'own chat']))
+                args = parse([*command, '--caption', 'own chat'])
+                code = await asyncio.to_thread(args.func, args)
                 cap = capsys.readouterr()
                 # Not the bound front desk: today's behaviour, its own conversation only.
                 assert code == 0 and json.loads(cap.out)['stream_id'] == 'fixture-host:v2-other', cap
+                if typed:
+                    own = await store.fetch_session_event_tail('fixture-host:v2-other', limit=20)
+                    assert [e['raw']['dashboard_link'] for e in own if e.get('attachments')] == [link]
                 assert len([e for e in await store.fetch_session_event_tail(chat, limit=20) if e.get('attachments')]) == 1
             finally:
                 await composite.stop()

@@ -1722,7 +1722,7 @@ class AssistantComposite:
         publish_fields = {
             "type", "request_id", "composite_stream_id", "dispatch_id",
             "reply_to_message_id", "reply_to_question_id", "publish_kind", "message",
-            "attachment_ids", "evidence_refs", "response_state", "reply_to_message_ids",
+            "attachment_ids", "dashboard_link", "evidence_refs", "response_state", "reply_to_message_ids",
             "note_type", "ref", "note_reason",
             "owes", "owes_due", "owes_spec", "owes_lane", "closes",
         }
@@ -1828,6 +1828,14 @@ class AssistantComposite:
             attachments = await self.publication_attachments(attachment_ids, scope)
             for attachment in attachments:
                 attachment["publisher"] = {"stream_id": actor_stream_id, "generation": actor_generation}
+        dashboard_link = None
+        if "dashboard_link" in msg:
+            from design_links import require_design_png, validate_design_link
+
+            if not proactive:
+                raise ValueError("assistant_publish_payload_invalid")
+            dashboard_link = validate_design_link(msg["dashboard_link"])
+            require_design_png(attachments)
         canonical_payload = {
             "composite_stream_id": self.config.stream_id,
             "dispatch_id": dispatch_id,
@@ -1868,6 +1876,9 @@ class AssistantComposite:
                 "evidence_refs": evidence_refs,
             },
         }
+        if dashboard_link is not None:
+            canonical_payload["dashboard_link"] = dashboard_link
+            event["raw"]["dashboard_link"] = dashboard_link
         if response_state is not None:
             event["raw"]["response_state"] = response_state
         if reply_to_message_ids is not None:

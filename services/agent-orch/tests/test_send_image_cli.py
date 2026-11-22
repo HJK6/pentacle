@@ -271,3 +271,38 @@ def test_other_seat_with_explicit_target_falls_back_on_refusal(tmp_path, monkeyp
         calls = _publish_wire(monkeypatch, {"type": "assistant.publish.error", "error_code": code}, bound=False)
         assert cli.send_image(_fd_args(p, to="x:assistant")) == 0
         assert _kinds(calls)[-1] == "legacy"
+
+
+def test_send_design_link_uses_verified_preview_and_explicit_request_id(tmp_path, monkeypatch, capsys):
+    p = tmp_path / "phone.png"
+    p.write_bytes(PNG)
+    sha = hashlib.sha256(PNG).hexdigest()
+    link = {
+        "dashboard": "design", "target": {"project_id": "sample", "design_id": "board", "view_id": "phone"},
+        "title": "Phone", "subtitle": "Board", "revision_id": "a" * 64,
+    }
+    payloads = []
+
+    async def upload(config, data, *, timeout):
+        assert data == PNG
+        return {"type": "upload_blob.ok", "blob_sha": sha}
+
+    async def post(config, payload, *, timeout):
+        payloads.append(payload)
+        return {"type": "send_image.ok", "stream_id": "localhost:seat", "event_id": 7}
+
+    monkeypatch.setattr(cli, "load_config", lambda: object())
+    monkeypatch.setattr(cli, "upload_blob_once", upload)
+    monkeypatch.setattr(cli, "send_image_once", post)
+    monkeypatch.setattr(cli, "_send_image_to_composite", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_resolve_design_preview", lambda *a: (p, sha, link))
+    args = cli.build_parser().parse_args([
+        "send-design-link", "sample", "board", "phone", "--caption", "Review",
+        "--request-id", "fixture-1", "--from-stream-id", "localhost:seat",
+    ])
+    assert args.func(args) == 0
+    assert payloads[0]["dashboard_link"] == link
+    assert payloads[0]["request_id"] == "send-design-link:fixture-1"
+    assert payloads[0]["caption"] == "Review"
+    assert payloads[0]["attachments"] == [{"key": sha, "mime": "image/png", "bytes": len(PNG)}]
+    assert str(p) not in capsys.readouterr().out

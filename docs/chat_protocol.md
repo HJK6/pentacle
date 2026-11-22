@@ -490,3 +490,35 @@ notice and, after 300 seconds, an `unanswered` chat event tied to the input.
 Desk-originated dispatches receive neither. `inspect_stream` reports the setting
 and source. Set `assistant.strict_publication.enabled` to `off` in kv to restore
 legacy mirroring and untyped notes without a restart.
+
+### Typed Design links
+
+The agent image send and proactive `assistant.publish` paths accept
+`dashboard_link` for a Design target with one PNG attachment. The daemon
+writes it as `raw.dashboard_link` on the same transcript event as the
+ordinary caption and attachment. Authorization and request-ID deduplication
+use the same rules as the underlying image publication. A new Design post
+requires this shape:
+
+```json
+{
+  "dashboard": "design",
+  "target": { "project_id": "sample", "design_id": "orders", "view_id": "phone" },
+  "title": "Phone",
+  "subtitle": "Orders",
+  "revision_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+```
+
+Omit `view_id` to target a board. IDs have 1–80 lowercase ASCII letters or
+digits, with hyphens allowed after the first character. The shared reader
+also accepts an omitted `target` for the Design Home chip. A null or malformed
+target, or an unknown dashboard, leaves the caption and attachment in the
+ordinary transcript.
+
+`revision_id` pins the preview image only. Web and mobile open the current
+target at `/next/design` and `/next/embed/design` respectively, followed by
+`/<project>/<design>[/<view>]` for a target. A missing or invalid optional
+preview field leaves the link actionable. New web tries the recorded
+revision's authenticated media first and then the PNG attachment. Older
+clients show the caption and attachment.
