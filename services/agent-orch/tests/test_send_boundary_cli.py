@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -61,6 +62,20 @@ def test_every_network_dispatch_translates_only_service_error(monkeypatch, tmp_p
     png.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=="))
     values = {"__FILE__": str(file), "__PNG__": str(png), "__JSON__": str(json_file), "__ROOT__": str(tmp_path)}
     argv = [values.get(arg, arg) for arg in row["argv"]]
+    if row["command"] == "send-design-link":
+        # Supply a local recorded image while the real command exercises its RPC boundary.
+        digest = hashlib.sha256(png.read_bytes()).hexdigest()
+
+        def recorded_preview(project, design, view):
+            return png, digest, {
+                "dashboard": "design",
+                "target": {"project_id": project, "design_id": design, "view_id": view},
+                "title": "Fixture screen",
+                "subtitle": "Fixture board",
+                "revision_id": "a" * 64,
+            }
+
+        monkeypatch.setattr(cli, "_resolve_design_preview", recorded_preview)
     sockets, hits = [], []
     async def boundary(*args, **kwargs):
         hits.append(True)
