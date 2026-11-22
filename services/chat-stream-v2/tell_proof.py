@@ -6,6 +6,7 @@ import hashlib
 import logging
 import sqlite3
 from bisect import bisect_right
+from contextlib import closing
 
 from submission_events import EventProof, provider_text_digest
 from retention import (history_query, RECEIPT_PROOF_PREDICATE, RECEIPT_PROOF_WIRE,
@@ -84,6 +85,25 @@ class TellDeliveryParseCache:
 # Reuse bounds: a stream larger than these is read per call exactly as before.
 _TAIL_REUSE_MAX_ROWS = 4096
 _TAIL_REUSE_MAX_BYTES = 8 * 1024 * 1024
+_SQLITE_MAX_INTEGER = (1 << 63) - 1
+_SQLITE_MIN_INTEGER = -(1 << 63)
+
+# Source rows (including duplicates), UTF-8 wire/key bytes and range markers
+# are capped across a projection. Oversized or uncertain ranges use legacy SQL.
+_DISPATCH_REUSE_MAX_ROWS = 4096
+_DISPATCH_REUSE_MAX_BYTES = 8 * 1024 * 1024
+_DISPATCH_REUSE_MAX_RANGES = 4096
+_DISPATCH_WIRE = "json_extract(route_json,'$.direct_envelope.wire_body')"
+_DISPATCH_RANGE = (
+    "FROM v2_assistant_composite_routes WHERE route_target=? "
+    "AND route_target_generation=? AND routing_state='resolved' "
+    "AND json_extract(route_json,'$.admission_mode')='direct_primary'"
+)
+_DISPATCH_LOAD = (
+    f"SELECT CASE WHEN length(CAST({_DISPATCH_WIRE} AS BLOB))<=? "
+    f"THEN {_DISPATCH_WIRE} END {_DISPATCH_RANGE} LIMIT ?"
+)
+
 
 _UNPARSED, _UNPARSEABLE = object(), object()
 
@@ -128,7 +148,7 @@ class _TailWindow:
 
 
 class ProjectionReuse:
-    """Tail reads shared only within one projection call.
+    """Tail reads and optional dispatch membership within one projection call.
 
     The total_changes guard also drops windows after writes within a private
     projection. Store readers give each call a new instance, so neither another
@@ -138,12 +158,75 @@ class ProjectionReuse:
     def __init__(self):
         self._changes = None
         self._tail = {}
+        self._dispatch = None
+        self.exact_anchors = False
+        self._dispatch_rows = 0
+        self._dispatch_bytes = 0
+
+    def enable_dispatch(self):
+        self._dispatch = {}
+
+    def enable_exact_anchors(self):
+        self.exact_anchors = True
 
     def _fresh(self, conn):
         changes = conn.total_changes
         if changes != self._changes:
             self._tail = {}
+            if self._dispatch is not None:
+                self._dispatch.clear()
+                self._dispatch_rows = self._dispatch_bytes = 0
             self._changes = changes
+
+    def dispatch_contains(self, conn, target, text, generation) -> bool | None:
+        """True/False for a supported range; None requests the original probe."""
+        if (self._dispatch is None or type(target) is not str
+                or type(generation) is not str or type(text) is not str
+                or not _lookup_string(text)):
+            return None
+        self._fresh(conn)
+        key = (target, generation)
+        wires = self._dispatch.get(key, _UNPARSED)
+        if wires is _UNPARSED:
+            if (len(self._dispatch) >= _DISPATCH_REUSE_MAX_RANGES
+                    or not _lookup_string(target) or not _lookup_string(generation)):
+                return None
+            key_bytes = len(target.encode("utf-8")) + len(generation.encode("utf-8"))
+            remaining = _DISPATCH_REUSE_MAX_BYTES - self._dispatch_bytes - key_bytes
+            if remaining < 0:
+                return None
+            self._dispatch_bytes += key_bytes
+            loaded = self._read_dispatch(
+                conn, key, _DISPATCH_REUSE_MAX_ROWS - self._dispatch_rows, remaining)
+            if loaded is None:
+                wires = None  # Sticky fallback for only this range and snapshot.
+            else:
+                wires, rows, size = loaded
+                self._dispatch_rows += rows
+                self._dispatch_bytes += size
+            self._dispatch[key] = wires
+        return None if wires is None else text in wires
+
+    @staticmethod
+    def _read_dispatch(conn, key, max_rows, max_bytes):
+        # Let SQLite extract the wire exactly as the equality probe does.
+        # Overlarge values become NULL before transfer to Python. Any NULL,
+        # non-text/unclean value or SQL/fetch error falls back to the probe.
+        wires = set()
+        size = rows = 0
+        try:
+            with closing(conn.execute(_DISPATCH_LOAD, (max_bytes, *key, max_rows + 1))) as cursor:
+                for (wire,) in cursor:
+                    rows += 1
+                    if rows > max_rows or not _lookup_string(wire):
+                        return None
+                    size += len(wire.encode("utf-8"))
+                    if size > max_bytes:
+                        return None
+                    wires.add(wire)
+        except sqlite3.Error:
+            return None
+        return wires, rows, size
 
     def tail_after(self, conn, target, birth, watermark):
         """The `_TailEvent`s with event_id > `watermark`, ascending, or None.
@@ -377,6 +460,20 @@ def _tail_events(conn, target, birth, watermark, reuse):
         yield _TailEvent(row["event_id"], row["event_json"])
 
 
+def _exact_tail_event(conn, target, birth, watermark, anchor):
+    """One lifecycle-matched anchor, or None to retry a failed read on the old path."""
+    try:
+        with closing(conn.execute(
+            "SELECT event_id,event_json FROM session_event_tail "
+            "WHERE event_id=? AND stream_id=? AND session_created_at=? AND event_id>?",
+            (anchor, target, birth, watermark),
+        )) as cursor:
+            row = cursor.fetchone()
+    except sqlite3.Error:
+        return None
+    return () if row is None else (_TailEvent(row["event_id"], row["event_json"]),)
+
+
 def retained_proof(conn, payload, *, deliveries=None):
     """Run inside the promotion transaction; never infer missing original anchors."""
     delivery = payload.get("delivery") or {}
@@ -415,21 +512,32 @@ def retained_proof(conn, payload, *, deliveries=None):
         return {raw_input_digest(), memo["stripped"]}
 
     # The retained history may be older than the current 500-event live tail.
-    for tail in _tail_events(conn, target, birth, watermark,
-                             deliveries.reuse if deliveries is not None else None):
+    reuse = deliveries.reuse if deliveries is not None else None
+    anchor = delivery.get("proof_event_id")
+    tails = None
+    if (reuse is not None and reuse.exact_anchors and type(anchor) is int
+            and _SQLITE_MIN_INTEGER <= anchor <= _SQLITE_MAX_INTEGER
+            and watermark <= _SQLITE_MAX_INTEGER and _lookup_string(birth)
+            and reuse.dispatch_contains(conn, target, text, generation) is not None):
+        # The legacy loop can check dispatch before rejecting a non-anchor row.
+        # If membership is uncertain, retain that loop and its SQL errors.
+        tails = _exact_tail_event(conn, target, birth, watermark, anchor)
+    if tails is None:
+        tails = _tail_events(conn, target, birth, watermark, reuse)
+    for tail in tails:
         try:
             event = tail.event()
             candidate_wire = delivery_wire(event)
             if (delivery.get("proof_event_id") is None and event.get("kind") in {"USER", "TELL"}
                     and isinstance(candidate_wire, str) and candidate_wire != text and text in candidate_wire
-                    and not operator_dispatch(conn, target, candidate_wire, generation)):
+                    and not _has_operator_dispatch(conn, target, candidate_wire, generation, reuse)):
                 return None  # An unsplit occurrence cannot be reassigned to a later quotation.
             if (event.get("stream_id", target) == target
                     and (event.get("kind") == "USER" or (event.get("kind") == "TELL"
                          and isinstance((event.get("raw") or {}).get("peer_wire_text"), str)))
                     and delivery_wire(event) == text
                     and ("provider_text_digest" not in event or event["provider_text_digest"] in accepted_input_digests())
-                    and not operator_dispatch(conn, target, text, generation)
+                    and not _has_operator_dispatch(conn, target, text, generation, reuse)
                     and (delivery.get("proof_event_id") is None or delivery["proof_event_id"] == tail.event_id)):
                 matches.append((tail.event_id, event.get("timestamp")))
         except (TypeError, ValueError, AttributeError):
@@ -511,12 +619,14 @@ def send_proofs(conn, target, text):
 def operator_dispatch(conn, target, text, generation):
     """An authenticated dispatch owns its exact wire even if it resembles a tell."""
     return conn.execute(
-        "SELECT dispatch_id FROM v2_assistant_composite_routes WHERE route_target=? "
-        "AND route_target_generation=? AND routing_state='resolved' "
-        "AND json_extract(route_json,'$.admission_mode')='direct_primary' "
-        "AND json_extract(route_json,'$.direct_envelope.wire_body')=? LIMIT 1",
+        f"SELECT dispatch_id {_DISPATCH_RANGE} AND {_DISPATCH_WIRE}=? LIMIT 1",
         (target, generation, text),
     ).fetchone()
+
+
+def _has_operator_dispatch(conn, target, text, generation, reuse):
+    found = reuse.dispatch_contains(conn, target, text, generation) if reuse is not None else None
+    return bool(operator_dispatch(conn, target, text, generation)) if found is None else found
 
 
 def delivery_wire(event):
@@ -628,7 +738,8 @@ def input_origin(conn, event, event_id, *, deliveries=None):
     row = conn.execute('SELECT generation FROM v2_session_generations WHERE host=? AND session_name=?',
                        (host, name)).fetchone()
     generation = row[0] if row else None
-    if generation and operator_dispatch(conn, target, text, generation):
+    reuse = deliveries.reuse if deliveries is not None else None
+    if generation and _has_operator_dispatch(conn, target, text, generation, reuse):
         return {'kind': 'operator', 'verified': True, 'generation': None}
     matches = []
     payloads = deliveries.candidates(conn, target, text) if deliveries is not None else None

@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+import receipt_proof
 from server import Server
 from store import SESSION_EVENT_TAIL_DDL, Store
 from test_send_receipts import TARGET, _VisibleSessions
@@ -101,6 +102,50 @@ def test_late_provider_proof_promotes_without_resending(tmp_path, archive_only):
             assert count == 2
         finally:
             store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("over_limit", [False, True])
+def test_hot_proof_payload_read_keeps_lifecycle_bound(tmp_path, monkeypatch, over_limit):
+    monkeypatch.setattr(receipt_proof, "HOT_ROW_LIMIT", 3)
+
+    async def run():
+        store, key, proof = await setup_receipt(tmp_path)
+        claim = receipt_proof.epoch(CLAIM)
+        payload_timestamps = []
+
+        def seed_and_count(conn):
+            conn.execute("UPDATE session_event_tail SET recorded_at=?", (claim,))
+            conn.executemany(
+                "INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,recorded_at) "
+                "VALUES(?,?,?,?,?)",
+                [(TARGET, BIRTH, f"before-claim-{i}", "malformed json", claim - 1)
+                 for i in range(2 + over_limit)],
+            )
+            conn.commit()
+            original = conn.row_factory
+
+            def counting_factory(cursor, row):
+                names = [column[0] for column in cursor.description]
+                if "event_json" in names and "recorded_at" in names:
+                    payload_timestamps.append(row[names.index("recorded_at")])
+                return original(cursor, row)
+
+            conn.row_factory = counting_factory
+            return original
+
+        try:
+            await add_proof(store, key)
+            original = await store.submit(seed_and_count)
+            try:
+                row = await read_receipt(store, key, proof)
+            finally:
+                await store.submit(lambda conn: setattr(conn, "row_factory", original))
+            assert row["state"] == ("accepted" if over_limit else "landed")
+            assert payload_timestamps == ([] if over_limit else [claim])
+        finally:
+            store.stop()
+
     asyncio.run(run())
 
 
