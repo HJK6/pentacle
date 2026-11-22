@@ -1,1 +1,127 @@
-{"version":1,"records":{}}
+{
+  "records": {
+    "300f23dbf6f039cd1938098dc442793c1764d3d7978e82f3f317aa73309873d7": {
+      "boundary": "Real queued Store execution and in-process observation",
+      "evidence_manifest": "scripts/test-admission-evidence/be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845.json",
+      "evidence_manifest_sha256": "be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845",
+      "failing_receipt": "store-diag-observation-red",
+      "failing_sha256": "79179cfa2ba27a59bdc3a6e86e8da26dc49722105d72cf5eab54ce99d58209cf",
+      "fingerprint": "1b353e3a78f9f87ce2a07e087cef0b2ec27c9908f6baa3945b6e39d5467be4fe",
+      "journey": "Broken diagnostics preserve Store results and count both dropped records",
+      "passing_receipt": "store-diag-widened-20",
+      "passing_sha256": "29c03b4f2a8cabbcc6c1c47d23f8086c04df06e7e8de9ee9cfd0bfea6e002297",
+      "platforms": [
+        "darwin",
+        "linux"
+      ],
+      "qa_report_id": "a18f8e0f-30fb-4a43-9e13-6be2f03eaad5",
+      "qa_target_sha": "d0a8f1fcf2819d515d94591bd2657db724a88ab1",
+      "restoration_of": [],
+      "suite": "daemon",
+      "test_id": "tests/test_store_call_diag.py::test_instrumentation_failure_is_counted_and_dropped"
+    },
+    "3a82169adfa364d83ec489636d2c55e7057f1ecd514de5d9f45063dbdeb57de1": {
+      "boundary": "Real queued Store execution and in-process observation",
+      "evidence_manifest": "scripts/test-admission-evidence/be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845.json",
+      "evidence_manifest_sha256": "be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845",
+      "failing_receipt": "store-diag-red",
+      "failing_sha256": "daa8aa2fd6c10aa7307c071ea821b6cee4d10f5951e544da59967e52e2fdfd86",
+      "fingerprint": "1c0896cb85e39511f533f8010d7efa1f260c41a68d37c1f529e9ed39b1bb2f5c",
+      "journey": "Ordinary, actor and internal Store calls emit one named slow line each",
+      "passing_receipt": "store-diag-widened-20",
+      "passing_sha256": "29c03b4f2a8cabbcc6c1c47d23f8086c04df06e7e8de9ee9cfd0bfea6e002297",
+      "platforms": [
+        "darwin",
+        "linux"
+      ],
+      "qa_report_id": "a18f8e0f-30fb-4a43-9e13-6be2f03eaad5",
+      "qa_target_sha": "d0a8f1fcf2819d515d94591bd2657db724a88ab1",
+      "restoration_of": [
+        "seed-pr606"
+      ],
+      "suite": "daemon",
+      "test_id": "tests/test_store_call_diag.py::test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line"
+    },
+    "3d69b4481131fe257c2efbb7496471fd023704f16a5f3008e42fb5cdb4da9a48": {
+      "boundary": "Real queued Store execution and in-process observation",
+      "evidence_manifest": "scripts/test-admission-evidence/be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845.json",
+      "evidence_manifest_sha256": "be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845",
+      "failing_receipt": "store-diag-red",
+      "failing_sha256": "daa8aa2fd6c10aa7307c071ea821b6cee4d10f5951e544da59967e52e2fdfd86",
+      "fingerprint": "071eef1d33211875c46679a7522f34e8e8e1492dabab9a9e97ae022f296e7f64",
+      "journey": "Successful and raising calls survive naming errors and emit both unnamed lines",
+      "passing_receipt": "store-diag-widened-20",
+      "passing_sha256": "29c03b4f2a8cabbcc6c1c47d23f8086c04df06e7e8de9ee9cfd0bfea6e002297",
+      "platforms": [
+        "darwin",
+        "linux"
+      ],
+      "qa_report_id": "a18f8e0f-30fb-4a43-9e13-6be2f03eaad5",
+      "qa_target_sha": "d0a8f1fcf2819d515d94591bd2657db724a88ab1",
+      "restoration_of": [],
+      "suite": "daemon",
+      "test_id": "tests/test_store_call_diag.py::test_naming_failure_at_admission_runs_call_as_unnamed"
+    },
+    "80d3321f56803dedd22f0284bfcf476dd246e78e53998ccc1570a25e2060e9c6": {
+      "boundary": "Real queued Store execution and in-process observation",
+      "evidence_manifest": "scripts/test-admission-evidence/be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845.json",
+      "evidence_manifest_sha256": "be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845",
+      "failing_receipt": "store-diag-observation-red",
+      "failing_sha256": "79179cfa2ba27a59bdc3a6e86e8da26dc49722105d72cf5eab54ce99d58209cf",
+      "fingerprint": "3fdc499bdb21c68c600a181d0884d80f9b03bacbd389ff46ed43c22dfc4c7c18",
+      "journey": "Raising alert sinks preserve results and futures and count both failures",
+      "passing_receipt": "store-diag-widened-20",
+      "passing_sha256": "29c03b4f2a8cabbcc6c1c47d23f8086c04df06e7e8de9ee9cfd0bfea6e002297",
+      "platforms": [
+        "darwin",
+        "linux"
+      ],
+      "qa_report_id": "a18f8e0f-30fb-4a43-9e13-6be2f03eaad5",
+      "qa_target_sha": "d0a8f1fcf2819d515d94591bd2657db724a88ab1",
+      "restoration_of": [],
+      "suite": "daemon",
+      "test_id": "tests/test_store_call_diag.py::test_raising_alert_sink_never_changes_results_or_futures"
+    },
+    "a73e097824aa14b21686e19a22e101449d417be9341152162d14495a20732f55": {
+      "boundary": "Real queued Store execution and in-process observation",
+      "evidence_manifest": "scripts/test-admission-evidence/be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845.json",
+      "evidence_manifest_sha256": "be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845",
+      "failing_receipt": "store-diag-observation-red",
+      "failing_sha256": "79179cfa2ba27a59bdc3a6e86e8da26dc49722105d72cf5eab54ce99d58209cf",
+      "fingerprint": "029a091eb5ee108b82d6d4953040ff617b4dcf1e19c54dd7c1d46f282bc71ea9",
+      "journey": "A long callable name produces one bounded slow line and one bounded alert",
+      "passing_receipt": "store-diag-widened-20",
+      "passing_sha256": "29c03b4f2a8cabbcc6c1c47d23f8086c04df06e7e8de9ee9cfd0bfea6e002297",
+      "platforms": [
+        "darwin",
+        "linux"
+      ],
+      "qa_report_id": "a18f8e0f-30fb-4a43-9e13-6be2f03eaad5",
+      "qa_target_sha": "d0a8f1fcf2819d515d94591bd2657db724a88ab1",
+      "restoration_of": [],
+      "suite": "daemon",
+      "test_id": "tests/test_store_call_diag.py::test_long_qualname_is_bounded_in_line_and_alert"
+    },
+    "b42fd11fab4db5531f7e602d71e8fa2c96fdd1d32c45a44e9be96ce02e6c0226": {
+      "boundary": "Real queued Store execution and in-process observation",
+      "evidence_manifest": "scripts/test-admission-evidence/be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845.json",
+      "evidence_manifest_sha256": "be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845",
+      "failing_receipt": "store-diag-red",
+      "failing_sha256": "daa8aa2fd6c10aa7307c071ea821b6cee4d10f5951e544da59967e52e2fdfd86",
+      "fingerprint": "6752fd9ab58b35ad7352774e5c54abc8972d235b1593ba4c1e00e52d312120c0",
+      "journey": "A partial emits one unnamed line without leaking the payload",
+      "passing_receipt": "store-diag-widened-20",
+      "passing_sha256": "29c03b4f2a8cabbcc6c1c47d23f8086c04df06e7e8de9ee9cfd0bfea6e002297",
+      "platforms": [
+        "darwin",
+        "linux"
+      ],
+      "qa_report_id": "a18f8e0f-30fb-4a43-9e13-6be2f03eaad5",
+      "qa_target_sha": "d0a8f1fcf2819d515d94591bd2657db724a88ab1",
+      "restoration_of": [],
+      "suite": "daemon",
+      "test_id": "tests/test_store_call_diag.py::test_unusable_name_is_unnamed_and_lines_carry_no_payload"
+    }
+  },
+  "version": 1
+}
