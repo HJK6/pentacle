@@ -1,0 +1,255 @@
+.melody-viewer {
+  display:flex;
+  flex-direction:column;
+  min-width:0;
+  min-height:0;
+  background:var(--surface);
+  color:var(--text)
+}
+.melody-head {
+  height:48px;
+  flex:none;
+  display:flex;
+  align-items:center;
+  gap:4px;
+  padding:0 12px 0 20px;
+  border-bottom:1px solid var(--line);
+  color:var(--dim);
+  font-size:13px
+}
+.melody-head span {
+  flex:1
+}
+.melody-icon {
+  width:30px;
+  height:30px;
+  border-radius:9px;
+  color:var(--faint);
+  font-size:18px
+}
+.melody-icon:hover {
+  background:var(--hover);
+  color:var(--text)
+}
+.melody-scroll {
+  overflow:auto;
+  min-height:0;
+  flex:1
+}
+.melody-content {
+  max-width:1000px;
+  margin:auto;
+  padding:16px 22px 22px
+}
+.melody-content h1 {
+  font:600 24px/1.2 var(--display);
+  letter-spacing:-.03em;
+  margin:0
+}
+.melody-content h1 {
+  margin-bottom:12px
+}
+.melody-toolbar {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin-bottom:12px
+}
+.melody-toolbar button,.melody-editor button,.melody-dialog button {
+  background:var(--raised);
+  color:var(--dim);
+  padding:7px 12px;
+  border-radius:10px;
+  font-size:12px
+}
+.melody-toolbar button:hover,.melody-editor button:hover,.melody-dialog button:hover {
+  background:var(--press);
+  color:var(--text)
+}
+.melody-viewer button:disabled {
+  opacity:.45;
+  cursor:default
+}
+.melody-section {
+  border:1px solid var(--line);
+  border-radius:16px;
+  padding:12px 15px;
+  margin-top:8px
+}
+.melody-section-head {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:8px
+}
+.melody-section-head strong {
+  font-size:14px
+}
+.melody-section-head p {
+  margin:2px 0 0;
+  color:var(--faint);
+  font-size:12px
+}
+.melody-name {
+  color:var(--faint);
+  font-size:13px
+}
+.melody-primary {
+  border-radius:10px;
+  background:var(--accent);
+  color:var(--ink);
+  font-weight:600;
+  font-size:12px;
+  padding:9px 12px;
+  white-space:nowrap
+}
+.melody-primary:hover {
+  background:var(--accent-hi)
+}
+.melody-gap-default {
+  font-size:12px;
+  color:var(--dim);
+  margin:7px 0
+}
+.melody-gap-default input,.melody-edit-gap input {
+  width:58px;
+  border:1px solid var(--line-strong);
+  border-radius:6px;
+  background:var(--bg);
+  color:var(--text);
+  font:inherit;
+  padding:3px 4px
+}
+.melody-strip-wrap {
+  display:flex;
+  align-items:center;
+  background:var(--bg);
+  border:1px solid var(--line);
+  border-radius:10px;
+  padding:6px;
+  min-width:0
+}
+.melody-strip-unit {
+  font-size:9px;
+  color:var(--faint);
+  line-height:1;
+  max-width:24px;
+  margin-right:5px
+}
+.melody-strip {
+  display:flex;
+  align-items:center;
+  min-width:0;
+  overflow-x:auto;
+  flex:1;
+  padding-bottom:2px
+}
+.melody-strip-empty {
+  color:var(--faint);
+  font-size:12px;
+  padding:8px
+}
+.melody-note {
+  width:var(--note-width);
+  min-width:var(--note-width);
+  height:34px;
+  padding:0 3px;
+  border:1px solid var(--accent-line);
+  border-radius:7px;
+  color:var(--accent);
+  background:var(--accent-soft);
+  font-size:11px;
+  font-weight:600;
+  white-space:nowrap
+}
+.melody-note.is-selected {
+  background:var(--accent);
+  color:var(--ink)
+}
+.melody-gap-caption {
+  min-width:28px;
+  flex:none;
+  text-align:center;
+  color:var(--dim);
+  font-size:10px;
+  font-variant-numeric:tabular-nums;
+  padding:4px 1px;
+  border-radius:5px
+}
+.melody-gap-caption:hover,.melody-gap-caption:focus-visible {
+  background:var(--hover);
+  color:var(--text)
+}
+.melody-editor {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:6px;
+  margin-top:9px;
+  font-size:12px
+}
+.melody-editor:empty {
+  display:none
+}
+.melody-edit-gap {
+  background:var(--raised);
+  color:var(--dim);
+  border-radius:8px;
+  padding:4px 7px;
+  font-size:11px
+}
+.melody-editor button {
+  padding:6px 8px;
+  font-size:11px
+}
+.melody-storage {
+  color:var(--faint);
+  font-size:11px;
+  margin:8px 2px
+}
+.melody-message {
+  margin:8px 0;
+  color:var(--amber);
+  font-size:12px
+}
+.melody-dialog {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px;
+  padding:12px;
+  margin:8px 0;
+  border:1px solid var(--line-strong);
+  border-radius:12px;
+  background:var(--raised)
+}
+.melody-dialog strong {
+  width:100%;
+  font-size:13px
+}
+.melody-dialog input {
+  min-width:160px;
+  flex:1;
+  background:var(--bg);
+  color:var(--text);
+  border:1px solid var(--line-strong);
+  border-radius:8px;
+  padding:7px;
+  font:inherit
+}
+.melody-dialog button {
+  background:var(--surface)
+}
+.melody-dialog-help {
+  width:100%;
+  color:var(--dim);
+  font-size:12px
+}
+.melody-load-list {
+  width:100%;
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  max-height:160px;
+  overflow:auto
+}

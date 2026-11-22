@@ -459,3 +459,36 @@ async function newChatParity(ctx) {
   }
 }
 module.exports.newChatParity=isolated(newChatParity);
+
+module.exports.melody = isolated(async ctx => {
+  const { session, report } = ctx;
+  await visit(ctx);
+  await session.click('[aria-label="Dashboards"]');
+  await session.click('.popover [aria-label="Melody"]');
+  const key = '.melody-card [data-midi="60"]';
+  await session.waitFor(`!!document.querySelector('${key}')`, { timeoutMs: ctx.timeoutMs });
+  const point = await session.eval(`(() => {
+    const r = document.querySelector('${key}').getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.bottom - 8 };
+  })()`);
+  await session.eval(`document.querySelector('${key}').focus()`);
+  await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space' });
+  await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
+  await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space' });
+  await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+  await session.waitFor("document.querySelectorAll('.melody-history-note:not(:disabled)').length === 2", { timeoutMs: ctx.timeoutMs });
+  report.ok('A second attack during a held note leaves an explicit zero gap',
+    await session.eval("document.querySelector('.melody-history-gap').textContent === '0'"));
+  await session.click('.melody-history-note');
+  await session.click('.melody-history-note');
+  report.ok('Played notes append with the displayed default gap',
+    await session.eval("[...document.querySelectorAll('.melody-note')].map(n => n.textContent).join(',') === 'C4,C4' && document.querySelector('.melody-gap-caption').textContent === '250'"));
+  await session.click('.melody-gap-caption');
+  await session.type('[aria-label="Previous gap in milliseconds"]', '0');
+  await session.click('.melody-editor [data-action="raise"]');
+  report.ok('The edited pitch and zero-length rest are visible',
+    await session.eval("document.querySelector('.melody-note.is-selected').textContent === 'C♯4' && document.querySelector('.melody-gap-caption').textContent === '0'"));
+  await session.click('.melody-clear-history');
+  report.ok('Clearing history keeps the arrangement',
+    await session.eval("!document.querySelector('.melody-history-note') && document.querySelectorAll('.melody-note').length === 2"));
+});

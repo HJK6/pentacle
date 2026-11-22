@@ -29,6 +29,8 @@ const IDENTITY = {
 const ASSETS = {
   '/next/xterm.css': '/* fixture xterm stylesheet */',
   '/next/style.css': '/* fixture Next stylesheet */',
+  '/next/melody.css': '/* fixture Melody stylesheet */',
+  '/next/melody_instrument.css': '/* fixture instrument stylesheet */',
   '/next/chat_core.bundle.js': '/* fixture chat core */',
   '/next/bundle.js': '/* fixture Next bundle */',
   '/next/design-embed.bundle.js': '/* fixture standalone bundle */',
@@ -118,7 +120,7 @@ test('identity mode serves the exact workspace and standalone shells with their 
     assert.doesNotMatch(standalone.body, /PENTACLE_CONFIG|<form|chat_core/);
 
     for (const [address, page, paths] of [
-      [WORKSPACE + suffix, workspace, Object.keys(ASSETS).slice(0, 4)],
+      [WORKSPACE + suffix, workspace, Object.keys(ASSETS).filter(asset => asset !== '/next/design-embed.bundle.js')],
       [EMBED + suffix, standalone, ['/next/style.css', '/next/design-embed.bundle.js']],
     ]) {
       const assets = [...page.body.matchAll(/(?:href|src)="([^"]+)"/g)].map(([, asset]) => asset);

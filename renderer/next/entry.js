@@ -13,6 +13,7 @@ const { Unicode11Addon } = require('@xterm/addon-unicode11');
 const { WebglAddon } = require('@xterm/addon-webgl');
 const { createTerminalPaste } = require('../terminal_paste');
 const layout = require('./layout');
+const { createMelodyViewer } = require('./melody_viewer');
 const { createDesignViewer } = require('./design_viewer');
 const { initialDesignRoute, replaceDesignAddress } = require('./design_location');
 const { hydrateDesignPreviews, markDesignLinks } = require('./design_links');
@@ -104,9 +105,13 @@ const designCard = node('section', 'card design-card', stage); designCard.hidden
 designCard.setAttribute('aria-label', 'Design');
 const designViewer = createDesignViewer(designCard, {
   onNavigate: onDesignNavigate,
-  onFullScreen: () => { state.layout = layout.toggleFullScreen(state.layout, 'dash', innerWidth); syncLayout(); },
-  onClose: closeDesign,
+  onFullScreen: toggleDashboardFullScreen,
+  onClose: closeDashboard,
 });
+const melodyCard = node('section', 'card melody-card', stage);
+melodyCard.setAttribute('aria-label', 'Melody');
+melodyCard.hidden = true;
+let melodyViewer;
 let designOpen = false;
 let currentDesignPath = null;
 const lanesCard = node('section', 'card lanes-card', stage); lanesCard.hidden = true;
@@ -116,8 +121,8 @@ let assistantComposerControl = null; let assistantComposerStream = null; let car
 let unmountQuestionList = null;
 function mountAssistantComposer(id) { if (!id || id === assistantComposerStream) return; assistantComposerControl?.dispose(); assistantComposerStream = id; assistantComposerControl = mountComposer({ host: assistantComposer, transcript: assistantVoice, streamId: id, drafts, cc, chatStore: store }); }
 function mountCardComposer(id) { cardComposerControl?.dispose(); cardComposerControl = id ? mountComposer({ host: cardComposer, transcript: cardVoice, streamId: id, drafts, cc, chatStore: store }) : null; }
-function closePopover() { unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
-function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; ({ chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); }
+function closePopover() { unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
+function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); }
 function sessions() { return store.getState().sessions || []; }
 function selectedSession() { return sessions().find(s => s.stream_id === state.selected) || (state.admittedSession?.stream_id === state.selected ? state.admittedSession : null); }
 function assistantSession() { return uniqueAssistantComposite(sessions()); }
@@ -181,7 +186,13 @@ assistantInner.addEventListener('keydown', event => { const update = event.targe
 function renderPopover() {
   if (state.popover === 'limits' && limitsControl) { limitsControl.update({ limits: store.getLimits(), hosts: state.hosts }); return; }
   popover.replaceChildren();
-  if (state.popover === 'chats') {
+  if (state.popover === 'dashboards') {
+    for (const [name, open] of [['Design', openDesign], ['Melody', openMelody]]) {
+      const row = button(name, name);
+      row.onclick = () => open();
+      popover.append(row);
+    }
+  } else if (state.popover === 'chats') {
     const newChat = button('New chat', 'New chat'); newChat.onclick = () => { closePopover(); openNewChat(); }; popover.append(newChat);
     const visible = filterSidebarSessions(sessions()).filter(s => s.session_kind !== 'assistant_composite').sort ( (a,b) => String(b.last_activity || b.last_event_at || '').localeCompare(String(a.last_activity || a.last_event_at || '')) );
     if (!visible.length) { const empty = node('div', 'empty', popover); empty.textContent = 'No chats yet.'; }
@@ -247,9 +258,25 @@ function syncLayout() {
   assistant.hidden = !visible.assistant;
   card.hidden = !visible.cards.includes('chat');
   designCard.hidden = !visible.cards.includes('dash') || !state.layout.dash.startsWith('design:');
-  stage.classList.toggle('has-design', !designCard.hidden);
+  const melodyVisible = visible.cards.includes('dash') && state.layout.dash === 'melody';
+  if (melodyVisible === melodyCard.hidden) {
+    melodyCard.hidden = !melodyVisible;
+    if (melodyVisible) {
+      melodyViewer ??= createMelodyViewer(melodyCard, { onFullScreen: toggleDashboardFullScreen, onClose: closeDashboard });
+      melodyViewer.show();
+    } else {
+      melodyViewer?.hide();
+    }
+  }
+  const dashboardVisible = !designCard.hidden || melodyVisible;
+  stage.classList.toggle('has-design', dashboardVisible);
   const full = designCard.querySelector('.design-full');
   const fullLabel = state.layout.solo === 'dash' ? 'Leave full screen' : 'Full screen';
+  const melodyFull = melodyCard.querySelector('[data-action="fullscreen"]');
+  if (melodyFull) {
+    melodyFull.setAttribute('aria-label', fullLabel);
+    melodyFull.title = fullLabel;
+  }
   full.setAttribute('aria-label', fullLabel);
   full.title = fullLabel;
   lanesCard.hidden = !visible.cards.includes('lanes');
@@ -260,13 +287,16 @@ function syncLayout() {
   assistant.style.flex = state.layout.assistantWidth && !grip.hidden ? `0 0 ${width}px` : '';
   brand.classList.toggle('on', visible.assistant);
   chatsButton.classList.toggle('on', !card.hidden);
-  dashboardsButton.classList.toggle('on', !designCard.hidden);
-  dashboardsButton.setAttribute('aria-pressed', String(!designCard.hidden));
+  dashboardsButton.classList.toggle('on', dashboardVisible);
+  dashboardsButton.setAttribute('aria-pressed', String(dashboardVisible));
   lanesButton.classList.toggle('on', !lanesCard.hidden);
   if (designOpen && !state.layout.dash?.startsWith('design:')) {
     designOpen = false;
     currentDesignPath = null;
     designViewer.close();
+    history.replaceState(history.state, '', '/next/');
+  }
+  if (state.layout.dash !== 'melody' && location.hash === '#melody') {
     history.replaceState(history.state, '', '/next/');
   }
   syncDesignLinkMarks();
@@ -311,7 +341,19 @@ function openDesignViewer(target) {
   void designViewer.open(target);
 }
 
-function closeDesign() {
+function toggleDashboardFullScreen() {
+  state.layout = layout.toggleFullScreen(state.layout, 'dash', innerWidth);
+  syncLayout();
+}
+
+function openMelody() {
+  closePopover();
+  state.layout = layout.show(state.layout, 'dash', 'melody', innerWidth);
+  syncLayout();
+  history.replaceState(history.state, '', '/next/#melody');
+}
+
+function closeDashboard() {
   state.layout = layout.shut(state.layout, 'dash', innerWidth);
   syncLayout();
 }
@@ -337,9 +379,14 @@ function closeCard() { leaveNewChat(); disposeTerminal(); mountCardComposer(null
 brand.onclick = () => { closePopover(); const wasSolo = !!state.layout.solo; state.layout = layout.toAssistant(state.layout, innerWidth); if (!wasSolo && !state.layout.chat) { leaveNewChat(); disposeTerminal(); mountCardComposer(null); state.selected = null; } syncLayout(); render(); };
 lanesButton.onclick = () => { closePopover(); state.layout = layout.fits(state.layout, innerWidth).cards.includes('lanes') ? layout.shut(state.layout, 'lanes', innerWidth) : layout.show(state.layout, 'lanes', true, innerWidth); syncLayout(); };
 dashboardsButton.onclick = () => {
-  closePopover();
-  if (designCard.hidden) openDesign();
-  else closeDesign();
+  if (innerWidth < layout.PHONE_WIDTH) {
+    closePopover();
+    if (designCard.hidden) openDesign();
+    else closeDashboard();
+    return;
+  }
+  togglePopover('dashboards');
+  dashboardsButton.setAttribute('aria-expanded', String(state.popover === 'dashboards'));
 };
 chatsButton.onclick = () => togglePopover('chats'); questionsButton.onclick = () => togglePopover('questions'); limitsButton.onclick = () => togglePopover('limits'); settingsButton.onclick = () => togglePopover('settings'); closeButton.onclick = closeCard;
 terminalButton.onclick = () => setMode('terminal'); statusButton.onclick = () => setMode('status');
@@ -363,8 +410,10 @@ assistant.addEventListener('pointerdown', () => { state.layout = layout.markUsed
 card.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'chat'); });
 lanesCard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
 lanesCard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
-designCard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
-designCard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
+for (const dashboard of [designCard, melodyCard]) {
+  dashboard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
+  dashboard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
+}
 const theme = localStorage.getItem('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
 let assistantHistory = null;
 questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(), questionReadFailed: () => questionNotifications.readFailed(),
@@ -406,7 +455,8 @@ cc.onDisconnect?.(({ epoch }) => {
   store.webHostDisconnected?.(epoch);
 });
 cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); });
-syncLayout();
 const designRoute = initialDesignRoute(window, 'workspace');
 if (designRoute) openDesign(designRoute.target);
+else if (location.hash === '#melody') openMelody();
+else syncLayout();
 void loadSnapshot().catch(() => render());
