@@ -238,7 +238,17 @@ class OwedItems:
             conn.execute('BEGIN IMMEDIATE')
             try:
                 # Outbox completion is durable before its callback; recover that crash gap.
-                conn.execute("UPDATE v2_assistant_owed SET due_notice_at=(SELECT min(delivered_at) FROM v2_outbound_notices n WHERE n.kind='owed_due' AND n.source_stream_id=v2_assistant_owed.stream_id AND n.episode_id=v2_assistant_owed.owed_id AND n.delivered_at IS NOT NULL) WHERE stream_id=? AND due_notice_at IS NULL",(stream,))
+                conn.execute("""
+                    UPDATE v2_assistant_owed AS o SET due_notice_at=d.first_delivery
+                    FROM (
+                        SELECT source_stream_id, episode_id, min(delivered_at) AS first_delivery
+                        FROM v2_outbound_notices
+                        WHERE source_stream_id=? AND kind='owed_due' AND delivered_at IS NOT NULL
+                        GROUP BY source_stream_id, episode_id
+                    ) AS d
+                    WHERE o.owed_id=d.episode_id AND o.stream_id=d.source_stream_id
+                      AND o.due_notice_at IS NULL
+                """, (stream,))
                 binding=self.binding(conn);target=binding.get('stream_id');generation=binding.get('generation')
                 if target and generation:
                     rows=conn.execute("SELECT * FROM v2_assistant_owed WHERE stream_id=? AND state='open' AND due_at<=? AND due_notice_at IS NULL ORDER BY due_at LIMIT 100",(stream,stamp())).fetchall()
