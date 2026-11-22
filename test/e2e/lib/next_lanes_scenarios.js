@@ -188,12 +188,12 @@ async function nextLanesRootRun(ctx, ownedIds, hooks) {
     otherRailBadges:[...document.querySelectorAll('.rail-button')].filter(button=>!String(button.getAttribute('aria-label')||'').startsWith('Questions')
       && (button.hasAttribute('data-count')||!!button.querySelector('[data-count]'))).map(button=>button.getAttribute('aria-label')),
     rootControls:document.querySelectorAll('.next-lanes-row .next-lanes-stop-number,.next-lanes-row .next-lanes-stop-counts,.next-lanes-row .next-lanes-progress').length})`);
-  check(ctx, 'six icon rail controls and desktop lanes default', rail.lanesVisible
+  check(ctx, 'seven icon rail controls and desktop lanes default', rail.lanesVisible
     && rail.labels[0] === rail.assistantName
-    && rail.labels[1] === 'Lanes' && rail.labels[2] === 'Chats'
-    && rail.labels[3]?.startsWith('Questions')
-    && rail.labels[4] === 'Limits and machines' && rail.labels[5] === 'Settings'
-    && rail.labels.length === 6 && !rail.cardTitle && !rail.fullScreen, rail);
+    && rail.labels[1] === 'Lanes' && rail.labels[2] === 'Dashboards' && rail.labels[3] === 'Chats'
+    && rail.labels[4]?.startsWith('Questions')
+    && rail.labels[5] === 'Limits and machines' && rail.labels[6] === 'Settings'
+    && rail.labels.length === 7 && !rail.cardTitle && !rail.fullScreen, rail);
   check(ctx, 'E1 question rail data-count equals one', rail.questionsCount === '1', { questionsCount: rail.questionsCount });
   check(ctx, 'other rail controls have no question count badges', rail.otherRailBadges.length === 0, { otherRailBadges: rail.otherRailBadges });
   check(ctx, 'quiet lane is present while parked lane stays folded', rail.quiet && !rail.parkedBefore, rail);
@@ -236,7 +236,7 @@ async function nextLanesRootRun(ctx, ownedIds, hooks) {
   await H.cleanupHook(ctx, hooks.pop());
   const narrowHook = await H.enterNext(ctx, 900); hooks.push(narrowHook);
   await H.installLaneBridge(ctx, { frame, versions: H.laneDetailVersions(lanes) });
-  await wait(ctx, 'window.innerWidth === 900 && document.querySelectorAll(".rail-button").length === 6', 'narrow desktop layout');
+  await wait(ctx, 'window.innerWidth === 900 && document.querySelectorAll(".rail-button").length === 7', 'narrow desktop layout');
   const narrow = await ctx.session.eval(`({hidden:document.querySelector('.lanes-card').hidden,width:document.documentElement.clientWidth,
     overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`);
   check(ctx, 'lanes default closed at 900 px and the stage does not scroll sideways',

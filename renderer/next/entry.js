@@ -13,6 +13,8 @@ const { Unicode11Addon } = require('@xterm/addon-unicode11');
 const { WebglAddon } = require('@xterm/addon-webgl');
 const { createTerminalPaste } = require('../terminal_paste');
 const layout = require('./layout');
+const { createDesignViewer } = require('./design_viewer');
+const { initialDesignRoute, replaceDesignAddress } = require('./design_location');
 const { mountComposer } = require('./composer');
 const { mountNewChatForm } = require('./new_chat');
 const { mountLimitsView } = require('./limits_view');
@@ -71,6 +73,7 @@ const state = { selected: null, admittedSession: null, mode: 'thread', layout: l
 const icons = {
   lanes: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12m-2.2 0a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0-4.4 0M5 6m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M19 6m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M12 20m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M6.4 7.2l3.9 3.3M17.6 7.2l-3.9 3.3M12 14.2v4"/></svg>',
   questions: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.6a2.5 2.5 0 1 1 3.7 2.2c-.8.5-1.2 1-1.2 1.8M12 16.8h.01"/></svg>',
+  dashboards: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></svg>',
   chats: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 5h12a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H9l-4 3v-3a3 3 0 0 1-2-3V8a3 3 0 0 1 1-3Z"/><path d="M19 9h1a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2v2l-3-2"/></svg>',
   limits: '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="11" width="4" height="8" rx="2"/><rect x="10" y="6" width="4" height="13" rx="2"/><rect x="17" y="14" width="4" height="5" rx="2"/></svg>',
   settings: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16M9 4v6m6 4v6"/></svg>',
@@ -94,8 +97,16 @@ const cardBody = node('div', 'thread', card); const cardInner = node('div', 'thr
 const terminalMount = node('div', 'terminal'); card.insertBefore(terminalMount, cardComposer); terminalMount.hidden = true;
 const statusMount = node('div', 'status'); card.insertBefore(statusMount, cardComposer); statusMount.hidden = true;
 const newChatMount = node('div', 'new-chat-host', card); newChatMount.hidden = true;
+const designCard = node('section', 'card design-card', stage); designCard.hidden = true;
+designCard.setAttribute('aria-label', 'Design');
+const designViewer = createDesignViewer(designCard, {
+  onNavigate: target => replaceDesignAddress(window, target, 'workspace'),
+  onFullScreen: () => { state.layout = layout.toggleFullScreen(state.layout, 'dash', innerWidth); syncLayout(); },
+  onClose: closeDesign,
+});
+let designOpen = false;
 const lanesCard = node('section', 'card lanes-card', stage); lanesCard.hidden = true;
-const brand = button('Assistant', '<span class="logo"></span>', 'rail-button brand on'); const group = node('div', 'rail-group', rail); const lanesButton = button('Lanes', icons.lanes, 'rail-button'); const chatsButton = button('Chats', icons.chats, 'rail-button'); const questionsButton = button('Questions', icons.questions, 'rail-button'); group.append(lanesButton, chatsButton, questionsButton); rail.prepend(brand); node('div', 'rail-spacer', rail); const limitsButton = button('Limits and machines', icons.limits, 'rail-button'); const settingsButton = button('Settings', icons.settings, 'rail-button'); rail.append(limitsButton, settingsButton);
+const brand = button('Assistant', '<span class="logo"></span>', 'rail-button brand on'); const group = node('div', 'rail-group', rail); const lanesButton = button('Lanes', icons.lanes, 'rail-button'); const dashboardsButton = button('Dashboards', icons.dashboards, 'rail-button'); const chatsButton = button('Chats', icons.chats, 'rail-button'); const questionsButton = button('Questions', icons.questions, 'rail-button'); group.append(lanesButton, dashboardsButton, chatsButton, questionsButton); rail.prepend(brand); node('div', 'rail-spacer', rail); const limitsButton = button('Limits and machines', icons.limits, 'rail-button'); const settingsButton = button('Settings', icons.settings, 'rail-button'); rail.append(limitsButton, settingsButton);
 const popover = node('div', 'popover', root.querySelector('.next-app')); popover.hidden = true;
 let assistantComposerControl = null; let assistantComposerStream = null; let cardComposerControl = null; let limitsControl = null;
 let unmountQuestionList = null;
@@ -205,7 +216,47 @@ function renderStatus(session) {
   add('Goal', c.goal); if (plan.length) { const h = node('h2', '', statusMount); h.textContent = 'Plan'; const bar = node('div', 'meter', statusMount); const fill = node('span', '', bar); fill.style.width = `${rollup.percent}%`; const list = node('ol', '', statusMount); for (const step of plan) { const item = node('li', step.status || 'pending', list); const glyph = node('span', 'status-glyph', item); glyph.textContent = step.status === 'done' ? '✓' : step.status === 'active' ? '◉' : '○'; item.append(document.createTextNode(step.text)); } } add('Latest update', c.update);
 }
 function setMode(mode) { const s = selectedSession(); if (!s) return; const next = nextMode(state.mode, mode); if (next === 'terminal') void cardComposerControl?.cancelRecording(); if (state.mode === 'terminal' && next !== 'terminal') disposeTerminal(); state.mode = next; cardBody.hidden = state.mode !== 'thread'; cardComposer.hidden = state.mode === 'terminal'; terminalMount.hidden = state.mode !== 'terminal'; statusMount.hidden = state.mode !== 'status'; terminalButton.classList.toggle('active', state.mode === 'terminal'); statusButton.classList.toggle('active', state.mode === 'status'); if (state.mode === 'terminal') void openTerminal(s); if (state.mode === 'status') renderStatus(s); }
-function syncLayout() { const visible = layout.fits(state.layout, innerWidth); assistant.hidden = !visible.assistant; card.hidden = !visible.cards.includes('chat'); lanesCard.hidden = !visible.cards.includes('lanes'); lanesCard.classList.toggle('alone', !lanesCard.hidden && card.hidden && assistant.hidden); grip.hidden = assistant.hidden || (card.hidden && lanesCard.hidden) || innerWidth < 600; const width = Math.max(280, Math.min(state.layout.assistantWidth || 0, stage.clientWidth - 312)); assistant.style.flex = state.layout.assistantWidth && !grip.hidden ? `0 0 ${width}px` : ''; brand.classList.toggle('on', visible.assistant); chatsButton.classList.toggle('on', !card.hidden); lanesButton.classList.toggle('on', !lanesCard.hidden); }
+function syncLayout() {
+  const visible = layout.fits(state.layout, innerWidth);
+  assistant.hidden = !visible.assistant;
+  card.hidden = !visible.cards.includes('chat');
+  designCard.hidden = !visible.cards.includes('dash');
+  stage.classList.toggle('has-design', !designCard.hidden);
+  const full = designCard.querySelector('.design-full');
+  const fullLabel = state.layout.solo === 'dash' ? 'Leave full screen' : 'Full screen';
+  full.setAttribute('aria-label', fullLabel);
+  full.title = fullLabel;
+  lanesCard.hidden = !visible.cards.includes('lanes');
+  lanesCard.classList.toggle('alone', !lanesCard.hidden && visible.cards.length === 1 && assistant.hidden);
+  grip.hidden = assistant.hidden || !visible.cards.length || innerWidth < layout.PHONE_WIDTH;
+  const cardsWidth = visible.cards.reduce((sum, key) => sum + layout.MIN_WIDTH[key], 0);
+  const width = Math.max(layout.MIN_WIDTH.assistant, Math.min(state.layout.assistantWidth || 0, stage.clientWidth - cardsWidth));
+  assistant.style.flex = state.layout.assistantWidth && !grip.hidden ? `0 0 ${width}px` : '';
+  brand.classList.toggle('on', visible.assistant);
+  chatsButton.classList.toggle('on', !card.hidden);
+  dashboardsButton.classList.toggle('on', !designCard.hidden);
+  dashboardsButton.setAttribute('aria-pressed', String(!designCard.hidden));
+  lanesButton.classList.toggle('on', !lanesCard.hidden);
+  if (designOpen && !state.layout.dash) {
+    designOpen = false;
+    designViewer.close();
+    history.replaceState(history.state, '', '/next/');
+  }
+}
+
+function openDesign(target = null) {
+  closePopover();
+  state.layout = layout.show(state.layout, 'dash', 'design', innerWidth);
+  syncLayout();
+  designOpen = true;
+  void designViewer.open(target);
+}
+
+function closeDesign() {
+  state.layout = layout.shut(state.layout, 'dash', innerWidth);
+  syncLayout();
+}
+
 grip.addEventListener('pointerdown', event => { event.preventDefault(); grip.setPointerCapture(event.pointerId); document.body.classList.add('dragging'); });
 grip.addEventListener('pointermove', event => { if (!grip.hasPointerCapture(event.pointerId)) return; state.layout = layout.setAssistantWidth(state.layout, event.clientX - stage.getBoundingClientRect().left, stage.clientWidth, innerWidth); syncLayout(); });
 grip.addEventListener('pointerup', event => { if (grip.hasPointerCapture(event.pointerId)) grip.releasePointerCapture(event.pointerId); document.body.classList.remove('dragging'); });
@@ -226,10 +277,25 @@ async function openNewChat() {
 function closeCard() { leaveNewChat(); disposeTerminal(); mountCardComposer(null); state.selected = null; state.mode = 'thread'; state.layout = layout.shut(state.layout, 'chat', innerWidth); syncLayout(); render(); }
 brand.onclick = () => { closePopover(); const wasSolo = !!state.layout.solo; state.layout = layout.toAssistant(state.layout, innerWidth); if (!wasSolo && !state.layout.chat) { leaveNewChat(); disposeTerminal(); mountCardComposer(null); state.selected = null; } syncLayout(); render(); };
 lanesButton.onclick = () => { closePopover(); state.layout = layout.fits(state.layout, innerWidth).cards.includes('lanes') ? layout.shut(state.layout, 'lanes', innerWidth) : layout.show(state.layout, 'lanes', true, innerWidth); syncLayout(); };
+dashboardsButton.onclick = () => {
+  closePopover();
+  if (designCard.hidden) openDesign();
+  else closeDesign();
+};
 chatsButton.onclick = () => togglePopover('chats'); questionsButton.onclick = () => togglePopover('questions'); limitsButton.onclick = () => togglePopover('limits'); settingsButton.onclick = () => togglePopover('settings'); closeButton.onclick = closeCard;
 terminalButton.onclick = () => setMode('terminal'); statusButton.onclick = () => setMode('status');
 fullButton.onclick = () => { state.layout = layout.toggleFullScreen(state.layout, 'chat', innerWidth); syncLayout(); };
-document.addEventListener('keydown', event => { if (event.key !== 'Escape') return; if (state.popover) closePopover(); else if (state.layout.solo) { state.layout = layout.toggleFullScreen(state.layout, 'chat', innerWidth); syncLayout(); } });
+document.addEventListener('keydown', event => {
+  if (state.popover && event.key === 'Escape') { closePopover(); return; }
+  if (!designCard.hidden && (designCard.contains(event.target) || event.target === document.body) && designViewer.handleKey(event)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === 'Escape' && state.layout.solo) {
+    state.layout = layout.toggleFullScreen(state.layout, state.layout.solo, innerWidth);
+    syncLayout();
+  }
+});
 document.addEventListener('click', event => { const path = event.composedPath?.() || []; if (state.popover && !path.includes(popover) && !path.includes(rail) && !popover.contains(event.target) && !rail.contains(event.target)) closePopover(); });
 window.addEventListener('resize', () => syncLayout());
 assistant.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'assistant'); });
@@ -238,6 +304,8 @@ assistant.addEventListener('pointerdown', () => { state.layout = layout.markUsed
 card.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'chat'); });
 lanesCard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
 lanesCard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
+designCard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
+designCard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
 const theme = localStorage.getItem('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
 let assistantHistory = null;
 questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(), questionReadFailed: () => questionNotifications.readFailed(),
@@ -279,4 +347,7 @@ cc.onDisconnect?.(({ epoch }) => {
   store.webHostDisconnected?.(epoch);
 });
 cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); });
-syncLayout(); void loadSnapshot().catch(() => render());
+syncLayout();
+const designRoute = initialDesignRoute(window, 'workspace');
+if (designRoute) openDesign(designRoute.target);
+void loadSnapshot().catch(() => render());

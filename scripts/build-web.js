@@ -229,6 +229,12 @@ async function build({ minify = false } = {}) {
     outfile: path.join(nextOut, 'bundle.js'), minify,
     plugins: [rendererResolvePlugin()], logLevel: 'info',
   });
+  await esbuild.build({
+    entryPoints: [path.join(nextSource, 'design-embed-entry.js')], bundle: true,
+    format: 'iife', target: 'es2020', platform: 'browser',
+    outfile: path.join(nextOut, 'design-embed.bundle.js'), minify, logLevel: 'info',
+  });
+  fs.copyFileSync(path.join(nextSource, 'design-embed.html'), path.join(nextOut, 'design-embed.html'));
   fs.copyFileSync(path.join(nextSource, 'index.html'), path.join(nextOut, 'index.html'));
   fs.copyFileSync(path.join(nextSource, 'style.css'), path.join(nextOut, 'style.css'));
   fs.copyFileSync(path.join(ROOT, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), path.join(nextOut, 'xterm.css'));
