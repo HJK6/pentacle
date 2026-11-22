@@ -231,6 +231,42 @@ async function composer(ctx) {
   await session.click('.card [data-next-send]'); await session.waitFor("window.__nextSends.length===2",{timeoutMs:ctx.timeoutMs});
   report.ok('attachment uploads and is included in the outbound turn',await session.eval("window.__nextSends[1].attachments.length === 1 && !!window.__nextSends[1].attachments[0].key"));
   await cdp.sleep(100);
+
+  const png = await session.eval(`(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 12;
+    canvas.height = 8;
+    const drawing = canvas.getContext('2d');
+    drawing.fillStyle = '#37658b';
+    drawing.fillRect(0, 0, canvas.width, canvas.height);
+    const encoded = canvas.toDataURL('image/png').split(',')[1];
+    const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+    const clipboardData = new DataTransfer();
+    clipboardData.items.add(new File([bytes], 'synthetic-clipboard.png', { type: 'image/png' }));
+    const input = document.querySelector('.card [data-next-message]');
+    input.focus();
+    input.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+    return encoded;
+  })()`);
+  await session.waitFor("!!document.querySelector('.card .next-composer-attachment-preview[alt=\"synthetic-clipboard.png\"]')",
+    { timeoutMs: ctx.timeoutMs, label: 'clipboard image enters the Next composer tray' });
+  await session.click('.card [data-next-send]');
+  await session.waitFor('window.__nextSends.length === 3', { timeoutMs: ctx.timeoutMs });
+  const bytes = Buffer.from(png, 'base64');
+  const key = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const sent = await session.eval('window.__nextSends[2]');
+  report.ok('pasted PNG uploads through the fixture daemon and enters the ordinary outbound turn',
+    sent.streamId === 'local:web-gate-1' && sent.text === '' && sent.attachments.length === 1
+      && sent.attachments[0].key === key && sent.attachments[0].mime === 'image/png'
+      && sent.attachments[0].bytes === bytes.length);
+  const displayed = JSON.stringify(`.card .slot-chat-media-button[data-attachment-key="${key}"]`);
+  await session.waitFor(`(() => {
+    const button = document.querySelector(${displayed});
+    const image = button?.querySelector('img');
+    return image?.naturalWidth === 12 && image.naturalHeight === 8
+      && !button.querySelector('.slot-chat-media-loading') && !document.querySelector('.card .next-composer-attachment');
+  })()`, { timeoutMs: ctx.timeoutMs, label: 'sent clipboard image decodes in the transcript and clears the draft' });
+  report.ok('sent clipboard PNG is displayed and the draft attachment is cleared', true);
 }
 module.exports.composer = isolated(composer);
 async function terminalStatus(ctx) {

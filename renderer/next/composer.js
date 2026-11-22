@@ -683,6 +683,16 @@ function mountComposer({
 
   const owner = {};
   on(input, 'input', () => { setError(''); setDraftText(input.value); });
+  on(input, 'paste', event => {
+    const clipboard = event.clipboardData;
+    const files = Array.from(clipboard?.items || [])
+      .filter(item => item.kind === 'file' && item.type.toLowerCase().startsWith('image/'))
+      .map(item => item.getAsFile()).filter(Boolean);
+    if (!files.length) files.push(...Array.from(clipboard?.files || [])
+      .filter(file => file.type.toLowerCase().startsWith('image/')));
+    // Leave the textarea's native text paste and undo behavior intact.
+    if (files.length) void addFiles(files);
+  });
   on(input, 'keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault();
