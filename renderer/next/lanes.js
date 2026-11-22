@@ -706,9 +706,9 @@ function appendStop(doc, parent, stop, laneId) {
   const title = el(doc, 'span', 'next-lanes-stop-title', open); title.textContent = stop.goal.title;
   if (stop.question) { const mark = el(doc, 'span', 'next-lanes-question-mark', open); mark.textContent = '?'; mark.setAttribute('aria-label', 'Needs your answer'); }
   if (stop.progress) {
+    if (stop.blockedCount) { const blocked = el(doc, 'span', 'next-lanes-stop-blocked', open); blocked.textContent = `${stop.blockedCount} blocked`; }
+    const counts = el(doc, 'span', 'next-lanes-stop-counts', open); counts.textContent = stop.progress.text;
     appendProgress(doc, wrapper, stop.progress);
-    const counts = el(doc, 'span', 'next-lanes-stop-counts', wrapper); counts.textContent = stop.progress.text;
-    if (stop.blockedCount) { const blocked = el(doc, 'span', 'next-lanes-stop-blocked', wrapper); blocked.textContent = `${stop.blockedCount} blocked`; }
   }
   if (stop.isDefault && stop.sections.length) {
     const members = el(doc, 'div', 'next-lanes-default-members', wrapper);
