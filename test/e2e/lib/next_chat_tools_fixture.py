@@ -42,7 +42,7 @@ def install(Server, UIVerbs, VerbError, scratch):
 
     def record(verb, message):
         keys = ('host', 'session_name', 'display_name', 'force', 'operator_confirm',
-                'text', 'request_id', 'queued_send_now')
+                'text', 'request_id', 'optimistic_id', 'queued_send_now')
         with log.open('a') as out:
             out.write(json.dumps({'verb': verb, **{k: message[k] for k in keys if k in message}}) + '\n')
 
@@ -76,7 +76,7 @@ def install(Server, UIVerbs, VerbError, scratch):
         return {'type': 'close.ok', 'ok': True}
 
     receipts = {}
-    sent_text = {}
+    sent_inputs = {}
     echo_number = 12000
 
     async def send(self, msg):
@@ -85,7 +85,10 @@ def install(Server, UIVerbs, VerbError, scratch):
         record('send', msg)
         text = msg['text']
         request_id = msg['request_id']
-        sent_text[request_id] = text
+        sent_inputs[request_id] = {
+            'stream_id': host + ':' + msg['session_name'], 'text': text,
+            'optimistic_id': msg.get('optimistic_id'),
+        }
         receipts[request_id] = {'type': 'send.result', 'request_id': request_id,
                                 'delivery': 'not_landed' if 'failed' in text else 'landed',
                                 'provider_queued': 'queued' in text}
@@ -96,19 +99,25 @@ def install(Server, UIVerbs, VerbError, scratch):
         if not target(msg) or not isinstance(selected, dict):
             return await original_interrupt(self, msg)
         record('send.interrupt', msg)
-        receipt = receipts.get(selected.get('original_request_id'))
-        if not receipt:
-            raise VerbError('fixture_unknown_queue', 'Unknown fixture queued receipt')
-        # Native queue ownership ends only on the original correlated USER echo.
+        original_id = selected.get('original_request_id')
+        origin = sent_inputs.get(original_id)
+        if (not origin or not receipts[original_id]['provider_queued'] or
+                origin['stream_id'] != host + ':' + msg['session_name'] or
+                not origin['optimistic_id'] or origin['optimistic_id'] != selected.get('optimistic_id')):
+            raise VerbError('fixture_unknown_queue', 'Selected identity does not match the original queued send')
+        # Match the top-level receipt metadata a durable USER echo carries;
+        # the normal ingestion path assigns the sequence and publishes it.
         nonlocal echo_number
         echo_number += 1
-        original_id = selected['original_request_id']
-        event = _event(host + ':' + msg['session_name'], 'USER', sent_text[original_id], echo_number)
-        event['timestamp'] = datetime.now(timezone.utc).isoformat()
-        event['request_id'] = original_id
-        event['raw'].update({'request_id': original_id, 'receipt_state': 'landed'})
-        await append_ingested_event(server.store, server.broadcast, event,
-                                    recent_limit=500, sessions=server.sessions)
+        event = _event(origin['stream_id'], 'USER', origin['text'], echo_number)
+        event.update(timestamp=datetime.now(timezone.utc).isoformat(),
+                     optimistic_id=origin['optimistic_id'], request_id=original_id,
+                     receipt_id='fixture-receipt-' + original_id, receipt_state='landed',
+                     receipt_delivery='landed', attachment_count=0)
+        seq = await append_ingested_event(server.store, server.broadcast, event,
+                                          recent_limit=500, sessions=server.sessions)
+        if seq is None:
+            raise VerbError('fixture_echo_missing', 'The correlated USER event was not published')
         return {'type': 'send.interrupt.ok', 'ok': True}
 
     async def driver(self):
@@ -123,7 +132,7 @@ def install(Server, UIVerbs, VerbError, scratch):
                         renames.clear()
                         closed.clear()
                         receipts.clear()
-                        sent_text.clear()
+                        sent_inputs.clear()
                         log.unlink(missing_ok=True)
                     settings.update(data.get('settings', {}))
                     if data.get('result'):

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { setTimeout: sleep } = require('node:timers/promises');
+const { readViewport, clearAndSettle } = require('./viewport_settle');
 
 const A = 'web-gate-1', B = 'web-gate-survivor', C = 'web-gate-empty', ASSISTANT = 'web-gate-assistant';
 const rail = '.chats-button';
@@ -60,22 +61,70 @@ async function enter(ctx, width) {
   await wait(ctx, `!!${query(rail)} && [...window.PentacleChatStore.getState().sessions].some(s=>s.stream_id==='local:${A}')`, 'fixture inventory loaded');
 }
 
+const workspaceKeys = `key => key.startsWith('pentacle.next.') || key === 'pentacle.workspace.v1'`;
+async function saveFixtureBaseline(ctx) {
+  const {session:s} = ctx;
+  return {
+    viewport: await readViewport(s),
+    ...await s.eval(`(() => {
+      const keys = Object.keys(localStorage).filter(${workspaceKeys}).sort();
+      return { storage: Object.fromEntries(keys.map(k=>[k,localStorage.getItem(k)])),
+        dpr: devicePixelRatio, reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        dark: matchMedia('(prefers-color-scheme: dark)').matches };
+    })()`),
+  };
+}
+async function restoreFixtureBaseline(ctx, baseline) {
+  const {session:s} = ctx;
+  const snapshot=JSON.stringify(baseline.storage);
+  await s.eval(`(() => {
+    for (const key of Object.keys(localStorage).filter(${workspaceKeys})) localStorage.removeItem(key);
+    for (const [key,value] of Object.entries(${snapshot})) localStorage.setItem(key,value);
+    return true;
+  })()`);
+  await s.send('Emulation.setEmulatedMedia',{media:'',features:[]});
+  const scheme = `matchMedia('(prefers-color-scheme: dark)').matches === ${baseline.dark}`;
+  const motion = `matchMedia('(prefers-reduced-motion: reduce)').matches === ${baseline.reduced}`;
+  if (!await s.eval(`(${scheme}) && (${motion})`)) {
+    await s.send('Emulation.setEmulatedMedia',{media:'',features:[
+      {name:'prefers-color-scheme',value:baseline.dark?'dark':'light'},
+      {name:'prefers-reduced-motion',value:baseline.reduced?'reduce':'no-preference'},
+    ]});
+  }
+  // Let the restored old Web render at natural metrics before judging those
+  // metrics. If Chrome's new frame acquired different browser chrome, restore
+  // the actual baseline content dimensions rather than passing a drift on.
+  await s.send('Emulation.clearDeviceMetricsOverride');
+  await s.send('Page.navigate',{url:ctx.url});
+  await wait(ctx,"document.readyState === 'complete' && !!document.getElementById('session-list') && !document.querySelector('.next-app')",'old web layout restored');
+  try {
+    await clearAndSettle(s,baseline.viewport,{timeoutMs:2000});
+  } catch (error) {
+    if (!String(error.message).startsWith('viewport restore timed out')) throw error;
+    await s.send('Emulation.setDeviceMetricsOverride',{
+      ...baseline.viewport,deviceScaleFactor:baseline.dpr,mobile:false,
+    });
+  }
+  const {width,height}=baseline.viewport;
+  await wait(ctx,`innerWidth===${width} && innerHeight===${height}
+    && devicePixelRatio===${baseline.dpr} && (${scheme}) && (${motion})
+    && JSON.stringify(Object.fromEntries(Object.keys(localStorage).filter(key=>key.startsWith('pentacle.next.'))
+      .sort().map(k=>[k,localStorage.getItem(k)])))===JSON.stringify(Object.fromEntries(
+        Object.entries(${snapshot}).filter(([k])=>k.startsWith('pentacle.next.'))))`,'viewport, media and Next storage restored');
+}
 function isolated(run, width = 1440) {
   return async ctx => {
-    await command(ctx, { reset: true, settings: { enabled: true } });
+    const baseline = await saveFixtureBaseline(ctx);
     try {
+      await command(ctx, { reset: true, settings: { enabled: true } });
       await enter(ctx, width);
       await ctx.session.eval("localStorage.removeItem('pentacle.next.chat.seen'); true");
       await enter(ctx, width);
       await wait(ctx, "localStorage.getItem('pentacle.next.chat.seen') !== null", 'initial seen marks');
       await run(ctx);
     } finally {
-      await command(ctx, { reset: true });
-      await ctx.session.eval("localStorage.removeItem('pentacle.next.chat.seen'); true");
-      await ctx.session.send('Emulation.setEmulatedMedia', { features: [] });
-      await ctx.session.send('Emulation.clearDeviceMetricsOverride');
-      await ctx.session.send('Page.navigate', { url: ctx.url });
-      await wait(ctx, "document.readyState === 'complete' && !!document.getElementById('session-list')", 'old web restored');
+      try { await command(ctx, { reset: true }); }
+      finally { await restoreFixtureBaseline(ctx, baseline); }
     }
   };
 }
@@ -85,8 +134,14 @@ async function select(ctx, name, from = rail) {
   await wait(ctx, shown(row(name)), 'chat row available');
   await ctx.session.click(row(name));
 }
+const renameButton = name => query(action(name, '.next-chat-rename'));
+const renameReady = (ctx,name) => wait(ctx,`${renameButton(name)}?.disabled===false`,
+  `Rename for ${name} enabled after reply and inventory`);
 async function rename(ctx, name, value, mode) {
+  if (!await ctx.session.eval(`${renameButton(name)}?.disabled===false`))
+    throw new Error(`Cannot rename ${name}: Rename is missing or still disabled by an earlier request`);
   await clickAction(ctx, name, '.next-chat-rename');
+  await wait(ctx,`!!${query(editing)}`,`inline Rename input opens for ${name}`);
   await ctx.session.eval(`(() => { const el=${query(editing)}; el.value=${JSON.stringify(value)};
     if (${mode === 'blur'}) el.blur();
     else el.dispatchEvent(new KeyboardEvent('keydown',{ key:${JSON.stringify(mode)}, bubbles:true, cancelable:true }));
@@ -123,13 +178,11 @@ const head = isolated(async ctx => {
   await command(ctx, { settings: { rows: {
     [A]: { model: 'claude-opus-5-5', effort: 'high' },
     [B]: { model: 'claude-sonnet-5', effective_model: 'gpt-6-sol', effort: 'medium', effective_effort: 'default' },
-    [ASSISTANT]: { model: 'claude-opus-5-5', effort: 'high' },
   } } });
   await select(ctx, A);
   await wait(ctx, `${text('[data-pane=chat] .next-chat-model')}==='Opus 5.5 · high'`, 'plain model and effort');
   await select(ctx, B, title('chat'));
   await wait(ctx, `${text('[data-pane=chat] .next-chat-model')}==='6 Sol'`, 'effective model and default effort');
-  ctx.report.ok('Assistant has no model line even with model metadata', await ctx.session.eval(`!${query('[data-pane=assistant] .next-chat-model')}`));
 });
 
 const renaming = isolated(async ctx => {
@@ -139,13 +192,16 @@ const renaming = isolated(async ctx => {
   await wait(ctx, `${text(row(A))}==='Rail renamed' && ${text(title('chat'))}==='Rail renamed'`, 'rail rename visible');
   await waitCall(ctx, r => r.verb === 'rename' && r.session_name === A && r.display_name === 'Rail renamed');
   await ctx.session.click(title('chat'));
+  await renameReady(ctx,A);
   await rename(ctx, A, 'Title renamed', 'blur');
   await wait(ctx, `${text(row(A))}==='Title renamed' && ${text(title('chat'))}==='Title renamed'`, 'blur rename visible');
   await waitCall(ctx, r => r.verb === 'rename' && r.session_name === A && r.display_name === 'Title renamed');
+  await renameReady(ctx,A);
   await rename(ctx, A, 'Escaped name', 'Escape');
   await ctx.session.click(rail);
   ctx.report.ok('Escape sends nothing and both lists reflect rename', !calls(ctx).some(r => r.display_name === 'Escaped name')
     && await ctx.session.eval(`${text(row(A))}==='Title renamed'`));
+  await renameReady(ctx,A);
   await rename(ctx, A, 'Refused name', 'Enter');
   await waitCall(ctx, r => r.verb === 'rename' && r.display_name === 'Refused name');
   await wait(ctx, `${text(row(A))}==='Title renamed' && ${text(title('chat'))}==='Title renamed'`, 'rename refusal restores previous name');
@@ -185,6 +241,11 @@ const unread = isolated(async ctx => {
   await wait(ctx, `${query(rail)}.dataset.count==='1'`, 'unread preserved across reload');
   await select(ctx, B);
   await wait(ctx, `!${query(rail)}.dataset.count`, 'opening chat clears unread');
+  await ctx.session.click(rail);
+  await wait(ctx,`!!${query(row(B))} && !${query(action(B,'.next-chat-dot'))}`,'opened chat loses its dot in the rail list');
+  await ctx.session.click(title('chat'));
+  await wait(ctx,`!!${query(row(B))} && !${query(action(B,'.next-chat-dot'))}`,'opened chat loses its dot in the title list');
+  await ctx.session.click(title('chat'));
   await ctx.session.click('.brand');
   await wait(ctx, `${query('[data-pane=assistant]')}.hidden`, 'Assistant aside');
   await command(ctx, { settings:{ rows:{[B]: {last_kind:'ASSIST',last_text:'New offstage answer'}, [ASSISTANT]: {last_kind:'ASSIST',last_text:'Assistant aside update'} } } });
@@ -227,13 +288,36 @@ const sendStatus = isolated(async ctx => {
     await send(ctx,'chat',queued);
     await command(ctx,{result:queued});
     await wait(ctx, shown(line('queued')+' .chevron'), 'provider queued chevron');
-    const now = line('queued')+' .slot-chat-send-now:not([hidden])';
-    ctx.report.ok('selected queued capability reflected for '+name, await ctx.session.eval(shown(now)) === allowed);
+    // Bind the proof to this exact synthetic message, not a stale idle row
+    // or another queued send on the same chat.
+    const queuedRow = `[...document.querySelectorAll('[data-pane=chat] article.slot-chat-row.is-user')]
+      .find(row => row.querySelector('.slot-chat-user-bubble')?.textContent.trim()===${JSON.stringify(queued)})`;
+    await wait(ctx,`!!(${queuedRow})?.querySelector('.slot-chat-send-status.is-queued')`,'selected message has its own queued line');
+    const canSend = await ctx.session.eval(`!!(${queuedRow})?.querySelector('.slot-chat-send-now')`);
+    ctx.report.ok('selected queued capability reflected for '+name,canSend===allowed);
     if (allowed) {
-      await ctx.session.click(now);
-      const request = await waitCall(ctx, r => r.verb==='send.interrupt' && r.session_name===name);
-      ctx.report.ok('Send now sends the queued origin and optimistic ids', !!request.queued_send_now.original_request_id && !!request.queued_send_now.optimistic_id);
-      await wait(ctx, `!${query(line('queued'))} && ${shown(line('sent')+' .check')}`, 'queued row follows correlated completion');
+      const origin = await waitCall(ctx,r=>r.verb==='send' && r.text===queued);
+      await ctx.session.eval(`(${queuedRow}).querySelector('.slot-chat-send-now').click(); true`);
+      const request = await waitCall(ctx,r=>r.verb==='send.interrupt' && r.session_name===name);
+      ctx.report.ok('Send now selects the exact queued origin and optimistic ids',
+        !!origin.optimistic_id && request.queued_send_now.original_request_id===origin.request_id &&
+        request.queued_send_now.optimistic_id===origin.optimistic_id);
+      try {
+        await wait(ctx,`!!(${queuedRow}) && !(${queuedRow}).querySelector('.slot-chat-send-status.is-queued')`,
+          'correlated completion leaves this message visible without its queued line');
+      } catch (error) {
+        const dump=await ctx.session.eval(`(() => {
+          const id=${JSON.stringify(origin.optimistic_id)}, input=${JSON.stringify(queued)}, state=window.PentacleChatStore.getState();
+          return { optimistic:state.optimisticSends?.[id] ?? null,
+            events:state.events.filter(e=>e.optimistic_id===id || e.text===input).map(e=>({
+              kind:e.kind, stream_id:e.stream_id, timestamp:e.timestamp, daemon_seq:e.daemon_seq,
+              optimistic_id:e.optimistic_id, request_id:e.request_id, receipt_state:e.receipt_state,
+            })), pendingHtml:(${queuedRow})?.querySelector('.slot-chat-send-status')?.textContent ?? null };
+        })()`);
+        fs.writeFileSync(path.join(ctx.report.dir,'next-queued-echo-state.json'),JSON.stringify(dump,null,2));
+        ctx.report.note('Queued echo did not reconcile; see next-queued-echo-state.json');
+        throw error;
+      }
     }
   }
   const failed = 'Chat tools failed';

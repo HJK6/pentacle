@@ -265,18 +265,16 @@ test('U3: the rail counts newly unread chats offstage and does not mark a hidden
   assert.equal(s.$('.brand').classList.contains('assistant-unread'), false);
 });
 
-test('U4: effective model and effort appear on the card but not in Assistant or the new form', async t => {
+test('U4: effective model and effort appear on a chat card but not in the new form', async t => {
   const s = openShell(t);
-  const [assistant, a, b] = s.rows;
+  const [, a, b] = s.rows;
   Object.assign(a,{model:'claude-sonnet-5',effort:'low',effective_model:'claude-opus-5-5',effective_effort:'high'});
   Object.assign(b,{model:'gpt-6-sol',effort:'default'});
-  Object.assign(assistant,{model:'claude-opus-5-5',effort:'high'});
   await flush(); s.choose('a');
   assert.equal(s.$('[data-pane=chat] .next-chat-model')?.textContent ?? '', 'Opus 5.5 · high');
   a.effective_effort = 'default'; s.update();
   assert.equal(s.$('[data-pane=chat] .next-chat-model').textContent, 'Opus 5.5');
   s.choose('b'); assert.equal(s.$('[data-pane=chat2] .next-chat-model').textContent, '6 Sol');
-  assert.equal(s.$('[data-pane=assistant] .next-chat-model'), null);
   b.model = null; s.update(); assert.equal(s.$('[data-pane=chat2] .next-chat-model').hidden, true);
   s.$('[aria-label=Chats]').click(); s.$('.popover [aria-label="New chat"]').click();
   assert.equal(s.$('.chat-card:has(.new-chat-host:not([hidden])) .next-chat-model').hidden, true);

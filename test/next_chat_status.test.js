@@ -71,3 +71,10 @@ edge('one shared presentation module keeps legacy labels and exact configured pr
   assert.equal(isProtectedAssistant([null,{role:'assistant'}],'assistant'),true);
   assert.equal(isProtectedAssistant([{session_kind:'assistant_composite'}],''),true);
 });
+
+edge('assistant composite suppresses a known model and effort in the shared formatter', () => {
+  const {modelAndEffort}=status;
+  const metadata={model:'claude-sonnet-5',effort:'low',effective_model:'claude-opus-5-5',effective_effort:'high'};
+  assert.equal(modelAndEffort({...metadata,session_kind:'session'}),'Opus 5.5 · high');
+  assert.equal(modelAndEffort({...metadata,session_kind:'assistant_composite'}),'');
+});
