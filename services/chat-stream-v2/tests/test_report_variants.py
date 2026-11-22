@@ -853,6 +853,8 @@ def test_advisor_accept_reports_validate_strict_shape_before_any_write(tmp_path)
                 {"discharges": ["one"]}, {"qa_verdict": "accept"}, {"completion_kind": "implementation_ready"},
                 {"advisor_rule_accept": {}}, {"session_generation": "forged"},
                 {"details": {"nested": [{"fd_generation": "forged"}]}},
+                {"agent_orch_attestation": {"envelope": {"advisor_rule_accept": {}}}},
+                {"details": {"nested": [{"completion_kind": "implementation_ready"}]}},
                 {"extras": {"advisor_rule_accept": {}}}, {"extras": {"advisor_rule": None}},
             )]
             for fields in frames:

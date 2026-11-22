@@ -136,11 +136,16 @@ def _advisor_rule_error():
 
 
 def validate_advisor_rule_envelope(message):
-    if ({advisor_rule.ACCEPT_KEY} | advisor_rule.STAMP_FIELDS) & message.keys():
+    variant = is_advisor_rule_report(message)
+    reserved = {advisor_rule.ACCEPT_KEY} | advisor_rule.STAMP_FIELDS
+    if variant:
+        reserved.add("session_generation")
+    release_attestation = message.get("agent_orch_attestation")
+    if (reserved & message.keys()
+            or any(_nested_key_paths(release_attestation, key, path="agent_orch_attestation") for key in reserved)):
         raise _advisor_rule_error()
-    if is_advisor_rule_report(message) and (
+    if variant and (
             not advisor_rule.valid_id(message.get("report_id"))
-            or "session_generation" in message
             or type(message.get("msg_id")) is not int or message["msg_id"] != 0
             or message.get("status") != "progress"
             or any(message.get(key) for key in (
@@ -154,11 +159,11 @@ def _validate_advisor_rule_payload(payload, status):
     reserved = {advisor_rule.ACCEPT_KEY}
     if variant:
         extras = payload["extras"]
-        if (status != "progress" or not advisor_rule.valid_review(extras["advisor_rule"])
-                or any(key in payload for key in GOVERNANCE_FIELDS)
-                or {"assistant_composite", "qa_review", "work_checkpoint"} & extras.keys()):
+        if status != "progress" or not advisor_rule.valid_review(extras["advisor_rule"]):
             raise _advisor_rule_error()
-        reserved.update(advisor_rule.STAMP_FIELDS | {"session_generation"})
+        reserved.update(advisor_rule.STAMP_FIELDS, GOVERNANCE_FIELDS, {
+            "session_generation", "assistant_composite", "qa_review", "work_checkpoint",
+        })
     if any(_nested_key_paths(payload, key, path="payload") for key in reserved):
         raise _advisor_rule_error()
 
