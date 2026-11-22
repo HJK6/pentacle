@@ -92,6 +92,8 @@ def test_tool_activity_ordering_and_projection():
     ("claude", "Read", "read"), ("claude", "Grep", "search"),
     ("claude", "Edit", "edit"), ("claude", "Write", "edit"),
     ("claude", "Bash", "command"), ("codex", "exec_command", "tool"),
+    ("cursor", "read", "read"), ("cursor", "write", "edit"),
+    ("cursor", "shell", "command"), ("gemini", "read_file", "read"),
     ("claude", "/private/sentinel", "tool"), ("claude", None, "tool"),
 ])
 def test_tool_categories_use_only_provider_and_bounded_name(provider, name, category):
@@ -130,6 +132,29 @@ def test_tool_summary_rebuild_retention_and_generation(tmp_path):
     asyncio.run(run())
 
 
+def test_restart_can_restore_older_tool_after_live_winner_ages_out():
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = Sessions(store, local_host="fixture")
+            await sessions.open("fixture", "chat", provider="claude", created_at=CREATED)
+            newer = event(kind="TOOL_USE", timestamp="2026-10-26T02:00:00Z", raw={"tool_name": "Read"})
+            older = event(kind="TOOL_USE", timestamp="2026-10-26T01:00:00Z", raw={"tool_name": "Grep"})
+            for index, item in enumerate((newer, older)):
+                seq = await store.append_session_event("fixture:chat", item, identity=f"tool-{index}", limit=1000)
+                sessions.apply_genuine_activity_event("fixture:chat", {**item, "daemon_seq": seq})
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "read"
+            for index in range(SUMMARY_TAIL_LIMIT - 1):
+                await store.append_session_event("fixture:chat", event(str(index), kind="TOOL_RESULT"),
+                                                 identity=f"result-{index}", limit=1000)
+            await sessions.refresh()
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "search"
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_local_and_remote_committed_tool_events_rebuild(tmp_path):
     from ingest import Ingest, _StreamIngest, _close_stream
     from test_event_push import _sink, _push
@@ -158,11 +183,71 @@ def test_local_and_remote_committed_tool_events_rebuild(tmp_path):
             assert live["last_tool_activity"]["category"] == "search"
             assert live["last_text"] == "Visible"
             assert (await sink.handle_push(_push(sink, [remote], host="fixture")))["inserted"] == 0
+            older = event(kind="TOOL_USE", timestamp="2026-10-26T00:30:00Z",
+                raw={"tool_name": "Edit", "jsonl_record_uuid": "remote-older", "jsonl_event_index": 0})
+            assert (await sink.handle_push(_push(sink, [older], host="fixture")))["inserted"] == 1
+            assert sessions.list_open()[0]["last_tool_activity"] == live["last_tool_activity"]
+            tie = event(kind="TOOL_USE", timestamp=remote["timestamp"],
+                raw={"tool_name": "Read", "jsonl_record_uuid": "remote-tie", "jsonl_event_index": 0})
+            assert (await sink.handle_push(_push(sink, [tie], host="fixture")))["inserted"] == 1
+            live = sessions.list_open()[0]
+            assert live["last_tool_activity"]["category"] == "read"
             await sessions.refresh()
             assert sessions.list_open()[0]["last_tool_activity"] == live["last_tool_activity"]
         finally:
             if state:
                 _close_stream(state)
+            store.stop()
+    asyncio.run(run())
+
+
+def test_stale_close_and_already_open_restore_strip_private_tool_order():
+    from types import SimpleNamespace
+    async def run():
+        async def none(*args, **kwargs):
+            return None
+        async def children(*args, **kwargs):
+            return []
+        sessions = Sessions(SimpleNamespace(fetch_session=none, get_session_reap=none,
+                                            children_of=children), local_host="fixture")
+        sessions._inv["fixture:chat"] = {"stream_id": "fixture:chat", "host": "fixture",
+            "session_name": "chat", "session_generation": "g", "status": "open", "created_at": CREATED}
+        sessions.apply_genuine_activity_event("fixture:chat", event(kind="TOOL_USE", raw={"tool_name": "Read"}))
+        restored = await sessions.restore_reconciled("fixture", "chat")
+        assert restored["already_open"]
+        assert not any(k.startswith("_last_tool") for k in restored["session"])
+        json.dumps(restored)
+        closed = await sessions._close_locked("fixture", "chat")
+        assert closed["already_closed"] and closed["stale_generation"]
+        assert not any(k.startswith("_last_tool") for k in closed["session"])
+        json.dumps(closed)
+    asyncio.run(run())
+
+
+def test_remote_claude_reopen_timestamp_boundary():
+    from datetime import datetime, timedelta
+    from test_event_push import _sink, _push
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = Sessions(store, local_host="fixture")
+            await sessions.open("fixture", "chat", provider="claude", created_at=CREATED)
+            await store.mark_closed("fixture", "chat", closed_at="2026-10-26T02:00:00Z", pane_status="gone")
+            await sessions.open("fixture", "chat", provider="claude")
+            floor = datetime.fromisoformat(sessions.list_open()[0]["created_at"].replace("Z", "+00:00"))
+            sink, _, _ = _sink(store, sessions=sessions)
+            old = event(kind="TOOL_USE", timestamp=(floor - timedelta(seconds=1)).isoformat(),
+                        raw={"tool_name": "Read", "jsonl_record_uuid": "pre-birth", "jsonl_event_index": 0})
+            late = event(kind="TOOL_USE", timestamp=(floor + timedelta(seconds=1)).isoformat(),
+                         raw={"tool_name": "Grep", "jsonl_record_uuid": "post-birth", "jsonl_event_index": 0})
+            await sink.handle_push(_push(sink, [old], host="fixture"))
+            assert "last_tool_activity" not in sessions.list_open()[0]
+            assert (await sink.handle_push(_push(sink, [late], host="fixture")))["inserted"] == 1
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "search"
+            await sessions.refresh()
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "search"
+        finally:
             store.stop()
     asyncio.run(run())
 
@@ -205,6 +290,20 @@ def test_codex_real_local_ingest_and_remote_push():
             assert remote.list_open()[0]["last_tool_activity"]["category"] == "tool"
             await remote.refresh()
             assert next(r for r in remote.list_open() if r["stream_id"] == "hostc:v2-codex-current")["last_tool_activity"]["category"] == "tool"
+            raced = await remote.open("hostc", "v2-codex-raced", provider="codex", pane_pid="7001")
+            append = store.append_session_events_lifecycle_cas
+            async def reopen_after_admission(entries, *, limit):
+                await store.mark_closed("hostc", "v2-codex-raced", pane_status="gone", closed_at="2026-10-26T02:00:00Z",
+                                        expected_generation=raced["session_generation"])
+                await remote.open("hostc", "v2-codex-raced", provider="codex", pane_pid="7001")
+                return await append(entries, limit=limit)
+            store.append_session_events_lifecycle_cas = reopen_after_admission
+            stale = _proven_codex_ev(CURRENT_CODEX_ROLLOUT, 2, stream_id="hostc:v2-codex-raced", pane_pid="7001")
+            stale.update(kind="TOOL_USE", text="exec_command", timestamp="2099-01-01T00:00:00Z")
+            stale["raw"]["tool_name"] = "exec_command"
+            reply = await sink.handle_push(_push(sink, [stale], host="hostc"))
+            assert reply["inserted"] == 0 and reply["dropped"][0]["reason"] == "lifecycle_changed"
+            assert "last_tool_activity" not in next(r for r in remote.list_open() if r["stream_id"] == "hostc:v2-codex-raced")
         finally:
             _close_stream(state)
             store.stop()
@@ -229,6 +328,15 @@ def test_tool_only_change_emits_once_and_duplicate_does_not():
         assert await emitter.emit_if_changed()
         assert [f["sessions"][0]["last_tool_activity"]["category"] for f in frames] == ["read", "search"]
     asyncio.run(run())
+
+
+def test_dot_projection_excludes_tool_activity_and_ordering():
+    from server import Server
+    row = {"stream_id": "fixture:chat", "visibility": "default",
+           "last_tool_activity": {"category": "read", "timestamp": "2026-10-26T01:00:00Z"},
+           "_last_tool_at": 123, "_last_tool_seq": 42}
+    projected = Server._dot_project_session(row)
+    assert not ({"last_tool_activity", "_last_tool_at", "_last_tool_seq"} & projected.keys())
 
 
 @pytest.mark.parametrize("kind", ["USER", "ASSIST_TEXT", "ASSIST", "TELL"])

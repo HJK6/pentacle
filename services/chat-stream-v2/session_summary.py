@@ -78,6 +78,11 @@ def apply_message_summary(row: dict[str, Any], event: dict[str, Any]) -> bool:
     return True
 
 
+def _utc_microseconds(value: datetime) -> int:
+    return (((value.toordinal() * 24 + value.hour) * 60 + value.minute) * 60
+            + value.second) * 1_000_000 + value.microsecond
+
+
 def apply_tool_summary(row: dict[str, Any], event: dict[str, Any]) -> bool:
     """Reduce committed tool observations without retaining provider payloads."""
     if event.get("kind") != "TOOL_USE":
@@ -109,9 +114,12 @@ def apply_tool_summary(row: dict[str, Any], event: dict[str, Any]) -> bool:
         except (ValueError, OverflowError, OSError):
             return False
         canonical = parsed.isoformat(timespec="microseconds" if parsed.microsecond else "seconds").replace("+00:00", "Z")
+        ordering_time = _utc_microseconds(parsed)
         if prior_stamp is not None:
-            prior_dt = row.get("_last_tool_at") or datetime.fromisoformat(prior_stamp.replace("Z", "+00:00"))
-            if (parsed, seq) <= (prior_dt, row.get("_last_tool_seq", 0)):
+            prior_time = row.get("_last_tool_at")
+            if prior_time is None:
+                prior_time = _utc_microseconds(datetime.fromisoformat(prior_stamp.replace("Z", "+00:00")))
+            if (ordering_time, seq) <= (prior_time, row.get("_last_tool_seq", 0)):
                 return False
     name = raw.get("tool_name")
     provider = event.get("provider")
@@ -119,5 +127,5 @@ def apply_tool_summary(row: dict[str, Any], event: dict[str, Any]) -> bool:
     row["last_tool_activity"] = {"category": category, "timestamp": canonical}
     row["_last_tool_seq"] = seq
     if stamp != prior_stamp:
-        row["_last_tool_at"] = parsed
+        row["_last_tool_at"] = ordering_time
     return True

@@ -1429,7 +1429,7 @@ class Sessions:
             if current is None:
                 raise VerbError("unknown_session", "Unknown or inactive session")
             if str(current.get("status") or "") == "open":
-                return {"restored": False, "already_open": True, "liveness": "already_open", "session": dict(current)}
+                return {"restored": False, "already_open": True, "liveness": "already_open", "session": _without_tool_order(current)}
             if not (
                 str(current.get("presumed_dead_at") or "").strip()
                 or str(current.get("dead_open_closed_at") or "").strip()
@@ -1898,7 +1898,7 @@ class Sessions:
             "already_closed": True,
             "stale_generation": True,
             "failed": False,
-            "session": row,
+            "session": _without_tool_order(row) if row is not None else None,
             "reap_status": (reap or {}).get("reap_status", "unknown"),
             "survivors": (reap or {}).get("survivors", []),
             "live_children": await self._live_children(sid),
