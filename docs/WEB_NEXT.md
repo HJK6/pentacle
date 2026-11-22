@@ -73,3 +73,27 @@ Assistant uses its own elapsed clock only. Reduced motion slows the working
 ring, makes the Assistant's mark still, and stops the send chevrons. The queue
 line only offers Send now when the store permits it for that specific message.
 The shared transcript and ordinary desktop/web send behavior are unchanged.
+
+### Reading width, microphone and scrollbars
+
+**Settings → Text width** sets one reading-column cap for Assistant and
+chat transcripts, their composers and voice displays, status views and
+working rows. Type a whole number from 320 to 2400 px, or use the
+480–1200 px slider. The exact field value remains authoritative between
+slider steps. Guides show while either control has focus. Narrow panes
+keep their margins; terminal, Lanes and dashboards do not use this cap.
+The default is 720 px; preferences stay in this browser.
+
+**Microphone** appears when the browser can name more than one physical
+input. **System default** is first. A selected microphone applies across
+all Next conversations. If only that input remains, the picker hides but
+the selection stays active. If the input disappears or the browser says
+it cannot be found, Next forgets it and the following recording uses the
+default. Permission and busy errors do not reset a choice. The current Web
+MIC panel and its preference are separate.
+
+Native thumbs are quiet at rest and clearer on hover or for 900 ms after
+scrolling. They widen under the pointer and take the theme accent when
+dragged. Conversations reserve equal gutters to avoid shifting; lists and
+message fields have a narrower bar. Design tabs keep their hidden scrollbar
+and terminals keep their existing scroller.

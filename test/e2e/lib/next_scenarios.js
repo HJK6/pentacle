@@ -456,7 +456,7 @@ async function scrollAndFocus(ctx) {
     await visit(ctx,width);
     const baseline=await session.eval(`(() => {const input=document.querySelector('.pane .next-composer-input'), outer=input.closest('.next-composer'), scroller=document.querySelector('.pane .thread'); const filler=document.createElement('div');filler.style.height='2000px';filler.style.flex='none';filler.textContent='Scroll fixture';scroller.append(filler);scroller.scrollTop=500;const before=getComputedStyle(outer).boxShadow;input.focus();return {outline:getComputedStyle(input).outlineStyle,before,after:getComputedStyle(outer).boxShadow,scrollbar:getComputedStyle(scroller).scrollbarWidth,width:getComputedStyle(scroller,'::-webkit-scrollbar').width,overflow:scroller.scrollHeight>scroller.clientHeight};})()`);
     report.ok(`composer focus uses the outer cue at ${width}`,baseline.outline==='none' && baseline.before!==baseline.after,baseline);
-    report.ok(`scrollbar is thin and styled at ${width}`,baseline.overflow && baseline.scrollbar==='thin' && baseline.width==='7px',baseline);
+    report.ok(`scrollbar is native auto with a 14 px styled box at ${width}`,baseline.overflow && baseline.scrollbar==='auto' && baseline.width==='14px',baseline);
     await session.screenshot(path.join(report.dir,`next-repair-scroll-focus-${width}.png`));
   }
 }
