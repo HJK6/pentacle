@@ -409,7 +409,7 @@ body :where(*:not(.terminal,.terminal *,.design-tabs,.design-tabs *))::-webkit-s
   min-height:48px;min-width:48px;border:5px solid var(--scroll-track);border-radius:999px;
   background-color:var(--scroll-rest);background-clip:content-box
 }
-body :where(*:not(.terminal,.terminal *,.design-tabs,.design-tabs *)):is(:hover,.next-scrolling)::-webkit-scrollbar-thumb{background-color:var(--scroll-near)}
+body :where(*:not(.terminal,.terminal *,.design-tabs,.design-tabs *)):is(.next-scroll-near,.next-scrolling)::-webkit-scrollbar-thumb{background-color:var(--scroll-near)}
 body :where(*:not(.terminal,.terminal *,.design-tabs,.design-tabs *))::-webkit-scrollbar-thumb:hover{
   border-width:3px;background-color:var(--scroll-hot)
 }
@@ -417,12 +417,13 @@ body :where(*:not(.terminal,.terminal *,.design-tabs,.design-tabs *))::-webkit-s
   border-width:3px;background-color:var(--accent)
 }
 .thread{scrollbar-gutter:stable both-edges;padding-inline:10px}
+.chat-card .thread{padding-inline:2px}
 :is(.next-lanes-scroll,.design-home,.design-outline,.melody-scroll,.melody-load-list,.new-chat-host){scrollbar-gutter:stable}
 :is(.next-lanes-scroll,.design-home,.design-outline,.melody-scroll,.melody-load-list,.new-chat-host)::-webkit-scrollbar-track{margin-bottom:14px}
-.popover::-webkit-scrollbar,.next-composer-input::-webkit-scrollbar{width:10px;height:10px}
-.popover::-webkit-scrollbar-thumb,.next-composer-input::-webkit-scrollbar-thumb{border-width:3px}
-.popover::-webkit-scrollbar-thumb:hover,.popover::-webkit-scrollbar-thumb:active{border-width:2px}
-.popover::-webkit-scrollbar-track{margin-block:6px}
+.popover.next-chat-list-popover::-webkit-scrollbar,.next-composer-input::-webkit-scrollbar{width:10px;height:10px}
+.popover.next-chat-list-popover::-webkit-scrollbar-thumb,.next-composer-input::-webkit-scrollbar-thumb{border-width:3px}
+.popover.next-chat-list-popover::-webkit-scrollbar-thumb:hover,.popover.next-chat-list-popover::-webkit-scrollbar-thumb:active{border-width:2px}
+.popover.next-chat-list-popover::-webkit-scrollbar-track{margin-block:6px}
 .next-composer-input::-webkit-scrollbar-thumb{min-height:24px}
 @supports not selector(::-webkit-scrollbar){
   body :where(*:not(.terminal,.terminal *,.design-tabs,.design-tabs *)){

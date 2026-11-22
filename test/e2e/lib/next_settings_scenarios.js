@@ -12,7 +12,7 @@ const wait = (ctx, condition, label) => ctx.session.waitFor(condition, {timeoutM
 const requireProof = (ctx,label,ok,detail) => {ctx.report.ok(label,!!ok,detail); if (!ok) throw new Error(label);};
 const frame = s => s.eval('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
 const mouse = (s,type,x,y,held=false) => s.send('Input.dispatchMouseEvent',{type,x,y,
-  button:type==='mouseMoved'?'none':'left',buttons:type==='mouseReleased'?0:held||type==='mousePressed'?1:0,
+  button:type==='mouseMoved'&&!held?'none':'left',buttons:type==='mouseReleased'?0:held||type==='mousePressed'?1:0,
   clickCount:type==='mouseMoved'?0:1});
 
 async function enter(ctx,width=1440) {
@@ -50,32 +50,97 @@ async function measureWidth(s, wanted) {
     const thread=pane.querySelector('.thread'), col=pane.querySelector('.thread-inner'), composer=pane.querySelector('.next-composer');
     const style=getComputedStyle(thread), pad=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight);
     const expected=Math.min(${wanted},thread.clientWidth-pad);
-    return {pane:pane.dataset.pane,expected,column:col.getBoundingClientRect().width,
+    const voice=pane.querySelector('.voice-host'), work=pane.querySelector('.next-working:not([hidden])');
+    const c=col.getBoundingClientRect(), f=composer.getBoundingClientRect();
+    return {pane:pane.dataset.pane,expected,column:c.width,columnLeft:c.left,
       composerExpected:Math.min(${wanted},pane.clientWidth-(pane.classList.contains('chat-card')||innerWidth<600?32:48)),
-      composer:composer.getBoundingClientRect().width,
+      composer:f.width,composerLeft:f.left,voice:voice.getBoundingClientRect().width,
+      working:work?.getBoundingClientRect().width ?? null,
       guides:['::before','::after'].every(p=>getComputedStyle(col,p).borderLeftStyle==='dashed')};
   })`);
 }
 const widthsMatch = rows => rows.every(row => Math.abs(row.column-row.expected)<1 && Math.abs(row.composer-row.composerExpected)<1);
+
+const gripPoint = `(() => {
+  const handle=document.querySelector('.grip:not([hidden])');
+  if (!handle) return null;
+  const r=handle.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const x=r.left+r.width/2,y=r.top+Math.min(120,r.height/2);
+  return document.elementFromPoint(x,y)?.closest('.grip')===handle ? {x,y} : null;
+})()`;
+
+async function split(ctx,wide,narrow) {
+  const {session:s}=ctx;
+  await wait(ctx, `!!${gripPoint}`, 'resize divider is visible and hit-testable');
+  const drag = await s.eval(`(() => {
+    const handle=${gripPoint}, good=${q(wide)}.getBoundingClientRect(), other=${q(narrow)}.getBoundingClientRect();
+    const dir=good.left<other.left?1:-1;
+    return {...handle, end:Math.max(6,Math.min(innerWidth-6,handle.x+(980-good.width)*dir))};
+  })()`);
+  await mouse(s,'mousePressed',drag.x,drag.y);
+  await wait(ctx,"document.body.classList.contains('dragging')",'boundary owns the down event');
+  await mouse(s,'mouseMoved',drag.end,drag.y,true);
+  await mouse(s,'mouseReleased',drag.end,drag.y);
+  await wait(ctx,`${q(wide)}.getBoundingClientRect().width>=955 &&
+    ${q(narrow)}.getBoundingClientRect().width<500 &&
+    !document.body.classList.contains('dragging')`,'actual wide and narrow pane dimensions');
+  await frame(s);
+}
 
 async function width(ctx) {
   const {session:s}=ctx;
   await withNext(ctx,1440,async () => {
     if (await s.eval("!document.querySelector('[data-pane=lanes]').hidden")) await s.click('button[aria-label=Lanes]');
     await openChat(ctx);
-    const grip=await s.eval(`(() => { const r=${q('.grip:not([hidden])')}.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.top+100}; })()`);
-    await mouse(s,'mousePressed',grip.x,grip.y);
-    await mouse(s,'mouseMoved',grip.x+300,grip.y,true);
-    await mouse(s,'mouseReleased',grip.x+300,grip.y);
+    await s.eval(`(() => {
+      const store=window.PentacleChatStore;
+      const sessions=store.getState().sessions.map(s=>s.stream_id==='local:web-gate-1'
+        ? {...s, working:true, working_label:'7s', status_card:{goal:'Width status fixture'}}
+        : s.session_kind==='assistant_composite' ? {...s,working:true} : s);
+      store.applyFrame({type:'session.inventory',sessions}); return true;
+    })()`);
+    await wait(ctx,`!!${q(A+' .next-working:not([hidden])')} && !!${q(B+' .next-working:not([hidden])')}`,'two visible working rows');
+    const measure = async (wide,narrow) => {
+      await s.click('[aria-label=Settings]');
+      await setInput(s,field,'905');
+      const rows=await measureWidth(s,905);
+      const large=rows.find(r=>r.pane===wide), small=rows.find(r=>r.pane===narrow);
+      requireProof(ctx,'transcript, field, voice and working row honor the same cap for '+wide+' wide',rows.length===2 && widthsMatch(rows)
+        && Math.abs(large.column-905)<1 && small.column<905
+        && rows.every(r=>r.guides && Math.abs(r.voice-r.expected)<1 && r.working!==null &&
+          Math.abs(r.working-r.composerExpected)<1),rows);
+      await s.eval(`${q(field)}.blur(); true`);
+      requireProof(ctx,'blur removes both reading guides', (await measureWidth(s,905)).every(r=>!r.guides));
+      await s.click('[aria-label=Settings]');
+      return {large,small};
+    };
+
+    await split(ctx,A,B);
+    const {small:chat} = await measure('assistant','chat');
+    requireProof(ctx,'narrow chat text and field have the same width and left edge',
+      Math.abs(chat.column-chat.composer)<1 && Math.abs(chat.columnLeft-chat.composerLeft)<1,chat);
+    await s.click(B+' [aria-label=Status]');
+    await wait(ctx,`!${q(B+' .status')}.hidden && ${q(B+' .status')}.textContent.includes('Width status fixture')`,'narrow status is open');
+    const narrowStatus=await s.eval(`({view:${q(B+' .status')}.getBoundingClientRect().width,pane:${q(B)}.getBoundingClientRect().width})`);
+    requireProof(ctx,'narrow status view respects its card width',Math.abs(narrowStatus.view-narrowStatus.pane)<1 && narrowStatus.view<905,narrowStatus);
+    await s.click(B+' [aria-label=Status]');
+
+    await split(ctx,B,A);
+    await measure('chat','assistant');
+    await s.click(B+' [aria-label=Status]');
+    await wait(ctx,`!${q(B+' .status')}.hidden && ${q(B+' .status')}.textContent.includes('Width status fixture')`,'wide status is open');
+    const status = await s.eval(`${q(B+' .status')}.getBoundingClientRect().width`);
+    requireProof(ctx,'wide status view uses the exact 905px cap',Math.abs(status-905)<1,{status});
+    await s.click(B+' [aria-label=Status]');
+
     await s.click('[aria-label=Settings]');
-    await setInput(s,field,'905');
-    const rows=await measureWidth(s,905);
-    requireProof(ctx,'both visible columns use the same 905px cap with real gutters', rows.length===2 && widthsMatch(rows)
-      && rows.some(r=>Math.abs(r.column-905)<1) && rows.some(r=>r.column<905) && rows.every(r=>r.guides),rows);
-    await s.eval(`${q(field)}.blur(); true`);
-    requireProof(ctx,'blur removes both reading guides', (await measureWidth(s,905)).every(r=>!r.guides));
     await setInput(s,slider,'1200');
     requireProof(ctx,'slider and field stay synchronized',await s.eval(`${q(field)}.value==='1200' && document.documentElement.style.getPropertyValue('--read')==='1200px'`));
+    await setInput(s,field,'2400');
+    requireProof(ctx,'out-of-range field leaves slider at its own spoken maximum',await s.eval(
+      `${q(field)}.value==='2400' && ${q(slider)}.value==='1200' && ${q(slider)}.getAttribute('aria-valuetext')==='1200 pixels'`));
+    await setInput(s,slider,'1200');
     await setInput(s,field,'12a');
     await s.eval(`${q(field)}.blur(); true`);
     requireProof(ctx,'malformed width restores the applied number',await s.eval(`${q(field)}.value==='1200'`));
@@ -184,7 +249,7 @@ async function sample(ctx, name, box, gutter, y, inset=0) {
 async function scrollbars(ctx) {
   const s=ctx.session;
   await withNext(ctx,1440,async () => {
-    const thread=A+' .thread', list='.popover:not([hidden])';
+    const thread=A+' .thread', list='.popover.next-chat-list-popover:not([hidden])';
     for (const theme of ['dark','light','cosmic']) {
       await s.eval(`document.documentElement.dataset.theme=${JSON.stringify(theme)}; true`);
       await mouse(s,'mouseMoved',2,2);
@@ -195,7 +260,10 @@ async function scrollbars(ctx) {
       await frame(s); await sleep(1220);
       const rest=await sample(ctx,'next-scroll-'+theme+'-rest',long,14,23);
       requireProof(ctx,theme+' quiet thumb paints 4 by 38',rest.width===4 && rest.length===38,rest);
-      await mouse(s,'mouseMoved',long.right-55,long.top+100); await frame(s);
+      await mouse(s,'mouseMoved',long.right-55,long.top+100);
+      await wait(ctx,`${q(thread)}.classList.contains('next-scroll-near') &&
+        !${q(thread)}.classList.contains('next-scrolling')`,'pointer-over-area class is active without a scroll');
+      await frame(s);
       const near=await sample(ctx,'next-scroll-'+theme+'-near',long,14,23);
       await mouse(s,'mouseMoved',rest.x,rest.y); await frame(s);
       const hot=await sample(ctx,'next-scroll-'+theme+'-hot',long,14,23);
@@ -207,6 +275,7 @@ async function scrollbars(ctx) {
       requireProof(ctx,theme+' held thumb uses the theme accent',active.width===8 && delta(active.color,color)<=2,{active,color});
       await mouse(s,'mouseReleased',rest.x,rest.y);
       await mouse(s,'mouseMoved',2,2);
+      await wait(ctx,`!${q(thread)}.classList.contains('next-scroll-near')`,'pointer leaving resets area hover');
       const scrollAt=await s.eval(`new Promise((resolve,reject) => {
         const thread=${q(thread)};
         const timeout=setTimeout(()=>reject(Error('no real scroll event')),1000);

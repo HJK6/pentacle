@@ -375,6 +375,8 @@ test('U1 Settings applies an exact shared width, keeps focus during renders and 
   assert.equal(root.style.getPropertyValue('--read'), '1200px');
   input(field, '2400');
   assert.equal(slider.value, '1200');
+  assert.equal(slider.getAttribute('aria-valuetext'), '1200 pixels');
+  assert.equal(field.value, '2400');
   s.$('[aria-label=Settings]').click();
   assert.ok(!root.classList.contains('next-read-guides'));
 });
@@ -413,7 +415,7 @@ test('U2 Settings lists named physical microphones, preserves a sole selected mi
   assert.deepEqual(requests, [{audio:{deviceId:{exact:'b'}}},{audio:{deviceId:{exact:'b'}}}]);
   assert.equal(store.getItem('pentacle.next.mic'),'b', 'permission refusal is not unplugging');
   const updateDevices = async rows => { devices=rows; target.dispatchEvent(new s.window.Event('devicechange')); await flush(); };
-  await updateDevices([alias, two]);
+  await updateDevices([alias, d('b','')]);
   s.$('[aria-label=Settings]').click();
   assert.equal(s.$('.next-mic-setting').hidden,true);
   assert.equal(store.getItem('pentacle.next.mic'),'b');
@@ -429,4 +431,22 @@ test('U2 Settings lists named physical microphones, preserves a sole selected mi
   s.$('[aria-label=Settings]').click();
   await record('assistant');
   assert.deepEqual(requests.at(-1),{audio:true});
+});
+
+
+test('only rail and title chat lists opt into the narrow scrollbar', async t => {
+  const s=openShell(t);
+  await flush();
+  const popover=s.$('.popover');
+  s.$('.chats-button').click();
+  assert.ok(popover.classList.contains('next-chat-list-popover'));
+  s.$('.popover [data-stream-id="fixture:a"]').click();
+  s.$('[data-pane=chat] .next-chat-title').click();
+  assert.ok(popover.classList.contains('next-chat-list-popover'));
+  s.$('[aria-label=Settings]').click();
+  assert.equal(popover.classList.contains('next-chat-list-popover'),false);
+  const limits=s.$('[aria-label="Limits and machines"]');
+  limits.click();
+  try { assert.equal(popover.classList.contains('next-chat-list-popover'),false); }
+  finally { limits.click(); }
 });

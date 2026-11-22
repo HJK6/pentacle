@@ -45,6 +45,10 @@ unit('U2 input reduction ignores aliases and labels gate the picker without losi
   assert.equal(reduceInputs([], 'b', true).selection,null);
   assert.equal(reduceInputs([b],'b',true).selection,'b');
   assert.equal(reduceInputs([b],'b',true).nativeId,'b');
+  const unnamedSelection=reduceInputs([input('b','')],'b',true);
+  assert.deepEqual(unnamedSelection.options,[]);
+  assert.equal(unnamedSelection.selection,'b');
+  assert.equal(unnamedSelection.nativeId,'b','a real chosen id still drives capture when its label disappears');
   assert.equal(selectionAfterFailure('b','b','NotFoundError'),null);
   assert.equal(selectionAfterFailure('b','b','OverconstrainedError'),null);
   assert.equal(selectionAfterFailure('b','b','NotAllowedError'),'b');
@@ -68,6 +72,37 @@ unit('scroll activity captures nonbubbling scrolls, resets after 900 ms and leav
   window.close();
 });
 
+unit('pointer entry and exit invalidate scrollbar paint independently of the scroll timer', () => {
+  const {trackScroll}=require('../renderer/next/scroll_activity');
+  const {window}=new JSDOM('<section id="thread" style="overflow:auto"><span id="child"></span></section><div class="terminal" style="overflow:auto"></div><div class="design-tabs" style="overflow:auto"></div>');
+  let expire;
+  trackScroll(window.document,{setTimer(fn){expire=fn;return 1;},cancelTimer(){}});
+  const here=window.document.getElementById('thread'), inside=window.document.getElementById('child');
+  const send=(element,type,pointerType='mouse')=>{
+    const event=new window.Event(type);
+    Object.defineProperty(event,'pointerType',{value:pointerType});
+    element.dispatchEvent(event);
+  };
+  send(here,'pointerenter','touch');
+  assert.equal(here.classList.contains('next-scroll-near'),false,'touch is not hover');
+  send(here,'pointerenter');
+  send(inside,'pointerenter');
+  assert.equal(here.classList.contains('next-scroll-near'),true,'capture listener saw non-bubbling pointer entry');
+  assert.equal(inside.classList.contains('next-scroll-near'),false,'a non-scrolling child is not styled');
+  assert.equal(here.classList.contains('next-scrolling'),false,'the near state did not require a scroll');
+  send(here,'scroll');
+  send(here,'pointerleave');
+  assert.equal(here.classList.contains('next-scroll-near'),false);
+  assert.equal(here.classList.contains('next-scrolling'),true,'pointer exit does not clear the independent timer');
+  expire();
+  assert.equal(here.classList.contains('next-scrolling'),false);
+  for (const el of window.document.querySelectorAll('.terminal,.design-tabs')) {
+    send(el,'pointerenter');
+    assert.equal(el.classList.contains('next-scroll-near'),false);
+  }
+  window.close();
+});
+
 test('U3 theme tokens define each approved thumb strength; supported Chrome styles use a 14px native box', () => {
   const css=fs.readFileSync(path.join(__dirname,'../renderer/next/style.css'),'utf8');
   for (const [color,suffixes] of [['255,255,255',['.16','.28','.46']],['16,28,22',['.19','.31','.52']],['120,255,160',['.2','.32','.56']]]) {
@@ -77,6 +112,10 @@ test('U3 theme tokens define each approved thumb strength; supported Chrome styl
   assert.match(css,/::-webkit-scrollbar\{width:14px;height:14px}/);
   assert.match(css,/@supports not selector\(::-webkit-scrollbar\)\{/);
   assert.match(css,/\.thread\{scrollbar-gutter:stable both-edges/);
+  assert.match(css,/\.chat-card \.thread\{padding-inline:2px}/);
+  assert.match(css,/:is\(\.next-scroll-near,\.next-scrolling\)::-webkit-scrollbar-thumb/);
+  assert.match(css,/\.popover\.next-chat-list-popover::-webkit-scrollbar-track\{margin-block:6px}/);
+  assert.doesNotMatch(css,/(?:^|\n)\.popover::[^{]*-scrollbar/);
 });
 
 unit('scroll screenshot sampling decodes actual RGB rows and distinguishes a 4 by 38 thumb', () => {

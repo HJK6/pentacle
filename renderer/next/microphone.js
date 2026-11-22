@@ -19,7 +19,7 @@ function reduceInputs(devices, selection, sawIds) {
     sawIds: sawIds || real.size > 0,
     selection: selected,
     lost,
-    nativeId: inputs.some(input => input.id === selected) ? selected : null,
+    nativeId: real.has(selected) ? selected : null,
     options: inputs.length > 1 ? [{id: null, label: 'System default'}, ...inputs] : [],
   };
 }

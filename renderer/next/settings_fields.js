@@ -16,7 +16,7 @@ function mountSettingsFields(host, { reading, microphone }) {
   const sync = ({keepField = false} = {}) => {
     if (!keepField) field.value = String(reading.width);
     slider.value = String(sliderPosition(reading.width));
-    slider.setAttribute('aria-valuetext', reading.width + ' pixels');
+    slider.setAttribute('aria-valuetext', slider.value + ' pixels');
     slider.style.setProperty('--read-progress', ((Number(slider.value) - 480) / 720) * 100 + '%');
   };
   field.addEventListener('input', () => { if (reading.set(field.value)) sync({keepField: true}); });

@@ -352,7 +352,9 @@ function attachTranscript(transcript, source) { transcript.addEventListener('cli
 attachTranscript(assistantInner, 'assistant');
 assistantInner.addEventListener('keydown', event => { const update = event.target.closest('.slot-chat-lane-update[data-lane-id]'); if (update && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openLaneTarget(update.dataset.laneId); } });
 function renderPopover() {
-  if (state.popover === 'chats' || state.popover === 'switch') {
+  const isChatList = state.popover === 'chats' || state.popover === 'switch';
+  popover.classList.toggle('next-chat-list-popover', isChatList);
+  if (isChatList) {
     if (!chatList) {
       popover.replaceChildren();
       chatList = mountChatList(popover, { choose: chooseChat, rename: renameChat, remove: deleteChat });
