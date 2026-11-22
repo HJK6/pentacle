@@ -636,7 +636,7 @@ const SCENARIOS = [
   ['next-home-rail', require('./next_scenarios').homeRail],
   ['next-chat-card', require('./next_scenarios').chatCard],
   ['next-attachment-thumbnail', require('./next_scenarios').attachmentThumbnail],
-  ['next-pane-divider', require('./next_scenarios').paneDivider],
+  ['next-lanes-fixed-width', require('./next_scenarios').fixedLanesWidth],
   ['next-composer', require('./next_scenarios').composer],
   ['next-voice', require('./next_scenarios').voice],
   ['next-terminal-status', require('./next_scenarios').terminalStatus],

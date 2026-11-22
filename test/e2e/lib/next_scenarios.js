@@ -111,7 +111,7 @@ async function attachmentThumbnail(ctx) {
   }
 }
 module.exports.attachmentThumbnail = isolated(attachmentThumbnail);
-async function paneDivider(ctx) {
+async function fixedLanesWidth(ctx) {
   const { session, report } = ctx;
   await visit(ctx);
   await session.click('.rail [aria-label="Chats"]');
@@ -129,21 +129,23 @@ async function paneDivider(ctx) {
   const x = (before.chat.right + before.lanes.left) / 2;
   const y = before.chat.top + 100;
   const delta = 44;
-  const hit = await session.eval(`document.elementFromPoint(${x}, ${y})?.className ?? null`);
+  const hit = await session.eval(`(() => {
+    const target = document.elementFromPoint(${x}, ${y});
+    return { className: target?.className ?? null, handle: !!target?.closest('.grip,[role="separator"]') };
+  })()`);
   await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
   await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
   await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x - delta, y, button: 'left', buttons: 1 });
   await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x - delta, y, button: 'left', buttons: 0, clickCount: 1 });
   const after = await session.eval(readPanes);
-  await session.screenshot(path.join(report.dir, 'next-chat-lanes-divider.png'));
-  const resized = Math.abs(after.chat.width - before.chat.width + delta) <= 2 &&
-    Math.abs(after.lanes.width - before.lanes.width - delta) <= 2 &&
-    Math.abs(after.assistant.width - before.assistant.width) <= 1 &&
+  await session.screenshot(path.join(report.dir, 'next-lanes-fixed-width.png'));
+  const fixed = !hit.handle && before.lanes.width === 344 && after.lanes.width === before.lanes.width &&
+    after.chat.width === before.chat.width && after.assistant.width === before.assistant.width &&
     after.chat.right <= after.lanes.left;
-  report.ok('a real drag reallocates width between adjacent chat and Lanes panes', resized, { before, after, hit });
-  if (!resized) throw new Error('chat/Lanes divider did not reallocate width');
+  report.ok('Lanes stays fixed with no resize handle at the chat boundary', fixed, { before, after, hit });
+  if (!fixed) throw new Error('chat/Lanes boundary must leave Lanes fixed at 344 px');
 }
-module.exports.paneDivider = isolated(paneDivider);
+module.exports.fixedLanesWidth = isolated(fixedLanesWidth);
 async function newChat(ctx) {
   const { session, report } = ctx; await visit(ctx);
   const catalogFlag = path.join(ctx.runtime.fixtureScratch, 'next-catalog-fixture'); require('fs').writeFileSync(catalogFlag, 'enabled');

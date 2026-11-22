@@ -16,6 +16,7 @@ const layout = require('./layout');
 const { createDesignViewer } = require('./design_viewer');
 const { initialDesignRoute, replaceDesignAddress } = require('./design_location');
 const { hydrateDesignPreviews, markDesignLinks } = require('./design_links');
+const { hydrateImageAttachments } = require('./image_attachments');
 const { parseDesignRoute } = require('../../lib/design_routes.cjs');
 const { mountComposer } = require('./composer');
 const { mountNewChatForm } = require('./new_chat');
@@ -155,6 +156,7 @@ function paintTranscript(element, id) {
   }
   markDesignLinks(element, designCard.hidden ? null : currentDesignPath);
   hydrateDesignPreviews(element, key => cc.chatFetchBlob(key));
+  hydrateImageAttachments(element, key => cc.chatFetchBlob(key));
   void view.hydrateFileAttachments(element);
   if (stick) scroller.scrollTop = scroller.scrollHeight;
 }
