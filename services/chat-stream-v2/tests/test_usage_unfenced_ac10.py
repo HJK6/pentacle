@@ -718,6 +718,8 @@ def test_k_conflict_latch_is_durable_and_excluded_from_counts(tmp_path):
     assert conflict_id.removeprefix("loss_conflict:") in {loss["loss_id"] for loss in rig.held.state["losses"]}
 
 
+# Fleet gate: 37.6–39.9 s normally and one 60.045 s kill under load; 120 s is 3× the worst normal run.
+@pytest.mark.timeout(120)
 def test_k_soak_supported_operations(tmp_path):
     import random
     rng = random.Random(20261007)
