@@ -1087,6 +1087,14 @@ class _RoutingStoreMixin:
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
 
+        def operator_origin():
+            if operator_admission is None:
+                return None
+            principal = operator_admission()
+            if not principal or principal != actor_stream_id:
+                raise ValueError("authentication_required")
+            return OPERATOR_ORIGIN
+
         def _ensure_receipt(conn: sqlite3.Connection, stamp: str, shown: str,
                             frozen_meta: dict | None = None) -> str:
             # The canonical USER admission is landed even while its answer is
@@ -1168,6 +1176,7 @@ class _RoutingStoreMixin:
                             raise ValueError("assistant_input_idempotency_conflict")
                     if record["payload_digest"] != retry_digest:
                         raise ValueError("assistant_input_idempotency_conflict")
+                    operator_origin()
                     frozen_meta = prior_payload.get("input_meta")
                     if frozen_meta is None:
                         # Legacy/no-context admission cannot acquire later page visits.
@@ -1262,12 +1271,6 @@ class _RoutingStoreMixin:
                     ),
                 )
                 event_id = int(cur.lastrowid)
-                operator_origin = None
-                if operator_admission is not None:
-                    principal = operator_admission()
-                    if not principal or principal != actor_stream_id:
-                        raise ValueError("authentication_required")
-                    operator_origin = OPERATOR_ORIGIN
                 conn.execute(
                     """INSERT INTO v2_assistant_composite_routes(
                         route_id,stream_id,input_identity,payload_digest,input_request_id,event_id,body,
@@ -1279,7 +1282,7 @@ class _RoutingStoreMixin:
                         canonical_attachments, reply_to_message_id, reply_to_question_id, actor_stream_id,
                         "queued", None,
                         json.dumps(admission_payload, sort_keys=True, ensure_ascii=False) if admission_payload else None,
-                        timestamp, timestamp, operator_origin,
+                        timestamp, timestamp, operator_origin(),
                     ),
                 )
                 receipt_id = _ensure_receipt(conn, timestamp, shown_body) if direct_primary else None

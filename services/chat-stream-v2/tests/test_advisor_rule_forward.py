@@ -411,9 +411,15 @@ def test_mapped_desk_preserves_display_dispatch_and_legacy_duplicate(tmp_path, m
     asyncio.run(run())
 
 
-def test_operator_connection_rejection_during_admission_leaves_no_route(tmp_path, monkeypatch):
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_operator_connection_rejection_during_admission_leaves_no_route(tmp_path, monkeypatch, duplicate):
     async def run():
         async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            if duplicate:
+                credential = operator_auth.decode_envelope(envelope)["credential_id"]
+                await h.composite.accept_input({"msg_id": MESSAGE_ID, "text": WORDS},
+                    operator_principal="operator:" + credential)
+            prior = await input_row(h, MESSAGE_ID)
             paused, release = asyncio.Event(), asyncio.Event()
             validate = h.server._validate_assistant_input_attachments
 
@@ -434,6 +440,12 @@ def test_operator_connection_rejection_during_admission_leaves_no_route(tmp_path
             result = await socket.recv()
             assert result.get("request_id") == "fixture-paused-send"
             assert result.get("error_code") == "authentication_required"
-            assert await input_row(h, MESSAGE_ID) is None
+            after = await input_row(h, MESSAGE_ID)
+            if prior is None:
+                assert after is None
+            else:
+                for key in ("route_id", "event_id", "body", "actor_stream_id", "operator_origin"):
+                    assert after[key] == prior[key]
+            assert await h.store.get_send_receipt(COMPOSITE_CHAT, "fixture-paused-send") is None
 
     asyncio.run(run())
