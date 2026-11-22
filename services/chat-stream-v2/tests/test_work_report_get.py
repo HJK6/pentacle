@@ -273,6 +273,10 @@ def test_reader_projects_exact_advisor_accept_and_keeps_opaque_fields_private(tm
                     }
                     assert response["session_generation"] == h.gen[SEAT_B]
                     assert "details" not in response and "extras" not in response
+                    ordinary = await advisor("work.report.get", report_id=report["report_id"])
+                    assert ordinary["type"] == "work.report.get.ok"
+                    assert "advisor_rule_accept" not in ordinary and "session_generation" not in ordinary
+
                     def corrupt_stamp(conn):
                         conn.execute("UPDATE v2_reports SET advisor_rule_accept=json_set("
                                      "advisor_rule_accept,'$.advisor_generation','invalid-other-generation') "
@@ -282,9 +286,6 @@ def test_reader_projects_exact_advisor_accept_and_keeps_opaque_fields_private(tm
                     corrupt = await reader.rpc("work.report.get", report_id=report["report_id"])
                     assert corrupt["type"] == "work.report.get.ok"
                     assert "advisor_rule_accept" not in corrupt and "session_generation" not in corrupt
-                ordinary = await advisor("work.report.get", report_id=report["report_id"])
-                assert ordinary["type"] == "work.report.get.ok"
-                assert "advisor_rule_accept" not in ordinary and "session_generation" not in ordinary
     asyncio.run(run())
 
 
