@@ -6357,13 +6357,24 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             birth = str(current["created_at"])
             if peers(conn, latest, birth) != 1:
                 return {"ready": False, "result": result}
-            events = conn.execute(
-                "SELECT * FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
-                "ORDER BY event_id DESC LIMIT ?", (target, birth, proof.HOT_ROW_LIMIT + 1)).fetchall()
-            if len(events) > proof.HOT_ROW_LIMIT:
-                return {"ready": False, "result": result}
+            # Count against the whole hot lifecycle before reading claim payloads.
+            # Keep the bound, payload selection and event sequence in one snapshot.
+            conn.execute("SAVEPOINT receipt_proof_snapshot")
+            try:
+                overflow = conn.execute(
+                    "SELECT 1 FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+                    "LIMIT 1 OFFSET ?", (target, birth, proof.HOT_ROW_LIMIT)).fetchone()
+                if overflow is not None:
+                    return {"ready": False, "result": result}
+                events = conn.execute(
+                    "SELECT * FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+                    "AND recorded_at>=? ORDER BY event_id DESC", (target, birth, claim)).fetchall()
+                event_sequence = sequence(conn)
+            finally:
+                conn.execute("RELEASE receipt_proof_snapshot")
+            # Preserve the original conversion for legacy values stored outside REAL affinity.
             hot = [{**dict(r), "proof_store": "hot"} for r in events if float(r["recorded_at"]) >= claim]
-            return {"ready": True, "result": result, "hot": hot, "sequence": sequence(conn),
+            return {"ready": True, "result": result, "hot": hot, "sequence": event_sequence,
                     "birth": birth, "claim": claim, "signature": proof.immutable_identity(latest),
                     "first": (rows[0]["receipt_rowid"], rows[0]["created_at"], rows[0]["receipt_id"])}
 
@@ -7010,7 +7021,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     def _history_deliveries(self, conn, shared):
         """Called only on the Store thread, inside the reader's savepoint."""
-        return conn.delivery_lookup.get(conn, shared=shared)
+        deliveries = conn.delivery_lookup.get(conn, shared=shared)
+        deliveries.reuse.enable_dispatch()
+        deliveries.reuse.enable_exact_anchors()
+        return deliveries
 
     async def fetch_session_event_page(
         self,

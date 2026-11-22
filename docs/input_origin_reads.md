@@ -65,6 +65,41 @@ conditions are unchanged. Both notice projection reads use the additive index
 on `v2_outbound_notices(recipient_stream_id)`; old code can ignore this index
 after a source rollback.
 
+## Read-scoped operator-dispatch membership
+
+Inventory and event pages share one lazy operator-dispatch lookup in their
+existing Store read snapshot. For each target and current generation,
+including an empty range, the lookup uses the hot route target/generation
+index and SQLite's existing resolved/direct-primary filter and wire
+extraction. An exact text hit still takes precedence over delivery proof.
+The retained-occurrence checks use the same membership set; neither
+archive-only routes nor a stale generation gain dispatch authority.
+Direct callers that need the dispatch ID still use the original SQL.
+
+The lookup keeps at most 4,096 source rows (including duplicates), 8 MiB of
+UTF-8 wire and range-key bytes, and 4,096 range entries across the read.
+Over-limit ranges, unsupported text/SQLite values, and load failures fall
+back to the original SQL, including its own error and short-circuit
+behavior. A failed materialization is not retried for that range in the
+same read. No memberships or fallback markers survive the snapshot.
+
+## Exact retained-proof anchors
+
+Within the inventory and event-page savepoints only, a plain Python integer
+`proof_event_id` in SQLite's signed 64-bit range can seek directly to one
+retained event. The existing generation and session-birth checks still run;
+the seek also requires the same stream, lifecycle and an event ID strictly
+after the proof watermark. At most the selected row is decoded on this path.
+A missing row, malformed selected JSON or disqualified event supplies no
+proof. The same wire, digest, dispatch, overlap and audit checks apply.
+
+Absent anchors keep the ordered tail walk and its unsplit-quotation veto.
+Unsupported anchors (including booleans, floats, strings and out-of-range
+integers), uncertain operator-dispatch membership and point-query failures
+use the ordered walk, preserving its equality and error behavior. Writer
+and intake callers keep the existing walk. No point result survives the
+read; paired receipts and their match limit are unchanged.
+
 ## Regression evidence
 
 `tests/test_read_projection_deliveries.py` drives real Store inventory and
