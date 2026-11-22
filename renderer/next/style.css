@@ -298,3 +298,43 @@ div.design-empty{padding:15vh 0 0;color:var(--text)}
   padding: 5px 9px;
   border-radius: 999px;
 }
+
+/* The fluid stage is desktop-only. Phone layout keeps the existing shell. */
+.assistant-head,.sidebar-setting{display:none}
+@media(min-width:600px){
+  .next-app{position:relative}
+  .next-app>.rail{order:-1;z-index:6}
+  .rail .rail-button.on:not(.brand)::before{right:auto;left:-10px;border-radius:0 3px 3px 0}
+  .next-app>.stage{position:relative;gap:var(--fluid-gap,12px);padding-right:12px;min-height:0}
+  .stage>.card{min-width:312px;margin-left:0}
+  .stage>.lanes-card{min-width:344px}
+  .stage>.chat-card,.stage>.lanes-card,.stage>.design-card,.stage>.melody-card{position:relative}
+  .stage>.grip{position:absolute;width:12px;top:12px;bottom:12px;margin:0}
+  .stage>.fluid-lifted,.stage>.fluid-landing{z-index:4;pointer-events:none}
+  .stage>.fluid-lifted{box-shadow:0 12px 40px var(--shade-pop)}
+  .fluid-moving{cursor:grabbing;user-select:none}
+  .fluid-zone{position:fixed;border-radius:var(--radius);background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent-line);pointer-events:none;z-index:1}
+  .stage:has(> [data-pane]:not([hidden]) ~ [data-pane]:not([hidden])) :is([data-grab],.next-lanes-head){cursor:grab}
+  .stage:has(> [data-pane]:not([hidden]) ~ [data-pane]:not([hidden])) :is([data-grab],.next-lanes-head) :is(button,input,textarea,select,a){cursor:revert}
+  .assistant-head{display:flex;align-items:center;justify-content:space-between;height:60px;flex:none;padding:0 24px;color:var(--dim);font:600 15px var(--display)}
+  .assistant-keep{flex:none}
+  .stage>.assistant-overlay{position:absolute;inset:0 auto 0 0;width:min(480px,100% - 120px);min-width:0;border-radius:0 var(--radius) var(--radius) 0;background:var(--bg);background-image:var(--sky);box-shadow:0 0 0 1px var(--line),30px 0 80px var(--shade-pop);z-index:4}
+  .sidebar-setting{display:block;margin-top:12px;padding-top:8px;border-top:1px solid var(--line)}
+  .sidebar-choices{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .popover .sidebar-choice{text-align:center;background:var(--hover)}
+  .popover .sidebar-choice[aria-pressed=true]{box-shadow:inset 0 0 0 1px var(--accent-line);color:var(--accent)}
+  .next-app>.popover{right:auto;left:64px;top:var(--anchor-y,12px);bottom:auto;max-height:calc(100% - var(--anchor-y,12px) - 8px)}
+  .next-app>.popover.bottom{top:auto;bottom:14px;max-height:calc(100% - 26px)}
+  html[data-rail=top] .next-app{flex-direction:column}
+  html[data-rail=top] .next-app>.rail{height:48px;width:100%;flex-direction:row;padding:4px 12px}
+  html[data-rail=top] .rail-group{flex-direction:row;margin:0 0 0 12px}
+  html[data-rail=top] .rail .rail-button.on:not(.brand)::before{right:12px;left:12px;top:auto;bottom:-4px;width:auto;height:3px;border-radius:3px 3px 0 0}
+  html[data-rail=top] .assistant-head{height:48px}
+  html[data-rail=top] .stage>.assistant-overlay{border-radius:0 var(--radius) 0 0}
+  html[data-rail=top] .stage>.card{margin-top:4px}
+  html[data-rail=top] .next-app>.popover{top:calc(var(--rail-bottom,48px) + 4px);left:var(--anchor-x,8px);bottom:auto;max-height:calc(100% - var(--rail-bottom,48px) - 12px)}
+  html[data-rail=top] .next-app>.popover.bottom{left:auto;right:12px}
+}
+@media(prefers-reduced-motion:reduce){
+  .stage>[data-pane]{transition:none!important}
+}
