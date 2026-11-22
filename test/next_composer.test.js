@@ -187,6 +187,36 @@ test('Target State 6: picker keeps the current JPEG/PNG contract and sends throu
   assert.equal(sent[2][0].key, 'a'.repeat(64));
 });
 
+test('clipboard images use the ordinary attachment path without cancelling native text paste', async t => {
+  const u = fixture(t);
+  u.env.Image = class FakeImage {
+    naturalWidth = 16;
+    naturalHeight = 12;
+    set src(_value) { queueMicrotask(() => this.onload()); }
+  };
+  const image = new u.dom.window.File([new Uint8Array([1, 2, 3, 4])], 'clipboard.png', { type: 'image/png' });
+  const paste = clipboardData => {
+    const event = new u.dom.window.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+    u.input.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, false);
+  };
+
+  paste({ items: [{ kind: 'string', type: 'text/plain' }], files: [] });
+  assert.equal(u.send.hidden, true);
+  paste({ items: [{ kind: 'file', type: image.type, getAsFile: () => image }], files: [image] });
+  const chips = () => u.document.querySelectorAll('.next-composer-attachment');
+  await waitFor(() => chips().length === 1, 'the pasted image draft chip');
+  u.send.click();
+  await waitFor(() => u.calls.some(call => call.type === 'sendTurn'), 'the pasted image send');
+  assert.equal(u.calls.filter(call => call.type === 'chatUploadBlob').length, 1);
+  assert.equal(u.calls.find(call => call.type === 'sendTurn').args[2][0].name, 'clipboard.png');
+  await waitFor(() => chips().length === 0, 'the sent draft to clear');
+
+  paste({ items: [{ kind: 'file', type: image.type, getAsFile: () => null }], files: [image] });
+  await waitFor(() => chips().length === 1, 'the clipboard FileList fallback');
+});
+
 test('Target State 6: attachment validation rejects unsupported, empty, oversized and undecodable images', async t => {
   const u = fixture(t);
   const fileInput = u.document.querySelector('[data-next-file-input]');
