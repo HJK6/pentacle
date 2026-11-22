@@ -4643,7 +4643,8 @@ def _send_image_to_composite(args: argparse.Namespace, path: Path, caption: str,
 
 
 def _resolve_design_preview(project: str, design: str, view: str | None):
-    script = Path(__file__).resolve().parents[3] / "scripts/design-library.cjs"
+    # The release .pth points _shared at app/services, as in a source checkout.
+    script = Path(_shared.__file__).resolve().parents[2] / "scripts/design-library.cjs"
     argv = ["node", str(script), "link-preview", "--project", project, "--design", design]
     if view is not None:
         argv.extend(("--view", view))

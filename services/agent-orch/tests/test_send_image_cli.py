@@ -306,3 +306,32 @@ def test_send_design_link_uses_verified_preview_and_explicit_request_id(tmp_path
     assert payloads[0]["caption"] == "Review"
     assert payloads[0]["attachments"] == [{"key": sha, "mime": "image/png", "bytes": len(PNG)}]
     assert str(p) not in capsys.readouterr().out
+
+
+def test_design_preview_uses_app_root_when_cli_is_installed(tmp_path, monkeypatch):
+    import json
+    from subprocess import CompletedProcess
+
+    app = tmp_path / "release" / "app"
+    shared = app / "services" / "_shared" / "__init__.py"
+    installed_cli = tmp_path / "release" / "runtime" / "lib" / "python3.13" / "site-packages" / "agent_orch" / "cli.py"
+    script = app / "scripts" / "design-library.cjs"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    monkeypatch.setattr(cli, "__file__", str(installed_cli))
+    monkeypatch.setattr(cli._shared, "__file__", str(shared))
+
+    def run(argv, **kwargs):
+        assert argv == ["node", str(script), "link-preview", "--project", "sample",
+                        "--design", "board", "--view", "phone"]
+        return CompletedProcess(argv, 0, stdout=json.dumps({
+            "path": str(tmp_path / "phone.png"),
+            "sha256": "a" * 64,
+            "dashboard_link": {"dashboard": "design"},
+        }))
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    path, digest, link = cli._resolve_design_preview("sample", "board", "phone")
+    assert path == tmp_path / "phone.png"
+    assert digest == "a" * 64
+    assert link == {"dashboard": "design"}
