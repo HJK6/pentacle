@@ -1783,6 +1783,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
             conn.execute(SESSIONS_DDL)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_open ON sessions(status) WHERE status='open'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_open_host ON sessions(host) WHERE status='open'")
             conn.execute(VOICE_OPERATIONS_DDL)
             for ddl in store_attachments.DDL:
                 conn.execute(ddl)
@@ -7224,6 +7225,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                        ), '') AS last_event_at
                 FROM sessions s
                 WHERE s.status = 'open'
+                ORDER BY s.rowid
                 """
             ).fetchall()
             result = [_session_row(conn, row) for row in rows]
