@@ -284,3 +284,9 @@ check. The named web scenario covers 1440×900, 390×844 and 375×812, project/f
 selection, media seeking, reload preservation, opaque sandbox and cleanup.
 Real-export capture/record evidence remains private. Mobile WebView integration,
 iOS Safari and phone-network auth belong to the separate mobile delivery.
+
+When showing a design in chat, use `agent-orch send-design-link` from the
+library host. It attaches the selected revision's recorded PNG and links to
+the current board or screen. Board links use the first screen's recorded PNG.
+See [Send a Design link](../services/agent-orch/README.md#send-a-design-link)
+for the request ID and front-desk form.

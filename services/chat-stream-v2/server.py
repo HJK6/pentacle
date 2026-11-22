@@ -74,6 +74,7 @@ from seat_token_telemetry import (
     TOKEN_REASON_WRONG_SEAT,
 )
 from sessions import VerbError, _finish_despite_cancel, with_bootstrap_state
+from design_links import validate_design_link
 from store import STREAM_TOKEN_HASH_VERSION, role_source_for
 from machine_stats import validate_machine_stats
 from submission_events import COMMITTED_PENDING_PROOF_STATUSES
@@ -5526,6 +5527,7 @@ class Server:
         request_id = str(msg.get("request_id") or "").strip()
         if not request_id:
             raise VerbError("bad_request", "request_id is required")
+        dashboard_link = validate_design_link(msg["dashboard_link"]) if "dashboard_link" in msg else None
         return await self.comms.post_self_image(
             stream_id=stream_id,
             raw_attachments=msg.get("attachments"),
@@ -5533,6 +5535,7 @@ class Server:
             request_id=request_id,
             broadcast=self.broadcast,
             recent_limit=RECENT_LIMIT,
+            dashboard_link=dashboard_link,
         )
 
     async def _on_contact_dispatch_proof(self, msg: dict[str, Any]) -> dict[str, Any]:

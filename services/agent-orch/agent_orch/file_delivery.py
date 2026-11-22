@@ -185,6 +185,9 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
             if not data:
                 raise AttachmentError('empty_file')
             mime = validated_media_type(filename, data[:16])
+            expected_sha = getattr(args, 'expected_image_sha', None)
+            if expected_sha is not None and (mime != 'image/png' or hashlib.sha256(data).hexdigest() != expected_sha):
+                raise AttachmentError('dashboard_link_png_required')
         else:
             upload_id = receipt_upload_id(args.from_receipt) if args.from_receipt else _upload_id(args.upload_id)
         config = load_config()
@@ -205,6 +208,9 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
         payload = dict(type='assistant.publish', composite_stream_id=target,
             **correlation, message=getattr(args, 'caption', '') or '',
             attachment_ids=[upload_id])
+        dashboard_link = getattr(args, 'dashboard_link', None)
+        if dashboard_link is not None:
+            payload['dashboard_link'] = dashboard_link
         for field in ('note_type', 'ref'):
             if getattr(args, field, None) is not None:
                 payload[field] = getattr(args, field)

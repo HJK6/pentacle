@@ -967,3 +967,52 @@ test('tagged multiline notification answer keeps every line in the answer elemen
   assert.equal(entry.querySelector('p'), null, 'answer continuation is not a note');
   assert.equal(entry.querySelector('script'), null, 'answer remains escaped plain text');
 });
+
+test('Next uses typed Design previews while legacy and malformed links keep their attachments', () => {
+  const png = { key: 'a'.repeat(64), mime: 'image/png', bytes: 67 };
+  const meta = {
+    dashboard: 'design', target: { project_id: 'sample', design_id: 'orders', view_id: 'phone' },
+    title: 'Phone & detail', subtitle: 'Orders', revision_id: 'b'.repeat(64),
+  };
+  const cases = [
+    makeEvent({ daemon_seq: 1, text: 'Look here', attachments: [png], raw: { dashboard_link: meta } }),
+    makeEvent({ daemon_seq: 2, text: '', raw: { dashboard_link: { dashboard: 'design' } } }),
+    makeEvent({ daemon_seq: 3, text: 'Ordinary attachment', attachments: [png], raw: { dashboard_link: { ...meta, target: null } } }),
+    makeEvent({ daemon_seq: 4, text: 'Text preview', raw: { dashboard_link: { dashboard: 'design', target: meta.target, revision_id: 'invalid' } } }),
+  ];
+  const controller = controllerWithEvents(cases);
+  const detail = controller.selectSessionDetail(STREAM, { visibleCount: 120 });
+  const { dom, container } = newDom();
+  try {
+    container.innerHTML = renderTranscriptTimelineHtml(detail, CHROME, { showDashboardLinks: true });
+    const buttons = [...container.querySelectorAll('[data-next-design-link]')];
+    assert.equal(buttons.length, 3);
+    assert.equal(buttons[0].getAttribute('data-next-design-link'), '/next/design/sample/orders/phone');
+    assert.equal(buttons[0].querySelector('strong')?.textContent, 'Phone & detail');
+    assert.equal(buttons[0].querySelector('img')?.getAttribute('data-media'),
+      '/design-media/sample/' + meta.revision_id + '/design-preview/orders/phone');
+    assert.equal(buttons[0].querySelector('img')?.getAttribute('data-png'), png.key);
+    assert.match(buttons[0].closest('article')?.textContent || '', /Look here/);
+    assert.equal(buttons[1].getAttribute('data-next-design-link'), '/next/design');
+    assert.equal(buttons[1].textContent, 'Design');
+    assert.equal(buttons[2].querySelector('strong')?.textContent, 'Text preview');
+    assert.equal(buttons[2].querySelector('img'), null);
+    assert.equal(container.querySelectorAll('.slot-chat-media-button').length, 1);
+
+    container.innerHTML = renderTranscriptTimelineHtml(detail, CHROME);
+    assert.equal(container.querySelector('[data-next-design-link]'), null);
+    assert.equal(container.querySelectorAll('.slot-chat-media-button').length, 2);
+    assert.match(container.textContent || '', /Look here/);
+
+    for (const type of ['snapshot', 'stream_events']) {
+      const restored = controllerWithEvents([]);
+      restored.applyFrame({ type, stream_id: STREAM, sessions: [makeSession()], events: [cases[1]] });
+      const saved = restored.selectSessionDetail(STREAM, { visibleCount: 120 });
+      container.innerHTML = renderTranscriptTimelineHtml(saved, CHROME, { showDashboardLinks: true });
+      assert.equal(container.querySelector('.next-design-chip')?.textContent, 'Design', type);
+      assert.equal(renderTranscriptTimelineHtml(saved, CHROME), '', type);
+    }
+  } finally {
+    dom.window.close();
+  }
+});

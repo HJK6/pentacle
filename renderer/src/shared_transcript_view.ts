@@ -37,7 +37,7 @@ import type {
   MdInline,
   ChatAttachment,
 } from 'pentacle-chat-core';
-import { formatAssistantActivity, parseMarkdown, parsePentacleQuestionAnswerText, interpretPentacleEvent } from 'pentacle-chat-core';
+import { buildDesignPath, formatAssistantActivity, parseMarkdown, parsePentacleQuestionAnswerText, interpretPentacleEvent } from 'pentacle-chat-core';
 import { validVoiceMetadata } from './voice_metadata';
 
 // Chrome colors are a DESKTOP concern (legacy `chat_ui_state.js#hostChrome`),
@@ -56,6 +56,7 @@ export type TranscriptRenderOptions = {
   showTurnDuration?: boolean;
   streamId?: string;
   allowReplies?: boolean;
+  showDashboardLinks?: boolean;
   allowQueuedSendNow?: boolean;
   resolvedQuestions?: readonly ResolvedQuestionRecord[];
 };
@@ -499,6 +500,29 @@ function renderLaneUpdateCard(update: NonNullable<PentacleTranscriptItem['laneUp
 
 // Render ONE transcript item to an HTML string, mapping displayRule -> desktop
 // DOM. Returns '' for items that must not produce a row (hidden:*, draft:*).
+const designMark = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></svg>';
+
+function renderDesignLink(item: PentacleTranscriptItem): string {
+  const link = item.dashboardLink;
+  if (!link) return '';
+  const path = buildDesignPath(link.target, 'workspace');
+  if (!path) return '';
+  const button = `type="button" data-next-design-link="${escapeHtml(path)}" aria-pressed="false"`;
+  if (!link.target) {
+    return `<button class="next-design-preview next-design-chip" ${button}>${designMark}Design</button>`;
+  }
+  const { project_id, design_id, view_id } = link.target;
+  const media = link.revision_id &&
+    `/design-media/${project_id}/${link.revision_id}/design-preview/${design_id}${view_id ? '/' + view_id : ''}`;
+  const png = item.attachments?.find(attachment => attachment.mime === 'image/png' && /^[0-9a-f]{64}$/.test(attachment.key));
+  const image = media || png
+    ? `<span class="next-design-preview-image" hidden><img alt="" data-media="${escapeHtml(media || '')}" data-png="${escapeHtml(png?.key || '')}"></span>`
+    : '';
+  const title = link.title || item.text.trim() || 'Design';
+  const subtitle = link.subtitle ? 'Design · ' + link.subtitle : 'Design';
+  return `<button class="next-design-preview" ${button}>${image}<strong>${escapeHtml(title)}</strong><span class="next-design-preview-subtitle">${designMark}${escapeHtml(subtitle)}</span></button>`;
+}
+
 function renderTranscriptItemBodyHtml(
   item: PentacleTranscriptItem,
   chrome: ViewChrome = DEFAULT_CHROME,
@@ -571,12 +595,15 @@ function renderTranscriptItemBodyHtml(
       </div>
     </div></article>`;
   }
+  if (item.dashboardLink && !options.showDashboardLinks && !item.text.trim() && !item.attachments?.length) return '';
+
   // bubble:assistant (and any unmapped fallback) -> assistant card.
   // An agent-authored image (the send_image path) rides as an assistant event
   // carrying attachments: render the same media button+img the operator's own
   // user-attachment bubble uses (line ~468) so the shared image viewer opens
   // identically from either side.
-  const assistantAttachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
+  const assistantAttachments = (options.showDashboardLinks && renderDesignLink(item)) ||
+    renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
   const blocks = parseAssistantBlocks(item.text);
   return `<article class="slot-chat-row" data-copy-kind="message"><div class="slot-chat-assistant-card">
     ${blocks.map((block, index) => {

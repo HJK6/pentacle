@@ -236,3 +236,63 @@ div.design-empty{padding:15vh 0 0;color:var(--text)}
 @container(max-width:370px){
   .design-card:not(.design-phone) .design-zoom{bottom:62px}
 }
+
+.next-design-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  width: min(100%, 296px);
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.next-design-preview:hover, .next-design-preview[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+.next-design-preview[aria-pressed="true"] {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.next-design-preview-image {
+  width: 100%;
+  display: block;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 14px 22px;
+  aspect-ratio: 16 / 10;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.next-design-preview-image[hidden] { display: none; }
+.next-design-preview-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 4px;
+  object-fit: contain;
+}
+.next-design-preview-subtitle, .next-design-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.next-design-preview > strong, .next-design-preview-subtitle { padding-inline: 4px; }
+.next-design-preview-subtitle svg, .next-design-chip svg { color: var(--accent); }
+.next-design-preview-subtitle {
+  font-size: 12px;
+  color: var(--dim);
+}
+.next-design-chip {
+  flex-direction: row;
+  width: fit-content;
+  padding: 5px 9px;
+  border-radius: 999px;
+}
