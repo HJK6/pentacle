@@ -1,5 +1,6 @@
 'use strict';
 
+const path = require('node:path');
 const { fixtureRequest } = require('./closed_chat_scenario');
 const F = require('./next_lanes_fixtures');
 const H = require('./next_lanes_harness');
@@ -973,9 +974,48 @@ async function nextQuestionUncertainRun(ctx, ownedIds, hooks) {
       lostNotificationId, resolveCount: lostResolveCount, reconciliation, reconciledRead, lostReceipt });
 }
 
+async function nextLanesStopLayout(ctx, _ownedIds, hooks) {
+  const lane = F.makeL11();
+  await install(ctx, hooks, 654, [lane], F.inventoryFrame([lane]));
+  await ctx.session.send('Emulation.setDeviceMetricsOverride', {
+    width: 654, height: 573, deviceScaleFactor: 1, mobile: false,
+  });
+  if (await ctx.session.eval("document.querySelector('.lanes-card').hidden")) {
+    await ctx.session.click('.rail [aria-label="Lanes"]');
+  }
+  await wait(ctx, `!!document.querySelector(${sel(rowSelector(F.L11_ID))})`, 'synthetic lane listed');
+  await realPointerClick(ctx, rowSelector(F.L11_ID));
+  await wait(ctx, `document.querySelector('.next-lanes-scroll')?.dataset.level === 'lane' &&
+    document.querySelectorAll('.next-lanes-stop span.next-lanes-stop-blocked').length >= 2`,
+    'lane detail with at least two blocked badges');
+  const result = await ctx.session.eval(`(() => {
+    const bounds = element => element?.getBoundingClientRect().toJSON();
+    const title = bounds(document.querySelector('.next-lanes-detail-title'));
+    const rows = [...document.querySelectorAll('.next-lanes-stop')]
+      .filter(row => row.querySelector('span.next-lanes-stop-blocked')).slice(0, 2).map(row => ({
+        position: getComputedStyle(row).position,
+        row: bounds(row),
+        label: bounds(row.querySelector('.next-lanes-stop-title')),
+        badge: bounds(row.querySelector('span.next-lanes-stop-blocked')),
+        count: bounds(row.querySelector('.next-lanes-stop-counts')),
+      }));
+    return { width: innerWidth, height: innerHeight, title, rows };
+  })()`);
+  await ctx.session.screenshot(path.join(ctx.report.dir, 'next-blocked-lanes-654x573.png'));
+  const { width, height, title, rows } = result;
+  check(ctx, '654×573 blocked rows are ordered below the lane title with contained badges and counts',
+    width === 654 && height === 573 && rows.length === 2 && rows.every((entry, index) => {
+      const { row, label, badge, count } = entry;
+      return entry.position !== 'absolute' && row.top >= (index ? rows[index - 1].row.bottom : title.bottom) &&
+        label.right <= badge.left + 1 && badge.right <= count.left + 1 &&
+        [label, badge, count].every(box => box.top >= row.top && box.bottom <= row.bottom && box.right <= row.right);
+    }), result);
+}
+
 module.exports = {
   nextLanesRoot: isolated(nextLanesRootRun),
   nextLanesDrill: isolated(nextLanesDrillRun),
+  nextLanesStopLayout: isolated(nextLanesStopLayout),
   nextQuestionsList: isolated(nextQuestionsListRun),
   nextQuestionAnswer: isolated(nextQuestionAnswerRun),
   nextQuestionUncertain: isolated(nextQuestionUncertainRun),

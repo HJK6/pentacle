@@ -232,6 +232,33 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
         store.stop()
 
 
+async def seed_next_thumbnail(db: str, blob_root: str) -> dict:
+    # A real synthetic 48x32 RGB PNG. The wire event has a key and no URI.
+    data = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAADAAAAAgCAIAAADbtmxLAAAAOElEQVR4nO3OMQ0AMAgAMJzsRQCZ3jnBGibIriYV0Kh+K07eFSEkJCQkJCQkJCQkJCQkJCQk9DM0ITYwW0Q3o70AAAAASUVORK5CYII='
+    )
+    digest = hashlib.sha256(data).hexdigest()
+    blob = Path(blob_root) / digest[:2] / digest
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(data)
+
+    store = Store(db)
+    store.start()
+    try:
+        stream_id = 'local:web-gate-1'
+        event = _event(stream_id, 'ASSIST_TEXT', 'Synthetic persisted image.', 178)
+        event['timestamp'] = _iso(datetime.now(timezone.utc))
+        event['attachments'] = [
+            dict(key=digest, mime='image/png', size=len(data), width=48, height=32)
+        ]
+        appended = await store.append_session_event(
+            stream_id, event, identity=_identity_key(event), limit=500,
+        )
+        return {'stream_id': stream_id, 'digest': digest, 'appended': bool(appended)}
+    finally:
+        store.stop()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True)
@@ -240,8 +267,14 @@ def main() -> int:
     parser.add_argument("--objective", default="web gate fixture")
     parser.add_argument("--token-file")
     parser.add_argument("--blob-root")
+    parser.add_argument("--next-thumbnail", action="store_true")
     args = parser.parse_args()
-    result = asyncio.run(seed(args.db, args.host, args.session, args.objective, args.token_file, args.blob_root))
+    if args.next_thumbnail:
+        if not args.blob_root:
+            parser.error("--next-thumbnail requires --blob-root")
+        result = asyncio.run(seed_next_thumbnail(args.db, args.blob_root))
+    else:
+        result = asyncio.run(seed(args.db, args.host, args.session, args.objective, args.token_file, args.blob_root))
     print(json.dumps(result))
     return 0
 

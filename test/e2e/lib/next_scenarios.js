@@ -1,4 +1,5 @@
 'use strict';
+const { execFileSync } = require('node:child_process');
 const path = require('path');
 function isolated(run) { return async ctx => { try { await run(ctx); } finally { await ctx.session.send('Emulation.clearDeviceMetricsOverride'); await ctx.session.send('Page.navigate', { url: ctx.url }); await ctx.session.waitFor("document.readyState === 'complete' && !!document.getElementById('session-list')", { timeoutMs: ctx.timeoutMs }); } }; }
 async function visit(ctx, width = 1440) {
@@ -69,6 +70,80 @@ async function chatCard(ctx) {
   report.ok('closing the card does not close its daemon session', await session.eval("window.cc.getChatStreamState().then(s=>(s.sessions||[]).some(x=>x.stream_id==='local:web-gate-survivor' && x.status!=='closed' && !x.closed_at))"));
 }
 module.exports = { homeRail: isolated(homeRail), chatCard: isolated(chatCard) };
+async function attachmentThumbnail(ctx) {
+  const { session, report, runtime } = ctx;
+  const scratch = runtime?.fixtureScratch;
+  if (!ctx.fixture || !runtime.fixtureDaemonPort || !scratch ||
+      !path.basename(scratch).startsWith('pentacle-web-gate-')) {
+    throw new Error('thumbnail proof requires a disposable web-gate fixture');
+  }
+  const seeded = JSON.parse(execFileSync(ctx.python, [
+    path.join(__dirname, 'seed_web_gate.py'), '--db', path.join(scratch, 'sessions.db'),
+    '--blob-root', path.join(scratch, 'blobs'), '--next-thumbnail',
+  ], { encoding: 'utf8' }));
+  await visit(ctx);
+  await session.click('.rail [aria-label="Chats"]');
+  await session.click(`.popover [data-stream-id="${seeded.stream_id}"]`);
+  const thumbnail = JSON.stringify(`.card .slot-chat-media-button[data-attachment-key="${seeded.digest}"]`);
+  await session.waitFor(`!!document.querySelector(${thumbnail})`, { timeoutMs: ctx.timeoutMs, label: 'persisted attachment shown in chat' });
+  await session.eval(`document.querySelector(${thumbnail}).scrollIntoView({ block: 'center' }); true`);
+  const loaded = `(() => {
+    const node = document.querySelector(${thumbnail});
+    const image = node?.querySelector('img');
+    return image?.naturalWidth === 48 && image.naturalHeight === 32 &&
+      !node.querySelector('.slot-chat-media-loading');
+  })()`;
+  try {
+    await session.waitFor(loaded, { timeoutMs: Math.min(ctx.timeoutMs, 5000), label: 'ordinary PNG decodes through the Next attachment bridge' });
+    report.ok('persisted PNG is decoded and its loading label clears', true);
+  } catch (error) {
+    const evidence = await session.eval(`(() => {
+      const node = document.querySelector(${thumbnail});
+      const image = node?.querySelector('img');
+      return { route: location.pathname, alt: image?.alt, width: image?.naturalWidth,
+        height: image?.naturalHeight, pending: image?.hasAttribute('data-needs-blob'),
+        loading: node?.querySelector('.slot-chat-media-loading')?.textContent };
+    })()`);
+    report.ok('persisted PNG is decoded and its loading label clears', false, evidence);
+    throw error;
+  } finally {
+    await session.screenshot(path.join(report.dir, 'next-ordinary-image.png'));
+  }
+}
+module.exports.attachmentThumbnail = isolated(attachmentThumbnail);
+async function paneDivider(ctx) {
+  const { session, report } = ctx;
+  await visit(ctx);
+  await session.click('.rail [aria-label="Chats"]');
+  await session.click('.popover [data-stream-id="local:web-gate-1"]');
+  const readPanes = `(() => {
+    const stage = document.querySelector('.stage');
+    const bounds = node => node?.getBoundingClientRect().toJSON();
+    const chat = stage.querySelector('.card:not(.lanes-card):not(.design-card)');
+    return { assistant: bounds(stage.querySelector('.pane:not([hidden])')),
+      chat: bounds(chat), lanes: bounds(stage.querySelector('.lanes-card:not([hidden])')) };
+  })()`;
+  const before = await session.eval(readPanes);
+  if (!before.assistant?.width || !before.chat?.width || !before.lanes?.width ||
+      before.chat.right > before.lanes.left) throw new Error('three visible adjacent panes required');
+  const x = (before.chat.right + before.lanes.left) / 2;
+  const y = before.chat.top + 100;
+  const delta = 44;
+  const hit = await session.eval(`document.elementFromPoint(${x}, ${y})?.className ?? null`);
+  await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+  await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x - delta, y, button: 'left', buttons: 1 });
+  await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x - delta, y, button: 'left', buttons: 0, clickCount: 1 });
+  const after = await session.eval(readPanes);
+  await session.screenshot(path.join(report.dir, 'next-chat-lanes-divider.png'));
+  const resized = Math.abs(after.chat.width - before.chat.width + delta) <= 2 &&
+    Math.abs(after.lanes.width - before.lanes.width - delta) <= 2 &&
+    Math.abs(after.assistant.width - before.assistant.width) <= 1 &&
+    after.chat.right <= after.lanes.left;
+  report.ok('a real drag reallocates width between adjacent chat and Lanes panes', resized, { before, after, hit });
+  if (!resized) throw new Error('chat/Lanes divider did not reallocate width');
+}
+module.exports.paneDivider = isolated(paneDivider);
 async function newChat(ctx) {
   const { session, report } = ctx; await visit(ctx);
   const catalogFlag = path.join(ctx.runtime.fixtureScratch, 'next-catalog-fixture'); require('fs').writeFileSync(catalogFlag, 'enabled');
