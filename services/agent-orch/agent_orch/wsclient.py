@@ -2005,6 +2005,10 @@ async def _operator_envelope_rpc(config: Config, payload: dict[str, Any], *,
             if frame.get("type") == "working.state":
                 # This asynchronous push can arrive between authentication and ready.
                 continue
+            if (frame.get("type") == "session.inventory" and isinstance(frame.get("sessions"), list)
+                    and "request_id" not in frame):
+                # Unsolicited inventory has no effect on admission.
+                continue
             if frame.get("type") != "ready":
                 raise PermissionError("operator credential RPC admission refused")
             break
