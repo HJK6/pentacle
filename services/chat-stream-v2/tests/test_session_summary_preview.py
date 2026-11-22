@@ -88,6 +88,25 @@ def test_tool_activity_ordering_and_projection():
     assert sessions.list_open()[0]["last_tool_activity"] == row["last_tool_activity"]
 
 
+def test_tool_ordering_across_offsets_and_lifecycle_floor():
+    from session_summary import apply_tool_summary
+    row = {"created_at": CREATED}
+    assert apply_tool_summary(row, event(kind="TOOL_USE", seq=4,
+        timestamp="2026-10-26T02:00:00+01:00", raw={"tool_name": "Read"}))
+    assert not apply_tool_summary(row, event(kind="TOOL_USE", seq=99,
+        timestamp="2026-10-26T00:59:59Z", raw={"tool_name": "Edit"}))
+    assert not apply_tool_summary(row, event(kind="TOOL_USE", seq=3,
+        timestamp="2026-10-26T01:00:00.000000Z", raw={"tool_name": "Edit"}))
+    assert apply_tool_summary(row, event(kind="TOOL_USE", seq=5,
+        timestamp="2026-10-26T01:00:00.000000Z", raw={"tool_name": "Grep"}))
+    assert row["last_tool_activity"] == {"category": "search", "timestamp": "2026-10-26T01:00:00Z"}
+    # A candidate that would win by order still must pass the lifecycle floor.
+    row["created_at"] = "2026-10-26T03:00:00Z"
+    assert not apply_tool_summary(row, event(kind="TOOL_USE", seq=6,
+        timestamp="2026-10-26T02:00:00Z", raw={"tool_name": "Bash"}))
+    assert row["last_tool_activity"]["category"] == "search"
+
+
 @pytest.mark.parametrize("provider,name,category", [
     ("claude", "Read", "read"), ("claude", "Grep", "search"),
     ("claude", "Edit", "edit"), ("claude", "Write", "edit"),

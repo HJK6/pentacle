@@ -103,24 +103,29 @@ def apply_tool_summary(row: dict[str, Any], event: dict[str, Any]) -> bool:
             return False
         canonical = stamp
     else:
-        floor = event_timestamp_epoch(row.get("created_at"))
-        if floor is None or not isinstance(stamp, str):
+        if not isinstance(stamp, str):
             return False
         try:
-            parsed = datetime.fromisoformat(stamp.strip().replace("Z", "+00:00").replace("z", "+00:00"))
-            if parsed.tzinfo is None or parsed.utcoffset() is None or parsed.timestamp() < floor:
+            clean_stamp = stamp.strip()
+            if clean_stamp.endswith("z"):
+                clean_stamp = clean_stamp[:-1] + "Z"
+            parsed = datetime.fromisoformat(clean_stamp)
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
                 return False
             parsed = parsed.astimezone(timezone.utc)
+            ordering_time = _utc_microseconds(parsed)
+            if prior_stamp is not None:
+                prior_time = row.get("_last_tool_at")
+                if prior_time is None:
+                    prior_time = _utc_microseconds(datetime.fromisoformat(prior_stamp.replace("Z", "+00:00")))
+                if (ordering_time, seq) <= (prior_time, row.get("_last_tool_seq", 0)):
+                    return False
+            floor = event_timestamp_epoch(row.get("created_at"))
+            if floor is None or parsed.timestamp() < floor:
+                return False
         except (ValueError, OverflowError, OSError):
             return False
         canonical = parsed.isoformat(timespec="microseconds" if parsed.microsecond else "seconds").replace("+00:00", "Z")
-        ordering_time = _utc_microseconds(parsed)
-        if prior_stamp is not None:
-            prior_time = row.get("_last_tool_at")
-            if prior_time is None:
-                prior_time = _utc_microseconds(datetime.fromisoformat(prior_stamp.replace("Z", "+00:00")))
-            if (ordering_time, seq) <= (prior_time, row.get("_last_tool_seq", 0)):
-                return False
     name = raw.get("tool_name")
     provider = event.get("provider")
     category = _TOOL_CATEGORIES.get(provider, {}).get(name, "tool") if isinstance(name, str) and len(name) <= 128 and isinstance(provider, str) else "tool"
