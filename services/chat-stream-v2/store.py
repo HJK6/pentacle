@@ -1004,6 +1004,14 @@ SESSION_EVENT_TAIL_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_session_event_tail_stream_event "
     "ON session_event_tail(stream_id, session_created_at, event_id DESC)"
 )
+# SQLite assigns ordinary dates a nonnegative Julian day. Keep clock-relative
+# spellings and non-text values out of the indexed date function and evaluate
+# that bucket in the inventory statement, where SQLite supplies its clock.
+EVENT_ACTIVITY_RANK = (
+    "CASE WHEN event_ts IS NULL THEN NULL "
+    "WHEN typeof(event_ts)='text' AND event_ts GLOB '[0-9]*' THEN julianday(event_ts) "
+    "ELSE -1 END"
+)
 SESSION_EVENT_TAIL_IDENTITY_DDL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_event_tail_identity "
     "ON session_event_tail(stream_id, session_created_at, identity)"
@@ -1774,6 +1782,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.execute("BEGIN")
             conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
             conn.execute(SESSIONS_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_open ON sessions(status) WHERE status='open'")
             conn.execute(VOICE_OPERATIONS_DDL)
             for ddl in store_attachments.DDL:
                 conn.execute(ddl)
@@ -1820,6 +1829,11 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.execute(ROUTING_INTEGRITY_DDL)
             conn.execute(ROUTING_INTEGRITY_AUDIT_DDL)
             conn.execute(OUTBOUND_NOTICE_DDL)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v2_outbound_delivered_owed "
+                "ON v2_outbound_notices(source_stream_id, episode_id, delivered_at) "
+                "WHERE kind='owed_due' AND delivered_at IS NOT NULL"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_outbound_notices_recipient "
                          "ON v2_outbound_notices(recipient_stream_id)")
             # Measured error-alert dependency lookups. Partial indexes exclude
@@ -1987,6 +2001,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.execute(REPORT_REJECTIONS_INDEX_DDL)
             conn.execute(SESSION_EVENT_TAIL_DDL)
             conn.execute(SESSION_EVENT_TAIL_INDEX_DDL)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_event_tail_activity "
+                f"ON session_event_tail(stream_id, session_created_at, {EVENT_ACTIVITY_RANK} DESC, event_id DESC)"
+            )
             conn.execute(SESSION_EVENT_TAIL_IDENTITY_DDL)
             conn.execute(SESSION_EVENT_TAIL_RECORDED_DDL)
             from native_input_lookup import ensure_schema as ensure_native_input_schema
@@ -7175,7 +7193,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
         def _op(conn: sqlite3.Connection, shared: bool) -> list[dict[str, Any]]:
             rows = conn.execute(
-                """
+                f"""
                 SELECT s.*,
                        EXISTS (
                            SELECT 1 FROM session_event_tail t
@@ -7183,12 +7201,26 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                              AND t.session_created_at = s.created_at
                        ) AS _bootstrap_event_seen,
                        COALESCE((
-                           SELECT t.event_ts FROM session_event_tail t
-                           WHERE t.stream_id = s.host || ':' || s.session_name
-                             AND t.session_created_at = s.created_at
-                             AND julianday(t.event_ts) IS NOT NULL
-                           ORDER BY julianday(t.event_ts) DESC, t.event_id DESC
-                           LIMIT 1
+                           SELECT event_ts FROM (
+                               SELECT * FROM (
+                                   SELECT event_ts, event_id, {EVENT_ACTIVITY_RANK} AS rank
+                                   FROM session_event_tail
+                                   WHERE stream_id = s.host || ':' || s.session_name
+                                     AND session_created_at = s.created_at
+                                     AND {EVENT_ACTIVITY_RANK} >= 0
+                                   ORDER BY rank DESC, event_id DESC LIMIT 1
+                               )
+                               UNION ALL
+                               SELECT * FROM (
+                                   SELECT event_ts, event_id, julianday(event_ts) AS rank
+                                   FROM session_event_tail
+                                   WHERE stream_id = s.host || ':' || s.session_name
+                                     AND session_created_at = s.created_at
+                                     AND {EVENT_ACTIVITY_RANK} = -1
+                                     AND julianday(event_ts) IS NOT NULL
+                                   ORDER BY rank DESC, event_id DESC LIMIT 1
+                               )
+                           ) ORDER BY rank DESC, event_id DESC LIMIT 1
                        ), '') AS last_event_at
                 FROM sessions s
                 WHERE s.status = 'open'
