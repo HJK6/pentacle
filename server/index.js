@@ -27,6 +27,7 @@ const { createMicRequest } = require('../main/mic_request');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
 const { freezeWebDist } = require('./web_build_id');
+const { serveFeaturedScore } = require('./melody');
 const { createPrivateDashboardRoute } = require('./private_dashboards');
 const { createDesignRoutes } = require('./designs');
 const { parseDesignRoute } = require('../lib/design_routes.cjs');
@@ -533,6 +534,10 @@ async function main(argv = process.argv.slice(2)) {
         return;
       }
       serveStatic(res, route.mode === 'embed' ? DESIGN_EMBED_ENTRY : '/next/', configJson, frozen);
+      return;
+    }
+    if (urlPath === '/api/melody/featured') {
+      void serveFeaturedScore(req, res, auth && process.env.PENTACLE_MELODY_FEATURED_FILE);
       return;
     }
     if (urlPath === '/api/config') {

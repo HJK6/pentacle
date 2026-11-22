@@ -240,6 +240,7 @@ async function cardJourney(ctx) {
   for (const width of [1440, 1010, 702]) {
     await open(ctx, '/next/', width);
     await click(ctx, '[aria-label="Dashboards"]');
+    await click(ctx, '.popover button[aria-label="Design"]');
     await homeReady(ctx);
     await check(ctx, 'Design occupies the dash card and lights the rail at ' + width,
       '!document.querySelector(".design-card").hidden && document.querySelector("[aria-label=Dashboards]").classList.contains("on") && !document.querySelector(".design-card .card-head") && document.querySelector(".design-menu").hidden');
@@ -252,8 +253,9 @@ async function cardJourney(ctx) {
     await click(ctx, '.design-card [aria-label="Close"]');
     await atPath(ctx, '/next/');
     await click(ctx, '[aria-label="Dashboards"]');
+    await click(ctx, '.popover button[aria-label="Design"]');
     await homeReady(ctx);
-    await click(ctx, '[aria-label="Dashboards"]');
+    await click(ctx, '.design-card [aria-label="Close"]');
     await atPath(ctx, '/next/');
   }
 }

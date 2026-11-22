@@ -236,6 +236,9 @@ async function build({ minify = false } = {}) {
   });
   fs.copyFileSync(path.join(nextSource, 'design-embed.html'), path.join(nextOut, 'design-embed.html'));
   fs.copyFileSync(path.join(nextSource, 'index.html'), path.join(nextOut, 'index.html'));
+  for (const file of ['melody.css', 'melody_instrument.css']) {
+    fs.copyFileSync(path.join(nextSource, file), path.join(nextOut, file));
+  }
   fs.copyFileSync(path.join(nextSource, 'style.css'), path.join(nextOut, 'style.css'));
   fs.copyFileSync(path.join(ROOT, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), path.join(nextOut, 'xterm.css'));
   fs.copyFileSync(path.join(RENDERER, 'dist', 'chat_core.bundle.js'), path.join(nextOut, 'chat_core.bundle.js'));
