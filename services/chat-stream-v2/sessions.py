@@ -18,7 +18,7 @@ from assistant_policy import AssistantPolicy
 from store_qa import SpecInputsUnavailable, spec_binding_source
 from mirror import _extract_live_state, _provider_from_session_name
 from v2_runtime import iso_now
-from session_summary import (MESSAGE_SUMMARY_FIELDS, apply_message_summary,
+from session_summary import (MESSAGE_SUMMARY_FIELDS, TOOL_SUMMARY_FIELDS, apply_message_summary, apply_tool_summary,
                              event_timestamp_epoch as _event_timestamp_epoch)
 
 VISIBILITIES = ("default", "visible", "hidden", "subagent")
@@ -65,6 +65,13 @@ LIVE_OVERLAY_FIELDS = frozenset({
 })
 
 log = logging.getLogger("chat_streamd_v2.sessions")
+
+
+def _without_tool_order(row: dict[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    for key in TOOL_SUMMARY_FIELDS - {"last_tool_activity"}:
+        result.pop(key, None)
+    return result
 
 _GENUINE_ACTIVITY_KINDS = frozenset({"USER", "TOOL_USE", "ASSIST_TEXT"})
 BOOTSTRAP_EVENT_WINDOW_S = 15.0
@@ -197,6 +204,8 @@ def with_bootstrap_state(
     result = dict(row)
     internal_seen = bool(result.pop("_bootstrap_event_seen", False))
     for key in MESSAGE_SUMMARY_FIELDS - {"last_text", "last_kind"}:
+        result.pop(key, None)
+    for key in TOOL_SUMMARY_FIELDS - {"last_tool_activity"}:
         result.pop(key, None)
     seen = internal_seen if event_seen is None else event_seen
     if str(result.get("status") or "open") != "open":
@@ -621,6 +630,8 @@ class Sessions:
             if not row:
                 return None
             result = dict(row)
+            for key in TOOL_SUMMARY_FIELDS - {"last_tool_activity"}:
+                result.pop(key, None)
             if any(child.get("parent_stream_id") == stream_id for child in self._inv.values()):
                 result["agents"] = next(r["agents"] for r in self.list_open() if r["stream_id"] == stream_id)
             return result
@@ -663,7 +674,7 @@ class Sessions:
                 field: value for field, value in overlay.items()
                 if field in LIVE_OVERLAY_FIELDS
             })
-            return dict(row)
+            return _without_tool_order(row)
 
     def restore_genuine_activity(
         self, stream_id: str, events: list[dict[str, Any]]
@@ -688,7 +699,7 @@ class Sessions:
                 "genuine_activity_at": max(valid) if generation and valid else None,
                 "genuine_activity_generation": generation if generation and valid else None,
             })
-            return dict(row)
+            return _without_tool_order(row)
 
     def apply_genuine_activity_event(
         self, stream_id: str, event: dict[str, Any], *, expected_generation: str | None = None,
@@ -702,9 +713,11 @@ class Sessions:
             floor = _event_timestamp_epoch(row.get("created_at"))
             timestamp = _event_timestamp_epoch(event.get("timestamp"))
             if floor is None or timestamp is None or timestamp < floor:
-                return dict(row)
+                return _without_tool_order(row)
             row["_bootstrap_event_seen"] = True
-            if apply_message_summary(row, event):
+            if event.get("kind") == "TOOL_USE":
+                apply_tool_summary(row, event)
+            elif apply_message_summary(row, event):
                 log.debug("session message preview advanced stream=%s", stream_id,
                           extra={"subsystem": "session_summary", "bug_ref": "session_summary_missing_preview_2026_10"})
             user_epoch = operator_user_epoch(event, row.get("created_at"))
@@ -721,7 +734,7 @@ class Sessions:
             generation = str(row.get("session_generation") or "").strip()
             epoch = genuine_activity_epoch(event)
             if not generation or epoch is None:
-                return dict(row)
+                return _without_tool_order(row)
             prior_generation = str(row.get("genuine_activity_generation") or "")
             prior = row.get("genuine_activity_at")
             prior_epoch = (
@@ -737,7 +750,7 @@ class Sessions:
                     "genuine_activity_at": epoch,
                     "genuine_activity_generation": generation,
                 })
-            return dict(row)
+            return _without_tool_order(row)
 
     def apply_durable(
         self, stream_id: str, *, expected_generation: str | None = None, **fields: Any,
@@ -755,7 +768,7 @@ class Sessions:
             ):
                 return None
             row.update(fields)
-            return dict(row)
+            return _without_tool_order(row)
 
     @staticmethod
     def split(stream_id: str) -> tuple[str, str]:
@@ -771,7 +784,7 @@ class Sessions:
             changed_generation = previous and self._inventory_generation(previous) != self._inventory_generation(row)
             merged = {**previous, **row, **overlay}
             if changed_generation:
-                for key in MESSAGE_SUMMARY_FIELDS:
+                for key in MESSAGE_SUMMARY_FIELDS | TOOL_SUMMARY_FIELDS:
                     merged.pop(key, None)
                 if "last_event_at" not in row and "last_event_at" not in overlay:
                     merged.pop("last_event_at", None)
@@ -779,7 +792,7 @@ class Sessions:
                 self._set_inventory_row_locked(sid, merged)
             else:
                 self._pop_inventory_locked(sid)
-            return dict(merged)
+            return _without_tool_order(merged)
 
     def _lifecycle_lock(self, host: str, session_name: str) -> asyncio.Lock:
         sid = f"{host}:{session_name}"

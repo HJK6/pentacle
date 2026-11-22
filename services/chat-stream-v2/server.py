@@ -3475,7 +3475,7 @@ class Server:
         """
         fields = (
             "stream_id", "host", "session_name", "provider", "display_name",
-            "last_event_at", "last_text", "last_kind", "draft", "question",
+            "last_event_at", "last_text", "last_kind", "last_tool_activity", "draft", "question",
             "pending_peer_messages", "role", "role_source", "phase", "spec_id", "spec_ids",
             "qualified_spec_ids", "spec_binding_provenance", "assigned_spec_id", "spec_resolution",
             "visibility", "self_close_on_completion", "online", "pending",

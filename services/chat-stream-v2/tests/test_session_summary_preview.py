@@ -67,6 +67,170 @@ def event(text="Answer", kind="ASSIST_TEXT", seq=1, timestamp="2026-10-26T01:00:
             "daemon_seq": seq, "timestamp": timestamp, **fields}
 
 
+def test_tool_activity_ordering_and_projection():
+    sessions = registry()
+    sessions.apply_genuine_activity_event("fixture:chat", event())
+    sessions.apply_genuine_activity_event("fixture:chat", event(kind="TOOL_USE", seq=2,
+        timestamp="2026-10-26T02:00:00.123456+01:00", raw={"tool_name": "Read"}))
+    assert sessions.list_open()[0]["last_tool_activity"] == {
+        "category": "read", "timestamp": "2026-10-26T01:00:00.123456Z"}
+    sessions.apply_genuine_activity_event("fixture:chat", event(kind="TOOL_USE", seq=3,
+        timestamp="2026-10-26T01:00:00.123456Z", raw={"tool_name": "unknown/secret"}))
+    row = sessions.list_open()[0]
+    assert row["last_tool_activity"]["category"] == "tool"
+    assert row["last_text"] == "Answer"
+    assert not any(key.startswith("_last_tool") for key in row)
+    for bad in ({"kind": "TOOL_RESULT"}, {"raw": {"tool_name": "Edit", "isSidechain": True}},
+                {"raw": {"tool_name": "Edit", "is_sidechain": True}},
+                {"raw": {"tool_name": "Edit", "daemon_notice": True}}, {"daemon_seq": 0}):
+        sessions.apply_genuine_activity_event("fixture:chat", {**event(kind="TOOL_USE", seq=10,
+            timestamp="2026-10-26T02:00:00Z"), **bad})
+    assert sessions.list_open()[0]["last_tool_activity"] == row["last_tool_activity"]
+
+
+@pytest.mark.parametrize("provider,name,category", [
+    ("claude", "Read", "read"), ("claude", "Grep", "search"),
+    ("claude", "Edit", "edit"), ("claude", "Write", "edit"),
+    ("claude", "Bash", "command"), ("codex", "exec_command", "tool"),
+    ("claude", "/private/sentinel", "tool"), ("claude", None, "tool"),
+])
+def test_tool_categories_use_only_provider_and_bounded_name(provider, name, category):
+    sessions = registry()
+    sessions.apply_genuine_activity_event("fixture:chat", event("output-sentinel", kind="TOOL_USE", provider=provider,
+        raw={"tool_name": name, "tool_input": {"path": "argument-sentinel"}}))
+    row = sessions.list_open()[0]
+    assert row["last_tool_activity"]["category"] == category
+    assert not any(value in json.dumps(row) for value in ("/private/sentinel", "argument-sentinel", "output-sentinel"))
+
+
+def test_tool_summary_rebuild_retention_and_generation(tmp_path):
+    async def run():
+        store = Store(str(tmp_path / "tool.db"))
+        store.start()
+        try:
+            sessions = Sessions(store, local_host="fixture")
+            row = await sessions.open("fixture", "chat", provider="claude", created_at=CREATED)
+            tool = event(kind="TOOL_USE", raw={"tool_name": "Read"})
+            await store.append_session_event("fixture:chat", tool, identity="tool", limit=1000)
+            for n in range(SUMMARY_TAIL_LIMIT - 1):
+                await store.append_session_event("fixture:chat", event(str(n), kind="TOOL_RESULT"), identity=f"result-{n}", limit=1000)
+            await sessions.refresh()
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "read"
+            await store.append_session_event("fixture:chat", event("outside", kind="TOOL_RESULT"), identity="outside", limit=1000)
+            await sessions.refresh()
+            assert "last_tool_activity" not in sessions.list_open()[0]
+            sessions.apply_genuine_activity_event("fixture:chat", {**tool, "daemon_seq": 1001}, expected_generation=row["session_generation"])
+            sessions._cache({**sessions.get("fixture:chat"), "title": "renamed"})
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "read"
+            sessions._cache({**sessions.get("fixture:chat"), "session_generation": "next"})
+            assert "last_tool_activity" not in sessions.list_open()[0]
+            assert sessions.apply_genuine_activity_event("fixture:chat", {**tool, "daemon_seq": 1002}, expected_generation=row["session_generation"]) is None
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_local_and_remote_committed_tool_events_rebuild(tmp_path):
+    from ingest import Ingest, _StreamIngest, _close_stream
+    from test_event_push import _sink, _push
+
+    async def run():
+        store = Store(str(tmp_path / "routes.db"))
+        store.start()
+        state = None
+        try:
+            sessions = Sessions(store, local_host="fixture")
+            row = await sessions.open("fixture", "chat", provider="claude", created_at=CREATED, pane_pid="1234")
+            records = [{"type": "assistant", "uuid": "local-tool", "sessionId": "fixture-session",
+                "timestamp": "2026-10-26T01:00:00Z", "message": {"content": [
+                    {"type": "text", "text": "Visible"}, {"type": "tool_use", "id": "tool-id", "name": "Bash", "input": {"command": "secret-argument"}}]}}]
+            path = tmp_path / "claude.jsonl"
+            path.write_text(''.join(json.dumps(record) + '\n' for record in records))
+            state = _StreamIngest(generation=row["session_generation"], path=str(path))
+            ingest = Ingest(store, sessions, None, lambda _: asyncio.sleep(0), local_host="fixture", recent_limit=500)
+            assert await ingest._ingest_stream_events(row, state, 500) == 2
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "command"
+            sink, _, _ = _sink(store, sessions=sessions, emit_inventory=True)
+            remote = event(kind="TOOL_USE", timestamp="2026-10-26T01:00:01Z",
+                raw={"tool_name": "Grep", "jsonl_record_uuid": "remote-tool", "jsonl_event_index": 0})
+            assert (await sink.handle_push(_push(sink, [remote], host="fixture")))["inserted"] == 1
+            live = sessions.list_open()[0]
+            assert live["last_tool_activity"]["category"] == "search"
+            assert live["last_text"] == "Visible"
+            assert (await sink.handle_push(_push(sink, [remote], host="fixture")))["inserted"] == 0
+            await sessions.refresh()
+            assert sessions.list_open()[0]["last_tool_activity"] == live["last_tool_activity"]
+        finally:
+            if state:
+                _close_stream(state)
+            store.stop()
+    asyncio.run(run())
+
+
+def test_actual_codex_tool_normalization_is_generic():
+    from codex_rollout_norm import normalize_codex_rollout_records
+    records = [{"type": "response_item", "timestamp": "2026-10-26T01:00:00Z",
+        "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-1", "arguments": "{\"cmd\":\"cat private\"}"}}]
+    normalized = normalize_codex_rollout_records(records, host="fixture", session_name="chat")
+    assert len(normalized) == 1 and normalized[0]["raw"]["tool_name"] == "exec_command"
+    sessions = registry()
+    sessions.apply_genuine_activity_event("fixture:chat", {**normalized[0], "daemon_seq": 1})
+    assert sessions.list_open()[0]["last_tool_activity"]["category"] == "tool"
+
+
+def test_codex_real_local_ingest_and_remote_push():
+    from ingest import Ingest, _StreamIngest, _close_stream
+    from test_ingest import _codex_row
+    from test_event_push import _sink, _push, _proven_codex_ev, CURRENT_CODEX_ROLLOUT
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        state = _StreamIngest()
+        try:
+            sessions = Sessions(store, local_host="h")
+            await sessions.open("h", "v2-codex", provider="codex", created_at="2024-01-01T00:00:00Z", pane_pid="8123")
+            path = Path(__file__).parent / "fixtures" / "codex_rollout_first_turn.jsonl"
+            ingest = Ingest(store, sessions, None, lambda _: asyncio.sleep(0), local_host="h", recent_limit=500)
+            assert await ingest._ingest_stream(await _codex_row(store, path), state, 500) > 0
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "tool"
+            await sessions.refresh()
+            assert sessions.list_open()[0]["last_tool_activity"]["category"] == "tool"
+            remote = Sessions(store, local_host="hostc")
+            await remote.open("hostc", "v2-codex-current", provider="codex", created_at="2024-01-01T00:00:00Z", pane_pid="8123")
+            sink, _, _ = _sink(store, sessions=remote)
+            payload = _proven_codex_ev(CURRENT_CODEX_ROLLOUT, 1, stream_id="hostc:v2-codex-current")
+            payload.update(kind="TOOL_USE", text="exec_command")
+            payload["raw"]["tool_name"] = "exec_command"
+            assert (await sink.handle_push(_push(sink, [payload], host="hostc")))["inserted"] == 1
+            assert remote.list_open()[0]["last_tool_activity"]["category"] == "tool"
+            await remote.refresh()
+            assert next(r for r in remote.list_open() if r["stream_id"] == "hostc:v2-codex-current")["last_tool_activity"]["category"] == "tool"
+        finally:
+            _close_stream(state)
+            store.stop()
+    asyncio.run(run())
+
+
+def test_tool_only_change_emits_once_and_duplicate_does_not():
+    from inventory import InventoryEmitter
+    async def run():
+        sessions = registry()
+        frames = []
+        async def broadcast(frame):
+            frames.append(frame)
+        emitter = InventoryEmitter(sessions, broadcast, min_interval_s=0)
+        emitter.prime()
+        first = event(kind="TOOL_USE", seq=1, raw={"tool_name": "Read"})
+        sessions.apply_genuine_activity_event("fixture:chat", first)
+        assert await emitter.emit_if_changed()
+        sessions.apply_genuine_activity_event("fixture:chat", first)
+        assert not await emitter.emit_if_changed()
+        sessions.apply_genuine_activity_event("fixture:chat", {**first, "daemon_seq": 2, "raw": {"tool_name": "Grep"}})
+        assert await emitter.emit_if_changed()
+        assert [f["sessions"][0]["last_tool_activity"]["category"] for f in frames] == ["read", "search"]
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("kind", ["USER", "ASSIST_TEXT", "ASSIST", "TELL"])
 def test_normalized_conversation_kinds_produce_previews(kind):
     sessions = registry()
@@ -215,6 +379,8 @@ def test_summary_wire_list_inventory_and_restart(tmp_path, events_mode):
                     await sessions.open("fixture", "chat", provider="claude", created_at=CREATED)
                     await sessions.open("fixture", "empty", provider="claude", created_at=CREATED)
                     await store.append_session_event("fixture:chat", event("Initial"), identity="initial", limit=500)
+                    await store.append_session_event("fixture:chat", event(kind="TOOL_USE", seq=2,
+                        raw={"tool_name": "Read"}), identity="wire-tool", limit=500)
                 await sessions.refresh()
                 server = Server(port=0, store=store, sessions=sessions, local_host="fixture")
                 server.inventory_ready.set()
@@ -229,11 +395,14 @@ def test_summary_wire_list_inventory_and_restart(tmp_path, events_mode):
                         assert not snapshot.get("events")
                     assert all(not key.startswith("_last_message") for row in rows.values() for key in row)
                     assert rows["fixture:chat"]["last_text"] == ("Updated" if restart else "Initial")
+                    assert rows["fixture:chat"]["last_tool_activity"]["category"] == "read"
+                    assert all(not key.startswith("_last_tool") for row in rows.values() for key in row)
                     assert "last_text" not in rows["fixture:empty"]
                     await socket.send(json.dumps({"type": "list_sessions", "request_id": "list"}))
                     listed = await receive(socket, "list_sessions.ok")
                     assert all(not key.startswith("_last_message") for row in listed["active"] for key in row)
                     assert next(row for row in listed["active"] if row["stream_id"] == "fixture:chat")["last_text"] == rows["fixture:chat"]["last_text"]
+                    assert next(row for row in listed["active"] if row["stream_id"] == "fixture:chat")["last_tool_activity"] == rows["fixture:chat"]["last_tool_activity"]
                     if not restart:
                         await append_ingested_event(store, server.broadcast,
                             event("Updated", seq=2, timestamp="2026-10-26T01:00:01Z"), recent_limit=500, sessions=sessions)
@@ -241,6 +410,7 @@ def test_summary_wire_list_inventory_and_restart(tmp_path, events_mode):
                         inventory = await receive(socket, "session.inventory")
                         assert all(not key.startswith("_last_message") for row in inventory["sessions"] for key in row)
                         assert next(row for row in inventory["sessions"] if row["stream_id"] == "fixture:chat")["last_text"] == "Updated"
+                        assert next(row for row in inventory["sessions"] if row["stream_id"] == "fixture:chat")["last_tool_activity"] == rows["fixture:chat"]["last_tool_activity"]
             finally:
                 if emitter and emitter._flush_task is not None:
                     emitter._flush_task.cancel()
