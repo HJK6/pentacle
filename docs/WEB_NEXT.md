@@ -97,3 +97,20 @@ scrolling. They widen under the pointer and take the theme accent when
 dragged. Conversations reserve equal gutters to avoid shifting; lists and
 message fields have a narrower bar. Design tabs keep their hidden scrollbar
 and terminals keep their existing scroller.
+
+## Pictures beside their chat
+
+In the new view, click an ordinary image thumbnail to open Picture in the shared
+slot used by Design. The outlined thumbnail closes the card when clicked again;
+another thumbnail replaces it. Desktop Picture uses the fluid stage and defaults to even widths with
+its source chat. Close returns to the prior chat placement, including a
+full-screen chat. The dim assistant logo brings Bart in beside Picture;
+choosing a chat from the rail ends the picture arrangement. When room is
+tight the picture is in front and the chat waits behind it. The full-screen
+control is available only at 600 CSS pixels and above; Escape leaves full
+screen. Lanes retain their own state.
+
+Ordinary images use the existing attachment read and stay separate from typed
+Design previews, which take over the same slot. Ordinary Markdown links,
+including `/designs/`, continue opening in a new tab. The current web's
+attachment viewer, file downloads, and the terminal remain unchanged.
