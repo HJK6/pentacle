@@ -1,5 +1,25 @@
 {
   "records": {
+    "14747c9cc16c1d898671dd0acd996cfa9742e388c0d7dbd532b3e5f0bda2291c": {
+      "boundary": "Real pytest timeout with the full seeded HeldSpans and SQLite loss soak. Delay control is isolated from the gate.",
+      "evidence_manifest": "scripts/test-admission-evidence/16cf46aef7b7545a65c64403ee229b76504de719b7766502a34e7481a5e6ebe3.json",
+      "evidence_manifest_sha256": "16cf46aef7b7545a65c64403ee229b76504de719b7766502a34e7481a5e6ebe3",
+      "failing_receipt": "usage-soak-marker-only-base-with-61-second-call-delay",
+      "failing_sha256": "266b17f5969f45805a8ddd0ab541a48a39ff23951de12cd139959466b57adab1",
+      "fingerprint": "6230ea9291e1ec211919fd338b5159dee70dd376d7fba73340ba511dcc6863eb",
+      "journey": "The seeded usage loss soak runs past the suite default without losing coverage or exiting the worker",
+      "passing_receipt": "usage-soak-marker-only-candidate-with-identical-call-delay",
+      "passing_sha256": "215533d8a94b6ea1adb124db1a103345df1477d4dbf32cd74470710914eaee22",
+      "platforms": [
+        "darwin",
+        "linux"
+      ],
+      "qa_report_id": "a339c3f4-cb6d-441e-92e5-9d3e72a4b899",
+      "qa_target_sha": "ded861c75283eca6f2102929bcd1e284bc1d5d5e",
+      "restoration_of": [],
+      "suite": "daemon",
+      "test_id": "tests/test_usage_unfenced_ac10.py::test_k_soak_supported_operations"
+    },
     "300f23dbf6f039cd1938098dc442793c1764d3d7978e82f3f317aa73309873d7": {
       "boundary": "Real queued Store execution and in-process observation",
       "evidence_manifest": "scripts/test-admission-evidence/be97a6b48ef078d92a9c576df6cd30e49612e50e22537e6a05b35777dded4845.json",
