@@ -812,6 +812,7 @@ class _WorkLanesStoreMixin:
                                      binding_name=binding_name, env_binding=env_binding,
                                      confirmation=confirmation, digest=digest, fault=fault,
                                      activity_reader=getattr(self, "lane_presence_reader", None),
+                                     capture_age_reader=getattr(self, "lane_capture_age_reader", None),
                                      external_config=getattr(self, "external_work_config", None))
                 conn.commit()
                 return result
@@ -999,7 +1000,8 @@ class _WorkLanesStoreMixin:
             try:
                 result = _reconcile_lane_lifecycle_conn(
                     conn, external_config=getattr(self, "external_work_config", None),
-                    activity_reader=getattr(self, "lane_presence_reader", None))
+                    activity_reader=getattr(self, "lane_presence_reader", None),
+                    capture_age_reader=getattr(self, "lane_capture_age_reader", None))
                 conn.commit()
                 return result
             except BaseException:
@@ -1101,9 +1103,10 @@ def _activity_packets_conn(conn, config):
 class _LaneActivitySnapshot:
     """Read each source once in the caller's current Store transaction."""
 
-    def __init__(self, conn, reader):
+    def __init__(self, conn, reader, capture_age_reader=None):
         self.conn = conn
         self.reader = reader
+        self.capture_age_reader = capture_age_reader
         self.assignments = None
         self.presence = None
 
@@ -1112,7 +1115,7 @@ class _LaneActivitySnapshot:
         if self.assignments is None:
             grouped = {}
             for row in self.conn.execute(
-                "SELECT s.host,s.session_name,s.spec_id,s.spec_ids,s.assigned_spec_id,s.pane_status,"
+                "SELECT s.host,s.session_name,s.spec_id,s.spec_ids,s.assigned_spec_id,s.pane_status,s.provider,s.role,"
                 "s.offline_since_ts,s.presumed_dead_at,g.generation FROM sessions s "
                 "LEFT JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
                 "WHERE s.status='open' AND (s.assigned_spec_id IS NOT NULL OR s.spec_id IS NOT NULL OR s.spec_ids IS NOT NULL)"
@@ -1126,28 +1129,40 @@ class _LaneActivitySnapshot:
 
     def _presence(self):
         if self.presence is None:
-            from presence import PresenceConfig
-            from reconciler import ReconcileConfig
-            observed = self.reader() if self.reader else None
-            if not isinstance(observed, (list, tuple)):
-                raise ValueError("activity presence unavailable")
-            rows = {}
-            for row in observed:
-                if not isinstance(row, dict) or not isinstance(row.get("stream_id"), str):
-                    raise ValueError("invalid activity presence")
-                identity = row["stream_id"]
-                if identity in rows:
-                    raise ValueError("duplicate activity presence")
-                rows[identity] = row
-            # Idle seats follow the ordinary reconciliation cadence, not the
-            # fast, hot-working cadence. Allow one list timeout for that sweep.
-            max_age = ReconcileConfig.from_env().interval_s + PresenceConfig.from_env().list_timeout_s
-            self.presence = rows, time.time(), max_age
+            try:
+                from presence import PresenceConfig
+                from reconciler import ReconcileConfig
+                observed = self.reader() if self.reader else None
+                if not isinstance(observed, (list, tuple)):
+                    raise ValueError("activity presence unavailable")
+                rows = {}
+                for row in observed:
+                    if not isinstance(row, dict) or not isinstance(row.get("stream_id"), str):
+                        raise ValueError("invalid activity presence")
+                    identity = row["stream_id"]
+                    if identity in rows:
+                        raise ValueError("duplicate activity presence")
+                    rows[identity] = row
+                if self.capture_age_reader is not None:
+                    max_age = self.capture_age_reader(observed)
+                else:
+                    max_age = PresenceConfig.from_env().capture_rotation_age_s(
+                        len(observed), ReconcileConfig.from_env().interval_s)
+                self.presence = rows, time.time(), max_age
+            except _ACTIVITY_READ_ERRORS:
+                self.presence = False  # Do not retry a failed reader for another lane in this snapshot.
+        if self.presence is False:
+            raise ValueError("activity presence unavailable")
         return self.presence
 
     def work(self, lane):
-        if not lane.get("_work_index_available") or any(
-                goal.get("quality") != "fresh" for goal in (lane.get("_goals") or {}).values()):
+        # Placement may be retained from a last-good epic after a newer
+        # source scan fails (even when the charter itself is fresh).
+        if (not lane.get("_work_index_available") or any(
+                goal.get("quality") != "fresh" for goal in (lane.get("_goals") or {}).values()) or any(
+                (m.get("observation") or {}).get("error") == "work_goal_reference_unresolved"
+                or (m.get("goal_id") is not None and (m.get("observation") or {}).get("quality") != "fresh")
+                for m in lane.get("_members") or [])):
             return (), (), "membership"
         if not lane.get("_activity_external_known"):
             return (), (), "external_work"
@@ -1156,6 +1171,11 @@ class _LaneActivitySnapshot:
         try:
             for identity in sorted(members):
                 for row in self._assignments().get(identity, ()):
+                    sid = f"{row['host']}:{row['session_name']}"
+                    # Virtual and control backends are not execution seats.
+                    # A virtual composite cannot be captured at all.
+                    if _is_composite({**row, "stream_id": sid}) or _protected(row) or fd_backend_conn(self.conn, sid):
+                        continue
                     if not row["generation"]:
                         return (), (), "assignment_generation"
                     durable_disconnect = (row["pane_status"] == "pane_dead"
@@ -1166,7 +1186,7 @@ class _LaneActivitySnapshot:
                         if durable_disconnect:
                             continue
                         return (), (), "presence"
-                    observed = live.get(f"{row['host']}:{row['session_name']}")
+                    observed = live.get(sid)
                     if not observed or observed.get("session_generation") != row["generation"]:
                         if durable_disconnect:
                             continue
@@ -1239,7 +1259,7 @@ def _lane_work_status_conn(conn, lane_id: str) -> str:
 
 
 def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, payload, actor, generation,
-                binding_name, env_binding, confirmation, digest, fault, activity_reader=None, external_config=None) -> dict[str, Any]:
+                binding_name, env_binding, confirmation, digest, fault, activity_reader=None, capture_age_reader=None, external_config=None) -> dict[str, Any]:
     from store_assistant_binding import _binding_conn
     binding = _binding_conn(conn, env_binding or {}, name=binding_name, include_target=False)
     if (not actor or not generation or binding.get("stream_id") != actor
@@ -1335,7 +1355,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == "paused" and parking is None:
                 _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required", required=True)
                 _text(payload.get("next_action"), UPDATE_TEXT_MAX, "work_lane_next_action_required", required=True)
-                specs, packets, unavailable = _LaneActivitySnapshot(conn, activity_reader).work(lane)
+                specs, packets, unavailable = _LaneActivitySnapshot(conn, activity_reader, capture_age_reader).work(lane)
                 if unavailable:
                     raise WorkLanePauseRefused(retryable=True, source=unavailable)
                 if specs:
@@ -1834,7 +1854,7 @@ def _lifecycle_lane_rows_conn(conn, external_config=None) -> list[dict[str, Any]
     return lanes
 
 
-def _reconcile_lane_lifecycle_conn(conn, external_config=None, activity_reader=None) -> dict[str, Any]:
+def _reconcile_lane_lifecycle_conn(conn, external_config=None, activity_reader=None, capture_age_reader=None) -> dict[str, Any]:
     stamp = _now()
     completed: list[str] = []
     settled: list[str] = []
@@ -1845,7 +1865,7 @@ def _reconcile_lane_lifecycle_conn(conn, external_config=None, activity_reader=N
     except _ACTIVITY_READ_ERRORS:
         # An unavailable membership read is not a known empty lane.
         return {"completed": completed, "settled": settled, "reopened": reopened, "resumed": resumed}
-    activity = _LaneActivitySnapshot(conn, activity_reader)
+    activity = _LaneActivitySnapshot(conn, activity_reader, capture_age_reader)
     for lane in lanes:
         # Spec F's reversible archive mark is skipped by settling and reopening.
         if lane.get("archived_at"):

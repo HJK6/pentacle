@@ -115,6 +115,9 @@ class SessionReconciler:
         # a recovery owner (Daff only) can respawn it.  Wired by main.
         self.on_protected_dead: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self.cfg = config or ReconcileConfig()
+        coverage = getattr(presence, "lane_capture_age_s", None)
+        if coverage is not None:
+            self.store.lane_capture_age_reader = lambda rows: coverage(rows, self.cfg.interval_s)
         self._dead_episodes: dict[str, dict[str, Any]] = {}
         self._offline_episodes: dict[str, dict[str, Any]] = {}
         self._last_observations: dict[str, PresenceObservation] = {}

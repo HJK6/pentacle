@@ -777,17 +777,20 @@ def test_paused_lane_resumes_for_live_assigned_worker(tmp_path):
     run(body, str(tmp_path / 'resume.db'))
 
 
-@pytest.mark.parametrize('role,pane,expected', [('lead', 'pane_alive', True), ('qa', 'pane_alive', True),
-                                              (None, 'pane_alive', True), ('planner', 'pane_alive', False),
-                                              ('worker', 'pane_dead', False)])
-def test_resume_seat_eligibility(tmp_path, role, pane, expected):
+@pytest.mark.parametrize('role,pane,expected,working', [
+    ('lead', 'pane_alive', True, True), ('qa', 'pane_alive', True, True),
+    (None, 'pane_alive', True, True), ('planner', 'pane_alive', False, False),
+    ('worker', 'pane_dead', False, True), ('planner', 'pane_alive', True, True),
+], ids=['lead-pane_alive-True', 'qa-pane_alive-True', 'None-pane_alive-True',
+        'planner-pane_alive-False', 'worker-pane_dead-False', 'planner-working'])
+def test_resume_seat_eligibility(tmp_path, role, pane, expected, working):
     root = tmp_path / 'memory'
     async def body(env):
         lane = await build_lane(env, root, key='stream:seat', goal='seat', items=[('i1', 'in_progress')])
         from test_work_lanes import _lane_activity
         row = await env.store.open_session('host-a', 'seat', role=role, pane_status=pane, assigned_spec_id='spec_demo__i1')
         env.store.lane_presence_reader = lambda: [_lane_activity('host-a:seat', row['session_generation'],
-            working=role != 'planner', dead=pane == 'pane_dead')]
+            working=working, dead=pane == 'pane_dead')]
         result = await lifecycle(env)
         assert (lane['lane_id'] in result['resumed']) is expected
     run(body, str(tmp_path / 'seat.db'))
@@ -896,7 +899,10 @@ def test_excluded_backend_seat_cannot_resume(tmp_path, monkeypatch, excluded):
     if excluded == 'protected':
         monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'protected_worker')
     async def body(env):
-        lane = await build_lane(env, root, key='stream:excluded', goal='excluded', items=[('i1', 'in_progress')])
+        lead, generation = await env.seat('excluded-lead', role='lead', parent_stream_id=FD)
+        lane = await build_lane(env, root, key='stream:excluded', goal='excluded',
+                               items=[('i1', 'in_progress')], state='active',
+                               lead={'stream_id': lead, 'generation': generation})
         role = 'protected_worker' if excluded == 'protected' else 'worker'
         row = await env.store.open_session('host-a', 'candidate', provider='composite' if excluded == 'composite' else 'codex',
                                            role=role, assigned_spec_id='spec_demo__i1')
@@ -906,5 +912,11 @@ def test_excluded_backend_seat_cannot_resume(tmp_path, monkeypatch, excluded):
                              ('test-extra', 'host-a:candidate', row['session_generation'], 1, '2026-01-01T00:00:00Z'))
                 conn.commit()
             await env.store.submit(bind)
+        from test_work_lanes import _lane_activity, _pause_actual
+        # FD and protected are genuinely busy; a virtual seat does not
+        # produce pane captures at all and is still known inactive.
+        env.store.lane_presence_reader = lambda: [] if excluded == 'composite' else [
+            _lane_activity('host-a:candidate', row['session_generation'], working=True)]
+        assert (await _pause_actual(env, lane))['lane']['work_state'] == 'paused'
         assert lane['lane_id'] not in (await lifecycle(env))['resumed']
     run(body, str(tmp_path / 'excluded.db'))

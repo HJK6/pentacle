@@ -1121,15 +1121,27 @@ def test_actual_work_refuses_pause_without_mutation(evidence):
 
 
 @pytest.mark.parametrize("fault", ["membership", "absent", "stale", "generation", "presence_read", "external_config", "external_read"])
-def test_actual_work_unknown_refuses_pause_and_defers_resume(monkeypatch, fault):
+def test_actual_work_unknown_refuses_pause_and_defers_resume(tmp_path, monkeypatch, fault):
     from external_work import ExternalWorkConfig
     import store_external_work
     import store_work_lanes
+    from test_work_lane_completion import build_lane
     async def scenario(env):
-        lane, ids = await _actual_work_fixture(env)
-        worker, gen = await env.seat("actual-unknown", role="worker", assigned_spec_id=ids[0])
-        env.store.lane_presence_reader = lambda: [_lane_activity(worker, gen)]
-        before = await env.store.get_work_lane(lane["lane_id"])
+        root = tmp_path / "memory"
+        lead, generation = await env.seat("unknown-lead", role="lead", parent_stream_id=FD)
+        lane = await build_lane(env, root, key="stream:unknown-active", goal="unknown_a",
+                                state="active", items=[("unknown_a", "in_progress")],
+                                lead={"stream_id": lead, "generation": generation})
+        paused = await build_lane(env, root, key="stream:unknown-paused", goal="unknown_p",
+                                  items=[("unknown_p", "in_progress")])
+        worker, gen = await env.seat("actual-unknown", role="worker", assigned_spec_id="spec_demo__unknown_a")
+        spare, spare_gen = await env.seat("actual-unknown-paused", role="worker", assigned_spec_id="spec_demo__unknown_p")
+        env.store.lane_presence_reader = lambda: [_lane_activity(worker, gen),
+                                                   _lane_activity(spare, spare_gen, working=True)]
+        async def persisted(lid):
+            return await env.store.submit(lambda c: (
+                store_work_lanes.lane_row_conn(c, lid), store_work_lanes.lane_events_conn(c, lid)))
+        before, before_paused = await persisted(lane["lane_id"]), await persisted(paused["lane_id"])
         with monkeypatch.context() as patch:
             if fault == "membership":
                 original = store_work_lanes.effective_membership_ids_conn
@@ -1153,29 +1165,20 @@ def test_actual_work_unknown_refuses_pause_and_defers_resume(monkeypatch, fault)
             else:
                 rows = [] if fault == "absent" else [_lane_activity(
                     worker, "replaced" if fault == "generation" else gen,
-                    age=3600 if fault == "stale" else 0)]
+                    age=3600 if fault == "stale" else 0), _lane_activity(
+                    spare, "replaced" if fault == "generation" else spare_gen,
+                    age=3600 if fault == "stale" else 0, working=True)]
                 patch.setattr(env.store, "lane_presence_reader", lambda: rows)
             with pytest.raises(ValueError, match="work_lane_pause_activity_unavailable") as exc:
                 await _pause_actual(env, lane)
             assert getattr(exc.value, "details", {}).get("retryable") is True
-            # Independent lifecycle control: a pre-existing paused row must
-            # stay paused while exactly the same input remains unknown.
-            await env.store.submit(lambda c: _seed_actual_paused(c, lane["lane_id"]))
+            assert await persisted(lane["lane_id"]) == before
             assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
-        actual = await env.store.get_work_lane(lane["lane_id"])
-        assert actual["lane"]["version"] == before["lane"]["version"] and actual["events"] == before["events"]
-        assert actual["lane"]["work_state"] == "paused"
-        await env.store.submit(lambda c: _seed_actual_paused(c, lane["lane_id"], "active"))
-        paused = (await _pause_actual(env, lane))["lane"]
-        env.store.lane_presence_reader = lambda: [_lane_activity(worker, gen, working=True)]
+            assert await persisted(paused["lane_id"]) == before_paused
+        assert (await _pause_actual(env, lane))["lane"]["work_state"] == "paused"
         assert (await env.store.reconcile_lane_lifecycle())["resumed"] == [paused["lane_id"]]
         assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
     run(scenario)
-
-
-def _seed_actual_paused(conn, lid, state="paused"):
-    with conn:
-        conn.execute("UPDATE v2_assistant_composite_lanes SET work_state=? WHERE lane_id=?", (state, lid))
 
 
 def test_actual_work_explicitly_disabled_and_dead_assignment_allow_pause():
@@ -1262,4 +1265,141 @@ def test_actual_work_unknown_local_source_defers_even_a_working_external_packet(
         env.store.lane_presence_reader = lambda: [_lane_activity(worker, gen)]
         assert (await env.store.reconcile_lane_lifecycle())["resumed"] == [lane["lane_id"]]
         assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
+    run(scenario)
+
+
+@pytest.mark.parametrize("direction", ["pause", "resume"])
+def test_reviewed_lane_defer_stale_authoritative_placement(tmp_path, direction):
+    from test_work_lane_completion import build_lane
+    from test_work_lane_goals import write_item, scanner, reconcile
+    root = tmp_path / "worktree"
+
+    async def scenario(env):
+        lead, generation = await env.seat("placement-lead", role="lead", parent_stream_id=FD)
+        active = await build_lane(env, root, key="stream:placement-active", goal="active",
+                                  state="active", items=[("placement_active", "in_progress")],
+                                  lead={"stream_id": lead, "generation": generation})
+        paused = await build_lane(env, root, key="stream:placement-paused", goal="paused",
+                                  items=[("placement_paused", "in_progress")])
+        source = scanner(root)
+        one = await env.seat("placement-idle", role="worker", assigned_spec_id="spec_demo__placement_active")
+        two = await env.seat("placement-busy", role="worker", assigned_spec_id="spec_demo__placement_paused")
+        env.store.lane_presence_reader = lambda: [_lane_activity(*one), _lane_activity(*two, working=True)]
+        for label in ("active", "paused"):
+            write_item(root, "placement_" + label, status="in_progress", epic="epic_unresolved")
+        await reconcile(env.store, source)
+        before = [await env.store.get_work_lane(row["lane_id"]) for row in (active, paused)]
+        for shown in before:
+            assert shown["_projection_row"]["_work_index_available"]
+            assert all(goal["quality"]=="fresh" for goal in shown["_projection_row"]["_goals"].values())
+            assert shown["members"][0]["observation"]["error"] == "work_goal_reference_unresolved"
+        if direction == "pause":
+            with pytest.raises(ValueError, match="work_lane_pause_activity_unavailable") as exc:
+                await _pause_actual(env, before[0]["lane"])
+            assert getattr(exc.value, "details", {}).get("retryable")
+        else:
+            assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
+        for prior in before:
+            after = await env.store.get_work_lane(prior["lane"]["lane_id"])
+            assert after["lane"] == prior["lane"] and after["events"] == prior["events"]
+
+        for label in ("active", "paused"):
+            write_item(root, "placement_" + label, status="in_progress", epic="epic_" + label)
+        await reconcile(env.store, source)
+        restored = (await env.store.get_work_lane(active["lane_id"]))["lane"]
+        assert (await _pause_actual(env, restored))["lane"]["work_state"] == "paused"
+        assert (await env.store.reconcile_lane_lifecycle())["resumed"] == [paused["lane_id"]]
+        assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
+
+    run(scenario)
+
+
+@pytest.mark.parametrize("outer_cap", [2, 3, 200])
+def test_reviewed_lane_rotating_presence_resumes_once_without_widening_stale(tmp_path, monkeypatch, outer_cap):
+    import time
+    from types import SimpleNamespace
+    from external_work import ExternalWorkConfig
+    from presence import PresenceConfig, PresenceObservation, RemotePresence
+    from reconciler import ReconcileConfig, SessionReconciler
+    from sessions import Sessions
+    from test_work_lane_completion import build_lane
+
+    clock = [2_000_000_000.]
+
+    async def scenario(env):
+        ids = [f"spec_demo__rotation_{n}" for n in range(4)]
+        lane = await build_lane(env, tmp_path / "memory", key="stream:rotation", goal="rotation",
+                                items=[(f"rotation_{n}", "in_progress") for n in range(4)])
+        members = (await env.store.get_work_lane(lane["lane_id"]))["members"]
+        assert {m["spec_id"] for m in members} == set(ids)
+        assert all(m["observation"]["quality"] == "fresh" for m in members)
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        workers = [await env.seat(f"rotation-{n}", role="worker", assigned_spec_id=identity,
+                                  pane_status="pane_alive") for n, identity in enumerate(ids)]
+        sessions = Sessions(env.store, local_host="host-a")
+        await sessions.refresh()
+        for sid, _ in workers:
+            sessions.apply_live(sid, online=True, pane_status="pane_alive")
+        async def silent():
+            pass
+        hosts = SimpleNamespace(local_host="host-a", peers={}, is_online=lambda _: True)
+        presence = RemotePresence(sessions, hosts, config=PresenceConfig(max_rows_per_pass=outer_cap, preview_max_rows_per_pass=1,
+                                  preview_cache_ttl_s=0), inventory_emitter=SimpleNamespace(emit_if_changed=silent))
+        SessionReconciler(sessions, hosts, presence=presence, config=ReconcileConfig(interval_s=60))
+        env.store.external_work_config = ExternalWorkConfig("disabled")
+        continuous = workers[-1][0]
+        captures = []
+        async def fake_capture(host, row, semaphore):
+            key = presence._preview_key(row)
+            captures.append(key[0])
+            return key, "pane", "preview", {"working": key[0] == continuous}, "idle"
+        monkeypatch.setattr(presence, "_capture_pane_read", fake_capture)
+        seen = []
+        for n in range(8):
+            selected = presence.select_rows()
+            assert len(selected) == min(outer_cap, 4)
+            presence.last_rows = {"host-a": selected}
+            presence.last_observations = {"host-a": PresenceObservation("host-a", "host_online_tmux_present",
+                                        alive={row["session_name"]: "fixture" for row in selected})}
+            before = len(captures)
+            await presence.capture_previews()
+            assert len(captures) == before + 1
+            # The continuously working seat is also refreshed by the hot path.
+            sessions.apply_live(continuous, **{"capture_observed_at": clock[0],
+                "capture_generation": workers[-1][1], "capture_liveness": "idle", "working": True})
+            seen.append((await env.store.reconcile_lane_lifecycle())["resumed"])
+            clock[0] += 60
+        assert set(captures) == {worker[0] for worker in workers}
+        assert not any(seen[:2])
+        assert [value for batch in seen for value in batch] == [lane["lane_id"]]
+        assert (await env.store.get_work_lane(lane["lane_id"]))["lane"]["version"] == lane["version"] + 1
+        assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
+
+        # After more than a coverage rotation, old captures no longer qualify.
+        clock[0] += 3600
+        fresh = (await env.store.get_work_lane(lane["lane_id"]))["lane"]
+        with pytest.raises(ValueError, match="work_lane_pause_activity_unavailable"):
+            await _pause_actual(env, fresh)
+
+    run(scenario, str(tmp_path / "rotation.db"))
+
+
+def test_reviewed_lane_failed_presence_is_read_once_per_transaction(tmp_path):
+    from test_work_lane_completion import build_lane
+    root = tmp_path / "memory"
+
+    async def scenario(env):
+        for n in range(2):
+            await build_lane(env, root, key=f"stream:presence_read_{n}", goal=f"presence{n}",
+                             items=[(f"presence_read_{n}", "in_progress")])
+            await env.seat(f"failed-presence-{n}", role="worker", assigned_spec_id=f"spec_demo__presence_read_{n}")
+        calls = []
+        def failed():
+            calls.append(True)
+            raise OSError("fixture unavailable")
+        env.store.lane_presence_reader = failed
+        assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
+        assert len(calls) == 1
+        assert (await env.store.reconcile_lane_lifecycle())["resumed"] == []
+        assert len(calls) == 2
     run(scenario)
