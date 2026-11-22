@@ -250,3 +250,96 @@ def test_pre_account_database_opens_additively_and_reopens_idempotently(tmp_path
         assert all(counts[table] == 0 for table in account_tables)
         assert _generations(path) == original_generations
         assert _version(path) == original_version == SCHEMA_VERSION
+
+
+def test_store_activity_and_owed_indexes_on_existing_database(tmp_path, monkeypatch, request, capsys):
+    import json
+    from types import SimpleNamespace
+
+    from assistant_owed import OwedItems
+    from store_routing import _insert_outbound_notice_conn
+
+    path = tmp_path / "store.db"
+    store = Store(str(path))
+    store.start()
+    store.stop()
+
+    indexes = {"idx_sessions_open", "idx_session_event_tail_activity", "idx_v2_outbound_delivered_owed"}
+    stream = "fixture:seat"
+    birth = "2025-01-01T00:00:00Z"
+    winner = "2099-01-01T07:00:00-05:00"
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        receipt = {"sqlite_version": sqlite3.sqlite_version,
+                   "sqlite_source_id": conn.execute("SELECT sqlite_source_id()").fetchone()[0]}
+        for name, value in receipt.items():
+            request.node.user_properties.append((name, value))
+        with capsys.disabled():
+            print("STORE_SQLITE_RUNTIME " + json.dumps(receipt, sort_keys=True), flush=True)
+
+        # Model a pre-index writer on the existing Store schema. A bare julianday
+        # expression index would reject the clock-relative row during the next boot.
+        for name in sorted(indexes):
+            conn.execute(f"DROP INDEX IF EXISTS {name}")
+        conn.execute("""INSERT INTO sessions(host,session_name,provider,visibility,status,created_at)
+                        VALUES('fixture','seat','codex','hidden','open',?)""", (birth,))
+        for stamp in ("now", winner):
+            conn.execute("""INSERT INTO session_event_tail
+                            (stream_id,session_created_at,event_key,event_json,event_ts,recorded_at)
+                            VALUES(?,?,?,'{"kind":"TOOL"}',?,1)""", (stream, birth, stamp, stamp))
+        conn.execute("""INSERT INTO v2_assistant_owed
+                        (owed_id,stream_id,label,source_kind,source_id,source_ids,state,
+                         actor_stream_id,actor_generation,created_at,source_at)
+                        VALUES('episode',?,'test','message','message','[]','closed',?,'generation',?,?)""",
+                     (stream, stream, birth, birth))
+        _insert_outbound_notice_conn(conn, notice_id="notice", kind="owed_due", dedupe_key="notice",
+                                     recipient_stream_id=stream, tell_id="notice", body="test",
+                                     source_stream_id=stream, episode_id="episode", created_at=birth)
+
+    # Capacity state is unrelated to activity projection and lives in kv.
+    monkeypatch.setattr("store_capacity_retry.load", lambda conn, sid: None)
+    owed = OwedItems(SimpleNamespace(store=store, config=SimpleNamespace(stream_id=stream, name="fixture"),
+                                     _env_binding=dict))
+
+    async def migrate_and_write():
+        existing = await store.submit(lambda c: {row[0] for row in c.execute(
+            "SELECT name FROM sqlite_schema WHERE type='index'")})
+        assert indexes <= existing, f"Store boot omitted indexes: {sorted(indexes - existing)}"
+        assert await store.claim_outbound_notice("notice", owner="fixture-owner", lease_s=60, force=True)
+        assert await store.complete_outbound_notice("notice", owner="fixture-owner")
+
+        statements = []
+        await store.submit(lambda c: c.set_trace_callback(statements.append))
+        try:
+            seat, = await store.list_open_sessions_with_event_summary()
+            assert (seat["stream_id"], seat["last_event_at"]) == (stream, winner)
+            await owed.tick()
+        finally:
+            await store.submit(lambda c: c.set_trace_callback(None))
+
+        inventory, = (sql for sql in statements if "AS _bootstrap_event_seen" in sql)
+        repair, = (sql for sql in statements if "UPDATE v2_assistant_owed" in sql and "min(delivered_at)" in sql)
+        for sql, expected in ((inventory, ("idx_sessions_open", "idx_session_event_tail_activity")),
+                              (repair, ("idx_v2_outbound_delivered_owed",))):
+            plan = await store.submit(lambda c: [row[3] for row in c.execute("EXPLAIN QUERY PLAN " + sql)])
+            for name in expected:
+                assert any(name in line.split() for line in plan), (name, plan)
+        assert await store.append_session_event(stream, {"kind": "TOOL", "timestamp": "2100-01-01"},
+                                                identity="later", limit=500)
+
+    store.start()
+    try:
+        asyncio.run(migrate_and_write())
+    finally:
+        store.stop()
+    store.start()
+    try:
+        seat, = asyncio.run(store.list_open_sessions_with_event_summary())
+        assert seat["last_event_at"] == "2100-01-01"
+        with sqlite3.connect(path) as conn:
+            ack, delivered = conn.execute("""SELECT o.due_notice_at,n.delivered_at FROM v2_assistant_owed o
+                                            JOIN v2_outbound_notices n ON o.owed_id=n.episode_id
+                                            WHERE o.stream_id=n.source_stream_id AND n.notice_id='notice'""").fetchone()
+            assert delivered and ack == delivered
+    finally:
+        store.stop()
