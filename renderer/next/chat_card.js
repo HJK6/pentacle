@@ -159,7 +159,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     const s = session();
     if (!s) return;
     const previous = mode;
-    if (previous === 'thread') history.set(selected, { mode: previous, scroll: body.scrollTop });
+    if (previous === 'thread') history.set(selected, { scroll: body.scrollTop });
     mode = nextMode(mode, requested);
     if (mode === 'terminal') void composer?.cancelRecording();
     if (previous === 'terminal' && mode !== 'terminal') disposeTerminal();
@@ -190,7 +190,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     if (id === selected) return;
     ++selection;
     if (selected && selected !== NEW_CHAT) history.set(selected, {
-      mode, scroll: mode === 'thread' && !card.hidden ? body.scrollTop : history.get(selected)?.scroll ?? null,
+      scroll: mode === 'thread' && !card.hidden ? body.scrollTop : history.get(selected)?.scroll ?? null,
     });
     newChatControl?.destroy();
     newChatControl = null;
@@ -208,7 +208,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     body.scrollTop = 0;
     const previous = id ? history.get(id) : null;
     restoredScroll = previous?.scroll ?? null;
-    mode = id === NEW_CHAT ? 'new' : previous?.mode ?? 'thread';
+    mode = id === NEW_CHAT ? 'new' : 'thread';
     renderMode();
     if (id === NEW_CHAT) void paintNewChat(selection);
     else if (id) {

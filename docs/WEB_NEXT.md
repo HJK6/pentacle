@@ -31,16 +31,17 @@ this browser profile. Pane placement, widths and open cards reset on reload.
 The stage has room for up to two main panes plus Lanes. Choose a chat from
 **Chats** to show it beside the last-used pane, replacing the other pane as
 needed. Choosing a chat already visible just uses it in place. Both chats have
-their own draft, transcript position and mode; closing a card does not close
-its session. Starting a recording in another pane stops and discards the
+their own draft and transcript position. Mode belongs to the card and resets
+to thread when it changes chats. Closing a card does not close its session. Starting a recording in another pane stops and discards the
 previous recording. A dashboard link opens beside the chat that contains it.
 
 The Assistant's rail mark sends the Assistant aside without closing a chat.
 Press it again to return the pane if there is room, or open it over the stage
 when there is not. Escape, another press of the mark, or a press outside the
 overlay dismisses it. **Keep [Assistant name] on screen** returns it to the
-stage, replacing the chat not used last when both chats were showing. The
-Assistant comes back automatically if the last open section closes.
+stage, replacing the chat not used last when both chats were showing, or
+dismissing the open card when a narrow desktop cannot fit it beside the
+Assistant. Its session stays in Chats. The Assistant comes back automatically if the last open section closes.
 
 Drag a section's header with the primary pointer to rearrange it. The side
 strips dock a section to a half; the top strip makes a chat or dashboard

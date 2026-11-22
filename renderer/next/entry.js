@@ -71,8 +71,11 @@ function applyLaneFrame(frame) {
     pendingLaneLink = null;
   }
 }
+function readSetting(key) {
+  try { return window.localStorage.getItem(key); } catch { return null; }
+}
 const railKey = 'pentacle.next.rail';
-const state = { layout: layout.createLayoutState(innerWidth, localStorage.getItem(railKey)), popover: null, hosts: {}, connected: false };
+const state = { layout: layout.createLayoutState(innerWidth, readSetting(railKey)), popover: null, hosts: {}, connected: false };
 const icons = {
   lanes: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12m-2.2 0a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0-4.4 0M5 6m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M19 6m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M12 20m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M6.4 7.2l3.9 3.3M17.6 7.2l-3.9 3.3M12 14.2v4"/></svg>',
   questions: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.6a2.5 2.5 0 1 1 3.7 2.2c-.8.5-1.2 1-1.2 1.8M12 16.8h.01"/></svg>',
@@ -465,7 +468,7 @@ for (const dashboard of [designCard, melodyCard]) {
   dashboard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
   dashboard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
 }
-const theme = localStorage.getItem('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
+const theme = readSetting('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
 let assistantHistory = null;
 questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(), questionReadFailed: () => questionNotifications.readFailed(),
   onOpenSpec: specId => { const placement = questionsControl.getSnapshot().list.find(item => item.placement?.specId === specId)?.placement; closePopover(); if (placement?.laneId) { openLaneTarget(placement.laneId, placement.goalId); lanesControl?.openSpec(placement.laneId, placement.goalId, specId); } },

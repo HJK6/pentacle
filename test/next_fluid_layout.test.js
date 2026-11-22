@@ -72,7 +72,14 @@ test('U2 mark toggles actual stage/overlay, preserves sessions and remembers use
   const underlying = dash(one);
   const afterSolo = layout.keepAssistant(layout.toAssistant(layout.toggleFullScreen(underlying, 'dash', W), W), W);
   assert.deepEqual(seats(afterSolo), seats(underlying), 'Keep only leaves solo when a pair is already behind it');
-  assert.equal(layout.toAssistant(open(fresh(640), 'a', 640), 640).overlay, true);
+  const narrow = layout.toAssistant(open(fresh(640), 'a', 640), 640);
+  assert.equal(narrow.overlay, true);
+  const keptNarrow = layout.keepAssistant(narrow, 640);
+  assert.deepEqual(layout.visibleSeats(keptNarrow, 640), ['assistant'],
+    'Keep actually puts Assistant on the narrow stage');
+  assert.equal(keptNarrow.overlay, false);
+  assert.equal(keptNarrow.chat, null);
+  assert.equal(narrow.chat, 'a', 'Keep does not mutate the input state');
   assert.equal(layout.toAssistant(layout.toAssistant(open(fresh(640, 'top'), 'a', 640), 640), 640).overlay, false);
   const explicit = layout.toAssistant(open(fresh(), 'a'), W);
   const covered = layout.toAssistant(open(explicit, 'b'), W);

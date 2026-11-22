@@ -254,6 +254,11 @@ function keepAssistant(state, width) {
   next.last = 'assistant';
   next.peek = null;
   next.aside = next.overlay = false;
+  // A narrow desktop cannot keep even one chat/dashboard beside Assistant.
+  // Remove the card bindings, not the sessions, just as on the two-chat path.
+  if (width >= PHONE_WIDTH && roomAt(width, next.rail) < MIN_WIDTH.assistant + MIN_WIDTH.chat) {
+    next.chat = next.chat2 = next.dash = null;
+  }
   return next;
 }
 

@@ -10,13 +10,16 @@ const entryRequire = createRequire(entry);
 const laneCore = require('../pentacle-chat-core/src/services/workLanes.ts');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function openShell(t, width = 1440, storedRail = null) {
+function openShell(t, width = 1440, storedRail = null, storageUnavailable = false) {
   const dom = new JSDOM('<main id="app"></main>', { url: 'https://fixture.invalid/next/', runScripts: 'outside-only' });
   const { window } = dom;
   t.after(() => window.close());
   window.innerWidth = width;
   window.fetch = async () => { throw new Error('offline shell makes no network requests'); };
   if (storedRail) window.localStorage.setItem('pentacle.next.rail', storedRail);
+  if (storageUnavailable) Object.defineProperty(window, 'localStorage', {
+    get() { throw new window.DOMException('Storage unavailable', 'SecurityError'); },
+  });
   window.requestAnimationFrame = fn => setImmediate(fn);
   window.ResizeObserver = class { observe() {} disconnect() {} };
   if (!window.HTMLElement.prototype.setPointerCapture) {
@@ -80,7 +83,7 @@ function draft(shell, section, text) {
   return input;
 }
 
-test('fluid shell uses two actual card controllers and preserves draft, status mode and scroll across replacement', async t => {
+test('fluid shell uses two actual card controllers and preserves draft and scroll, but starts in thread on replacement', async t => {
   const s = openShell(t);
   await flush();
   s.choose('a'); s.choose('b');
@@ -99,9 +102,7 @@ test('fluid shell uses two actual card controllers and preserves draft, status m
   assert.equal(s.$('[data-pane=chat2] [data-next-message]').value,'B draft');
   s.$('[data-pane=chat2] [data-next-message]').focus();
   s.choose('a');
-  assert.equal(s.$('[data-pane=chat] .status').hidden,false, 'the returning stream keeps status mode');
-  assert.match(s.$('[data-pane=chat] .status').textContent,/Goal a/);
-  s.$('[data-pane=chat] [aria-label=Status]').click();
+  assert.equal(s.$('[data-pane=chat] .status').hidden,true, 'the returning stream starts in thread mode');
   assert.equal(s.$('[data-pane=chat] .thread').scrollTop,37);
   assert.equal(s.$('[data-pane=chat2] [data-next-message]').value,'B draft');
   for (let i=0;i<2;i++) { s.$('button[aria-label=Chats]').click(); s.$('.popover [aria-label="New chat"]').click(); }
@@ -142,4 +143,43 @@ test('fluid shell sidebar reads storage and mark preserves the hidden chat benea
   s.$('[aria-label="Keep Fixture Assistant on screen"]').click();
   assert.equal(s.shown().length,1);
   assert.equal(s.shown()[0].querySelector('.thread-inner').dataset.streamId,'fixture:b');
+});
+
+
+test('returning to a chat that last used terminal starts in thread in a single card', async t => {
+  const s = openShell(t, 440);
+  await flush();
+  s.choose('a');
+  s.$('[data-pane=chat] [aria-label=Terminal]').click();
+  for (let i=0;i<5;i++) await flush();
+  assert.deepEqual(s.calls.filter(row => row[0]==='create').map(row => row.slice(1,3)), [[0,'a']]);
+  s.choose('b');
+  s.choose('a');
+  for (let i=0;i<5;i++) await flush();
+  assert.equal(s.$('[data-pane=chat] .terminal').hidden,true);
+  assert.equal(s.$('[data-pane=chat] .thread').hidden,false);
+  assert.deepEqual(s.calls.filter(row => row[0]==='create').map(row => row.slice(1,3)), [[0,'a']],
+    'selecting A again did not open a second PTY');
+});
+
+test('narrow Keep puts Assistant on stage without losing the session in Chats', async t => {
+  const s = openShell(t, 640);
+  await flush();
+  s.choose('a');
+  s.$('.rail .brand').click();
+  assert.equal(s.$('.assistant-overlay').hidden, false);
+  s.$('[aria-label="Keep Fixture Assistant on screen"]').click();
+  assert.equal(s.$('[data-pane=assistant]').hidden, false);
+  assert.equal(s.shown().length, 0);
+  s.choose('a');
+  assert.equal(s.shown()[0].querySelector('.thread-inner').dataset.streamId,'fixture:a');
+});
+
+test('storage denial falls back to a left rail and still starts the workspace', async t => {
+  const s = openShell(t, 1440, null, true);
+  await flush();
+  assert.equal(s.$('html').dataset.rail, 'left');
+  assert.equal(s.$('[data-pane=assistant]').hidden, false);
+  s.choose('a');
+  assert.equal(s.shown()[0].querySelector('.thread-inner').dataset.streamId, 'fixture:a');
 });

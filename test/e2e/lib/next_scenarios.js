@@ -177,8 +177,16 @@ async function newChat(ctx) {
   report.ok('an admitted listed session opens its ordinary chat and is recorded', await session.eval("window.__pentacleNextAdmitted.includes('local:web-gate-1') && !!document.querySelector('.card [aria-label=\"Terminal\"]')"));
   await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]'); await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs }); await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
   await session.eval(`window.__nextReply={ok:true,streamId:'local:web-gate-empty',session:{...window.PentacleChatStore.getState().sessions.find(s=>s.stream_id==='local:web-gate-empty'),state:'ready'}}; true`);
-  await session.click('[data-testid="start-chat"]'); await session.waitFor("window.__pentacleNextAdmitted.includes('local:web-gate-empty') && !!document.querySelector('.card [data-next-composer]')",{timeoutMs:ctx.timeoutMs});
-  report.ok('an ordinary ready reply opens the empty session and records its ID',await session.eval("!!document.querySelector('.card-title').textContent && !document.querySelector('.card .thread-inner .slot-chat-row') && !document.querySelector('.new-chat-host:not([hidden])')"));
+  await session.click('[data-testid="start-chat"]');
+  const empty = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-empty"])';
+  const stillOpen = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-1"])';
+  await session.waitFor(`window.__pentacleNextAdmitted.includes('local:web-gate-empty') && !!document.querySelector(${JSON.stringify(empty + ' [data-next-composer]')})`, {timeoutMs:ctx.timeoutMs});
+  report.ok('an ordinary ready reply opens the empty session and records its ID', await session.eval(`(() => {
+    const card = document.querySelector(${JSON.stringify(empty)});
+    return !!card?.querySelector('.card-title').textContent.trim() &&
+      !card.querySelector('.thread-inner .slot-chat-row') && !card.querySelector('.new-chat-host:not([hidden])') &&
+      !!document.querySelector(${JSON.stringify(stillOpen)});
+  })()`));
   } finally { require('fs').rmSync(catalogFlag, { force:true }); }
 }
 module.exports.newChat = isolated(newChat);
@@ -335,8 +343,21 @@ async function voice(ctx) {
     await session.eval('window.__nextVoice.release(),true'); await session.waitFor("window.__nextVoice.sends.length===1",{timeoutMs:ctx.timeoutMs});
     report.ok('transcribed voice reaches the shared send bridge',await session.eval("window.__nextVoice.sends[0].text.includes('Hermetic server transcript')"));
     await session.send('Runtime.evaluate',{expression:"document.querySelector('.card [data-next-mic]').click()",userGesture:true}); await session.waitFor("!!document.querySelector('.card [data-next-voice-bars]')",{timeoutMs:ctx.timeoutMs});
-    await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
-    await session.waitFor("window.__nextVoice.media.at(-1).stream.getTracks().every(t=>t.readyState==='ended')",{timeoutMs:ctx.timeoutMs});
+    const takeCard = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-1"])';
+    const otherCard = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-survivor"])';
+    await useFluid(session, takeCard + ' .card-title');
+    await chooseChat(session, 'local:web-gate-survivor');
+    await session.waitFor(`!!document.querySelector(${JSON.stringify(otherCard)})`, {timeoutMs:ctx.timeoutMs});
+    report.ok('adding a second card keeps the first take recording', await session.eval(
+      `!!document.querySelector(${JSON.stringify(takeCard + ' [data-next-voice-bars]')}) &&
+        window.__nextVoice.media.at(-1).stream.getTracks().every(t=>t.readyState==='live') &&
+        window.__nextVoice.sends.length===1`));
+    await session.click(otherCard + ' [aria-label="Close"]');
+    await useFluid(session, '[data-pane=assistant] .thread');
+    await chooseChat(session, 'local:web-gate-survivor');
+    await session.waitFor(`!document.querySelector(${JSON.stringify(takeCard)}) &&
+      !!document.querySelector(${JSON.stringify(otherCard)}) &&
+      window.__nextVoice.media.at(-1).stream.getTracks().every(t=>t.readyState==='ended')`,{timeoutMs:ctx.timeoutMs});
     report.ok('changing chats stops and discards an in-progress take', await session.eval("window.__nextVoice.sends.length===1 && !document.querySelector('[data-next-voice-pending]')"));
   } finally { await session.eval('window.__nextVoice.restore()'); require('fs').rmSync(path.join(ctx.runtime.fixtureScratch, 'asr-release'), { force: true }); }
 }
@@ -806,12 +827,15 @@ module.exports.fluidMove = isolated(async ctx => {
     fluidCheck(ctx,'secondary button does not lift', !(await fluidRead(s)).zone);
     await mouse(s,'mouseReleased',point[0]+450,point[1]+120,'right');
 
-    for (const control of [`${pane('chat')} [aria-label=Terminal]`, `${pane('chat')} [data-next-message]`]) {
+    for (const [control, label] of [
+      [`${pane('chat')} [aria-label=Terminal]`, 'header terminal button'],
+      [`${pane('chat')} [data-next-message]`, 'composer field outside the header'],
+    ]) {
       const r = await bounds(s,control);
       const a = [r.left+r.width/2,r.top+r.height/2];
       await mouse(s,'mousePressed',...a);
       await mouse(s,'mouseMoved',a[0]+60,a[1]+80);
-      fluidCheck(ctx,`interactive control does not lift: ${control}`, !(await fluidRead(s)).zone);
+      fluidCheck(ctx,`${label} does not lift`, !(await fluidRead(s)).zone);
       await mouse(s,'mouseReleased',a[0]+60,a[1]+80);
     }
     for (const trigger of ['Chats','Settings']) {
@@ -832,8 +856,19 @@ module.exports.fluidMove = isolated(async ctx => {
     const rail = await bounds(s,'.rail [aria-label="Settings"]');
     const under = [rail.left+rail.width/2,rail.top+rail.height/2];
     await mouse(s,'mouseMoved',...under);
+    await s.eval(`(() => {
+      window.__fluidReleaseClicks = [];
+      window.__fluidRecordClick = e => window.__fluidReleaseClicks.push(e.target.nodeName);
+      document.addEventListener('click', window.__fluidRecordClick);
+      return true;
+    })()`);
     await mouse(s,'mouseReleased',...under);
-    fluidCheck(ctx,'drop over settings is not a click on settings', await s.eval("document.querySelector('.popover').hidden"));
+    const release = await s.eval(`new Promise(resolve => requestAnimationFrame(() => {
+      document.removeEventListener('click', window.__fluidRecordClick);
+      resolve({clicks: window.__fluidReleaseClicks, hidden: document.querySelector('.popover').hidden});
+      delete window.__fluidRecordClick; delete window.__fluidReleaseClicks;
+    }))`);
+    fluidCheck(ctx,'drop above settings delivers no click to any page target', release.hidden && release.clicks.length===0,release);
 
     await s.click(`${pane('chat2')} [aria-label="Full screen"]`);
     const full = await bounds(s,`${pane('chat2')} .card-title`), f=[full.left+35,full.top+22];
@@ -892,9 +927,12 @@ module.exports.fluidBoundaries = isolated(async ctx => {
   fluidCheck(ctx,'grip changes only its two neighbours', Math.abs(moved.sizes.assistant-initial.sizes.assistant-90)<2 &&
     Math.abs(moved.sizes.chat-initial.sizes.chat+90)<2 && moved.sizes.lanes===344,{initial,moved});
   await s.send('Emulation.setDeviceMetricsOverride',{width:1600,height:900,deviceScaleFactor:1,mobile:false});
-  await s.waitFor('innerWidth===1600',{timeoutMs:ctx.timeoutMs});
+  await s.waitFor(`innerWidth===1600 && Math.abs(document.querySelector('[data-pane=chat]').getBoundingClientRect().width - ${moved.sizes.chat}) > 1`,{timeoutMs:ctx.timeoutMs});
   const resized=await fluidRead(s);
-  fluidCheck(ctx,'drag shares scale when the viewport changes', Math.abs(resized.sizes.assistant/resized.sizes.chat-moved.sizes.assistant/moved.sizes.chat)<.005,{moved,resized});
+  const growth=resized.sizes.assistant+resized.sizes.chat-moved.sizes.assistant-moved.sizes.chat;
+  fluidCheck(ctx,'drag shares scale when the viewport changes',
+    Math.abs(growth-160)<3 && Math.abs(resized.sizes.assistant/resized.sizes.chat-590/410)<.005 &&
+    Math.abs(moved.sizes.assistant/moved.sizes.chat-590/410)<.005 && resized.sizes.lanes===344,{moved,resized,growth});
   g=await bounds(s,'.grip:not([hidden])');
   for (const clickCount of [1,2]) {
     for (const type of ['mousePressed','mouseReleased']) await s.send('Input.dispatchMouseEvent',
