@@ -280,30 +280,30 @@ def test_codex_real_local_ingest_and_remote_push():
             assert sessions.list_open()[0]["last_tool_activity"]["category"] == "tool"
             await sessions.refresh()
             assert sessions.list_open()[0]["last_tool_activity"]["category"] == "tool"
-            remote = Sessions(store, local_host="hostc")
-            await remote.open("hostc", "v2-codex-current", provider="codex", created_at="2024-01-01T00:00:00Z", pane_pid="8123")
+            remote = Sessions(store, local_host="fixture-node")
+            await remote.open("fixture-node", "v2-codex-current", provider="codex", created_at="2024-01-01T00:00:00Z", pane_pid="8123")
             sink, _, _ = _sink(store, sessions=remote)
-            payload = _proven_codex_ev(CURRENT_CODEX_ROLLOUT, 1, stream_id="hostc:v2-codex-current")
+            payload = _proven_codex_ev(CURRENT_CODEX_ROLLOUT, 1, stream_id="fixture-node:v2-codex-current")
             payload.update(kind="TOOL_USE", text="exec_command")
             payload["raw"]["tool_name"] = "exec_command"
-            assert (await sink.handle_push(_push(sink, [payload], host="hostc")))["inserted"] == 1
+            assert (await sink.handle_push(_push(sink, [payload], host="fixture-node")))["inserted"] == 1
             assert remote.list_open()[0]["last_tool_activity"]["category"] == "tool"
             await remote.refresh()
-            assert next(r for r in remote.list_open() if r["stream_id"] == "hostc:v2-codex-current")["last_tool_activity"]["category"] == "tool"
-            raced = await remote.open("hostc", "v2-codex-raced", provider="codex", pane_pid="7001")
+            assert next(r for r in remote.list_open() if r["stream_id"] == "fixture-node:v2-codex-current")["last_tool_activity"]["category"] == "tool"
+            raced = await remote.open("fixture-node", "v2-codex-raced", provider="codex", pane_pid="7001")
             append = store.append_session_events_lifecycle_cas
             async def reopen_after_admission(entries, *, limit):
-                await store.mark_closed("hostc", "v2-codex-raced", pane_status="gone", closed_at="2026-10-26T02:00:00Z",
+                await store.mark_closed("fixture-node", "v2-codex-raced", pane_status="gone", closed_at="2026-10-26T02:00:00Z",
                                         expected_generation=raced["session_generation"])
-                await remote.open("hostc", "v2-codex-raced", provider="codex", pane_pid="7001")
+                await remote.open("fixture-node", "v2-codex-raced", provider="codex", pane_pid="7001")
                 return await append(entries, limit=limit)
             store.append_session_events_lifecycle_cas = reopen_after_admission
-            stale = _proven_codex_ev(CURRENT_CODEX_ROLLOUT, 2, stream_id="hostc:v2-codex-raced", pane_pid="7001")
+            stale = _proven_codex_ev(CURRENT_CODEX_ROLLOUT, 2, stream_id="fixture-node:v2-codex-raced", pane_pid="7001")
             stale.update(kind="TOOL_USE", text="exec_command", timestamp="2099-01-01T00:00:00Z")
             stale["raw"]["tool_name"] = "exec_command"
-            reply = await sink.handle_push(_push(sink, [stale], host="hostc"))
+            reply = await sink.handle_push(_push(sink, [stale], host="fixture-node"))
             assert reply["inserted"] == 0 and reply["dropped"][0]["reason"] == "lifecycle_changed"
-            assert "last_tool_activity" not in next(r for r in remote.list_open() if r["stream_id"] == "hostc:v2-codex-raced")
+            assert "last_tool_activity" not in next(r for r in remote.list_open() if r["stream_id"] == "fixture-node:v2-codex-raced")
         finally:
             _close_stream(state)
             store.stop()
