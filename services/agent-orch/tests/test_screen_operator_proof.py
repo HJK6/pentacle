@@ -251,3 +251,69 @@ def test_assistant_priorities_operator_uses_proof(protocol, action):
     assert [f["type"] for f in socket.frames] == ["hello", "pong", verb]
     assert socket.frames[0].get("auth_v2") and "token" not in socket.frames[0]
     assert "token" not in socket.frames[-1] and "stream_token" not in socket.frames[-1]
+
+
+def test_unsolicited_inventory_before_ready_preserves_correlated_release(protocol, monkeypatch):
+    cfg, socket = protocol
+    original_send = socket.send
+
+    async def send(raw):
+        await original_send(raw)
+        if json.loads(raw)["type"] == "hello":
+            socket.queue.insert(0, {"type": "session.inventory", "sessions": [{"id": "fixture:other"}]})
+
+    monkeypatch.setattr(socket, "send", send)
+    reply = asyncio.run(wsclient.screen_lease_once(
+        cfg, {"type": "screen.lease.release", "request_id": "fixture-release"}))
+    assert reply == {"type": "screen.lease.release.ok", "request_id": "fixture-release"}
+    assert [frame["type"] for frame in socket.frames] == ["hello", "pong", "screen.lease.release"]
+    assert socket.frames[-1]["request_id"] == "fixture-release"
+    assert socket.ready and socket.closed
+
+
+@pytest.mark.parametrize("fields", [
+    {"sessions": None},
+    {"sessions": {}},
+    {"sessions": [], "request_id": "fixture-release"},
+    {"sessions": [], "request_id": None},
+])
+def test_malformed_or_correlated_inventory_refuses_before_release(protocol, monkeypatch, fields):
+    cfg, socket = protocol
+    original_send = socket.send
+
+    async def send(raw):
+        await original_send(raw)
+        if json.loads(raw)["type"] == "hello":
+            socket.queue.insert(0, {"type": "session.inventory", **fields})
+
+    monkeypatch.setattr(socket, "send", send)
+    with pytest.raises(PermissionError, match="operator credential RPC admission refused"):
+        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.release"}))
+    assert [frame["type"] for frame in socket.frames] == ["hello"]
+    assert not socket.ready and socket.closed
+
+
+def test_inventory_stream_does_not_extend_readiness_deadline(protocol, monkeypatch):
+    from types import SimpleNamespace
+
+    cfg, socket = protocol
+    original_recv = socket.recv
+    now = 10.0
+    received = 0
+
+    async def recv():
+        nonlocal now, received
+        if not socket.frames:
+            return await original_recv()
+        received += 1
+        assert received <= 4, "inventory extended the original deadline"
+        now += .25
+        return json.dumps({"type": "session.inventory", "sessions": []})
+
+    monkeypatch.setattr(wsclient, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(socket, "recv", recv)
+    with pytest.raises(TimeoutError):
+        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.release"}, timeout=1))
+    assert received == 4
+    assert [frame["type"] for frame in socket.frames] == ["hello"]
+    assert not socket.ready and socket.closed
