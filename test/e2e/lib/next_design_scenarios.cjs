@@ -559,6 +559,10 @@ const pinnedPhone = design + '/' + project + '/phone-orders/' + phone;
 const pinnedScreen = design + route + '/' + prototype;
 
 async function seedDesignLinks(ctx) {
+  if (ctx.fixture) {
+    await wait(ctx, `window.PentacleChatStore?.getState().sessions.some(
+      row => row.stream_id === ${JSON.stringify(ctx.fixture.streamId)})`, 'workspace snapshot before link seed');
+  }
   const { revision } = await ctx.runtime.nextDesignFixture;
   const pngKey = createHash('sha256').update(PNG).digest('hex');
   const target = (design_id, view_id) => ({ project_id: project, design_id, ...(view_id ? { view_id } : {}) });
@@ -567,10 +571,12 @@ async function seedDesignLinks(ctx) {
   });
   const session = (stream_id, session_name, session_kind, display_name) => ({
     stream_id, session_name, session_kind, display_name, host: 'link-fixture', visibility: 'default',
+    provider: session_kind === 'assistant_composite' ? 'composite' : 'codex',
+    online: true, draft: '', last_text: '', last_kind: 'ASSIST',
     last_activity: '2026-01-01T12:00:00Z',
   });
   const sessions = [
-    session(linkAssistant, 'assistant', 'assistant_composite', 'Bart'),
+    session(linkAssistant, 'assistant', 'assistant_composite', 'Assistant'),
     session(linkChat, 'review', 'session', 'Design review fixture'),
   ];
   const event = (seq, stream, dashboard_link, withoutAttachment = false) => ({
@@ -618,7 +624,7 @@ async function designLinkJourney(ctx) {
   await click(ctx, preview);
   await atPath(ctx, pinnedScreen);
   await boardReady(ctx);
-  await check(ctx, 'Bart and the selected screen are visible, with the link outlined',
+  await check(ctx, 'Assistant and the selected screen are visible, with the link outlined',
     `!document.querySelector('.pane').hidden &&
       document.querySelector('${preview}').getAttribute('aria-pressed') === 'true' &&
       !!document.querySelector('.design-screen.is-current[data-view="${prototype}"]')`);
@@ -654,10 +660,10 @@ async function designLinkJourney(ctx) {
   await click(ctx, phonePreview);
   await atPath(ctx, pinnedPhone);
   await boardReady(ctx);
-  await check(ctx, 'Design follows the other chat while Bart steps aside',
+  await check(ctx, 'Design follows the other chat while Assistant steps aside',
     `document.querySelector('.pane').hidden && !document.querySelector('.card:not(.design-card):not(.lanes-card)').hidden`);
   await click(ctx, '.design-card [aria-label="Close"]');
-  await check(ctx, 'Bart returns after Design closes', '!document.querySelector(".pane").hidden');
+  await check(ctx, 'Assistant returns after Design closes', '!document.querySelector(".pane").hidden');
 
   await ctx.session.send('Page.navigate', { url: ctx.url });
   await wait(ctx, 'document.readyState === "complete" && !!document.getElementById("session-list")', 'old web workspace');

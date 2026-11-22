@@ -595,6 +595,8 @@ function renderTranscriptItemBodyHtml(
       </div>
     </div></article>`;
   }
+  if (item.dashboardLink && !options.showDashboardLinks && !item.text.trim() && !item.attachments?.length) return '';
+
   // bubble:assistant (and any unmapped fallback) -> assistant card.
   // An agent-authored image (the send_image path) rides as an assistant event
   // carrying attachments: render the same media button+img the operator's own

@@ -976,7 +976,7 @@ test('Next uses typed Design previews while legacy and malformed links keep thei
   };
   const cases = [
     makeEvent({ daemon_seq: 1, text: 'Look here', attachments: [png], raw: { dashboard_link: meta } }),
-    makeEvent({ daemon_seq: 2, text: 'Home chip', raw: { dashboard_link: { dashboard: 'design' } } }),
+    makeEvent({ daemon_seq: 2, text: '', raw: { dashboard_link: { dashboard: 'design' } } }),
     makeEvent({ daemon_seq: 3, text: 'Ordinary attachment', attachments: [png], raw: { dashboard_link: { ...meta, target: null } } }),
     makeEvent({ daemon_seq: 4, text: 'Text preview', raw: { dashboard_link: { dashboard: 'design', target: meta.target, revision_id: 'invalid' } } }),
   ];
@@ -1003,6 +1003,15 @@ test('Next uses typed Design previews while legacy and malformed links keep thei
     assert.equal(container.querySelector('[data-next-design-link]'), null);
     assert.equal(container.querySelectorAll('.slot-chat-media-button').length, 2);
     assert.match(container.textContent || '', /Look here/);
+
+    for (const type of ['snapshot', 'stream_events']) {
+      const restored = controllerWithEvents([]);
+      restored.applyFrame({ type, stream_id: STREAM, sessions: [makeSession()], events: [cases[1]] });
+      const saved = restored.selectSessionDetail(STREAM, { visibleCount: 120 });
+      container.innerHTML = renderTranscriptTimelineHtml(saved, CHROME, { showDashboardLinks: true });
+      assert.equal(container.querySelector('.next-design-chip')?.textContent, 'Design', type);
+      assert.equal(renderTranscriptTimelineHtml(saved, CHROME), '', type);
+    }
   } finally {
     dom.window.close();
   }
