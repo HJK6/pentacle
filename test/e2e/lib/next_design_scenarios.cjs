@@ -206,8 +206,10 @@ async function prototypes(ctx) {
     await ctx.cdp.sleep(200);
     await atPath(ctx, address);
     await ctx.session.eval('document.getElementById("stray-fixture").remove()');
-    await key(ctx, 'ArrowLeft');
+    // Keydown replaces the focused iframe. Release the key after the board takes focus.
+    await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowLeft' });
     await atPath(ctx, design + route + '/home');
+    await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowLeft' });
   });
   await click(ctx, nextButton);
   await atPath(ctx, address);
