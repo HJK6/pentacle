@@ -16,6 +16,7 @@ import { logTelemetry } from '../utils/telemetry';
 import { TELEMETRY_EVENTS } from '../utils/telemetryEvents';
 import { normalizePentacleHost } from './pentacleHosts';
 import { laneUpdateFromEvent, type PentacleLaneUpdate } from './workLanes';
+import { parseDashboardLinkEvent, type DashboardLink } from './dashboardLinks';
 import {
   coalesceInterpretedEvents,
   collapseCodeBlocks,
@@ -161,6 +162,7 @@ export type PentacleTranscriptItem = {
   publishKind?: PentacleAssistantPublishKind;
   // Typed lane-update card payload when publish_kind === 'lane_update'; `text` stays the summary.
   laneUpdate?: PentacleLaneUpdate;
+  dashboardLink?: DashboardLink;
   // Present on `agent-question-answer` rows: the durable notification this row echoes, so a
   // client holding the same answer as a resolved-notification projection can render one of them
   // rather than both.
@@ -760,6 +762,7 @@ function sameTranscriptItem(a: PentacleTranscriptItem, b: PentacleTranscriptItem
     a.laneUpdate?.update_id === b.laneUpdate?.update_id &&
     a.laneUpdate?.kind === b.laneUpdate?.kind &&
     a.laneUpdate?.summary === b.laneUpdate?.summary &&
+    JSON.stringify(a.dashboardLink) === JSON.stringify(b.dashboardLink) &&
     a.eventCase === b.eventCase &&
     a.displayRule === b.displayRule &&
     a.disclosure?.previewText === b.disclosure?.previewText &&
@@ -1795,6 +1798,7 @@ function buildSessionTranscriptRows(
     }
 
     const authoritativeSeq = authoritativeEventSeq(event);
+    const dashboardLink = parseDashboardLinkEvent(event);
     const nextItem: PentacleTranscriptItem = {
       id: event.optimistic_id || (Number.isFinite(authoritativeSeq) ? String(authoritativeSeq) : String(event.daemon_seq)),
       timestampLabel,
@@ -1830,6 +1834,7 @@ function buildSessionTranscriptRows(
       ...(event.lane_id ? { laneId: event.lane_id } : {}),
       ...(event.publish_kind ? { publishKind: event.publish_kind } : {}),
       ...laneUpdateField(event),
+      ...(dashboardLink ? { dashboardLink } : {}),
       ...(item.notificationId ? { notificationId: item.notificationId } : {}),
       ...(item.notificationAnswerText !== undefined ? { notificationAnswerText: item.notificationAnswerText } : {}),
     };

@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { createLibraryReader, contained, fileState, ID, HASH, sha256 } = require('../lib/design_library.cjs');
+const { createLibraryReader, contained, fileState, ID, HASH, sha256, designLinkPreview } = require('../lib/design_library.cjs');
 
 function publicItem(item, kind) {
   const out = { id: item.id, title: item.title, kind, entry: item.entry, surface: item.surface || item.screen || '', variant: item.variant || '', group: item.group || '', viewport: item.viewport, approval_ref: item.approval_ref || null, compatibility: item.compatibility, generated: item.generated || null, screenshots: item.screenshots || [], video: item.video || null, prototype: !!item.prepared };
@@ -56,7 +56,14 @@ function createDesignRoutes({ libraryRoot } = {}) {
       }
       // URL strings are never filesystem parameters until the exact manifest
       // allowlist has admitted them. Percent encodings are deliberately refused.
-      const asset = parts.join('/');
+      let asset = parts.join('/');
+      if (parts[0] === 'design-preview') {
+        const [, design, view] = parts;
+        if (![2, 3].includes(parts.length) || !ID.test(design) || (view !== undefined && !ID.test(view))) {
+          throw new Error('invalid design preview');
+        }
+        asset = designLinkPreview(loaded, design, view).file.path;
+      }
       const allow = new Set([...manifest.views, ...manifest.flows].flatMap(i => [...(i.screenshots || []).map(s => s.path), ...(i.video ? [i.video] : [])]));
       if (!allow.has(asset)) throw new Error('unknown media');
       const ext = path.extname(asset).toLowerCase();
