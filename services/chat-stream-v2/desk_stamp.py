@@ -2,8 +2,8 @@
 
 A small private map names the registry credentials that belong to desks. The
 daemon prefixes their sends so a receiver reads them as relayed content, and
-removing an entry (or the file) stops the stamp on the next send. This is
-attribution and per-credential revocation, not a reduction in privilege.
+removing an entry (or the file) stops the stamp on the next send. Relayed
+content carries the desk label as part of its stored body.
 """
 from __future__ import annotations
 
@@ -56,22 +56,8 @@ def stamp_message(msg: dict[str, Any]) -> dict[str, Any]:
     return stamp_with_label(msg)[0]
 
 
-def display_body(body: str, label: str | None) -> str:
-    return f"[from {label}]\n{sanitize_injectable(body)}" if label and body else body
-
-
-def route_display_body(route: dict[str, Any]) -> str:
-    """Render the preserved desk label on a canonical route's literal text."""
-    try:
-        payload = json.loads(route.get("route_json") or "{}")
-    except (TypeError, ValueError):
-        payload = None
-    label = payload.get("desk_label") if isinstance(payload, dict) else None
-    return display_body(str(route.get("body") or ""), label)
-
-
 def stamp_with_label(msg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    """Sample the label once for both the immediate send and durable display."""
+    """Return stamped text and the desk label from the same config read."""
     auth = msg.get("_auth_context")
     if not isinstance(auth, dict) or auth.get("operator_authenticated") is not True:
         return msg, None
@@ -89,5 +75,5 @@ def stamp_with_label(msg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     for field in _BODY_FIELDS:
         body = msg.get(field)
         if isinstance(body, str) and body:
-            stamped[field] = display_body(body, label)
+            stamped[field] = f"[from {label}]\n{sanitize_injectable(body)}"
     return stamped, label

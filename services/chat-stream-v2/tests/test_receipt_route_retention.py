@@ -1000,6 +1000,12 @@ def test_prior_daemon_carries_fully_migrated_history_through_rollback(tmp_path, 
     with tarfile.open(bundle) as archive:
         archive.extractall(prior, filter="data")
 
+    desk_args = dict(
+        stream_id="fixture:assistant", input_identity="fixture-queued-desk", input_request_id="fixture-desk-send",
+        body="[from fixture-desk]\nSynthetic queued desk text.  ", attachments=[], reply_to_message_id=None,
+        reply_to_question_id=None, actor_stream_id="operator:fixture-desk", desk_dispatch=True,
+    )
+
     async def seed_candidate():
         store = running(tmp_path)
         try:
@@ -1009,6 +1015,9 @@ def test_prior_daemon_carries_fully_migrated_history_through_rollback(tmp_path, 
                 archive_fixture.setattr(r, "_settled_route", lambda conn, row, cutoff: row["input_identity"] == "input-0")
                 assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
             assert (await move(store, r.RECEIPT_TABLE))["moved"] == 1
+            await store.ensure_assistant_composite_projection(stream_id=desk_args["stream_id"])
+            desk = await store.admit_assistant_composite_input(**desk_args)
+            assert desk["operator_origin"] is None and desk["routing_state"] == "queued"
 
             def seed_tells(conn):
                 reply = {"delivery_status": "delivered", "submission_confirmed": True}
@@ -1036,18 +1045,29 @@ def test_prior_daemon_carries_fully_migrated_history_through_rollback(tmp_path, 
     old_marker = marker()
     prior_code = """
 import asyncio
+import json
 import sys
 from pathlib import Path
 import store as prior_store
+from assistant_composite import AssistantCompositeConfig, direct_dispatch_envelope
 from test_receipt_route_retention import append, combined, move, r, running, TARGET, OLD
 
-async def run(root):
+async def run(root, desk_args):
     prior_store.TELL_RETENTION = 1
     for index in range(2):
         store = running(root)
         try:
             stamped = await store.get_assistant_composite_route(stream_id=TARGET, input_identity="input-0")
             assert stamped["operator_origin"] == "registered_operator_ws_v1"
+            desk = await store.get_assistant_composite_route(
+                stream_id=desk_args["stream_id"], input_identity=desk_args["input_identity"])
+            assert desk["operator_origin"] is None and desk["routing_state"] == "queued"
+            dispatch = direct_dispatch_envelope(
+                AssistantCompositeConfig(stream_id=desk_args["stream_id"]), desk,
+                dispatch_id="fixture-desk-dispatch", target="fixture:seat", generation="fixture-generation",
+            )
+            assert dispatch["original_input"]["text"] == desk_args["body"]
+            assert (await store.admit_assistant_composite_input(**desk_args))["duplicate"]
             receipts = await combined(store)
             assert receipts[0]["request_id"] == "before-rollback"
             await store.ensure_assistant_composite_projection(stream_id="fixture:assistant")
@@ -1082,20 +1102,23 @@ async def run(root):
         finally:
             store.stop()
 
-asyncio.run(run(Path(sys.argv[1])))
+asyncio.run(run(Path(sys.argv[1]), json.loads(sys.argv[2])))
 """
     services = prior / "services"
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(path) for path in (
         services / "chat-stream-v2", services / "chat-stream-v2" / "tests", services,
         services / "agent-orch", prior / "scripts",
     ))}
-    subprocess.run([sys.executable, "-c", prior_code, str(tmp_path)], cwd=prior, env=env, check=True, timeout=30)
+    subprocess.run([sys.executable, "-c", prior_code, str(tmp_path), json.dumps(desk_args)],
+                   cwd=prior, env=env, check=True, timeout=30)
 
     async def reupgrade():
         store = running(tmp_path)
         try:
             historian = await combined(store, r.ROUTE_TABLE)
-            assert next(row for row in historian if row["input_identity"] == "input-0") == stamped_rows[0]
+            for identity in ("input-0", desk_args["input_identity"]):
+                before = next(row for row in stamped_rows if row["input_identity"] == identity)
+                assert next(row for row in historian if row["input_identity"] == identity) == before
             prior_input = await store.get_assistant_composite_route(
                 stream_id="fixture:assistant", input_identity="prior-input")
             assert prior_input["operator_origin"] is None

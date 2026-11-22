@@ -201,9 +201,8 @@ A `send` authenticated with a mapped credential has its `text` (and `message`)
 prefixed `[from <label>]` on its own line after sanitising, before any target
 handling. The prefix is deliberately not an anchored tell, so the row stays an
 ordinary user row and its receipt reaches `landed`. The file is re-read on each
-send: deleting it or an entry stops the label at once. This is attribution and
-per-credential revocation, not a reduction in privilege; a desk credential can
-still do whatever an operator credential can, and only `send` text is labelled.
+send. Deleting it or an entry stops the label on subsequent sends. Desk-relayed
+messages are ineligible as the source of a protected advisor-rule forward.
 
 ## Remote session interrupt
 

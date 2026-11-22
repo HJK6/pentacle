@@ -350,6 +350,46 @@ def test_dispatch_custody_survives_failure_before_or_after_paste_preparation(tmp
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("change", ["rebind", "revoke", "presumed_dead"])
+def test_unprepared_dispatch_retry_requires_live_fd(tmp_path, monkeypatch, change):
+    async def run():
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            assert (await admit(socket))["type"] == "send.result"
+
+            async def transport_refused(*_args, **_kwargs):
+                raise VerbError("host_offline", "synthetic transport interruption")
+
+            async with seat(h, SEAT_A) as fd:
+                with monkeypatch.context() as interrupted:
+                    interrupted.setattr(h.comms, "_resolve_route", transport_refused)
+                    assert (await forward(fd)).get("error_code") == "host_offline"
+                reserved = await h.store.get_tell_delivery(TELL_ID)
+                assert "advisor_rule_intent" in reserved and "delivery" not in reserved
+                assert not h.tmux.inputs
+
+                if change == "rebind":
+                    await h.rotate_fd()
+                else:
+                    def disable_fd(conn):
+                        if change == "revoke":
+                            conn.execute(
+                                "INSERT OR REPLACE INTO v2_lifecycle_manager "
+                                "(id,stream_id,session_generation,revision,updated_at) VALUES (1,NULL,NULL,1,0)"
+                            )
+                        else:
+                            conn.execute("UPDATE sessions SET presumed_dead_at='2026-11-01T00:00:00Z' "
+                                         "WHERE host=? AND session_name=?", SEAT_A.split(":"))
+                        conn.commit()
+
+                    await h.store.submit(disable_fd)
+
+                assert (await forward(fd)).get("error_code") == "advisor_rule_fd_unverified"
+                assert not h.tmux.inputs
+                assert await h.store.get_tell_delivery(TELL_ID) == reserved
+
+    asyncio.run(run())
+
+
 def test_typed_transport_selects_verbatim_tmux_bytes(tmp_path):
     from pathlib import Path
     from tmux_transport import Tmux
@@ -384,19 +424,38 @@ def test_mapped_desk_preserves_display_dispatch_and_legacy_duplicate(tmp_path, m
 
     async def run():
         async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            immutable = ("route_id", "event_id", "actor_stream_id", "body", "payload_digest", "operator_origin")
             credential = operator_auth.decode_envelope(envelope)["credential_id"]
             monkeypatch.setattr(desk_stamp, "load", lambda: {credential: "fixture-desk"})
+            mint = h.server._registered_operator_admission
+            mint_calls = []
+
+            def record_mint(*args):
+                mint_calls.append(True)
+                return mint(*args)
+
+            monkeypatch.setattr(h.server, "_registered_operator_admission", record_mint)
             label = "[from fixture-desk]\n"
             await h.server._on_send({"to_stream_id": COMPOSITE_CHAT, "text": WORDS, "msg_id": "legacy-desk",
                 "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:" + credential}})
+            legacy = await input_row(h, "legacy-desk")
             duplicate = await admit(socket, "legacy-desk")
             assert duplicate["assistant_composite"]["duplicate"]
-            assert (await input_row(h, "legacy-desk"))["operator_origin"] is None
+            legacy_after = await input_row(h, "legacy-desk")
+            assert all(legacy_after[key] == legacy[key] for key in immutable)
+            assert legacy["body"] == label + WORDS and legacy["operator_origin"] is None
 
             fresh = await admit(socket)
             assert fresh["type"] == "send.result"
             row = await input_row(h, MESSAGE_ID)
-            assert row["body"] == WORDS and row["operator_origin"] == ORIGIN
+            assert row["operator_origin"] is None
+            assert row["body"] == label + WORDS
+            retried = await admit(socket)
+            assert retried["assistant_composite"]["duplicate"]
+            assert retried["receipt_id"] == fresh["receipt_id"]
+            fresh_after = await input_row(h, MESSAGE_ID)
+            assert all(fresh_after[key] == row[key] for key in immutable)
+            assert not mint_calls
             events = await h.store.fetch_session_event_tail(COMPOSITE_CHAT, limit=8)
             new_event = next(event for event in events if event["message_id"] == MESSAGE_ID)
             assert new_event["text"] == label + WORDS
@@ -407,7 +466,27 @@ def test_mapped_desk_preserves_display_dispatch_and_legacy_duplicate(tmp_path, m
                                                target=SEAT_A, generation=h.gen[SEAT_A])
             assert dispatch["original_input"]["text"] == label + WORDS
             async with seat(h, SEAT_A) as fd:
-                assert (await forward(fd))["delivery_status"] == "delivered"
+                for identity in (MESSAGE_ID, "legacy-desk"):
+                    for body in (WORDS, label + WORDS):
+                        refused = await forward(fd, identity=identity, body=body)
+                        assert refused.get("error_code") == "advisor_rule_operator_unverified"
+            assert await h.store.get_tell_delivery(TELL_ID) is None
+    asyncio.run(run())
+
+
+def test_desk_dispatch_cannot_use_operator_admission_in_store(tmp_path):
+    async def run():
+        async with rule_fixture(tmp_path) as (h, _):
+            def unexpected_admission():
+                pytest.fail("desk dispatch must not consult operator admission")
+
+            await h.composite.accept_input(
+                {"text": "[from fixture-desk]\n" + WORDS, "msg_id": MESSAGE_ID},
+                operator_principal="operator:fixture", desk_dispatch=True,
+                operator_admission=unexpected_admission,
+            )
+            assert (await input_row(h, MESSAGE_ID))["operator_origin"] is None
+
     asyncio.run(run())
 
 

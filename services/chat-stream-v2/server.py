@@ -2660,12 +2660,12 @@ class Server:
             else:
                 if self._rejected_rpc(websocket, verb):
                     return [self._auth_error_frame(verb, request_id, "authentication_required")]
-                admission = (
-                    self._registered_operator_admission(websocket, auth)
-                    if websocket is not None and handler == self._on_send else None
-                )
-                reply = (await self._on_send(dispatch_msg, operator_admission=admission)
-                         if admission is not None else await handler(dispatch_msg))
+                if websocket is not None and handler == self._on_send:
+                    reply = await self._on_send(
+                        dispatch_msg, admit_operator=lambda: self._registered_operator_admission(websocket, auth),
+                    )
+                else:
+                    reply = await handler(dispatch_msg)
         except (VerbError, StatusCardError, host_transfer.TransferError) as exc:  # expected business failures
             reply = {"type": f"{verb}.error", "error_code": exc.code, "error": str(exc),
                      **getattr(exc, "extra", {})}
@@ -4742,13 +4742,13 @@ class Server:
                 "request_id": request_id, "send_request_id": send_request_id}
 
     async def _on_send(self, msg: dict[str, Any], *,
-                       operator_admission: Callable[[], str | None] | None = None) -> dict[str, Any]:
+                       admit_operator: Callable[[], Callable[[], str | None] | None] | None = None) -> dict[str, Any]:
         from provider_accounts import AccountError, reject_overrides
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
-        original_msg = msg
         msg, desk_label = desk_stamp.stamp_with_label(msg)
         desk_dispatch = desk_label is not None
+        operator_admission = admit_operator() if admit_operator is not None and not desk_dispatch else None
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
@@ -4789,16 +4789,15 @@ class Server:
                 }
             if auth.get("operator_authenticated") is not True:
                 raise VerbError("assistant_send_unauthorized", "assistant composite send requires authenticated caller")
-            literal = original_msg.get("text") if "text" in original_msg else original_msg.get("message")
+            literal = msg.get("text") if "text" in msg else msg.get("message")
             admission = (operator_admission if composite is self.assistant_composite
                          and (literal is None or isinstance(literal, str)) else None)
             try:
                 attachments = await self._validate_assistant_input_attachments(msg.get("attachments"))
                 accepted = await composite.accept_input(
-                    {**(original_msg if admission is not None else msg), "attachments": attachments},
+                    {**msg, "attachments": attachments},
                     operator_principal=str(auth.get("operator_principal") or "") or None,
                     desk_dispatch=desk_dispatch,
-                    desk_label=desk_label if admission is not None else None,
                     operator_admission=admission,
                 )
             except ValueError as exc:

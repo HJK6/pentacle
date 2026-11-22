@@ -4418,7 +4418,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                         raise VerbError("tell_id_conflict", "tell_id already used with another payload")
                     if tombstone is not None:
                         raise VerbError("advisor_rule_event_unverified", "protected tell delivery proof expired")
-                    return stored if "delivery" in stored else None
+                    if "delivery" in stored:
+                        return stored
 
                 try:
                     fd = front_desk_principal(conn, configured(conn))
@@ -4434,6 +4435,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 ).fetchone()
                 if fd_seat is None or fd_seat["closed_at"] or fd_seat["presumed_dead_at"]:
                     raise VerbError("advisor_rule_fd_unverified", "front desk seat is unavailable")
+                if row is not None:
+                    # An unprepared retry may paste. Keep the original intent after checking live authority.
+                    return None
                 advisor = _advisor_rule_principal(conn, advisor_binding_conn)
                 if advisor is None or advisor["stream_id"] != target or target == sender:
                     raise VerbError("advisor_rule_advisor_unverified", "retained advisor recipient required")
