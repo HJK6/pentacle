@@ -56,7 +56,9 @@ class WorkWriter:
                     if cutoff < now:
                         raise ValueError('hosted snapshot predates requested cutoff')
                 except RECONCILE_ERRORS as exc:
-                    failed.append(self._fallback('source', surface, 'Cannot reconcile ' + surface, exc))
+                    failed.append(self._fallback('source', surface, 'Cannot reconcile ' + surface, exc, now))
+                else:
+                    self._rearm('source', surface)
             aliases = self._aliases()
             links = {}
             unresolved_sources = set()
@@ -71,7 +73,7 @@ class WorkWriter:
                     links.setdefault(entry['source'], set()).add(target)
                 except RECONCILE_ERRORS as exc:
                     issue = self._fallback('occurrence', entry['writer_key'],
-                                           'Pending work for ' + entry['source'], exc)
+                                           'Pending work for ' + entry['source'], exc, now)
                     failed.append(issue)
                     if issue['alert'] == 'confirmed':
                         confirmed_sources.add(entry['source'])
@@ -79,33 +81,59 @@ class WorkWriter:
                         unresolved_sources.add(entry['source'])
                     continue
                 self.pending.remove(entry)
+                self._rearm('occurrence', entry['writer_key'], persist=False)
                 self._persist()
             for source, decision in aliases.items():
                 try:
                     self._merge(source, decision, aliases, now)
                 except RECONCILE_ERRORS as exc:
-                    failed.append(self._fallback('alias', source, 'Pending reviewed cause merge', exc))
+                    failed.append(self._fallback('alias', source, 'Pending reviewed cause merge', exc, now))
+                else:
+                    self._rearm('alias', source)
             try:
                 self._maintenance(now)
             except RECONCILE_ERRORS as exc:
-                failed.append(self._fallback('prevention', 'work-history', 'Cannot attach scorecard follow-up', exc))
+                failed.append(self._fallback('prevention', 'work-history',
+                                             'Cannot attach scorecard follow-up', exc, now))
+            else:
+                self._rearm('prevention', 'work-history')
             return {'status': 'incomplete' if failed else 'complete', 'issues': failed,
                     'handled_sources': sorted((links.keys() | confirmed_sources) - unresolved_sources),
                     'pending': sorted({entry['id'] for entry in self.pending}),
                     'links': {source: sorted(items) for source, items in links.items()},
                     'cursors': state['cursors']}
 
-    def _fallback(self, kind, key, text, exc):
+    def _rearm(self, kind, key, *, persist=True):
+        alerted = self.register.get('writer_alerts')
+        if not alerted:
+            return
+        identity = _key('scorecard-' + kind, key)
+        if identity in alerted:
+            del alerted[identity]
+            if persist:
+                self._persist()
+
+    def _fallback(self, kind, key, text, exc, now):
         identity = _key('scorecard-' + kind, key)
         alerted = self.register.setdefault('writer_alerts', {})
-        if identity not in alerted:
-            try:
+        error = type(exc).__name__
+        issue = {'key': key, 'kind': kind, 'error': error}
+        try:
+            if identity not in alerted:
                 self.alert(identity, text)
-                alerted[identity] = True
-                self._persist()
-            except RECONCILE_ERRORS:
-                return {'key': key, 'kind': kind, 'error': type(exc).__name__, 'alert': 'unconfirmed'}
-        return {'key': key, 'kind': kind, 'error': type(exc).__name__, 'alert': 'confirmed'}
+            prior = alerted.get(identity)
+            failed_at = stamp(now)
+            # A legacy True confirms the notification, not the historical
+            # count or timestamps. Start recording those with this failure.
+            first, count = failed_at, 0
+            if isinstance(prior, dict):
+                first, count = prior['first_failed_at'], prior['failures']
+            alerted[identity] = {'error': error, 'first_failed_at': first,
+                                 'last_failed_at': failed_at, 'failures': count + 1}
+            self._persist()
+        except RECONCILE_ERRORS:
+            return {**issue, 'alert': 'unconfirmed'}
+        return {**issue, 'alert': 'confirmed'}
 
     def _ingest(self, sources, state, surface, now):
         old_cursor = state['cursors'].get(surface)

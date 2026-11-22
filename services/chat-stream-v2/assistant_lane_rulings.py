@@ -1145,6 +1145,10 @@ class AssistantLaneRulings:
                     packet = {"ruling_request_id": request_id, "action": action, "target": target,
                               "deadline": now + self.sla_s, "intent_digest": intent_digest,
                               "requester": requester, "covered": True, "work_item": work_item}
+                    if action in {"spawn", "send"}:
+                        from assistant_priorities import snapshot
+                        state = snapshot(conn, self._composite().config.stream_id)
+                        packet["priorities"] = {"revision": state["revision"], "items": [{k: item[k] for k in ("rank", "label", "owner")} for item in state["items"]]}
                     if action == "spawn" and intent.get("assignment_exempt"):
                         packet["exempt"] = intent["assignment_exempt"]
                     if work_item_error:

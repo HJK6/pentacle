@@ -239,3 +239,15 @@ def test_working_state_stream_does_not_extend_readiness_deadline(protocol, monke
     assert time.monotonic() - started < .3
     assert [frame["type"] for frame in socket.frames] == ["hello"]
     assert socket.closed
+
+
+@pytest.mark.parametrize("action", ["list", "add", "move", "remove", "owner"])
+def test_assistant_priorities_operator_uses_proof(protocol, action):
+    cfg, socket = protocol
+    verb = "assistant.priorities." + action
+    reply = asyncio.run(wsclient.assistant_once(cfg, {"type": verb}))
+    assert reply["type"] == verb + ".ok"
+    assert socket.closed
+    assert [f["type"] for f in socket.frames] == ["hello", "pong", verb]
+    assert socket.frames[0].get("auth_v2") and "token" not in socket.frames[0]
+    assert "token" not in socket.frames[-1] and "stream_token" not in socket.frames[-1]

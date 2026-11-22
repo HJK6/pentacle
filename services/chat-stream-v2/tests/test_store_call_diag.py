@@ -36,6 +36,11 @@ def fast_op(conn):
     return "fast"
 
 
+async def finish_prior_store_calls(store):
+    # The worker records diagnostics before starting the next queued call.
+    assert await asyncio.wait_for(store.submit(fast_op), timeout=1.0) == "fast"
+
+
 def slow_raising_op(conn):
     time.sleep(0.08)
     raise LookupError("kept")
@@ -85,6 +90,7 @@ async def test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line(st
         host_transfer.actor_context.reset(token)
     # An internal job runs outside any client request timing.
     assert await asyncio.create_task(store.submit(slow_job_op)) == "job"
+    await finish_prior_store_calls(store)
     slow = lines(caplog, "store_call_slow")
     assert [line["name"] for line in slow] == ["slow_client_op", "slow_actor_op", "slow_job_op"]
     for line in slow:
@@ -111,10 +117,12 @@ async def test_long_qualname_is_bounded_in_line_and_alert(tmp_path, caplog, monk
     s.call_diag.alert = sink
     try:
         assert await s.submit(op) == 7
+        await finish_prior_store_calls(s)
         await settle()
     finally:
         s.stop()
-    name = lines(caplog, "store_call_slow")[0]["name"]
+    [line] = lines(caplog, "store_call_slow")
+    name = line["name"]
     assert name == ("Very.longlocals." + "x" * 250)[:96] and len(name) == 96
     assert [f.episode_id for f in facts] == [name + ":" + store_call_diag._utc_day()]
     assert len(facts[0].episode_id) <= 128
@@ -130,6 +138,7 @@ async def test_naming_failure_at_admission_runs_call_as_unnamed(store, caplog, m
     assert await store.submit(slow_client_op) == "client"
     with pytest.raises(LookupError, match="kept"):
         await store.submit(slow_raising_op)
+    await finish_prior_store_calls(store)
     assert [line["name"] for line in lines(caplog, "store_call_slow")] == ["unnamed", "unnamed"]
 
 
@@ -138,6 +147,7 @@ async def test_unusable_name_is_unnamed_and_lines_carry_no_payload(store, caplog
     caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
     secret = "PRIVATE_PAYLOAD_7f3a"
     assert await store.submit(functools.partial(slow_payload_op, payload=secret)) == secret
+    await finish_prior_store_calls(store)
     assert [line["name"] for line in lines(caplog, "store_call_slow")] == ["unnamed"]
     assert secret not in caplog.text and "partial" not in caplog.text
 
@@ -229,9 +239,9 @@ async def test_raising_alert_sink_never_changes_results_or_futures(tmp_path, mon
         assert await asyncio.wait_for(s.submit(slow_client_op), 5) == "client"
         with pytest.raises(LookupError, match="kept"):
             await asyncio.wait_for(s.submit(slow_raising_op), 5)
+        await finish_prior_store_calls(s)
         await settle()
         assert len(calls) == 2 and s.call_diag.failures == 2
-        assert await asyncio.wait_for(s.submit(fast_op), 5) == "fast"
     finally:
         s.stop()
 
@@ -246,6 +256,7 @@ async def test_instrumentation_failure_is_counted_and_dropped(store, monkeypatch
     assert await asyncio.wait_for(store.submit(slow_client_op), 5) == "client"
     with pytest.raises(LookupError, match="kept"):
         await asyncio.wait_for(store.submit(slow_raising_op), 5)
+    await finish_prior_store_calls(store)
     assert store.call_diag.failures == 2
 
 
