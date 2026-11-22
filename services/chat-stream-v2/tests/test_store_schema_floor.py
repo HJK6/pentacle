@@ -88,6 +88,10 @@ def test_below_floor_ladder_is_absent_and_readiness_stays_live() -> None:
 
     # The current D1 feature adds one receipt field; the retired historical ladder remains forbidden.
     store_source = store_source.replace("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT", "D1 additive receipt")
+    # Advisor-rule acceptance adds one daemon-owned nullable report field.
+    statement = "ALTER TABLE v2_reports ADD COLUMN advisor_rule_accept TEXT"
+    assert store_source.count(statement) == 1
+    store_source = store_source.replace(statement, "")
     # Status freshness adds exactly one report field above the retained floor.
     statement = "ALTER TABLE v2_reports ADD COLUMN status_freshness TEXT"
     assert store_source.count(statement) == 1

@@ -123,9 +123,9 @@ def test_real_candidate_times_copies_and_never_touches_the_originals(real_candid
     with _db(db) as conn:
         assert conn.execute("SELECT archive_path, archive_ready FROM v2_send_receipt_sequence").fetchone() == (
             str(archive.absolute()), 1)
-    # Make startup migrate the archive: drop the known nullable batch columns.
+    # Recreate the pre-batch archive so startup applies the nullable route migrations.
     with _db(archive) as conn:
-        for column in ("batched_into_dispatch_id", "answered_by_event_id"):
+        for column in ("batched_into_dispatch_id", "answered_by_event_id", "operator_origin"):
             conn.execute(f"ALTER TABLE v2_assistant_composite_routes DROP COLUMN {column}")
     before = _freeze(db, archive)
     work = tmp_path / "work"
@@ -139,7 +139,7 @@ def test_real_candidate_times_copies_and_never_touches_the_originals(real_candid
     assert list(work.iterdir()) == [], "owned directory removed"
     with _db(kept / "sessions_archive.db") as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(v2_assistant_composite_routes)")}
-    assert {"batched_into_dispatch_id", "answered_by_event_id"} <= columns, "migration landed in the copy"
+    assert {"batched_into_dispatch_id", "answered_by_event_id", "operator_origin"} <= columns, "migration landed in the copy"
     with _db(kept / "sessions.db") as conn:
         bound = Path(conn.execute("SELECT archive_path FROM v2_send_receipt_sequence").fetchone()[0])
     assert bound.name == "sessions_archive.db" and bound.parent.name.startswith("pentacle-read-timing-")
