@@ -65,14 +65,14 @@ function temp(t) {
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   return dir;
 }
-function png() {
+function png(pixel = 200) {
   // Independently encoded valid RGBA fixture. Store tests inject capture;
   // the browser scenario proves silhouette and actual WebGL rendering.
   const width=448,height=280;
   const hdr=Buffer.alloc(13);
   hdr.writeUInt32BE(width);hdr.writeUInt32BE(height,4);hdr[8]=8;hdr[9]=6;
   const rows=Buffer.alloc(height*(1+width*4));
-  rows.fill(200,140*(1+width*4)+4*224+1,140*(1+width*4)+4*225+1);
+  rows.fill(pixel,140*(1+width*4)+4*224+1,140*(1+width*4)+4*225+1);
   function chunk(type,data) {
     const body=Buffer.concat([Buffer.from(type),data]);
     let crc=~0;
@@ -85,5 +85,5 @@ function png() {
   }
   return Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),chunk('IHDR',hdr),chunk('IDAT',zlib.deflateSync(rows)),chunk('IEND',Buffer.alloc(0))]);
 }
-const fakeCapture = async views=>views.map(png);
+const fakeCapture = async views=>views.map(()=>png());
 module.exports={sheet,box,glb,drop,temp,png,fakeCapture};

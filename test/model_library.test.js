@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const {spawnSync}=require('node:child_process');
-const {box,drop,glb,temp,fakeCapture}=require('./fixtures/model_library.cjs');
+const {box,drop,glb,temp,png,fakeCapture}=require('./fixtures/model_library.cjs');
 const cli=path.join(__dirname,'../scripts/model-library.cjs');
 function command(command, ...args) {
   const p=spawnSync(process.execPath,[cli,command,...args],{encoding:'utf8'});
@@ -110,6 +110,19 @@ test('U2 local dimensions ignore placed transforms and match only equivalent bak
   const bad=setup(t,{mesh:glb([{}, {points:box(11)}]),edit});
   assert.match(JSON.stringify(command('check',...bad.args).value),/matching copy/);
 });
+test('B3 copy spread is bounded independently of copy order',t=>{
+  for (const [order,ok] of [
+    [[10,10.09,9.91],false], [[9.91,10,10.09],false], [[10.09,9.91,10],false],
+    [[10,10.098,10.001],true], [[10.098,10.001,10],true],
+  ]) {
+    const {dir}=setup(t,{mesh:glb(order.map(x=>({points:box(x)}))),
+      edit:s=>parts(s)[0].nodes.push('Spacer B','Spacer C')});
+    const result=require('../lib/model_library.cjs').checkDrop(dir);
+    assert.equal(result.ok,ok,'copy-order spread '+order.join(','));
+    if(!ok) assert.ok(result.diagnostics.some(x=>x.fix.includes('matching copy')));
+  }
+});
+
 test('U3 three nodes are one part with three copies',t=>{
   const {checked}=measure(t,{mesh:glb([{}, {}, {}]),edit:s=>parts(s)[0].nodes.push('Spacer B','Spacer C')});
   assert.equal(checked[0].view.parts.length,1);
@@ -175,17 +188,24 @@ test('U6 removal, retained rollback and local preview',async t=>{
   const {args,dir,store,library,publish,first}=await publishFixture(t);
   const key=['--root',store,'--project','bench','--model','spacer'];
   drop(dir,{edit:s=>{s.title='Revised spacer';s.views.push({...view(s),title:'Rear',id:'rear'});}});
-  const second=await publish(new Date('2026-07-02'));
+  const pictures=[png(),png(160)];
+  const second=await publish(new Date('2026-07-02'),{capture:async()=>pictures});
   assert.notEqual(first.revision,second.revision);
-  assert.match(command('link-preview',...key,'--view','rear').value.picture_path,/\/picture\/rear$/);
-  assert.match(command('link-preview',...key).value.picture_path,/\/picture\/front$/);
+  for(const [opts,title,bytes] of [[[],'Front',pictures[0]],[['--view','rear'],'Rear',pictures[1]]]) {
+    await t.test('B4 opens the stored '+title+' PNG',()=>{
+      const preview=command('link-preview',...key,...opts).value;
+      assert.equal(preview.view_title,title);
+      assert.equal(path.dirname(preview.picture_path),path.join(store,'objects'));
+      assert.deepEqual(fs.readFileSync(preview.picture_path),bytes);
+    });
+  }
   assert.equal(command('link-preview',...key,'--view','invalid').status,1);
   assert.equal(command('remove',...key).status,0);
   assert.deepEqual(library.catalog().projects,[]);
   assert.equal(command('verify',...args.slice(2)).value.revisions,2);
   assert.equal(command('rollback',...key,'--revision',first.revision).value.revision,first.revision);
   assert.deepEqual(library.preview('bench','spacer'),{project_title:'Bench fixtures',model_title:'Test spacer',view_title:'Front',
-    revision:first.revision,picture_path:'/model-media/bench/spacer/'+first.revision+'/picture/front'});
+    revision:first.revision,picture_path:path.join(store,'objects',library.media('bench','spacer',first.revision,'picture','front').digest+'.png')});
   drop(dir,{edit:s=>s.project.title='Renamed fixtures'});
   await assert.rejects(publish(),/rename-project/);
   assert.equal((await publish(new Date('2026-07-04'),{rename:true})).ok,true);

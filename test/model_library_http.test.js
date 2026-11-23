@@ -4,10 +4,11 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const {createHash}=require('node:crypto');
+const {spawnSync}=require('node:child_process');
 const {WebSocket}=require('ws');
 const {temp,fakeCapture,glb,png}=require('./fixtures/model_library.cjs');
 const {operator,general,origin,proxy,tailnetArgs,writeFixture,request,withHost}=require('./e2e/lib/model_library_fixture.cjs');
-const {main,parseArgs,createTailscaleAuth}=require('../server/index.js');
+const {main,parseArgs,createTailscaleAuth,WEB_DIST}=require('../server/index.js');
 
 function checkDenial(res,status,method) {
   assert.equal(res.status,status);
@@ -43,6 +44,41 @@ for (const [label,args] of [
   await assert.rejects(main(['--port','0','--auth','tailscale','--origin',origin,...args]),error=>
     /^(--operator-login requires tailscale auth and exactly one matching|invalid or repeated --operator-login|use --operator-login followed)/.test(error.message) && !error.message.includes(operator) && !error.message.includes(general));
 });
+for (const [label,flags] of [
+  ['missing allow-list operand',['--allow-login','--operator-login',operator]],
+  ['unsupported allow-list equals form',['--allow-login='+operator]],
+  ['operator missing operand',['--operator-login','--allow-login',operator]],
+  ['unknown raw argument',[operator]],
+  ['invalid origin',['--allow-login',operator,'--operator-login',operator,'--origin',operator]],
+]) test('B1 startup redacts synthetic operands: '+label,async()=>{
+  const args=['--port','0','--auth','tailscale','--origin',origin,...flags];
+  await assert.rejects(main(args),error=>!error.message.includes(operator),'thrown startup error contained a synthetic operand');
+  const child=spawnSync(process.execPath,[path.join(__dirname,'../server/index.js'),...args],{encoding:'utf8',timeout:5000});
+  assert.equal(child.error,undefined);
+  assert.equal(child.status,1);
+  assert.equal(child.stdout.includes(operator),false,'stdout contained a synthetic operand');
+  assert.equal(child.stderr.includes(operator),false,'stderr contained a synthetic operand');
+});
+
+for (const binding of [false,true]) test('B2 static, descendant and aliased roots are refused; disjoint store works (binding '+binding+')',async t=>{
+  const f=writeFixture(temp(t));
+  fs.mkdirSync(WEB_DIST,{recursive:true});
+  const staging=fs.mkdtempSync(path.join(WEB_DIST,'model-root-test-'));
+  t.after(()=>fs.rmSync(staging,{force:true,recursive:true}));
+  const alias=path.join(path.dirname(f.profile),'static-alias');
+  fs.symlinkSync(staging,alias,'junction');
+  const args=binding?tailnetArgs(operator,true):[];
+  for (const library of [WEB_DIST,staging,path.join(staging,'not-yet-created'),alias,path.join(alias,'not-yet-created')]) {
+    await assert.rejects(withHost({...f,library},args,()=>{}),/model library root must be outside the public web directory/);
+  }
+  await require('../lib/model_library.cjs').createLibrary(f.library).publish(f.source,{capture:fakeCapture});
+  await withHost(f,args,async ({port})=>{
+    const result=await request(port,'/api/models',{headers:binding?proxy():{}});
+    assert.equal(result.status,binding?200:404);
+    if(binding) assert.equal(JSON.parse(result.body).projects[0].models.length,1);
+  });
+});
+
 test('U7 startup refuses token binding without echoing it',async()=>{
   await assert.rejects(main(['--port','0','--operator-login',operator]),error=>
     /requires tailscale/.test(error.message) && !error.message.includes(operator));

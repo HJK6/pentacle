@@ -70,37 +70,48 @@ function parseArgs(argv) {
   let malformedAllowList = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--profile') args.profile = argv[++i];
-    else if (a === '--port') args.port = Number(argv[++i]);
-    else if (a === '--bind') args.bind = argv[++i];
-    else if (a === '--token-file') args.tokenFile = argv[++i];   // web login auth (this host)
-    else if (a === '--token-path') args.tokenPath = argv[++i];   // chat-stream daemon credential
-    else if (a === '--auth') args.auth = argv[++i];
+    // Only call this for a recognized option. Never include raw argv in an
+    // error: an unconsumed operand or malformed option may contain a login.
+    const operand = () => {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--') || value === '-h') {
+        throw new Error('missing operand for ' + a);
+      }
+      i++;
+      return value;
+    };
+    if (a === '--profile') args.profile = operand();
+    else if (a === '--port') args.port = Number(operand());
+    else if (a === '--bind') args.bind = operand();
+    else if (a === '--token-file') args.tokenFile = operand();   // web login auth (this host)
+    else if (a === '--token-path') args.tokenPath = operand();   // chat-stream daemon credential
+    else if (a === '--auth') args.auth = operand();
     else if (a === '--allow-login') {
-      const entries = String(argv[++i] ?? '').split(',').map(l => l.trim());
+      const entries = operand().split(',').map(l => l.trim());
       if (entries.some(l => !l)) malformedAllowList = true;
       args.allowLogins.push(...entries.filter(Boolean));
     }
     else if (a === '--operator-login') {
-      const login = argv[++i];
+      const login = operand();
       if (args.operatorLogin !== undefined || !/^[!-~]+$/.test(login ?? '') || /^-|,/.test(login)) {
         throw new Error('invalid or repeated --operator-login');
       }
       args.operatorLogin = login;
     }
+    else if (a.startsWith('--allow-login=')) throw new Error('use --allow-login followed by one or more logins');
     else if (a.startsWith('--operator-login=')) throw new Error('use --operator-login followed by one login');
-    else if (a === '--origin') args.origin = argv[++i];
+    else if (a === '--origin') args.origin = operand();
     else if (a === '--help' || a === '-h') args.help = true;
-    else throw new Error(`unknown argument: ${a}`);
+    else throw new Error('unknown argument (see --help)');
   }
   if (!Number.isInteger(args.port) || args.port < 0 || args.port > 65535) {
-    throw new Error(`invalid --port: ${args.port}`);
+    throw new Error('invalid --port: expected an integer from 0 through 65535');
   }
   // Normalize the bind so the address classified for auth is exactly the address
   // node listens on; an empty/whitespace bind (a wildcard listener) is rejected.
   args.bind = String(args.bind ?? '').trim();
   if (!args.bind) throw new Error('invalid --bind: empty (a bind address is required; default is 127.0.0.1)');
-  if (args.auth !== 'token' && args.auth !== 'tailscale') throw new Error(`invalid --auth: ${args.auth} (token or tailscale)`);
+  if (args.auth !== 'token' && args.auth !== 'tailscale') throw new Error('invalid --auth: expected token or tailscale');
   if (args.operatorLogin !== undefined
       && (malformedAllowList || args.auth !== 'tailscale' || args.allowLogins.length !== 1 || args.allowLogins[0] !== args.operatorLogin)) {
     throw new Error('--operator-login requires tailscale auth and exactly one matching --allow-login entry');
@@ -277,9 +288,9 @@ function loopbackRequestAllowed(req) {
 
 function canonicalOrigin(origin) {
   let u;
-  try { u = new URL(origin); } catch { throw new Error(`invalid --origin: ${origin} (an https origin is required)`); }
+  try { u = new URL(origin); } catch { throw new Error('invalid --origin: an https origin is required'); }
   if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash || u.pathname !== '/' || u.origin !== String(origin).replace(/\/$/, '')) {
-    throw new Error(`invalid --origin: ${origin} (use the bare https origin, e.g. https://host.tailnet.ts.net)`);
+    throw new Error('invalid --origin: use the bare https origin, e.g. https://host.tailnet.ts.net');
   }
   return u.origin;
 }
@@ -434,6 +445,45 @@ function serveStatic(res, urlPath, configJson, frozen) {
   }).end(body);
 }
 
+// A store may be provisioned after host startup. Resolve every existing
+// ancestor rather than trusting a lexical comparison or requiring the leaf
+// to exist. Unresolvable aliases (including dangling links) fail closed.
+function canonicalStorePath(input) {
+  let current = path.resolve(input);
+  const suffix = [];
+  for (;;) {
+    try { return path.resolve(fs.realpathSync.native(current), ...suffix); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    try {
+      fs.lstatSync(current);
+      throw new Error('unresolvable path');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const parent = path.dirname(current);
+    if (parent === current) throw new Error('unresolvable path');
+    suffix.unshift(path.basename(current));
+    current = parent;
+  }
+}
+
+function checkedModelRoot(input) {
+  if (!input) return null;
+  let root, publicRoot;
+  try {
+    root = canonicalStorePath(input);
+    publicRoot = canonicalStorePath(WEB_DIST);
+  } catch {
+    throw new Error('could not resolve the model library or public web directory');
+  }
+  const within = (base, target) => {
+    const rel = path.relative(base, target);
+    return !rel || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+  };
+  if (within(WEB_DIST, path.resolve(input)) || within(publicRoot, root)) {
+    throw new Error('model library root must be outside the public web directory');
+  }
+  return root;
+}
+
 async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -448,7 +498,7 @@ async function main(argv = process.argv.slice(2)) {
   const requireAuth = !isLoopbackBind(args.bind);
   let auth = null;
   if (args.auth === 'tailscale') {
-    if (requireAuth) throw new Error(`--auth tailscale requires a loopback --bind (got ${args.bind}); the proxy must be the only way in`);
+    if (requireAuth) throw new Error('--auth tailscale requires a loopback --bind; the proxy must be the only way in');
     if (args.tokenFile) throw new Error('--auth tailscale does not take --token-file (identity replaces the token)');
     if (!args.origin) throw new Error('--auth tailscale requires --origin <https origin of the proxy>');
     if (!args.allowLogins.length) throw new Error('--auth tailscale requires --allow-login <login>[,<login>…]');
@@ -457,7 +507,7 @@ async function main(argv = process.argv.slice(2)) {
     throw new Error('--allow-login and --origin are only valid with --auth tailscale');
   } else if (requireAuth || args.tokenFile) {
     if (requireAuth && !args.tokenFile) {
-      throw new Error(`refusing to bind routable address ${args.bind} without --token-file (a loopback bind needs no token)`);
+      throw new Error('refusing to bind routable address without --token-file (a loopback bind needs no token)');
     }
     auth = createAuth(readTokenFile(args.tokenFile));
   }
@@ -488,6 +538,8 @@ async function main(argv = process.argv.slice(2)) {
     CONFIG.chatStream = { ...(CONFIG.chatStream || {}), tokenPath: args.tokenPath };
   }
 
+  const modelRoot = checkedModelRoot(process.env.PENTACLE_MODEL_LIBRARY_ROOT);
+
   // Freeze the served dist and derive the build id once, before any request.
   const frozen = freezeWebDist(WEB_DIST);
   const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
@@ -514,7 +566,7 @@ async function main(argv = process.argv.slice(2)) {
   });
   const designs = createDesignRoutes({ libraryRoot: CONFIG.dashboards?.designLibraryRoot || process.env.PENTACLE_DESIGN_LIBRARY_ROOT || null });
   const forge = createForgeEntitlement(args.operatorLogin);
-  const models = createModelRoutes(args.operatorLogin && process.env.PENTACLE_MODEL_LIBRARY_ROOT, forge.canReadForge);
+  const models = createModelRoutes(args.operatorLogin && modelRoot, forge.canReadForge);
   const loginLimiter = createLoginLimiter();
   const identityAuth = auth?.mode === 'tailscale';
   const server = http.createServer((req, res) => {

@@ -95,7 +95,7 @@ selected partial revision. Do not edit manifests or object files.
 `remove` deselects without deleting files. `rollback` defaults to the first
 retained selection and accepts `--revision <retained-revision>`.
 `link-preview` is local to a trusted reader. It picks the first view when
-`--view` is omitted. Verification checks all installed revisions and object
+`--view` is omitted and returns the verified local PNG path. Verification checks all installed revisions and object
 hashes. Readers verify each model and retain the last verified selection if a
 replacement copy is incomplete. A cold reader omits that model until the
 selection verifies. Restore the missing bytes from a verified backup, then
@@ -162,7 +162,7 @@ node test/e2e/web_gate.js --scenario model-library-publish --scenario model-libr
 node test/e2e/web_gate.js
 ```
 
-The standalone minified viewer bundle is 504,078 bytes uncompressed. The
+The standalone minified viewer bundle is 505,166 bytes uncompressed, including the full Three.js MIT notice. The
 repository gate used Node 22.23.5. The candidate's focused tests (including
 the existing web-auth, theme and Chrome-policy tests) passed. Repository
 `npm test` encountered the two inherited private-tmux socket checks in this

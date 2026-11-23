@@ -478,7 +478,9 @@ agent edit/publish/rollback procedure, dependency pins and sync verification.
 Forge starts closed. To enable it, use `--auth tailscale` with exactly one
 parsed `--allow-login` entry and a matching, case-sensitive
 `--operator-login <login>`. Repeating the same allow-list entry is still two
-entries. Point `PENTACLE_MODEL_LIBRARY_ROOT` at the verified model library.
+entries. Point `PENTACLE_MODEL_LIBRARY_ROOT` at the verified model library. Keep the library outside the public web
+directory. Startup refuses roots inside it, even through a path alias or
+with Forge access disabled.
 These values stay server-side. The proxy must overwrite supplied identity and
 forwarded headers and exclusively control access to the loopback identity
 listener. Neither a token cookie nor anonymous loopback grants Forge access.
