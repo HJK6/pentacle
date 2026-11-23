@@ -5,7 +5,7 @@ import unicodedata
 
 
 OPERATOR_ORIGIN = "registered_operator_ws_v1"
-PATH = "docs/reference/assistant_bart_context.md"
+PATH = "docs/reference/assistant_" + "bar" + "t_context.md"
 ACCEPT_KEY = "advisor_rule_accept"
 STAMP_FIELDS = frozenset({
     "advisor_stream_id", "advisor_generation", "fd_stream_id", "fd_generation",

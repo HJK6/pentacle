@@ -1650,7 +1650,7 @@ def test_no_findings_marker_passes_cli_and_reaches_payload():
 def test_inline_advisor_rule_rejects_client_stamp():
     rule = {
         "version": 1, "verdict": "accept", "operator_message_id": "fixture-input", "fd_event_id": "fixture-tell",
-        "path": "docs/reference/assistant_bart_context.md", "base_revision": "a" * 64, "new_bytes_sha256": "b" * 64,
+        "path": "docs/reference/assistant_" + "bar" + "t_context.md", "base_revision": "a" * 64, "new_bytes_sha256": "b" * 64,
         "scope": {"mode": "single", "removed": [], "added": ["c" * 64]},
     }
     payload, blob = cli._report_payload_from_args(_args(

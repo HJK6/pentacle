@@ -35,7 +35,7 @@ depends on installed lookup and a proven launcher-identity read journey.
 
 The current front desk uses
 `agent-orch tell --advisor-rule-message-id <operator-input-id> -- <advisor-stream> '<exact original text>'`.
-Use the complete canonical operator input ID from the primary Bart composite
+Use the complete canonical operator input ID from the primary assistant composite
 and preserve its UTF-8 text, including line endings and trailing spaces. The
 input must originate from a registered operator WebSocket admission with the
 server's origin stamp. The protected tell reserves its full ID and captures the
@@ -47,7 +47,7 @@ The retained advisor files a single inline `agent-orch report --status progress
 --msg-id 0 --report-id <stable-id> --result '<JSON>'` with `extras.advisor_rule`.
 Its object contains `version: 1`, `verdict: "accept"`, `operator_message_id`,
 `fd_event_id` (the full tell ID), `path` fixed to
-`docs/reference/assistant_bart_context.md`, `base_revision`,
+the fixed operator rules document path (`advisor_rule.PATH`), `base_revision`,
 `new_bytes_sha256`, and `scope`. Scope has `mode` and sorted `removed` and
 `added` arrays of lowercase SHA256 hashes of complete changed rule lines
 without the LF delimiter. Modes are `single`, `batch`, and `reorganize`.

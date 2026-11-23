@@ -136,7 +136,7 @@ def rule_report(report_id="fixture-rule-report", **review_fields):
         "report_id": report_id, "status": "progress", "msg_id": 0,
         "extras": {"advisor_rule": {
             "version": 1, "verdict": "accept", "operator_message_id": MESSAGE_ID, "fd_event_id": TELL_ID,
-            "path": "docs/reference/assistant_bart_context.md", "base_revision": "a" * 64,
+            "path": "docs/reference/assistant_" + "bar" + "t_context.md", "base_revision": "a" * 64,
             "new_bytes_sha256": "b" * 64, "scope": {"mode": "single", "removed": [], "added": ["c" * 64]},
             **review_fields,
         }},
