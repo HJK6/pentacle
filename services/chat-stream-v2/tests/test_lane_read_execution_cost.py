@@ -5,6 +5,7 @@ from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from hashlib import sha256
 import json
+import sqlite3
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -634,3 +635,102 @@ def test_detail_preserves_auth_and_missing_lane_boundaries(tmp_path, monkeypatch
             never_prepare_hue.assert_not_called()
 
     run(body, str(tmp_path / "detail.sqlite"))
+
+
+def test_detail_reads_membership_and_observations_from_one_committed_generation(tmp_path, fixed_clock):
+    path = str(tmp_path / "detail.sqlite")
+    entered, release = threading.Event(), threading.Event()
+    added = "spec_fixture__added"
+
+    async def body(env):
+        lane_id = await seed(env, unrelated=32, trail=0)
+        store = env.store
+        initial = await store.get_work_lane(lane_id)
+        prior_members = initial["lane"]["members_json"]
+
+        def hold(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("UPDATE v2_assistant_composite_lanes SET members_json=? WHERE lane_id=?",
+                             (json.dumps([added, *json.loads(prior_members)]), lane_id))
+                conn.execute("INSERT INTO v2_work_item_observations VALUES (?,?)",
+                             (added, _record(added, status="in_progress")))
+                entered.set()
+                assert release.wait(5)
+
+        async with authorized_show(env) as (show, _):
+            write = asyncio.create_task(store.submit(hold))
+            try:
+                assert await asyncio.to_thread(entered.wait, 3)
+                with sqlite3.connect(path, autocommit=False) as observer:
+                    assert observer.execute("SELECT members_json FROM v2_assistant_composite_lanes WHERE lane_id=?",
+                                            (lane_id,)).fetchone()[0] == prior_members
+                    assert observer.execute("SELECT 1 FROM v2_work_item_observations WHERE spec_id=?",
+                                            (added,)).fetchone() is None
+                pending = asyncio.create_task(show(lane_id, members_limit=1))
+                await asyncio.sleep(0)
+                assert not pending.done()
+            finally:
+                release.set()
+                await write
+            page = await pending
+            member_received, = page["members"]
+            assert (member_received["spec_id"], member_received["status"]) == (added, "in_progress")
+            assert page["members_total"] == len(initial["members"]) + 1
+            current = await store.get_work_lane(lane_id)
+            assert current["lane"]["members"] == [added, *initial["lane"]["members"]]
+            assert current["_projection_row"]["_detail_revision"] == page["detail_revision"]
+
+    run(body, path)
+
+
+def test_detail_rolls_back_cold_hue_on_dependent_read_failure(tmp_path, monkeypatch, fixed_clock):
+    async def body(env):
+        lane_id = await seed(env, unrelated=32, trail=0)
+        store = env.store
+
+        def hue(conn):
+            return conn.execute("SELECT hue FROM v2_assistant_composite_lanes WHERE lane_id=?",
+                                (lane_id,)).fetchone()[0]
+
+        def make_cold(conn):
+            conn.execute("UPDATE v2_assistant_composite_lanes SET hue=NULL WHERE lane_id=?", (lane_id,))
+            conn.commit()
+
+        def fail_after_hue(conn, **_kwargs):
+            assert conn.in_transaction and hue(conn) is not None
+            raise sqlite3.OperationalError("fixture dependent read failed")
+
+        await store.submit(make_cold)
+        with monkeypatch.context() as patch:
+            patch.setattr(lanes, "work_lane_rows_conn", fail_after_hue)
+            with pytest.raises(sqlite3.OperationalError, match="fixture dependent read failed"):
+                await store.get_work_lane(lane_id)
+        assert await store.submit(hue) is None
+        shown = await store.get_work_lane(lane_id)
+        assert shown["lane"]["hue"] == shown["_projection_row"]["hue"] == await store.submit(hue)
+        assert shown["lane"]["hue"]
+
+    run(body, str(tmp_path / "detail.sqlite"))
+
+
+def test_done_operator_lane_does_not_block_manager_close():
+    from test_fd_close_visible import HOST, close, lane, scenario, setup
+
+    async def body(env):
+        auth = await setup(env)
+        saved = await lane(env)
+
+        def settle(conn):
+            conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='done',done_at=? WHERE lane_id=?",
+                         (STAMP, saved["lane_id"]))
+            conn.commit()
+
+        await env.store.submit(settle)
+        result = await env.server._on_close(close(auth))
+        assert result["type"] == "close.ok" and env.tmux.killed == ["target"]
+        assert (await env.store.get_work_lane(saved["lane_id"]))["lane"]["work_state"] == "done"
+        audit = await env.store.latest_close_audit(HOST + ":target")
+        assert audit["actor_kind"] == "front_desk"
+
+    scenario(body)
