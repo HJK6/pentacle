@@ -8,10 +8,18 @@ const {drop,box,glb}=require('../../fixtures/model_library.cjs');
 const {stageFixture}=require('./next_design_fixture.cjs');
 const {operator,general,tailnetArgs,proxy,writeFixture,request,withHost}=require('./model_library_fixture.cjs');
 
-async function withFixture(fn) {
+async function withFixture(chromeBin, fn) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'pentacle-model-gate-'));
-  try { return await fn(root,writeFixture(root)); }
-  finally { fs.rmSync(root,{recursive:true,force:true}); }
+  const previousChrome = process.env.PENTACLE_CHROME;
+  try {
+    // The publish CLI and in-process picture checks use the same Design recorder executable.
+    if (chromeBin) process.env.PENTACLE_CHROME = chromeBin;
+    return await fn(root,writeFixture(root));
+  } finally {
+    if (previousChrome === undefined) delete process.env.PENTACLE_CHROME;
+    else process.env.PENTACLE_CHROME = previousChrome;
+    fs.rmSync(root,{recursive:true,force:true});
+  }
 }
 function cli(fixture, cmd, ...args) {
   const file=path.join(__dirname,'../../../scripts/model-library.cjs');
@@ -20,8 +28,8 @@ function cli(fixture, cmd, ...args) {
   }));
 }
 
-async function modelLibraryPublish({report}) {
-  await withFixture(async(root,fixture)=>{
+async function modelLibraryPublish({report,chromeBin}) {
+  await withFixture(chromeBin,async(root,fixture)=>{
     const stage=await stageFixture(root,{additional:false});
     fixture.design=stage.library;
     const args=['--drop',fixture.source];
@@ -102,8 +110,8 @@ function snapshot(root) {
   }).sort(([a],[b])=>a.localeCompare(b));
 }
 
-async function modelLibraryPicture({report}) {
-  await withFixture(async(root,fixture)=>{
+async function modelLibraryPicture({report,chromeBin}) {
+  await withFixture(chromeBin,async(root,fixture)=>{
     const {openPicturePage,capturePictures,themeWells}=require('../../../lib/model_picture.cjs');
     const {createLibrary}=require('../../../lib/model_library.cjs');
     const pub=cli(fixture,'publish','--drop',fixture.source);
