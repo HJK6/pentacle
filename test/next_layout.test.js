@@ -12,7 +12,6 @@ const {
   toAssistant,
   toggleFullScreen,
   markUsed,
-  setAssistantWidth,
   settle,
 } = require('../renderer/next/layout');
 
@@ -22,14 +21,14 @@ const cases = [
   {
     journey: 'compact: lanes start open only when there is room',
     run() {
-      const belowThreshold = createLayoutState(959);
-      const atThreshold = createLayoutState(960);
-      assert.deepEqual(view(belowThreshold, 959), { cards: [], assistant: true });
-      assert.deepEqual(view(atThreshold, 960), { cards: ['lanes'], assistant: true });
+      const belowThreshold = createLayoutState(971);
+      const atThreshold = createLayoutState(972);
+      assert.deepEqual(view(belowThreshold, 971), { cards: [], assistant: true });
+      assert.deepEqual(view(atThreshold, 972), { cards: ['lanes'], assistant: true });
 
       // The automatic choice follows resize until the first layout action.
       assert.deepEqual(view(belowThreshold, 1300), { cards: ['lanes'], assistant: true });
-      const touched = show(belowThreshold, 'chat', 'chat-a', 959);
+      const touched = show(belowThreshold, 'chat', 'chat-a', 971);
       assert.equal(touched.autoLanes, false);
       assert.deepEqual(view(touched, 1300), { cards: ['chat'], assistant: true });
     },
@@ -37,9 +36,9 @@ const cases = [
   {
     journey: 'compact: Assistant and lanes sit side by side at a readable width',
     run() {
-      const state = show(createLayoutState(702), 'lanes', true, 702);
-      assert.deepEqual(view(state, 702), { cards: ['lanes'], assistant: true });
-      assert.ok(702 - 60 >= 280 + 356);
+      const state = show(createLayoutState(708), 'lanes', true, 708);
+      assert.deepEqual(view(state, 708), { cards: ['lanes'], assistant: true });
+      assert.ok(708 - 72 >= 280 + 356);
     },
   },
   {
@@ -54,13 +53,14 @@ const cases = [
     },
   },
   {
-    journey: 'desktop: one other chat at a time',
+    journey: 'desktop: a second chat opens beside the chat last used',
     run() {
       let state = show(createLayoutState(1440), 'chat', 'chat-a', 1440);
       state = show(state, 'chat', 'chat-b', 1440);
-      assert.equal(state.chat, 'chat-b');
-      assert.deepEqual(pair(state), ['assistant', 'chat']);
-      assert.deepEqual(view(state, 1440), { cards: ['chat', 'lanes'], assistant: true });
+      assert.equal(state.chat, 'chat-a');
+      assert.equal(state.chat2, 'chat-b');
+      assert.deepEqual(pair(state), ['chat', 'chat2']);
+      assert.deepEqual(view(state, 1440), { cards: ['chat', 'chat2', 'lanes'], assistant: false });
     },
   },
   {
@@ -189,7 +189,9 @@ const cases = [
       state = show(state, 'dash', 'dashboard-a', 1440);
       state = toAssistant(state, 1440);
       assert.equal(state.chat, 'chat-a');
-      assert.equal(state.front, 'assistant');
+      assert.equal(state.overlay, true);
+      assert.deepEqual(pair(state), ['chat', 'dash']);
+      state = require('../renderer/next/layout').keepAssistant(state, 1440);
       assert.deepEqual(pair(state), ['assistant', 'dash']);
       assert.deepEqual(view(state, 1440), { cards: ['dash', 'lanes'], assistant: true });
 
@@ -199,19 +201,22 @@ const cases = [
     },
   },
   {
-    journey: 'desktop: the logo leaves full screen, then returns to Assistant and leaves lanes',
+    journey: 'desktop: the mark overlays full screen, and Keep exits it without closing',
     run() {
       let state = show(createLayoutState(1440), 'chat', 'chat-a', 1440);
       state = toggleFullScreen(state, 'chat', 1440);
       state = toAssistant(state, 1440);
+      assert.equal(state.solo, 'chat');
+      assert.equal(state.overlay, true);
+      state = require('../renderer/next/layout').keepAssistant(state, 1440);
       assert.equal(state.solo, null);
-      assert.equal(state.chat, 'chat-a', 'the first logo action only leaves full screen');
+      assert.equal(state.chat, 'chat-a');
       assert.deepEqual(view(state, 1440), { cards: ['chat', 'lanes'], assistant: true });
 
       state = toAssistant(state, 1440);
-      assert.equal(state.chat, null);
+      assert.equal(state.chat, 'chat-a');
       assert.equal(state.lanes, true);
-      assert.deepEqual(view(state, 1440), { cards: ['lanes'], assistant: true });
+      assert.deepEqual(view(state, 1440), { cards: ['chat', 'lanes'], assistant: false });
     },
   },
   {
@@ -231,7 +236,7 @@ const cases = [
     run() {
       const state = show(createLayoutState(800), 'chat', 'chat-a', 800);
       assert.deepEqual(view(state, 600), { cards: ['chat'], assistant: false });
-      assert.deepEqual(view(state, 652), { cards: ['chat'], assistant: true });
+      assert.deepEqual(view(state, 664), { cards: ['chat'], assistant: true });
       assert.equal(state.chat, 'chat-a', 'resize projection does not close the chat');
     },
   },
@@ -349,16 +354,6 @@ test('layout transitions are pure and focus does not reorder cards', () => {
   fits(initial, 440);
   settle(initial, 440);
   assert.deepEqual(initial, beforeProjection);
-});
-
-test('dragged Assistant width respects its floor and visible card minimums', () => {
-  let state = show(createLayoutState(1440), 'dash', 'dashboard-a', 1440);
-  assert.equal(state.assistantWidth, null, 'the shell can use the CSS clamp until a drag occurs');
-  state = setAssistantWidth(state, 1100, 1200, 1440);
-  assert.equal(state.assistantWidth, 532, 'Assistant stops before the dashboard and lanes minimum widths');
-  state = setAssistantWidth(state, 40, 1200, 1440);
-  assert.equal(state.assistantWidth, 280);
-  assert.throws(() => setAssistantWidth(createLayoutState(800), 400, 740, 800), /visible card/);
 });
 
 test('full screen has no phone action and only chat or dashboard can use it', () => {

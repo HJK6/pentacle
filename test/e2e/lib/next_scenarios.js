@@ -34,7 +34,7 @@ async function homeRail(ctx) {
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
         assistant: document.querySelector('.pane .thread-inner').dataset.streamId,
         lit: rail.querySelector('.brand').classList.contains('on'),
-        chatLit: rail.querySelector('[aria-label=Chats]').classList.contains('on'),
+        chatLit: rail.querySelector('.chats-button').classList.contains('on'),
       };
     })()`);
     report.ok(`rail has seven icon-only controls at ${width}`, JSON.stringify(info.names) === JSON.stringify(expectedNames)
@@ -48,25 +48,26 @@ async function homeRail(ctx) {
 }
 async function chatCard(ctx) {
   const { session, report } = ctx; await visit(ctx);
-  await session.click('[aria-label="Chats"]');
-  report.ok('open chats popover lights its rail control', await session.eval("document.querySelector('[aria-label=Chats]').classList.contains('open')"));
+  await session.click('.chats-button');
+  report.ok('open chats popover lights its rail control', await session.eval("document.querySelector('.chats-button').classList.contains('open')"));
   await session.waitFor(`!!document.querySelector('.popover [data-stream-id="local:web-gate-1"]')`, { timeoutMs: ctx.timeoutMs });
   await session.click('.popover [data-stream-id="local:web-gate-1"]');
   await session.waitFor("!document.querySelector('.card').hidden && document.querySelector('.card-title').textContent.length>0", { timeoutMs: ctx.timeoutMs });
   report.ok('opening a seeded chat displays its card beside Assistant', await session.eval("!document.querySelector('.card').hidden && !document.querySelector('.pane').hidden"));
-  report.ok('the visible chat lights the chats control', await session.eval("document.querySelector('[aria-label=Chats]').classList.contains('on')"));
+  report.ok('the visible chat lights the chats control', await session.eval("document.querySelector('.chats-button').classList.contains('on')"));
   report.ok('the two chat panes share the stage evenly', await session.eval("Math.abs(document.querySelector('.pane').getBoundingClientRect().width-document.querySelector('.card').getBoundingClientRect().width)<20"));
   await session.click('[aria-label="Full screen"]'); report.ok('full screen hides Assistant', await session.eval("document.querySelector('.pane').hidden"));
   await session.screenshot(path.join(report.dir, 'next-full.png'));
   await session.send('Input.dispatchKeyEvent', { type:'keyDown', key:'Escape', code:'Escape' });
   report.ok('Escape returns to the split view', await session.eval("!document.querySelector('.pane').hidden"));
   await session.click('[aria-label="Full screen"]'); await session.click('.rail .brand');
-  report.ok('logo exits full screen', await session.eval("!document.querySelector('.pane').hidden && !document.querySelector('.card').hidden"));
-  await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
-  report.ok('a second chat replaces the first', await session.eval("document.querySelector('.card .thread-inner').dataset.streamId === 'local:web-gate-survivor'"));
+  report.ok('logo brings Assistant out over full screen', await session.eval("!!document.querySelector('.assistant-overlay:not([hidden])') && !!document.querySelector('.chat-card:not([hidden]) [aria-label=\"Leave full screen\"]')"));
+  await session.click('.assistant-keep');
+  await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
+  report.ok('a second chat replaces the first after Assistant was last used', await session.eval("document.querySelector('.card .thread-inner').dataset.streamId === 'local:web-gate-survivor'"));
   await session.screenshot(path.join(report.dir, 'next-chat.png'));
   await session.click('[aria-label="Close"]'); report.ok('closing the card returns to Assistant', await session.eval("document.querySelector('.card').hidden && !document.querySelector('.pane').hidden"));
-  await session.click('[aria-label="Chats"]'); report.ok('closing the card leaves the session in the list', await session.eval("!!document.querySelector('.popover [data-stream-id=\"local:web-gate-survivor\"]')"));
+  await session.click('.chats-button'); report.ok('closing the card leaves the session in the list', await session.eval("!!document.querySelector('.popover [data-stream-id=\"local:web-gate-survivor\"]')"));
   report.ok('closing the card does not close its daemon session', await session.eval("window.cc.getChatStreamState().then(s=>(s.sessions||[]).some(x=>x.stream_id==='local:web-gate-survivor' && x.status!=='closed' && !x.closed_at))"));
 }
 module.exports = { homeRail: isolated(homeRail), chatCard: isolated(chatCard) };
@@ -82,7 +83,7 @@ async function attachmentThumbnail(ctx) {
     '--blob-root', path.join(scratch, 'blobs'), '--next-thumbnail',
   ], { encoding: 'utf8' }));
   await visit(ctx);
-  await session.click('.rail [aria-label="Chats"]');
+  await session.click('.rail .chats-button');
   await session.click(`.popover [data-stream-id="${seeded.stream_id}"]`);
   const thumbnail = JSON.stringify(`.card .slot-chat-media-button[data-attachment-key="${seeded.digest}"]`);
   await session.waitFor(`!!document.querySelector(${thumbnail})`, { timeoutMs: ctx.timeoutMs, label: 'persisted attachment shown in chat' });
@@ -114,7 +115,7 @@ module.exports.attachmentThumbnail = isolated(attachmentThumbnail);
 async function fixedLanesWidth(ctx) {
   const { session, report } = ctx;
   await visit(ctx);
-  await session.click('.rail [aria-label="Chats"]');
+  await session.click('.rail .chats-button');
   await session.click('.popover [data-stream-id="local:web-gate-1"]');
   const readPanes = `(() => {
     const stage = document.querySelector('.stage');
@@ -154,7 +155,7 @@ async function newChat(ctx) {
     window.__nextRequests=[]; window.__pentacleNextAdmitted=[]; window.__nextReply={ok:false,error:'Fixture refusal'};
     window.cc.chatSpawnV2=async req=>{window.__nextRequests.push(req);const reply=window.__nextReply;if(reply.ok&&reply.streamId)window.__pentacleNextAdmitted.push(reply.streamId);return reply}; return true;
   })()`);
-  await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]');
+  await session.click('.chats-button'); await session.click('[aria-label="New chat"]');
   await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs });
   report.ok('provider tiles show catalog counts and Start is disabled', await session.eval("document.querySelector('[data-testid=\"set-provider-claude\"]').textContent.includes('1 model') && document.querySelector('[data-testid=\"set-provider-codex\"]').textContent.includes('1 model') && document.querySelector('[data-testid=\"start-chat\"]').disabled"));
   await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
@@ -165,7 +166,7 @@ async function newChat(ctx) {
   await session.click('[data-testid="start-chat"]'); await session.waitFor("document.querySelector('[data-testid=\"start-chat\"]')?.textContent === 'Starting'", { timeoutMs: ctx.timeoutMs });
   await session.eval("document.querySelector('[data-testid=\"start-chat\"]').click(),true");
   report.ok('queued admission holds the disabled form and records its stream', await session.eval("document.querySelector('[data-testid=\"start-chat\"]').disabled && window.__pentacleNextAdmitted.includes('local:not-listed') && window.__nextRequests.length === 2"));
-  await session.click('.card [aria-label="Close"]'); await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]');
+  await session.click('.card [aria-label="Close"]'); await session.click('.chats-button'); await session.click('[aria-label="New chat"]');
   await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs });
   report.ok('leaving and reopening shows a fresh form', await session.eval("!!document.querySelector('[data-testid=\"set-provider-claude\"]') && !document.querySelector('.start-error')"));
   await session.screenshot(path.join(report.dir, 'next-new-chat.png'));
@@ -174,10 +175,18 @@ async function newChat(ctx) {
   await session.click('[data-testid="start-chat"]');
   await session.waitFor("!document.querySelector('.card').hidden && !!document.querySelector('.card [data-next-composer]')", { timeoutMs: ctx.timeoutMs });
   report.ok('an admitted listed session opens its ordinary chat and is recorded', await session.eval("window.__pentacleNextAdmitted.includes('local:web-gate-1') && !!document.querySelector('.card [aria-label=\"Terminal\"]')"));
-  await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]'); await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs }); await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
+  await session.click('.chats-button'); await session.click('[aria-label="New chat"]'); await session.waitFor("!!document.querySelector('[data-testid=\"set-provider-claude\"]')", { timeoutMs: ctx.timeoutMs }); await session.click('[data-testid="set-provider-claude"]'); await session.click('[data-testid="set-model-fixture-model"]'); await session.click('[data-testid="set-account-ours"]');
   await session.eval(`window.__nextReply={ok:true,streamId:'local:web-gate-empty',session:{...window.PentacleChatStore.getState().sessions.find(s=>s.stream_id==='local:web-gate-empty'),state:'ready'}}; true`);
-  await session.click('[data-testid="start-chat"]'); await session.waitFor("window.__pentacleNextAdmitted.includes('local:web-gate-empty') && !!document.querySelector('.card [data-next-composer]')",{timeoutMs:ctx.timeoutMs});
-  report.ok('an ordinary ready reply opens the empty session and records its ID',await session.eval("!!document.querySelector('.card-title').textContent && !document.querySelector('.card .thread-inner .slot-chat-row') && !document.querySelector('.new-chat-host:not([hidden])')"));
+  await session.click('[data-testid="start-chat"]');
+  const empty = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-empty"])';
+  const stillOpen = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-1"])';
+  await session.waitFor(`window.__pentacleNextAdmitted.includes('local:web-gate-empty') && !!document.querySelector(${JSON.stringify(empty + ' [data-next-composer]')})`, {timeoutMs:ctx.timeoutMs});
+  report.ok('an ordinary ready reply opens the empty session and records its ID', await session.eval(`(() => {
+    const card = document.querySelector(${JSON.stringify(empty)});
+    return !!card?.querySelector('.card-title').textContent.trim() &&
+      !card.querySelector('.thread-inner .slot-chat-row') && !card.querySelector('.new-chat-host:not([hidden])') &&
+      !!document.querySelector(${JSON.stringify(stillOpen)});
+  })()`));
   } finally { require('fs').rmSync(catalogFlag, { force:true }); }
 }
 module.exports.newChat = isolated(newChat);
@@ -190,8 +199,29 @@ async function limitsSettings(ctx) {
   report.ok('machine CPU, RAM and disk figures use separate mock table columns', await session.eval("(() => {const row=document.querySelector('[data-machine-host=\"fixture-machine\"]');const cells=[...row.querySelectorAll('[role=cell]')].map(x=>x.textContent);return JSON.stringify(cells)===JSON.stringify(['24%','25%','40%'])&&!!document.querySelector('.limits-view h3')})()"));
   await session.screenshot(path.join(report.dir,'next-repair-stats-1440.png'));
   await session.send('Emulation.setDeviceMetricsOverride', {width:440,height:956,deviceScaleFactor:1,mobile:false});
-  await session.waitFor("window.innerWidth===440", {timeoutMs:ctx.timeoutMs});
-  report.ok('phone stats table does not overflow', await session.eval("document.documentElement.scrollWidth===document.documentElement.clientWidth && !!document.querySelector('[data-machine-host=\"fixture-machine\"]')"));
+  try {
+    await session.waitFor(`window.innerWidth === 440
+      && document.documentElement.scrollWidth === document.documentElement.clientWidth
+      && !!document.querySelector('[data-machine-host="fixture-machine"]')`,
+      { timeoutMs: ctx.timeoutMs, label: '440 px stats table without horizontal overflow' });
+  } catch (error) {
+    if (!error.message.startsWith('waitFor timed out')) throw error;
+    const detail = await session.eval(`(() => {
+      const { scrollWidth, clientWidth } = document.documentElement;
+      const machineRowPresent = !!document.querySelector('[data-machine-host="fixture-machine"]');
+      let widestElement = null;
+      for (const element of document.body.querySelectorAll('*')) {
+        const width = element.getBoundingClientRect().width;
+        if (!width || (widestElement && width <= widestElement.width)) continue;
+        const selector = element.id ? '#' + CSS.escape(element.id)
+          : element.localName + [...element.classList].map(name => '.' + CSS.escape(name)).join('');
+        widestElement = { selector, width };
+      }
+      return { scrollWidth, clientWidth, machineRowPresent, widestElement };
+    })()`);
+    report.ok('phone stats table does not overflow', false, detail);
+  }
+  report.ok('phone stats table does not overflow', true);
   await session.screenshot(path.join(report.dir,'next-repair-stats-440.png'));
   await session.send('Emulation.setDeviceMetricsOverride', {width:1440,height:900,deviceScaleFactor:1,mobile:false});
   await session.waitFor("window.innerWidth===1440", {timeoutMs:ctx.timeoutMs});
@@ -202,7 +232,7 @@ async function limitsSettings(ctx) {
   await session.click('[aria-label="Settings"]'); report.ok('settings presents three tiles and the selected theme', await session.eval("document.querySelector('.theme-heading').textContent==='Theme' && document.querySelectorAll('.theme-choice').length===3 && document.querySelector('[aria-label=dark]').getAttribute('aria-pressed')==='true'")); await session.screenshot(path.join(report.dir, 'next-settings.png')); await session.click('[aria-label="light"]');
   const light = await session.eval("getComputedStyle(document.body).backgroundColor");
   await session.click('[aria-label="cosmic"]');
-  const cosmic = await session.eval("(() => {const label=document.createElement('span');label.className='status-age';document.body.append(label);const result={bg:getComputedStyle(document.body).backgroundColor,title:getComputedStyle(document.querySelector('.card-title')).fontFamily,body:getComputedStyle(document.body).fontFamily,label:getComputedStyle(label).fontFamily,lit:getComputedStyle(document.querySelector('.rail-button.on')).color,idle:getComputedStyle(document.querySelector('[aria-label=Chats]')).color};label.remove();return result})()");
+  const cosmic = await session.eval("(() => {const label=document.createElement('span');label.className='status-age';document.body.append(label);const result={bg:getComputedStyle(document.body).backgroundColor,title:getComputedStyle(document.querySelector('.card-title')).fontFamily,body:getComputedStyle(document.body).fontFamily,label:getComputedStyle(label).fontFamily,lit:getComputedStyle(document.querySelector('.rail-button.on')).color,idle:getComputedStyle(document.querySelector('.chats-button')).color};label.remove();return result})()");
   report.ok('light and cosmic themes change the page and cosmic type', light !== cosmic.bg && cosmic.bg !== 'rgba(0, 0, 0, 0)' && cosmic.title.includes('Rajdhani') && !cosmic.body.includes('Rajdhani') && cosmic.label.includes('JetBrains Mono') && cosmic.lit !== cosmic.bg && cosmic.idle !== cosmic.bg, { light, cosmic });
   await session.send('Page.reload'); await session.waitFor("document.documentElement.dataset.theme === 'cosmic'", { timeoutMs: ctx.timeoutMs });
   report.ok('theme persists across reload', true);
@@ -211,11 +241,11 @@ async function limitsSettings(ctx) {
 module.exports.limitsSettings = isolated(limitsSettings);
 async function composer(ctx) {
   const { session, report, cdp } = ctx; await visit(ctx);
-  await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
+  await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
   await session.waitFor("!!document.querySelector('.card [data-next-message]')", { timeoutMs: ctx.timeoutMs });
   await session.eval(`(() => { window.__nextSends=[]; window.PentacleChatStore.setSendBridge(async args => { window.__nextSends.push(args); if(window.__nextSends.length===1) await new Promise(resolve=>window.__releaseNextSend=resolve); return {ok:true}; }); const e=document.querySelector('.card [data-next-message]'); e.value='draft to keep'; e.dispatchEvent(new Event('input',{bubbles:true})); return true; })()`);
   report.ok('typing replaces the microphone with send', await session.eval("document.querySelector('.card [data-next-mic]').hidden && !document.querySelector('.card [data-next-send]').hidden"));
-  await session.click('[aria-label="Close"]'); await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
+  await session.click('[aria-label="Close"]'); await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
   report.ok('the draft survives closing and reopening', await session.eval("document.querySelector('.card [data-next-message]').value === 'draft to keep'"));
   const shiftPass = await session.eval(`(() => { const e=document.querySelector('.card [data-next-message]');const k=new KeyboardEvent('keydown',{key:'Enter',shiftKey:true,bubbles:true,cancelable:true}); return e.dispatchEvent(k); })()`);
   report.ok('Shift+Enter remains a line break', shiftPass);
@@ -285,11 +315,11 @@ async function terminalStatus(ctx) {
   try {
     await session.send('Network.enable'); session.ws.on('message', observeFrame);
     await session.eval(`(() => {const original=window.cc.createPty;window.__nextPtyReady=false;window.cc.createPty=async(...args)=>{const pane=await original(...args);window.__nextPtyReady=!!pane;return pane};return true})()`);
-    await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
+    await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
     report.ok('a session without a status card has no status button', await session.eval("document.querySelector('.card [aria-label=\"Status\"]').hidden"));
     await session.click('.card [aria-label="Close"]');
     await session.eval(`(() => { const store=window.PentacleChatStore; const rows=store.getState().sessions.map(s=>s.stream_id==='local:web-gate-1'?{...s,session_name:${JSON.stringify(name)},status_card:{goal:'Fixture goal',plan:[{text:'First',status:'done'},{text:'Second',status:'active'}],update:'Fixture update',updated_at:new Date().toISOString()}}:s);store.applyFrame({type:'session.inventory',sessions:rows});return true;})()`);
-    await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
+    await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
     await session.click('.card [aria-label="Terminal"]');
     await session.waitFor("!!document.querySelector('.terminal .xterm-screen')", { timeoutMs:ctx.timeoutMs });
     await session.waitFor("window.__nextPtyReady === true", { timeoutMs:ctx.timeoutMs });
@@ -317,7 +347,7 @@ async function terminalStatus(ctx) {
 module.exports.terminalStatus = isolated(terminalStatus);
 async function voice(ctx) {
   const {session, report, cdp} = ctx; await visit(ctx);
-  await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
+  await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
   await session.eval(`(() => { window.__nextVoice={media:[],sends:[]}; const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices); const transcribe=window.cc.chatTranscribeBlob; window.__nextVoice.restore=async()=>{window.__nextVoice.release?.();navigator.mediaDevices.getUserMedia=original;window.cc.chatTranscribeBlob=transcribe;for(const m of window.__nextVoice.media){m.osc.stop();m.stream.getTracks().forEach(t=>t.stop());await m.context.close()}}; navigator.mediaDevices.getUserMedia=async()=>{const context=new AudioContext();await context.resume();const osc=context.createOscillator(),gain=context.createGain(),dest=context.createMediaStreamDestination();gain.gain.value=.05;osc.connect(gain).connect(dest);osc.start();setTimeout(()=>gain.gain.value=.9,500);window.__nextVoice.media.push({context,osc,stream:dest.stream});return dest.stream};window.cc.chatTranscribeBlob=async payload=>{await new Promise(resolve=>window.__nextVoice.release=resolve);return transcribe(payload)};window.cc.chatOutboundCommit=async()=>({ok:false,error_code:'unsupported'});window.PentacleChatStore.setSendBridge(async args=>{window.__nextVoice.sends.push(args);return {ok:true}});return true})()`);
   try {
     await session.send('Runtime.evaluate',{expression:"document.querySelector('.card [data-next-mic]').click()",userGesture:true});
@@ -334,8 +364,21 @@ async function voice(ctx) {
     await session.eval('window.__nextVoice.release(),true'); await session.waitFor("window.__nextVoice.sends.length===1",{timeoutMs:ctx.timeoutMs});
     report.ok('transcribed voice reaches the shared send bridge',await session.eval("window.__nextVoice.sends[0].text.includes('Hermetic server transcript')"));
     await session.send('Runtime.evaluate',{expression:"document.querySelector('.card [data-next-mic]').click()",userGesture:true}); await session.waitFor("!!document.querySelector('.card [data-next-voice-bars]')",{timeoutMs:ctx.timeoutMs});
-    await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
-    await session.waitFor("window.__nextVoice.media.at(-1).stream.getTracks().every(t=>t.readyState==='ended')",{timeoutMs:ctx.timeoutMs});
+    const takeCard = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-1"])';
+    const otherCard = '.chat-card:not([hidden]):has(.thread-inner[data-stream-id="local:web-gate-survivor"])';
+    await useFluid(session, takeCard + ' .card-title');
+    await chooseChat(session, 'local:web-gate-survivor');
+    await session.waitFor(`!!document.querySelector(${JSON.stringify(otherCard)})`, {timeoutMs:ctx.timeoutMs});
+    report.ok('adding a second card keeps the first take recording', await session.eval(
+      `!!document.querySelector(${JSON.stringify(takeCard + ' [data-next-voice-bars]')}) &&
+        window.__nextVoice.media.at(-1).stream.getTracks().every(t=>t.readyState==='live') &&
+        window.__nextVoice.sends.length===1`));
+    await session.click(otherCard + ' [aria-label="Close"]');
+    await useFluid(session, '[data-pane=assistant] .thread');
+    await chooseChat(session, 'local:web-gate-survivor');
+    await session.waitFor(`!document.querySelector(${JSON.stringify(takeCard)}) &&
+      !!document.querySelector(${JSON.stringify(otherCard)}) &&
+      window.__nextVoice.media.at(-1).stream.getTracks().every(t=>t.readyState==='ended')`,{timeoutMs:ctx.timeoutMs});
     report.ok('changing chats stops and discards an in-progress take', await session.eval("window.__nextVoice.sends.length===1 && !document.querySelector('[data-next-voice-pending]')"));
   } finally { await session.eval('window.__nextVoice.restore()'); require('fs').rmSync(path.join(ctx.runtime.fixtureScratch, 'asr-release'), { force: true }); }
 }
@@ -343,10 +386,10 @@ module.exports.voice=isolated(voice);
 async function narrowPhone(ctx) {
   const {session,report}=ctx;
   for (const width of [1010,702,440]) {
-    await visit(ctx,width); await session.click('[aria-label="Chats"]'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
+    await visit(ctx,width); await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-1"]');
     const result=await session.eval("({overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,assistant:!document.querySelector('.pane').hidden,full:getComputedStyle(document.querySelector('.fullscreen')).display})");
     report.ok(`chat layout fits at ${width}`,!result.overflow && (width>599 || (!result.assistant&&result.full==='none')),result);
-    if(width===440){await session.screenshot(path.join(report.dir, 'next-phone-chat.png'));await session.click('[aria-label="Chats"]');await session.screenshot(path.join(report.dir, 'next-phone-chats.png'));await session.click('.popover [data-stream-id="local:web-gate-survivor"]');await session.click('.card [aria-label="Close"]');report.ok('phone closes newest card to Assistant',await session.eval("!document.querySelector('.pane').hidden && document.querySelector('.card').hidden"));await session.click('[aria-label="Chats"]');await session.click('.popover [data-stream-id="local:web-gate-1"]');await session.click('.rail .brand');report.ok('phone logo returns to the assistant',await session.eval("!document.querySelector('.pane').hidden && document.querySelector('.card').hidden"));}
+    if(width===440){await session.screenshot(path.join(report.dir, 'next-phone-chat.png'));await session.click('.chats-button');await session.screenshot(path.join(report.dir, 'next-phone-chats.png'));await session.click('.popover [data-stream-id="local:web-gate-survivor"]');await session.click('.card [aria-label="Close"]');report.ok('phone closes newest card to Assistant',await session.eval("!document.querySelector('.pane').hidden && document.querySelector('.card').hidden"));await session.click('.chats-button');await session.click('.popover [data-stream-id="local:web-gate-1"]');await session.click('.rail .brand');report.ok('phone logo returns to the assistant',await session.eval("!document.querySelector('.pane').hidden && document.querySelector('.card').hidden"));}
   }
   await session.send('Emulation.clearDeviceMetricsOverride');
 }
@@ -413,7 +456,7 @@ async function scrollAndFocus(ctx) {
     await visit(ctx,width);
     const baseline=await session.eval(`(() => {const input=document.querySelector('.pane .next-composer-input'), outer=input.closest('.next-composer'), scroller=document.querySelector('.pane .thread'); const filler=document.createElement('div');filler.style.height='2000px';filler.style.flex='none';filler.textContent='Scroll fixture';scroller.append(filler);scroller.scrollTop=500;const before=getComputedStyle(outer).boxShadow;input.focus();return {outline:getComputedStyle(input).outlineStyle,before,after:getComputedStyle(outer).boxShadow,scrollbar:getComputedStyle(scroller).scrollbarWidth,width:getComputedStyle(scroller,'::-webkit-scrollbar').width,overflow:scroller.scrollHeight>scroller.clientHeight};})()`);
     report.ok(`composer focus uses the outer cue at ${width}`,baseline.outline==='none' && baseline.before!==baseline.after,baseline);
-    report.ok(`scrollbar is thin and styled at ${width}`,baseline.overflow && baseline.scrollbar==='thin' && baseline.width==='7px',baseline);
+    report.ok(`scrollbar is native auto with a 14 px styled box at ${width}`,baseline.overflow && baseline.scrollbar==='auto' && baseline.width==='14px',baseline);
     await session.screenshot(path.join(report.dir,`next-repair-scroll-focus-${width}.png`));
   }
 }
@@ -444,7 +487,7 @@ async function newChatParity(ctx) {
     }
     await session.screenshot(path.join(report.dir,`current-repair-choices-${width}.png`));
     await visit(ctx,width); await session.eval(install);
-    await session.click('[aria-label="Chats"]'); await session.click('[aria-label="New chat"]');
+    await session.click('.chats-button'); await session.click('[aria-label="New chat"]');
     await session.waitFor("!!document.querySelector('[data-set=provider]')",{timeoutMs:ctx.timeoutMs});
     const actual=await session.eval("[...document.querySelectorAll('[data-set=provider]')].map(x=>x.dataset.val)");
     report.ok(`new chat providers match the current web at ${width}`,JSON.stringify(actual)===JSON.stringify(expected),{actual,expected});
@@ -491,4 +534,455 @@ module.exports.melody = isolated(async ctx => {
   await session.click('.melody-clear-history');
   report.ok('Clearing history keeps the arrangement',
     await session.eval("!document.querySelector('.melody-history-note') && document.querySelectorAll('.melody-note').length === 2"));
+});
+
+const fluidA = 'local:web-gate-1';
+const fluidB = 'local:web-gate-survivor';
+const pane = key => `.stage>[data-pane="${key}"]:not([hidden])`;
+const activeChats = '.stage>.chat-card:not([hidden])';
+const bounds = (s, selector) => s.eval(`document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect().toJSON()`);
+const railClick = (s, name) => name === 'Chats' ? s.click('.rail .chats-button') : s.click(`.rail [aria-label="${name}"]`);
+const chooseChat = async (s, id) => { await railClick(s, 'Chats'); await s.click(`.popover [data-stream-id="${id}"]`); };
+const chooseMelody = async s => { await railClick(s, 'Dashboards'); await s.click('.popover [aria-label=Melody]'); };
+const closeFluid = (s, key) => s.click(`${pane(key)} [aria-label=Close]`);
+const esc = s => s.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
+const mouse = (s, type, x, y, button = 'left') => s.send('Input.dispatchMouseEvent',
+  { type, x, y, button, buttons: type === 'mouseReleased' ? 0 : button === 'left' ? 1 : 2, clickCount: type === 'mouseMoved' ? 0 : 1 });
+const dragFluid = async (s, a, b) => {
+  await mouse(s, 'mousePressed', ...a);
+  await mouse(s, 'mouseMoved', ...b);
+  await mouse(s, 'mouseReleased', ...b);
+};
+function fluidCheck(ctx, label, ok, measured) {
+  ctx.report.ok(label, ok, measured);
+  if (!ok) throw new Error(label);
+}
+const fluidRead = s => s.eval(`(() => {
+  const elements = [...document.querySelectorAll('.stage>[data-pane]:not([hidden])')];
+  const order = elements.filter(el => !el.classList.contains('assistant-overlay')).sort((a,b) => a.getBoundingClientRect().left-b.getBoundingClientRect().left);
+  return { keys: order.map(el => el.dataset.pane), sizes: Object.fromEntries(order.map(el => [el.dataset.pane,el.getBoundingClientRect().width])),
+    overlay: !!document.querySelector('.assistant-overlay:not([hidden])'), pressed: document.querySelector('.rail .brand').getAttribute('aria-pressed'),
+    lastFocus: document.activeElement?.closest('.stage>[data-pane]')?.dataset.pane || null,
+    streams: Object.fromEntries(order.filter(el => el.classList.contains('chat-card')).map(el => [el.dataset.pane,el.querySelector('.thread-inner').dataset.streamId])),
+    zone: document.querySelector('.fluid-zone:not([hidden])')?.dataset.type || null };
+})()`);
+const useFluid = async (s, selector) => {
+  const r = await bounds(s,selector);
+  const point = [r.left+r.width/2, r.top+r.height/2];
+  await mouse(s,'mousePressed',...point);
+  await mouse(s,'mouseReleased',...point);
+};
+async function fluidVisit(ctx, width = 1440, lanes = false) {
+  const { session: s } = ctx;
+  await visit(ctx, width);
+  await s.waitFor("document.querySelector('.rail .brand').getAttribute('aria-label') === 'Assistant Fixture'", { timeoutMs: ctx.timeoutMs });
+  if (!lanes && await s.eval("!document.querySelector('.lanes-card').hidden")) await railClick(s, 'Lanes');
+}
+const noMotion = (s, reduce = true) => s.send('Emulation.setEmulatedMedia', { features: reduce ? [{ name: 'prefers-reduced-motion', value: 'reduce' }] : [] });
+
+module.exports.fluidRail = isolated(async ctx => {
+  const { session: s } = ctx;
+  try {
+    await fluidVisit(ctx);
+    await railClick(s, 'Chats');
+    const left = {rail: await bounds(s,'.rail'), popover: await bounds(s,'.popover')};
+    fluidCheck(ctx, 'left rail is 60 px, and list is to its right', left.rail.left === 0 && left.rail.width === 60 && left.popover.left >= left.rail.right, left);
+    await railClick(s, 'Settings');
+    await s.click('.sidebar-choice[aria-label=Top]');
+    const top = {rail: await bounds(s,'.rail'), settings: await bounds(s,'.popover')};
+    fluidCheck(ctx, 'Top is a 48 px full-width rail with settings below and at right',
+      top.rail.top === 0 && top.rail.height === 48 && top.rail.width === 1440 && top.settings.top >= top.rail.bottom && top.settings.right >= 1420, top);
+    await railClick(s, 'Chats');
+    const list = {anchor: await bounds(s, '.rail .chats-button'), list: await bounds(s,'.popover')};
+    fluidCheck(ctx, 'Top list drops under its own button', list.list.top >= list.anchor.bottom && Math.abs(list.anchor.left-list.list.left) <= 2, list);
+    await s.send('Page.reload');
+    await s.waitFor("document.documentElement.dataset.rail==='top' && !!document.querySelector('.assistant-head')", { timeoutMs:ctx.timeoutMs });
+    await railClick(s, 'Settings');
+    fluidCheck(ctx, 'Top persisted through reload', await s.eval("localStorage.getItem('pentacle.next.rail')==='top' && document.querySelector('.sidebar-choice[aria-label=Top]').getAttribute('aria-pressed')==='true'"));
+  } finally {
+    if (await s.eval("document.documentElement.dataset.rail==='top'")) {
+      if (await s.eval("!document.querySelector('.sidebar-choice[aria-label=Left]')")) await railClick(s, 'Settings');
+      await s.click('.sidebar-choice[aria-label=Left]');
+    }
+    fluidCheck(ctx, 'Left is restored', (await bounds(s,'.rail')).width === 60);
+  }
+});
+
+module.exports.fluidBartSwitch = isolated(async ctx => {
+  const {session: s} = ctx;
+  const mark = () => s.click('.rail .brand');
+  const read = () => fluidRead(s);
+  await fluidVisit(ctx);
+  const name = await s.eval("({head: document.querySelector('.assistant-head').innerText.trim(), label: document.querySelector('.rail .brand').getAttribute('aria-label')})");
+  fluidCheck(ctx, 'Assistant head contains only its name', name.head === 'Assistant Fixture' && name.label === name.head, name);
+  await mark();
+  fluidCheck(ctx, 'mark alone leaves an empty stage', (await read()).keys.length === 0 && (await read()).pressed === 'false');
+  await mark();
+  await chooseChat(s, fluidA);
+  await mark();
+  const aside = await read();
+  fluidCheck(ctx, 'one chat takes all the room while Assistant is aside', aside.keys.join() === 'chat' && aside.sizes.chat === 1368 && !aside.overlay, aside);
+  await mark();
+  const resumed = await read();
+  fluidCheck(ctx, 'one chat permits return and focuses Assistant', resumed.keys.join() === 'assistant,chat' && resumed.lastFocus === 'assistant' && !resumed.overlay, resumed);
+  await useFluid(s,`${pane('chat')} .card-title`);
+  await chooseChat(s, fluidB);
+  await mark();
+  const overlay = await bounds(s,'.assistant-overlay');
+  const rail = await bounds(s,'.rail');
+  fluidCheck(ctx, 'two chats stay open under a 480 px focusable overlay', (await read()).keys.join() === 'chat,chat2' &&
+    (await read()).lastFocus === 'assistant' && (await read()).pressed === 'true' && overlay?.width === 480 && overlay.left === rail.right, overlay);
+  await mark(); fluidCheck(ctx,'mark dismisses overlay', !(await read()).overlay);
+  await mark(); await esc(s); fluidCheck(ctx,'Escape dismisses overlay', !(await read()).overlay);
+  await mark(); await useFluid(s,`${pane('chat2')} .card-title`); fluidCheck(ctx,'outside press dismisses overlay', !(await read()).overlay);
+  await mark(); await s.click('[aria-label="Keep Assistant Fixture on screen"]');
+  fluidCheck(ctx,'Keep preserves the chat used last', (await read()).keys.join() === 'assistant,chat2' && (await read()).streams.chat2 === fluidB);
+  await useFluid(s,`${pane('chat2')} .card-title`); await chooseMelody(s); await mark();
+  fluidCheck(ctx,'mark overlays chat in front of dashboard', (await read()).overlay && (await read()).keys.join() === 'chat2,dash');
+  await s.click('[aria-label="Keep Assistant Fixture on screen"]');
+  fluidCheck(ctx,'Keep restores Assistant without losing the waiting chat', (await read()).keys.join() === 'assistant,dash');
+  await s.click('.melody-card [aria-label="Close dashboard"]');
+  fluidCheck(ctx,'waiting chat returns beside Assistant', (await read()).keys.join() === 'assistant,chat2');
+  await s.click(`${pane('chat2')} [aria-label="Full screen"]`); await mark();
+  fluidCheck(ctx,'mark overlays while card remains full screen', (await read()).overlay && (await read()).keys.join() === 'chat2');
+  await s.click('[aria-label="Keep Assistant Fixture on screen"]');
+  fluidCheck(ctx,'Keep exits full screen without closing the chat', (await read()).keys.join() === 'assistant,chat2');
+  await mark(); await closeFluid(s,'chat2');
+  fluidCheck(ctx,'closing last seat brings Assistant back', (await read()).keys.join() === 'assistant');
+});
+
+async function seedFluidChat(s) {
+  await s.eval(`(() => {
+    const store = window.PentacleChatStore;
+    const rows = store.getState().sessions;
+    const original = rows.find(r => r.stream_id === '${fluidA}');
+    store.applyFrame({type:'session.inventory', sessions:[...rows,{...original, stream_id:'local:web-gate-fluid-third', session_name:'web-gate-fluid-third', display_name:'Fluid third', title:'Fluid third'}]});
+    return true;
+  })()`);
+}
+async function recordFluidTerminals(ctx) {
+  const {session:s, tmux} = ctx;
+  const names = [0, 1].map(n => `ptest-web-fluid-${process.pid}-${Date.now().toString(36)}-${n}`);
+  const running = [];
+  const output = ['', ''];
+  const started = process.hrtime.bigint();
+  function observe(raw) {
+    try {
+      const e = JSON.parse(raw);
+      if (e.method !== 'Network.webSocketFrameReceived') return;
+      const msg = JSON.parse(e.params.response.payloadData);
+      if (msg.event === 'pty:data' && [0,1].includes(msg.args?.[0])) output[msg.args[0]] += msg.args[1];
+    } catch (_) { /* Ignore unrelated WebSocket frames. */ }
+  }
+  try {
+    for (const name of names) {
+      tmux(['new-session','-d','-s',name,'sh','-c','stty raw -echo; exec cat']);
+      running.push(name);
+    }
+    await s.send('Network.enable');
+    s.ws.on('message',observe);
+    await s.eval(`(() => {
+      const store = window.PentacleChatStore;
+      const ids = ${JSON.stringify([fluidA, fluidB])}, names = ${JSON.stringify(names)};
+      store.applyFrame({type:'session.inventory',sessions:store.getState().sessions.map(row => ids.includes(row.stream_id) ? {...row,session_name:names[ids.indexOf(row.stream_id)]} : row)});
+      window.__fluidPtyReady = {};
+      const create = window.cc.createPty;
+      window.cc.createPty = async (...args) => {
+        const result = await create(...args);
+        window.__fluidPtyReady[args[0]] = { ready: !!result, cols: args[3], rows: args[4] };
+        return result;
+      };
+      return true;
+    })()`);
+    await s.click(`${pane('chat')} [aria-label=Terminal]`);
+    await s.waitFor('window.__fluidPtyReady[0]?.ready', {timeoutMs:ctx.timeoutMs});
+    fluidCheck(ctx,'first terminal leaves second transcript intact', await s.eval(`!document.querySelector('${pane('chat')}>.terminal').hidden && !document.querySelector('${pane('chat2')}>.thread').hidden`));
+    const beforeSecond = process.hrtime.bigint();
+    await s.click(`${pane('chat2')} [aria-label=Terminal]`);
+    await s.waitFor('window.__fluidPtyReady[1]?.ready', {timeoutMs:ctx.timeoutMs});
+    const sentinel = ['FLUID_PTY_ONLY_A','FLUID_PTY_ONLY_B'];
+    for (let n=0; n<2; n++) await s.eval(`window.cc.writePty(${n}, ${JSON.stringify(sentinel[n]+'\r')}),true`);
+    const limit = Date.now() + ctx.timeoutMs;
+    while (output.some((o,i)=>!o.includes(sentinel[i])) && Date.now() < limit) await ctx.cdp.sleep(50);
+    const measured = {
+      widths: (await fluidRead(s)).sizes,
+      terminals: await s.eval('window.__fluidPtyReady'),
+      bothMs: Number(process.hrtime.bigint() - started)/1e6,
+      secondAttachAndEchoMs: Number(process.hrtime.bigint() - beforeSecond)/1e6,
+    };
+    fluidCheck(ctx, 'two real side-by-side terminals fit and route data to distinct slots', output.every((o,i)=>o.includes(sentinel[i])&&!o.includes(sentinel[1-i])) &&
+      Object.values(measured.terminals).length === 2 && Object.values(measured.terminals).every(x=>x.cols>0&&x.rows>0), measured);
+    await s.click(`${pane('chat2')} [aria-label=Terminal]`);
+    await s.click(`${pane('chat')} [aria-label=Terminal]`);
+  } finally {
+    s.ws.off('message',observe);
+    for (const name of running) try { tmux(['kill-session','-t',`=${name}`]); } catch (_) {}
+  }
+}
+
+module.exports.fluidTwoChats = isolated(async ctx => {
+  const { session:s } = ctx;
+  const third = 'local:web-gate-fluid-third';
+  await fluidVisit(ctx); await seedFluidChat(s);
+  await chooseChat(s, fluidA);
+  await useFluid(s,'.assistant-head');
+  await chooseChat(s, fluidB);
+  fluidCheck(ctx, 'Assistant-used admission replaces only the prior chat', (await fluidRead(s)).keys.join() === 'assistant,chat' && (await fluidRead(s)).streams.chat === fluidB);
+  await chooseChat(s, fluidA);
+  fluidCheck(ctx, 'chat-used admission adds a second card', (await fluidRead(s)).streams.chat2 === fluidA);
+  await useFluid(s,`${pane('chat2')} .card-title`); await chooseChat(s, third);
+  fluidCheck(ctx, 'third chat takes the unused seat', (await fluidRead(s)).streams.chat === third && (await fluidRead(s)).streams.chat2 === fluidA);
+  await s.click(`${pane('chat2')} [aria-label="Full screen"]`);
+  await chooseChat(s, fluidA);
+  fluidCheck(ctx, 'choosing the already-visible chat leaves its full screen in place', (await fluidRead(s)).keys.join() === 'chat2');
+  await chooseChat(s, third);
+  fluidCheck(ctx, 'choosing another chat exits full screen and preserves both pane assignments', (await fluidRead(s)).streams.chat2 === fluidA && (await fluidRead(s)).streams.chat === third);
+  await useFluid(s,`${pane('chat2')} .card-title`);
+  await railClick(s,'Chats'); await s.click('.popover [aria-label="New chat"]');
+  await railClick(s,'Chats'); await s.click('.popover [aria-label="New chat"]');
+  fluidCheck(ctx,'only one new-chat form is admitted',await s.eval("document.querySelectorAll('.chat-card:not([hidden])>.new-chat-host:not([hidden])').length===1"));
+  await fluidVisit(ctx);
+  await chooseChat(s, fluidA); await chooseChat(s, fluidB);
+  await s.eval(`(() => {
+    window.__fluidSends = [];
+    window.PentacleChatStore.setSendBridge(async args => { window.__fluidSends.push(args); return {ok:true}; });
+    for (const [i,input] of [...document.querySelectorAll('${activeChats} [data-next-message]')].entries()) {
+      input.focus(); input.value = 'fluid typed ' + i;
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+      input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+    }
+    return true;
+  })()`);
+  await s.waitFor("window.__fluidSends.length===2", {timeoutMs:ctx.timeoutMs});
+  const sendView = await s.eval(`[...document.querySelectorAll('${activeChats} .thread-inner')].map(n=>({stream:n.dataset.streamId,text:n.textContent}))`);
+  fluidCheck(ctx,'both real composers keep their stream-specific optimistic transcripts',
+    sendView[0].stream === fluidA && sendView[1].stream === fluidB && sendView[0].text.includes('fluid typed 0') &&
+    !sendView[0].text.includes('fluid typed 1') && sendView[1].text.includes('fluid typed 1') && !sendView[1].text.includes('fluid typed 0'), sendView);
+
+  await s.eval(`(() => {
+    window.__fluidAudio = [];
+    navigator.mediaDevices.getUserMedia = async () => {
+      const context = new AudioContext(); await context.resume();
+      const osc = context.createOscillator(), out = context.createMediaStreamDestination();
+      osc.connect(out); osc.start(); window.__fluidAudio.push({context,osc,stream:out.stream}); return out.stream;
+    }; return true;
+  })()`);
+  try {
+    for (const [i,key] of ['chat','chat2','assistant'].entries()) {
+      if (key === 'assistant') await s.click('.rail .brand');
+      await s.send('Runtime.evaluate', {expression:`document.querySelector('${pane(key)} [data-next-mic]').click()`,userGesture:true});
+      await s.waitFor(`window.__fluidAudio.length===${i+1} && !!document.querySelector('${pane(key)} [data-next-voice-bars]')`,{timeoutMs:ctx.timeoutMs});
+      fluidCheck(ctx,`voice handoff to ${key} stops previous tracks`,await s.eval("window.__fluidAudio.slice(0,-1).every(a=>a.stream.getTracks().every(t=>t.readyState==='ended'))"));
+    }
+    await s.click('.assistant-overlay [data-next-voice-cancel]'); await s.click('.rail .brand');
+  } finally { await s.eval("Promise.all(window.__fluidAudio.map(a=>{a.osc.stop();a.stream.getTracks().forEach(t=>t.stop());return a.context.close()})).then(()=>true)"); }
+  await recordFluidTerminals(ctx);
+  await useFluid(s,`${pane('chat2')} .card-title`); await chooseMelody(s);
+  fluidCheck(ctx,'dashboard replaces unused chat, keeping last-used second seat', (await fluidRead(s)).keys.join() === 'chat2,dash');
+  await chooseChat(s,fluidA);
+  fluidCheck(ctx,'while dashboard is last used, a new chat replaces chat', (await fluidRead(s)).streams.chat2 === fluidA && (await fluidRead(s)).keys.join() === 'chat2,dash');
+  await useFluid(s,`${pane('chat2')} .card-title`); await chooseChat(s,fluidB);
+  fluidCheck(ctx,'while chat is last used, a new chat replaces dashboard', (await fluidRead(s)).keys.join() === 'chat,chat2');
+  const secondSlot = (await fluidRead(s)).streams.chat2;
+  await s.eval(`(() => {
+    const link = document.createElement('button'); link.textContent='Synthetic Design link';
+    link.dataset.nextDesignLink='/next/design'; link.className='fluid-test-link';
+    document.querySelector('${pane('chat2')} .thread-inner').append(link); return true;
+  })()`);
+  await s.click('.fluid-test-link');
+  fluidCheck(ctx,'link followed from second chat preserves that seat and takes other seat', (await fluidRead(s)).keys.join() === 'chat2,dash' && (await fluidRead(s)).streams.chat2 === secondSlot);
+  await s.click('.design-card [aria-label="Close"]');
+  await useFluid(s,`${pane('chat2')} .card-title`);
+  await chooseChat(s, fluidB);
+  if ((await fluidRead(s)).keys.join() === 'chat,chat2') {
+    await closeFluid(s,'chat');
+    fluidCheck(ctx,'closing one chat leaves the other in its arranged seat', (await fluidRead(s)).keys.join() === 'assistant,chat2' && (await fluidRead(s)).streams.chat2 === secondSlot);
+  } else {
+    fluidCheck(ctx, 'fixture admits two distinct chats for closing control', false);
+  }
+  await closeFluid(s,'chat2');
+  await chooseMelody(s);
+  await chooseChat(s,fluidA);
+  fluidCheck(ctx,'dashboard-used admission puts chat beside dashboard', (await fluidRead(s)).keys.join() === 'chat,dash');
+  await s.click('.melody-card [aria-label="Close dashboard"]');
+  await closeFluid(s,'chat');
+  await chooseMelody(s);
+  await useFluid(s,'.assistant-head');
+  await chooseChat(s,fluidA);
+  fluidCheck(ctx,'Assistant-used admission replaces dashboard', (await fluidRead(s)).keys.join() === 'assistant,chat');
+});
+
+module.exports.fluidMove = isolated(async ctx => {
+  const {session:s} = ctx;
+  await fluidVisit(ctx);
+  await chooseChat(s, fluidA);
+  await noMotion(s);
+  try {
+    const before = await bounds(s,pane('chat'));
+    const h = await bounds(s,`${pane('chat')} .card-title`);
+    const p = [h.left+60, h.top+25];
+    const q = [p[0]-440, p[1]+115];
+    await mouse(s,'mousePressed',...p);
+    await mouse(s,'mouseMoved',...q);
+    const during = {chat:await bounds(s,pane('chat')),assistant:await bounds(s,pane('assistant')),state:await fluidRead(s)};
+    fluidCheck(ctx,'carried card follows both axes while its neighbour slides before release',
+      Math.abs(during.chat.left-before.left+440)<2 && Math.abs(during.chat.top-before.top-115)<2 &&
+      during.assistant.left > during.chat.left && during.state.zone==='slot',during);
+    await mouse(s,'mouseReleased',...q);
+    const after = await fluidRead(s);
+    fluidCheck(ctx,'release commits order immediately under reduced motion', after.keys.join()==='chat,assistant' && !after.zone &&
+      await s.eval("!document.querySelector('.fluid-landing')"),after);
+
+    const h2 = await bounds(s,`${pane('chat')} .card-title`);
+    const point = [h2.left+60,h2.top+25];
+    await dragFluid(s,point,[point[0],point[1]+160]);
+    fluidCheck(ctx,'vertical-only drag does not reorder', (await fluidRead(s)).keys.join()==='chat,assistant');
+    await mouse(s,'mousePressed',...point);
+    await mouse(s,'mouseMoved',point[0]+450,point[1]+110);
+    await esc(s);
+    await mouse(s,'mouseReleased',point[0]+450,point[1]+110);
+    fluidCheck(ctx,'Escape restores before releasing', (await fluidRead(s)).keys.join()==='chat,assistant' && !(await fluidRead(s)).zone);
+
+    await mouse(s,'mousePressed',...point,'right');
+    await mouse(s,'mouseMoved',point[0]+450,point[1]+120,'right');
+    fluidCheck(ctx,'secondary button does not lift', !(await fluidRead(s)).zone);
+    await mouse(s,'mouseReleased',point[0]+450,point[1]+120,'right');
+
+    for (const [control, label] of [
+      [`${pane('chat')} [aria-label=Terminal]`, 'header terminal button'],
+      [`${pane('chat')} [data-next-message]`, 'composer field outside the header'],
+    ]) {
+      const r = await bounds(s,control);
+      const a = [r.left+r.width/2,r.top+r.height/2];
+      await mouse(s,'mousePressed',...a);
+      await mouse(s,'mouseMoved',a[0]+60,a[1]+80);
+      fluidCheck(ctx,`${label} does not lift`, !(await fluidRead(s)).zone);
+      await mouse(s,'mouseReleased',a[0]+60,a[1]+80);
+    }
+    for (const trigger of ['Chats','Settings']) {
+      await railClick(s,trigger);
+      await mouse(s,'mousePressed',...point);
+      await mouse(s,'mouseMoved',point[0]+36,point[1]+110);
+      fluidCheck(ctx,`lifting closes ${trigger} popover`, await s.eval("document.querySelector('.popover').hidden") && !!(await fluidRead(s)).zone);
+      await mouse(s,'mouseReleased',point[0]+36,point[1]+110);
+    }
+
+    await useFluid(s,`${pane('chat')} .card-title`); await chooseChat(s,fluidB);
+    await s.click('.rail .brand');
+    const h3=await bounds(s,`${pane('chat2')} .card-title`);
+    const from=[h3.left+45,h3.top+26];
+    await mouse(s,'mousePressed',...from);
+    await mouse(s,'mouseMoved',from[0]+30,from[1]+70);
+    fluidCheck(ctx,'lifting closes Assistant overlay', !(await fluidRead(s)).overlay && !!(await fluidRead(s)).zone);
+    const rail = await bounds(s,'.rail [aria-label="Settings"]');
+    const under = [rail.left+rail.width/2,rail.top+rail.height/2];
+    await mouse(s,'mouseMoved',...under);
+    await s.eval(`(() => {
+      window.__fluidReleaseClicks = [];
+      window.__fluidRecordClick = e => window.__fluidReleaseClicks.push(e.target.nodeName);
+      document.addEventListener('click', window.__fluidRecordClick);
+      return true;
+    })()`);
+    await mouse(s,'mouseReleased',...under);
+    const release = await s.eval(`new Promise(resolve => requestAnimationFrame(() => {
+      document.removeEventListener('click', window.__fluidRecordClick);
+      resolve({clicks: window.__fluidReleaseClicks, hidden: document.querySelector('.popover').hidden});
+      delete window.__fluidRecordClick; delete window.__fluidReleaseClicks;
+    }))`);
+    fluidCheck(ctx,'drop above settings delivers no click to any page target', release.hidden && release.clicks.length===0,release);
+
+    await s.click(`${pane('chat2')} [aria-label="Full screen"]`);
+    const full = await bounds(s,`${pane('chat2')} .card-title`), f=[full.left+35,full.top+22];
+    await mouse(s,'mousePressed',...f);
+    await mouse(s,'mouseMoved',f[0]+110,f[1]+65);
+    fluidCheck(ctx,'nothing lifts in full screen', !(await fluidRead(s)).zone);
+    await mouse(s,'mouseReleased',f[0]+110,f[1]+65);
+    await esc(s);
+    await closeFluid(s,'chat'); await closeFluid(s,'chat2');
+    await mouse(s,'mousePressed',90,30);
+    await mouse(s,'mouseMoved',290,170);
+    fluidCheck(ctx,'nothing lifts when one section is visible', !(await fluidRead(s)).zone);
+    await mouse(s,'mouseReleased',290,170);
+  } finally { await noMotion(s,false); }
+});
+
+module.exports.fluidSides = isolated(async ctx => {
+  const {session:s} = ctx;
+  await fluidVisit(ctx,1440,true);
+  await chooseChat(s,fluidA);
+  await noMotion(s);
+  try {
+    const from = await bounds(s,`${pane('chat')} .card-title`);
+    await dragFluid(s,[from.left+55,from.top+25],[1425,140]);
+    const half = await fluidRead(s);
+    const stage = await bounds(s,'.stage');
+    fluidCheck(ctx,'deliberate right drop gives the card the right half', half.keys.at(-1)==='chat' &&
+      Math.abs(half.sizes.chat-(stage.width-12)/2)<=12 && half.sizes.lanes===344,{half,stage});
+    const lane = await bounds(s,'.next-lanes-head');
+    await dragFluid(s,[lane.left+90,lane.top+28],[76,140]);
+    const moved=await fluidRead(s);
+    fluidCheck(ctx,'lanes move to the left edge without resizing',moved.keys[0]==='lanes'&&moved.sizes.lanes===344,moved);
+    const r=await bounds(s,`${pane('chat')} .card-head`);
+    // Start inside the top strip, initially move downward, then go upward by >10px.
+    await mouse(s,'mousePressed',r.left+90,24);
+    await mouse(s,'mouseMoved',r.left+108,22);
+    fluidCheck(ctx,'starting in the top strip is not a full-screen drop', (await fluidRead(s)).zone==='slot');
+    await mouse(s,'mouseMoved',r.left+108,9);
+    fluidCheck(ctx,'moving deliberately up takes full screen', (await fluidRead(s)).zone==='full');
+    await mouse(s,'mouseMoved',75,9);
+    fluidCheck(ctx,'top wins in the corner', (await fluidRead(s)).zone==='full');
+    await mouse(s,'mouseReleased',75,9);
+    fluidCheck(ctx,'top drop makes the chat full screen', (await fluidRead(s)).keys.join()==='chat' &&
+      await s.eval("!!document.querySelector('.chat-card:not([hidden]) [aria-label=\"Leave full screen\"]')"));
+  } finally { await noMotion(s,false); }
+});
+
+module.exports.fluidBoundaries = isolated(async ctx => {
+  const {session:s} = ctx;
+  await fluidVisit(ctx,1440,true);
+  await chooseChat(s,fluidA);
+  let g=await bounds(s,'.grip:not([hidden])');
+  const initial=await fluidRead(s);
+  await dragFluid(s,[g.left+g.width/2,g.top+140],[g.left+g.width/2+90,g.top+140]);
+  const moved=await fluidRead(s);
+  fluidCheck(ctx,'grip changes only its two neighbours', Math.abs(moved.sizes.assistant-initial.sizes.assistant-90)<2 &&
+    Math.abs(moved.sizes.chat-initial.sizes.chat+90)<2 && moved.sizes.lanes===344,{initial,moved});
+  await s.send('Emulation.setDeviceMetricsOverride',{width:1600,height:900,deviceScaleFactor:1,mobile:false});
+  await s.waitFor(`innerWidth===1600 && Math.abs(document.querySelector('[data-pane=chat]').getBoundingClientRect().width - ${moved.sizes.chat}) > 1`,{timeoutMs:ctx.timeoutMs});
+  const resized=await fluidRead(s);
+  const growth=resized.sizes.assistant+resized.sizes.chat-moved.sizes.assistant-moved.sizes.chat;
+  fluidCheck(ctx,'drag shares scale when the viewport changes',
+    Math.abs(growth-160)<3 && Math.abs(resized.sizes.assistant/resized.sizes.chat-590/410)<.005 &&
+    Math.abs(moved.sizes.assistant/moved.sizes.chat-590/410)<.005 && resized.sizes.lanes===344,{moved,resized,growth});
+  g=await bounds(s,'.grip:not([hidden])');
+  for (const clickCount of [1,2]) {
+    for (const type of ['mousePressed','mouseReleased']) await s.send('Input.dispatchMouseEvent',
+      {type, x:g.left+g.width/2, y:g.top+140, button:'left', buttons:type==='mousePressed'?1:0, clickCount});
+  }
+  const reset=await fluidRead(s);
+  fluidCheck(ctx,'double click restores automatic widths',Math.abs(reset.sizes.assistant-reset.sizes.chat)<2,reset);
+  const a=await bounds(s,pane('chat')), b=await bounds(s,pane('lanes')), x=(a.right+b.left)/2, y=a.top+160;
+  const hit=await s.eval(`!!document.elementFromPoint(${x},${y})?.closest('.grip')`);
+  await dragFluid(s,[x,y],[x-60,y]);
+  fluidCheck(ctx,'boundary touching lanes has no handle and leaves widths unchanged', !hit && JSON.stringify((await fluidRead(s)).sizes)===JSON.stringify(reset.sizes),reset);
+});
+
+module.exports.fluidPhone = isolated(async ctx => {
+  const {session:s}=ctx;
+  await fluidVisit(ctx,440);
+  await railClick(s,'Settings');
+  fluidCheck(ctx,'phone shows neither Sidebar nor Assistant head', await s.eval("getComputedStyle(document.querySelector('.sidebar-setting')).display==='none' && getComputedStyle(document.querySelector('.assistant-head')).display==='none'"));
+  await esc(s);
+  await chooseChat(s,fluidA);
+  await chooseChat(s,fluidB);
+  const state=await fluidRead(s);
+  fluidCheck(ctx,'only the last chat is visible on a 440 px phone',state.keys.join()==='chat' && state.streams.chat===fluidB && !state.overlay,state);
+  const r=await bounds(s,`${pane('chat')} .card-title`);
+  await mouse(s,'mousePressed',r.left+20,r.top+18);
+  await mouse(s,'mouseMoved',r.left+140,r.top+99);
+  fluidCheck(ctx,'phone has no active grip, full screen or drag', !(await fluidRead(s)).zone &&
+    await s.eval("!document.querySelector('.grip:not([hidden])') && getComputedStyle(document.querySelector('.chat-card:not([hidden]) .fullscreen')).display==='none'"));
+  await mouse(s,'mouseReleased',r.left+140,r.top+99);
+  await s.click('.rail .brand');
+  fluidCheck(ctx,'phone brand still returns to Assistant and closes the chat', (await fluidRead(s)).keys.join()==='assistant');
 });

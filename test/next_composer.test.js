@@ -319,3 +319,39 @@ test('U4: recording cancel button discards the take', async t => {
   assert.equal(u.panel.hidden, true);
   assert.equal(u.timers.size, 0);
 });
+
+test('fluid voice: recording in another pane discards the first take and starts only after its microphone is released', async t => {
+  const first = fixture(t, { streamId: 'fixture:first' });
+  const second = fixture(t, { streamId: 'fixture:second' });
+  let release;
+  const originalDiscard = first.recorder.discard;
+  first.recorder.discard = () => new Promise(resolve => { release = resolve; });
+  await startRecording(first);
+  assert.equal(first.controller.snapshot().voicePhase, 'recording');
+  second.mic.click();
+  await flush();
+  first.recorder.discard = originalDiscard;
+  if (release) release();
+  await flush();
+  assert.equal(first.controller.snapshot().voicePhase, 'idle', 'the other pane actually stopped');
+  assert.equal(second.controller.snapshot().voicePhase, 'recording');
+  assert.equal(first.calls.some(c => c.type === 'sendTurn'), false);
+  await second.controller.cancelRecording();
+});
+
+test('fluid voice: a pending permission request is retired before the next pane acquires', async t => {
+  const first = fixture(t, { streamId: 'fixture:pending' });
+  const second = fixture(t, { streamId: 'fixture:next' });
+  let finishStart;
+  first.recorder.start = () => new Promise(resolve => { finishStart = resolve; });
+  first.mic.click();
+  assert.equal(first.controller.snapshot().voicePhase, 'starting');
+  second.mic.click();
+  await flush();
+  assert.equal(second.calls.some(c => c.type === 'recorder.start'), false);
+  finishStart();
+  await flush();
+  assert.equal(first.controller.snapshot().voicePhase, 'idle');
+  assert.equal(second.controller.snapshot().voicePhase, 'recording');
+  await second.controller.cancelRecording();
+});
