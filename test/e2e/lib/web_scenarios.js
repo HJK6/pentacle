@@ -620,6 +620,8 @@ const SCENARIOS = [
   ['web-voice-answers', webVoiceAnswers],
   ['web-dashboards-revamp', webDashboardsRevamp],
   ['dashboard_catalog', dashboardCatalog],
+  ['model-library-publish', require('./model_library_scenario.cjs').modelLibraryPublish],
+  ['model-library-picture', require('./model_library_scenario.cjs').modelLibraryPicture],
   ['design-gallery', require('./design_gallery_scenario.cjs').designGallery],
   // Reloads the page at both ends and injects only the frozen lane wire fixture; runs before closed-chat-slot.
   ['web-work-lanes', webWorkLanes],

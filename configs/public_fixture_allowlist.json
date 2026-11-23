@@ -154,6 +154,7 @@
     "test/e2e/lib/chat_reliability_run_command.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/e2e/lib/flows.send_turn.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/e2e/lib/flows.spawn_tuple.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
+    "test/e2e/lib/model_library_fixture.cjs": "Synthetic tailnet (CGNAT) address for the positive Tailscale identity-auth model library fixture.",
     "test/e2e/scenarios/native_queue_send_gating.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/e2e/scenarios/new_chat_no_flash.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/e2e/scenarios/notifications_board.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",

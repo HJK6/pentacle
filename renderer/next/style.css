@@ -40,6 +40,14 @@ html[data-theme=cosmic],.sw-cosmic{
     radial-gradient(1px 1px at 61% 72%,rgba(189,255,224,.5) 50%,transparent 51%),radial-gradient(1.2px 1.2px at 69% 22%,rgba(189,255,224,.4) 50%,transparent 51%),radial-gradient(1px 1px at 77% 91%,rgba(189,255,224,.35) 50%,transparent 51%),
     radial-gradient(1.4px 1.4px at 85% 38%,rgba(189,255,224,.5) 50%,transparent 51%),radial-gradient(1px 1px at 93% 58%,rgba(189,255,224,.4) 50%,transparent 51%),radial-gradient(1px 1px at 13% 92%,rgba(189,255,224,.3) 50%,transparent 51%),
     radial-gradient(1.1px 1.1px at 3% 44%,rgba(189,255,224,.4) 50%,transparent 51%),radial-gradient(1px 1px at 57% 16%,rgba(189,255,224,.35) 50%,transparent 51%)}
+
+/* Forge picture wells. Shared with the offline model recorder. */
+:root {
+  --forge-well-dark: #0c0e0d;
+  --forge-well-light: #eef0ed;
+  --forge-well-cosmic: #09100d;
+}
+
 /* Theme tokens end here. */
 *{box-sizing:border-box}html,body,#app{height:100%;margin:0}body{background-color:var(--bg);background-image:var(--sky);color:var(--text);font:15px/1.55 var(--font);overflow:hidden}button,textarea,select{font:inherit;color:inherit}button{border:0;background:none;cursor:pointer}button:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent)}[hidden]{display:none!important}
 .next-app{display:flex;height:100%;min-width:0}.stage{display:flex;flex:1;min-width:0}.pane{position:relative;display:flex;flex:1 1 0;flex-direction:column;min-width:280px;min-height:0}.card{display:flex;flex:1 1 0;flex-direction:column;min-width:300px;min-height:0;margin:12px 0 12px 12px;border-radius:var(--radius);background:var(--surface);box-shadow:0 0 0 1px var(--edge);overflow:hidden}.card-head{height:48px;flex:none;display:flex;align-items:center;gap:4px;padding:0 10px 0 20px}.card-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font:500 13.5px var(--display)}.icon-button{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;color:var(--faint)}.icon-button:hover,.icon-button.active{background:var(--hover);color:var(--text)}
