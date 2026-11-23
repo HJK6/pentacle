@@ -821,6 +821,144 @@ def _assistant_operation_scope_conn(conn, *, stream_id, dispatch_id, actor, gene
     return route
 
 
+def _activity_summary_candidates(conn, stream_id):
+    # Keep the legacy scan and UNION order for ties at the recent cutoff and
+    # in the visible list. The older branches use the existing publication
+    # (stream, input) index, independently of the recent limit.
+    return list(history_query(conn, """
+        SELECT r.input_identity, r.created_at, r.routing_state, r.delivery_state
+        FROM v2_assistant_composite_routes r
+        WHERE r.stream_id=? AND (
+            r.route_id IN (SELECT route_id FROM v2_assistant_composite_routes
+                           WHERE stream_id=? ORDER BY created_at DESC LIMIT 2000)
+            OR (r.routing_state!='routing_failed' AND COALESCE(r.delivery_state,'')!='failed' AND NOT EXISTS
+                (SELECT 1 FROM v2_assistant_composite_publications p
+                 WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity))
+            OR (EXISTS (SELECT 1 FROM v2_assistant_composite_publications p
+                        WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity
+                        AND json_extract(p.canonical_payload_json,'$.response_state')='acknowledged')
+                AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p
+                                WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity
+                                AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final')))
+        )
+        """, (stream_id, stream_id)))
+
+
+def _activity_offscreen_publications(conn, stream_id, offscreen):
+    if not offscreen:
+        return {}
+    # Return only facts that can affect counts. The newest kind follows the
+    # same timestamp/event order as the full history reader.
+    return {row["input_identity"]: dict(row) for row in conn.execute("""
+        SELECT input_identity, MIN(created_at) AS first,
+               MIN(CASE WHEN kind='result' OR marker='final' THEN created_at END) AS final,
+               MAX(marker='acknowledged') AS acknowledged,
+               MAX(position=1 AND kind='question') AS question
+        FROM (
+            SELECT p.reply_to_message_id AS input_identity, p.created_at, p.publish_kind AS kind,
+                   json_extract(NULLIF(p.canonical_payload_json,''),'$.response_state') AS marker,
+                   ROW_NUMBER() OVER (PARTITION BY p.reply_to_message_id
+                                      ORDER BY p.created_at DESC,p.event_id DESC) AS position
+            FROM v2_assistant_composite_publications p
+            WHERE p.stream_id=? AND p.reply_to_message_id IN (SELECT value FROM json_each(?))
+        )
+        GROUP BY input_identity
+        """, (stream_id, json.dumps(list(offscreen))))}
+
+
+def _activity_summary_lanes(conn, stream_id, ids, route_lanes, visible_ids):
+    lanes = {}
+    offscreen_lanes = {}
+    for row in conn.execute("""
+        SELECT association.input_identity, l.lane_id, l.phase, l.pending_question_id
+        FROM (
+            SELECT json_extract(payload_json,'$.request_message_id') AS input_identity, lane_id
+            FROM v2_assistant_composite_operations
+            WHERE stream_id=? AND operation='lane.admit' AND lane_id IS NOT NULL
+              AND json_extract(payload_json,'$.request_message_id') IN (SELECT value FROM json_each(?))
+            UNION
+            SELECT key, value FROM json_each(?)
+        ) AS association
+        JOIN v2_assistant_composite_lanes l ON l.stream_id=? AND l.lane_id=association.lane_id
+        ORDER BY association.input_identity, l.lane_id
+        """, (stream_id, ids, json.dumps(route_lanes), stream_id)):
+        identity = row["input_identity"]
+        if identity in visible_ids:
+            lanes.setdefault(identity, []).append(dict(row))
+        else:
+            flags = offscreen_lanes.setdefault(identity, {"phases": set(), "pending_question": False})
+            flags["phases"].add(row["phase"])
+            flags["pending_question"] |= bool(row["pending_question_id"])
+    return lanes, offscreen_lanes
+
+
+def _activity_summary_conn(conn, stream_id, *, strict):
+    from assistant_activity import AWAITING_RESPONSE, project_input, response_state, summarize_activity
+
+    candidates = _activity_summary_candidates(conn, stream_id)
+    if not candidates:
+        return summarize_activity({})
+    visible = sorted(candidates, key=lambda row: row["created_at"], reverse=True)[:100]
+    visible_ids = dict.fromkeys(row["input_identity"] for row in visible)
+    offscreen = {
+        row["input_identity"]: row for row in candidates
+        if row["input_identity"] not in visible_ids and row["routing_state"] != "routing_failed"
+        and row["delivery_state"] not in {"failed", "uncertain"}
+    }
+    facts = _activity_offscreen_publications(conn, stream_id, offscreen)
+    # The terminal states, including cancellation before a final, contribute
+    # neither count. They do not need lane or route payloads off screen.
+    offscreen = {identity: row for identity, row in offscreen.items()
+                 if identity not in facts or not facts[identity]["final"]}
+    visible_json = json.dumps(list(visible_ids))
+    detail_keys = json.dumps(dict.fromkeys(visible_ids, True) | dict.fromkeys(offscreen, False))
+    details = {row["input_identity"]: row for row in history_query(conn, """
+        SELECT r.input_identity, r.created_at, r.routing_state, r.delivery_state,
+               CASE WHEN wanted.value THEN r.dispatch_id END AS dispatch_id,
+               CASE WHEN wanted.value THEN r.error_code END AS error_code,
+               CASE WHEN wanted.value THEN r.route_json END AS route_json,
+               json_extract(NULLIF(r.route_json,''),'$.lane_id') AS lane_id,
+               CASE WHEN ? AND NOT wanted.value THEN NULLIF(r.route_json,'')->'$.desk_dispatch' END AS desk_dispatch
+        FROM json_each(?) wanted CROSS JOIN v2_assistant_composite_routes r
+        WHERE r.stream_id=? AND r.input_identity=wanted.key
+        """, (strict, detail_keys, stream_id))}
+    lanes, offscreen_lanes = _activity_summary_lanes(
+        conn, stream_id, json.dumps(list(details)),
+        {key: row["lane_id"] for key, row in details.items() if row["lane_id"] is not None}, visible_ids,
+    )
+    publications = {}
+    for row in conn.execute("""
+        SELECT reply_to_message_id, publication_key, created_at, canonical_payload_json, publish_kind
+        FROM v2_assistant_composite_publications
+        WHERE stream_id=? AND reply_to_message_id IN (SELECT value FROM json_each(?))
+        ORDER BY reply_to_message_id, created_at, event_id
+        """, (stream_id, visible_json)):
+        publications.setdefault(row["reply_to_message_id"], []).append(row)
+    summary = summarize_activity({
+        identity: project_input(details[identity], publications.get(identity, ()), lanes.get(identity, ()),
+                                strict_publication=strict)
+        for identity in visible_ids
+    })
+    summary["has_more"] = len(candidates) > len(visible)
+    for identity, route in offscreen.items():
+        attached = offscreen_lanes.get(identity, {})
+        publication = facts.get(identity, {})
+        state = response_state(
+            route, first=publication.get("first"), final=publication.get("final"),
+            acknowledged=publication.get("acknowledged"), question=publication.get("question"),
+            pending_question=attached.get("pending_question"), phases=attached.get("phases"),
+            desk_dispatch=json.loads(details[identity]["desk_dispatch"] or "null"),
+        )
+        if state in AWAITING_RESPONSE:
+            summary["pending_count"] += 1
+            oldest = summary["oldest_pending_at"]
+            if oldest is None or route["created_at"] < oldest:
+                summary["oldest_pending_at"] = route["created_at"]
+        elif state == "waiting_for_operator":
+            summary["waiting_for_operator_count"] += 1
+    return summary
+
+
 class _RoutingStoreMixin:
     async def preflight_assistant_composite_question_operation(
         self, *, stream_id: str, lane_id: str, expected_lane_version: int, operation_id: str,
@@ -1588,6 +1726,13 @@ class _RoutingStoreMixin:
                 result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]),
                                                               strict_publication=strict)
             return result
+        return await self.submit(_op)
+
+    async def assistant_composite_activity_summary(self, *, stream_id: str):
+        """Read one fresh working snapshot on the serialized Store worker."""
+        def _op(conn):
+            strict = self._strict_publication_state_conn(conn, stream_id)["enabled"]
+            return _activity_summary_conn(conn, stream_id, strict=strict)
         return await self.submit(_op)
 
     async def list_assistant_composite_admitted_lanes(self, *, stream_id: str, dispatch_id: str):
