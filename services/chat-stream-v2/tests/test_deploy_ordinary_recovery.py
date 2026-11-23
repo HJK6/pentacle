@@ -644,7 +644,7 @@ def manual_operation(operation, monkeypatch):
           'text':f'GO record-ordinary-manual-recovery {pins["operation"]} {o.c.file_digest(auth)} {replacement}'}
     ledger={'type':'ledger_get.ok','tell_id':go,'ledger_row_id':10,'tell':tell,'read_only':True,
             'source':'v2_tell_deliveries'}
-    wire={'binding':binding,'ledger':ledger,'requests':[],'runtime_sha':target}
+    wire={'binding':binding,'ledger':ledger,'requests':[],'runtime_sha':target,'on_request':{}}
     class Socket:
         def __init__(self):
             self.pending=[{'type':'welcome','runtime_sha':wire['runtime_sha'],
@@ -652,7 +652,8 @@ def manual_operation(operation, monkeypatch):
         def __enter__(self):
             return self
         def __exit__(self,*error):
-            pass
+            if 'on_disconnect' in wire:
+                wire['on_disconnect']()
         def send(self,data):
             frame=json.loads(data)
             verb=frame['type']
@@ -676,6 +677,9 @@ def manual_operation(operation, monkeypatch):
                 response={'type':'ledger_get.error'} if frame.get('tell_id')!=go else wire['ledger']
                 if 'after_request' in wire:
                     wire['after_request']()
+            hook=wire['on_request'].get((verb,wire['requests'].count(verb)))
+            if hook is not None:
+                hook()
             self.pending.append({**response,'request_id':frame['request_id']})
         def recv(self,*,timeout):
             assert timeout>0
@@ -798,6 +802,49 @@ def test_manual_disposition_mismatch_keeps_fence(manual_operation, damage, monke
         assert after[0]==before[0]
     if damage!='cas_process':
         assert after[3]==before[3]
+    assert not (a.root/'events').exists()
+    with pytest.raises(o.c.Invalid,match='unfinished'):
+        o.fence(a.repo)
+
+
+@pytest.mark.parametrize('edge,damage',[
+    pytest.param(('inspect_stream',1),'process',id='inspect-process'),
+    pytest.param(('assistant.binding',2),'stamp',id='final-binding-stamp'),
+    pytest.param(None,'process',id='post-rpc-disconnect-process'),
+])
+def test_manual_disposition_rejects_late_serving_drift(manual_operation, monkeypatch, edge, damage):
+    a,b,_,pointer,journal,immutable,auth,operator,wire,args=manual_operation
+    protected=(pointer,journal,immutable,auth,operator)
+    before=[path.read_bytes() for path in protected]
+    injected=[]
+    journal_writes=[]
+    def change_serving():
+        if damage=='process':
+            probes=a.probes()
+            probes['process'].update(pid=33303,birth='synthetic-replacement-birth')
+            probes['boot_uuid']=str(uuid4())
+            a.save_probes(probes)
+        else:
+            (a.root/'files'/'stamp').write_bytes(b'synthetic external stamp drift')
+        injected.append(a.observe_manual(b.bundle))
+
+    if edge is None:
+        wire['on_disconnect']=change_serving
+    else:
+        wire['on_request'][edge]=change_serving
+
+    atomic_bytes=o.c.atomic_bytes
+    def record_writes(path,data,**options):
+        if path==journal:
+            journal_writes.append(path)
+        return atomic_bytes(path,data,**options)
+    monkeypatch.setattr(o.c,'atomic_bytes',record_writes)
+
+    status=cli(a.root,args)
+    assert len(injected)==1
+    assert status==d.EXIT_REFUSED and not journal_writes, 'late serving drift reached terminal publication'
+    assert [path.read_bytes() for path in protected]==before
+    assert a.observe_manual(b.bundle)==injected[0]
     assert not (a.root/'events').exists()
     with pytest.raises(o.c.Invalid,match='unfinished'):
         o.fence(a.repo)
