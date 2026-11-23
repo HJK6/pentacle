@@ -4,9 +4,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import hashlib
+import json
+from unittest.mock import Mock
+import uuid
 
 import pytest
 
+import desk_stamp
 from _shared import operator_auth
 from assistant_lane_rulings import AssistantLaneRulings
 from codex_rollout_norm import normalize_codex_rollout_record
@@ -418,15 +422,58 @@ def test_typed_transport_selects_verbatim_tmux_bytes(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("state", "expected_label", "expected_origin"),
+    [
+        ("valid", "fixture-desk", None),
+        ("too-many-entries", None, None),
+        ("non-private", None, None),
+        ("unset", None, ORIGIN),
+        ("valid-unmapped", None, ORIGIN),
+    ],
+)
+def test_desk_map_state_controls_operator_admission(tmp_path, monkeypatch, state, expected_label, expected_origin):
+    async def run():
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            credential = operator_auth.decode_envelope(envelope)["credential_id"]
+            if state == "unset":
+                monkeypatch.delenv(desk_stamp.CONFIG_ENV, raising=False)
+            else:
+                entries = {credential: "fixture-desk"} if state != "valid-unmapped" else {}
+                if state == "too-many-entries":
+                    entries.update({str(uuid.UUID(int=i)): "other-desk" for i in range(desk_stamp.MAX_ENTRIES)})
+                path = tmp_path / "desks.json"
+                path.write_text(json.dumps(entries), encoding="utf-8")
+                path.chmod(0o644 if state == "non-private" else 0o600)
+                monkeypatch.setenv(desk_stamp.CONFIG_ENV, str(path))
+
+            mint = Mock(wraps=h.server._registered_operator_admission)
+            monkeypatch.setattr(h.server, "_registered_operator_admission", mint)
+            assert (await admit(socket))["type"] == "send.result"
+            row = await input_row(h, MESSAGE_ID)
+            assert row["body"] == (f"[from {expected_label}]\n" + WORDS if expected_label else WORDS)
+            async with seat(h, SEAT_A) as fd:
+                result = await forward(fd)
+
+            expected_forward = "delivered" if expected_origin else "advisor_rule_operator_unverified"
+            assert (mint.call_count, row["operator_origin"], result.get("error_code") or result.get("delivery_status")) == (
+                int(expected_origin is not None), expected_origin, expected_forward,
+            )
+
+    asyncio.run(run())
+
+
 def test_mapped_desk_preserves_display_dispatch_and_legacy_duplicate(tmp_path, monkeypatch):
-    import desk_stamp
     from assistant_composite import direct_dispatch_envelope
 
     async def run():
         async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
             immutable = ("route_id", "event_id", "actor_stream_id", "body", "payload_digest", "operator_origin")
             credential = operator_auth.decode_envelope(envelope)["credential_id"]
-            monkeypatch.setattr(desk_stamp, "load", lambda: {credential: "fixture-desk"})
+            path = tmp_path / "desks.json"
+            path.write_text(json.dumps({credential: "fixture-desk"}), encoding="utf-8")
+            path.chmod(0o600)
+            monkeypatch.setenv(desk_stamp.CONFIG_ENV, str(path))
             mint = h.server._registered_operator_admission
             mint_calls = []
 

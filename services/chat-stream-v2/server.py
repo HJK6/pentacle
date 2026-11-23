@@ -4746,9 +4746,14 @@ class Server:
         from provider_accounts import AccountError, reject_overrides
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
-        msg, desk_label = desk_stamp.stamp_with_label(msg)
+        msg, desk_label, desk_map_ok = desk_stamp.stamp_with_label(msg)
         desk_dispatch = desk_label is not None
-        operator_admission = admit_operator() if admit_operator is not None and not desk_dispatch else None
+        # Desk credentials are identified by the map. Before rollout, verify
+        # PENTACLE_DESK_STAMP_CONFIG is set and loads. Unset keeps legacy admission
+        # because the credential registry has no desk flag.
+        operator_admission = None
+        if admit_operator is not None and desk_map_ok and not desk_dispatch:
+            operator_admission = admit_operator()
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
