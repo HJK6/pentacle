@@ -333,6 +333,13 @@ verify that the source returns to live capture after recovery completes.
 
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the web gate. Fixtures must use invented content and valid public wire identifiers.
 
+Normal session inventory and summary snapshots may include `last_tool_activity`,
+an object with `category` (`read`, `search`, `edit`, `command`, or `tool`) and
+the observed event's UTC `timestamp`. It describes the latest committed tool
+observation, not whether a tool is running or succeeded. After restart it is
+rebuilt from the same bounded 500-event lifecycle tail as the conversation
+preview, so an older observation may appear or the field may be absent.
+
 Public CI sets the existing unit-only budget `V2_UNIT_TIMEOUT_S=1200`; smoke and
 soak limits keep their defaults. Pytest scratch is separate from
 `V2_GATE_EVIDENCE_DIR`. On failure CI retains the gate logs/JUnit/receipt and the

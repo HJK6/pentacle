@@ -47,7 +47,7 @@ from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
 import store_call_diag
 from prockill import canonical_start
-from session_summary import SUMMARY_TAIL_LIMIT, apply_message_summary
+from session_summary import SUMMARY_TAIL_LIMIT, apply_message_summary, apply_tool_summary
 
 import attachment_locks
 import store_exchange
@@ -662,7 +662,10 @@ def _restore_message_summary_conn(
         if isinstance(event, dict):
             events.append({**event, "daemon_seq": int(item["event_id"])})
     for event in _project_session_events_conn(conn, events, deliveries=deliveries):
-        apply_message_summary(session, event)
+        if event.get("kind") == "TOOL_USE":
+            apply_tool_summary(session, event)
+        else:
+            apply_message_summary(session, event)
 
 
 def _project_session_events_conn(

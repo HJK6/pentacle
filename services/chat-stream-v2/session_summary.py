@@ -1,7 +1,7 @@
 """Latest conversation preview shared by durable rebuild and live inventory."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import math
 from typing import Any
 
@@ -10,6 +10,12 @@ from message_envelopes import MESSAGE_ENVELOPES
 # Startup work is bounded independently of durable history retention.
 SUMMARY_TAIL_LIMIT = 500
 MESSAGE_SUMMARY_FIELDS = frozenset({"last_text", "last_kind", "_last_message_at", "_last_message_seq"})
+TOOL_SUMMARY_FIELDS = frozenset({"last_tool_activity", "_last_tool_seq", "_last_tool_at"})
+_TOOL_CATEGORIES = {
+    "claude": {"Read": "read", "Grep": "search", "Edit": "edit", "Write": "edit", "Bash": "command"},
+    "cursor": {"read": "read", "write": "edit", "shell": "command"},
+    "gemini": {"read_file": "read"},
+}
 _VISIBLE_KINDS = frozenset({"USER", "ASSIST_TEXT", "ASSIST", "TELL"})
 _ENVELOPE_POLICIES = {entry.kind: entry.render_policy for entry in MESSAGE_ENVELOPES}
 
@@ -23,7 +29,7 @@ def event_timestamp_epoch(value: object) -> float | None:
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             return None
         epoch = parsed.timestamp()
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
     return epoch if math.isfinite(epoch) else None
 
@@ -69,4 +75,62 @@ def apply_message_summary(row: dict[str, Any], event: dict[str, Any]) -> bool:
         return False
     row.update(last_text=message[0], last_kind=message[1],
                _last_message_at=event["timestamp"], _last_message_seq=seq)
+    return True
+
+
+def _utc_microseconds(value: datetime) -> int:
+    return (((value.toordinal() * 24 + value.hour) * 60 + value.minute) * 60
+            + value.second) * 1_000_000 + value.microsecond
+
+
+def apply_tool_summary(row: dict[str, Any], event: dict[str, Any]) -> bool:
+    """Reduce committed tool observations without retaining provider payloads."""
+    if event.get("kind") != "TOOL_USE":
+        return False
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    if raw.get("is_sidechain") or raw.get("isSidechain") or raw.get("daemon_notice"):
+        return False
+    seq = event.get("daemon_seq")
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
+        return False
+    stamp = event.get("timestamp")
+    prior = row.get("last_tool_activity") or {}
+    prior_stamp = prior.get("timestamp") if isinstance(prior, dict) else None
+    # The canonical timestamp already passed the floor and timezone checks.
+    # Tail rebuild commonly encounters many records with that same timestamp.
+    if isinstance(stamp, str) and stamp == prior_stamp:
+        if seq <= row.get("_last_tool_seq", 0):
+            return False
+        canonical = stamp
+    else:
+        if not isinstance(stamp, str):
+            return False
+        try:
+            clean_stamp = stamp.strip()
+            if clean_stamp.endswith("z"):
+                clean_stamp = clean_stamp[:-1] + "Z"
+            parsed = datetime.fromisoformat(clean_stamp)
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return False
+            parsed = parsed.astimezone(timezone.utc)
+            ordering_time = _utc_microseconds(parsed)
+            if prior_stamp is not None:
+                prior_time = row.get("_last_tool_at")
+                if prior_time is None:
+                    prior_time = _utc_microseconds(datetime.fromisoformat(prior_stamp.replace("Z", "+00:00")))
+                if (ordering_time, seq) <= (prior_time, row.get("_last_tool_seq", 0)):
+                    return False
+            floor = event_timestamp_epoch(row.get("created_at"))
+            if floor is None or parsed.timestamp() < floor:
+                return False
+        except (ValueError, OverflowError, OSError):
+            return False
+        canonical = parsed.isoformat(timespec="microseconds" if parsed.microsecond else "seconds").replace("+00:00", "Z")
+    name = raw.get("tool_name")
+    provider = event.get("provider")
+    category = _TOOL_CATEGORIES.get(provider, {}).get(name, "tool") if isinstance(name, str) and len(name) <= 128 and isinstance(provider, str) else "tool"
+    row["last_tool_activity"] = {"category": category, "timestamp": canonical}
+    row["_last_tool_seq"] = seq
+    if stamp != prior_stamp:
+        row["_last_tool_at"] = ordering_time
     return True
