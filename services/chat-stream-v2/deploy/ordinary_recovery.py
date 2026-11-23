@@ -369,7 +369,6 @@ class Bundle:
                 or historical['sha'] != bundle['prior_sha']):
             raise c.Invalid('manual recovery serving identity or historical generation mismatch')
         def confirm_serving():
-            self.a.validate_controller(bundle, replacement)
             if self.a.observe_manual(bundle) != serving:
                 raise c.Invalid('manual recovery serving state changed before commit')
 
@@ -387,6 +386,9 @@ class Bundle:
                  'original_failure': failed['result'],
                  'authority': authority, 'serving': serving, 'authenticated_readback': proof}
         audit['sha256'] = c.digest(audit)
+        terminal_body = terminal(audit)
+        self.a.validate_controller(bundle, replacement)
+        confirm_serving()
         if (c.private_file(pointer).read_bytes() != pointer_bytes
                 or c.private_file(self.folder/'bundle.json').read_bytes() != bundle_bytes
                 or c.private_file(journal_path).read_bytes() != journal_bytes
@@ -396,7 +398,7 @@ class Bundle:
             raise c.Invalid('manual recovery state changed or authenticated readback expired before commit')
 
         # The original failure and its replacement audit share one atomic commit.
-        sealed_write(journal_path, terminal(audit))
+        sealed_write(journal_path, terminal_body)
         return readback(audit)
 
     def admit(self, authorization, go):
@@ -712,6 +714,8 @@ class OrdinaryRuntime:
                 if value.get('request_id') == rid:
                     if value['type'] != expected:
                         raise c.Invalid('manual recovery authenticated request refused')
+                    confirm_serving()
+                    remaining()
                     return value
 
         try:
@@ -725,7 +729,6 @@ class OrdinaryRuntime:
                 correlated(socket, hello, 'hello')
                 binding = correlated(socket, {'type': 'assistant.binding'}, 'assistant.binding.ok')
                 ledger = correlated(socket, {'type': 'ledger_get', 'tell_id': go}, 'ledger_get.ok')
-                confirm_serving()
                 seat = correlated(socket, {'type': 'inspect_stream', 'stream_id': binding['stream_id'],
                                            'event_tail': 0}, 'inspect_stream.ok')
                 current = correlated(socket, {'type': 'assistant.binding'}, 'assistant.binding.ok')

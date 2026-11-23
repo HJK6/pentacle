@@ -96,9 +96,11 @@ The controller reads the matching delivered tell through the serving daemon's
 Store on a nonce-authenticated operator connection to the loopback listener it
 just verified. The tell must have a verified peer sender and generation matching
 the current open FD binding, and must have been delivered in the preceding
-10 minutes. The controller rechecks managed files, process and binding within a
-30-second monotonic budget. The common deployment lock covers the exact pointer,
-bundle and journal comparisons, persistence and readback.
+10 minutes. The controller rechecks the full serving observation after each
+authenticated reply and again immediately before the final file comparisons and
+journal publication. The binding readbacks, serving checks and commit admission
+share a 30-second monotonic budget. The common deployment lock covers the exact
+pointer, bundle and journal comparisons, persistence and readback.
 
 The result `manual_recovered_serving_target` records the old operation as
 `aborted` and unqualified. One atomic terminal journal retains the original
