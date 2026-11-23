@@ -6,12 +6,10 @@ require('../web_cc').installWebCc();
 const { filterSidebarSessions } = require('../sidebar_filter');
 const { uniqueAssistantComposite } = require('../workspace_layout');
 const { createSpawnCatalogLoader } = require('../spawn_catalog_loader');
-const { createTerminalView, disposeTerminalView } = require('../terminal_view');
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11');
 const { WebglAddon } = require('@xterm/addon-webgl');
-const { createTerminalPaste } = require('../terminal_paste');
 const layout = require('./layout');
 const { createMelodyViewer } = require('./melody_viewer');
 const { createDesignViewer } = require('./design_viewer');
@@ -20,10 +18,10 @@ const { hydrateDesignPreviews, markDesignLinks } = require('./design_links');
 const { hydrateImageAttachments } = require('./image_attachments');
 const { parseDesignRoute } = require('../../lib/design_routes.cjs');
 const { mountComposer } = require('./composer');
-const { mountNewChatForm } = require('./new_chat');
+const { mountChatCard, NEW_CHAT } = require('./chat_card');
+const { mountStageLayout } = require('./stage_layout');
 const { mountLimitsView } = require('./limits_view');
 const hostPresentation = require('../host_presentation');
-const { statusRollup, nextMode } = require('./status_card');
 const { createLaneReads } = require('./lane_reads');
 const { linkAssistantNames } = require('./lane_links');
 const { createQuestions } = require('./questions');
@@ -73,7 +71,11 @@ function applyLaneFrame(frame) {
     pendingLaneLink = null;
   }
 }
-const state = { selected: null, admittedSession: null, mode: 'thread', layout: layout.createLayoutState(innerWidth), popover: null, hosts: {}, connected: false };
+function readSetting(key) {
+  try { return window.localStorage.getItem(key); } catch { return null; }
+}
+const railKey = 'pentacle.next.rail';
+const state = { layout: layout.createLayoutState(innerWidth, readSetting(railKey)), popover: null, hosts: {}, connected: false };
 const icons = {
   lanes: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12m-2.2 0a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0-4.4 0M5 6m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M19 6m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M12 20m-1.8 0a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0M6.4 7.2l3.9 3.3M17.6 7.2l-3.9 3.3M12 14.2v4"/></svg>',
   questions: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.6a2.5 2.5 0 1 1 3.7 2.2c-.8.5-1.2 1-1.2 1.8M12 16.8h.01"/></svg>',
@@ -92,39 +94,51 @@ function button(label, content, cls = '') {
 function node(tag, cls, parent) { const el = document.createElement(tag); el.className = cls; parent?.appendChild(el); return el; }
 root.innerHTML = '<div class="next-app"><div class="stage"></div><nav class="rail" aria-label="Navigation"></nav></div>';
 const stage = root.querySelector('.stage'); const rail = root.querySelector('.rail');
-const assistant = node('section', 'pane', stage); const assistantThread = node('div', 'thread', assistant); const assistantInner = node('div', 'thread-inner', assistantThread); const assistantVoice = node('div', 'voice-host', assistantThread); const assistantComposer = node('div', 'composer-host', assistant);
-const grip = node('div', 'grip', stage); grip.setAttribute('aria-hidden', 'true'); grip.hidden = true;
-const card = node('section', 'card', stage); card.hidden = true;
-const head = node('header', 'card-head', card); const title = node('div', 'card-title', head);
-const statusButton = button('Status', icons.status, 'icon-button'); const terminalButton = button('Terminal', icons.terminal, 'icon-button'); const fullButton = button('Full screen', icons.full, 'icon-button fullscreen'); const closeButton = button('Close', icons.close, 'icon-button'); head.append(statusButton, terminalButton, fullButton, closeButton);
-const cardBody = node('div', 'thread', card); const cardInner = node('div', 'thread-inner', cardBody); const cardVoice = node('div', 'voice-host', cardBody); const cardComposer = node('div', 'composer-host', card);
-const terminalMount = node('div', 'terminal'); card.insertBefore(terminalMount, cardComposer); terminalMount.hidden = true;
-const statusMount = node('div', 'status'); card.insertBefore(statusMount, cardComposer); statusMount.hidden = true;
-const newChatMount = node('div', 'new-chat-host', card); newChatMount.hidden = true;
+const assistant = node('section', 'pane', stage);
+assistant.dataset.pane = 'assistant';
+const assistantHead = node('header', 'assistant-head', assistant);
+assistantHead.dataset.grab = 'assistant';
+const assistantTitle = node('span', '', assistantHead);
+const keepButton = button('Keep Assistant on screen', icons.full, 'icon-button assistant-keep');
+keepButton.hidden = true;
+assistantHead.append(keepButton);
+const assistantThread = node('div', 'thread', assistant);
+const assistantInner = node('div', 'thread-inner', assistantThread);
+const assistantVoice = node('div', 'voice-host', assistantThread);
+const assistantComposer = node('div', 'composer-host', assistant);
+const chatHistory = new Map();
+const usePane = key => { state.layout = layout.markUsed(state.layout, key); };
+const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, mountChatCard(stage, {
+  key, slot, icons, node, button, sessions, store, cc, config, drafts, history: chatHistory,
+  paintTranscript, attachTranscript, requestHistory, catalogLoader, hostPresentation,
+  terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
+  onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
+})]));
 const designCard = node('section', 'card design-card', stage); designCard.hidden = true;
 designCard.setAttribute('aria-label', 'Design');
+designCard.dataset.pane = 'dash';
 const designViewer = createDesignViewer(designCard, {
   onNavigate: onDesignNavigate,
   onFullScreen: toggleDashboardFullScreen,
   onClose: closeDashboard,
 });
+designCard.querySelector('.design-bar').dataset.grab = 'dash';
 const melodyCard = node('section', 'card melody-card', stage);
 melodyCard.setAttribute('aria-label', 'Melody');
+melodyCard.dataset.pane = 'dash';
 melodyCard.hidden = true;
 let melodyViewer;
 let designOpen = false;
 let currentDesignPath = null;
-const lanesCard = node('section', 'card lanes-card', stage); lanesCard.hidden = true;
+const lanesCard = node('section', 'card lanes-card', stage); lanesCard.hidden = true; lanesCard.dataset.pane = 'lanes';
 const brand = button('Assistant', '<span class="logo"></span>', 'rail-button brand on'); const group = node('div', 'rail-group', rail); const lanesButton = button('Lanes', icons.lanes, 'rail-button'); const dashboardsButton = button('Dashboards', icons.dashboards, 'rail-button'); const chatsButton = button('Chats', icons.chats, 'rail-button'); const questionsButton = button('Questions', icons.questions, 'rail-button'); group.append(lanesButton, dashboardsButton, chatsButton, questionsButton); rail.prepend(brand); node('div', 'rail-spacer', rail); const limitsButton = button('Limits and machines', icons.limits, 'rail-button'); const settingsButton = button('Settings', icons.settings, 'rail-button'); rail.append(limitsButton, settingsButton);
 const popover = node('div', 'popover', root.querySelector('.next-app')); popover.hidden = true;
-let assistantComposerControl = null; let assistantComposerStream = null; let cardComposerControl = null; let limitsControl = null;
+let assistantComposerControl = null; let assistantComposerStream = null; let limitsControl = null;
 let unmountQuestionList = null;
 function mountAssistantComposer(id) { if (!id || id === assistantComposerStream) return; assistantComposerControl?.dispose(); assistantComposerStream = id; assistantComposerControl = mountComposer({ host: assistantComposer, transcript: assistantVoice, streamId: id, drafts, cc, chatStore: store }); }
-function mountCardComposer(id) { cardComposerControl?.dispose(); cardComposerControl = id ? mountComposer({ host: cardComposer, transcript: cardVoice, streamId: id, drafts, cc, chatStore: store }) : null; }
 function closePopover() { unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
-function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); }
+function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
 function sessions() { return store.getState().sessions || []; }
-function selectedSession() { return sessions().find(s => s.stream_id === state.selected) || (state.admittedSession?.stream_id === state.selected ? state.admittedSession : null); }
 function assistantSession() { return uniqueAssistantComposite(sessions()); }
 function requestHistory(id) { if (id) cc.requestStreamEvents({ streamId: id }).catch(() => {}); }
 function laneNameTargets() {
@@ -165,10 +179,10 @@ function paintTranscript(element, id) {
   void view.hydrateFileAttachments(element);
   if (stick) scroller.scrollTop = scroller.scrollHeight;
 }
-for (const transcript of [assistantInner, cardInner]) transcript.addEventListener('click', event => {
+function attachTranscript(transcript, source) { transcript.addEventListener('click', event => {
   const designLink = event.target.closest('[data-next-design-link]');
   if (designLink) {
-    followDesignLink(transcript === assistantInner ? 'assistant' : 'chat', designLink.dataset.nextDesignLink);
+    followDesignLink(source, designLink.dataset.nextDesignLink);
     return;
   }
   const laneLink = event.target.closest('.next-lane-name-link');
@@ -181,7 +195,8 @@ for (const transcript of [assistantInner, cardInner]) transcript.addEventListene
   if (retry) store.retryOptimisticSend(retry.dataset.optimisticId);
   const sendNow = event.target.closest('.slot-chat-send-now');
   if (sendNow) store.sendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId);
-});
+}); }
+attachTranscript(assistantInner, 'assistant');
 assistantInner.addEventListener('keydown', event => { const update = event.target.closest('.slot-chat-lane-update[data-lane-id]'); if (update && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openLaneTarget(update.dataset.laneId); } });
 function renderPopover() {
   if (state.popover === 'limits' && limitsControl) { limitsControl.update({ limits: store.getLimits(), hosts: state.hosts }); return; }
@@ -203,6 +218,24 @@ function renderPopover() {
   } else if (state.popover === 'settings') {
     const heading = node('div', 'theme-heading', popover); heading.textContent = 'Theme'; const grid = node('div', 'themes', popover); const selected = document.documentElement.dataset.theme || 'dark';
     for (const theme of ['dark', 'light', 'cosmic']) { const row = button(theme, `<span class="theme-preview sw-${theme}" aria-hidden="true"><span class="theme-mini"><i></i><b></b></span></span><span>${theme[0].toUpperCase() + theme.slice(1)}</span>`, `theme-choice${selected === theme ? ' on' : ''}`); row.setAttribute('aria-pressed', String(selected === theme)); row.onclick = () => { document.documentElement.classList.add('swap'); document.documentElement.dataset.theme = theme; localStorage.setItem('pentacle.next.theme', theme); renderPopover(); requestAnimationFrame(() => document.documentElement.classList.remove('swap')); }; grid.append(row); }
+    const sidebar = node('div', 'sidebar-setting', popover);
+    node('div', 'theme-heading', sidebar).textContent = 'Sidebar';
+    const choices = node('div', 'sidebar-choices', sidebar);
+    choices.setAttribute('role', 'group');
+    choices.setAttribute('aria-label', 'Sidebar');
+    for (const value of ['left', 'top']) {
+      const label = value === 'left' ? 'Left' : 'Top';
+      const choice = button(label, label, 'sidebar-choice');
+      choice.setAttribute('aria-pressed', String(state.layout.rail === value));
+      choice.onclick = () => {
+        state.layout = layout.setRail(state.layout, value);
+        localStorage.setItem(railKey, value);
+        syncLayout();
+        renderPopover();
+        popover.querySelector(`.sidebar-choice[aria-label="${label}"]`)?.focus();
+      };
+      choices.append(choice);
+    }
   } else if (state.popover === 'limits') {
     const hostIds = Array.isArray(config.hostIds) && config.hostIds.length ? config.hostIds : ['local'];
     const hostOrder = hostIds.map(id => hostPresentation.streamHost(config, id));
@@ -214,49 +247,27 @@ function renderPopover() {
 function render() {
   const a = assistantSession(); paintTranscript(assistantInner, a?.stream_id); mountAssistantComposer(a?.stream_id);
   const assistantName = a?.assistant_display_name || a?.display_name || a?.title || 'Assistant'; brand.setAttribute('aria-label', assistantName); brand.title = assistantName;
-  const s = selectedSession();
-  if (state.selected && s) { title.textContent = s.display_name || s.title || s.session_name; statusButton.hidden = !s.status_card; paintTranscript(cardInner, s.stream_id); if (state.mode === 'status') renderStatus(s); }
+  assistantTitle.textContent = assistantName;
+  keepButton.setAttribute('aria-label', `Keep ${assistantName} on screen`);
+  keepButton.title = keepButton.getAttribute('aria-label');
+  for (const card of Object.values(cards)) card.render();
   const meters = document.createElement('span'); meters.className = 'rail-meters'; meters.setAttribute('aria-hidden', 'true'); for (const limit of store.getLimits()) { const bar = document.createElement('i'); bar.style.height = `${Math.max(3, Math.round((limit.pct || 0) * 0.13) + 3)}px`; meters.append(bar); } limitsButton.replaceChildren(meters);
   if (state.popover && state.popover !== 'questions') renderPopover();
 }
-let terminal = null; let terminalGeneration = 0; let terminalQueue = Promise.resolve();
-function disposeTerminal() { terminalGeneration++; const previous = terminal; terminal = null; disposeTerminalView(previous); terminalQueue = terminalQueue.then(() => cc.killPty(0)).catch(() => {}); terminalMount.replaceChildren(); }
-cc.onPtyData((slot, data) => { if (slot === 0 && terminal) terminal.term.write(data); });
-async function openTerminal(session) {
-  disposeTerminal(); const generation = terminalGeneration;
-  await terminalQueue;
-  if (generation !== terminalGeneration) return;
-  const style = getComputedStyle(document.documentElement);
-  const pair = createTerminalView(terminalMount, { background: style.getPropertyValue('--term-bg').trim(), foreground: style.getPropertyValue('--term-text').trim(), cursor: style.getPropertyValue('--accent').trim() }, { Terminal, FitAddon, Unicode11Addon, WebglAddon });
-  terminal = pair; await new Promise(resolve => requestAnimationFrame(resolve));
-  if (generation !== terminalGeneration) return;
-  pair.fitAddon.fit();
-  const paste = createTerminalPaste({ term: pair.term, readClipboard: () => cc.readClipboard(), pastePty: text => cc.pastePty(0, text), isCurrent: () => generation === terminalGeneration && !!terminal?.paneId });
-  pair.term.element.addEventListener('paste', paste.nativePaste, { capture: true });
-  pair.term.attachCustomKeyEventHandler(event => paste.key(event, /mac/i.test(navigator.platform)));
-  pair.term.onData(data => { if (!paste.captureData(data)) { cc.exitCopyMode(0); cc.writePty(0, data); } });
-  let paneId;
-  const hostId = (config.hostIds || ['local']).find(id => hostPresentation.streamHost(config, id).toLowerCase() === String(session.host || '').toLowerCase()) || session.hostId || session.host;
-  terminalQueue = cc.createPty(0, session.session_name || session.name, hostId, pair.term.cols, pair.term.rows).then(id => { paneId = id; });
-  await terminalQueue;
-  if (generation !== terminalGeneration) return;
-  pair.paneId = paneId;
-  pair.observer = new ResizeObserver(() => { if (generation !== terminalGeneration) return; const cols = pair.term.cols, rows = pair.term.rows; pair.fitAddon.fit(); if (cols !== pair.term.cols || rows !== pair.term.rows) cc.resizePty(0, pair.term.cols, pair.term.rows); });
-  pair.observer.observe(terminalMount);
-}
-function renderStatus(session) {
-  const c = session.status_card; statusMount.replaceChildren(); if (!c) return;
-  const plan = Array.isArray(c.plan) ? c.plan.filter(Boolean) : []; const rollup = statusRollup(c);
-  const top = node('div', 'status-top', statusMount); const chip = node('span', 'status-chip', top); chip.textContent = rollup.label; chip.hidden = !plan.length;
-  if (c.updated_at && Number.isFinite(Date.parse(c.updated_at))) { const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(c.updated_at)) / 1000)); const age = node('span', 'status-age', top); age.textContent = `updated ${seconds < 60 ? 'just now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : `${Math.floor(seconds / 3600)}h ago`}`; }
-  const add = (heading, text) => { if (!text) return; const h = node('h2', '', statusMount); h.textContent = heading; const p = node('p', '', statusMount); p.textContent = text; };
-  add('Goal', c.goal); if (plan.length) { const h = node('h2', '', statusMount); h.textContent = 'Plan'; const bar = node('div', 'meter', statusMount); const fill = node('span', '', bar); fill.style.width = `${rollup.percent}%`; const list = node('ol', '', statusMount); for (const step of plan) { const item = node('li', step.status || 'pending', list); const glyph = node('span', 'status-glyph', item); glyph.textContent = step.status === 'done' ? '✓' : step.status === 'active' ? '◉' : '○'; item.append(document.createTextNode(step.text)); } } add('Latest update', c.update);
-}
-function setMode(mode) { const s = selectedSession(); if (!s) return; const next = nextMode(state.mode, mode); if (next === 'terminal') void cardComposerControl?.cancelRecording(); if (state.mode === 'terminal' && next !== 'terminal') disposeTerminal(); state.mode = next; cardBody.hidden = state.mode !== 'thread'; cardComposer.hidden = state.mode === 'terminal'; terminalMount.hidden = state.mode !== 'terminal'; statusMount.hidden = state.mode !== 'status'; terminalButton.classList.toggle('active', state.mode === 'terminal'); statusButton.classList.toggle('active', state.mode === 'status'); if (state.mode === 'terminal') void openTerminal(s); if (state.mode === 'status') renderStatus(s); }
-function syncLayout() {
+function syncLayout(admitted = null) {
+  document.documentElement.dataset.rail = state.layout.rail;
   const visible = layout.fits(state.layout, innerWidth);
-  assistant.hidden = !visible.assistant;
-  card.hidden = !visible.cards.includes('chat');
+  if ((visible.assistant || innerWidth < layout.PHONE_WIDTH) && state.layout.overlay) state.layout = layout.dismissAssistant(state.layout);
+  const overlay = state.layout.overlay;
+  if (!assistant.hidden && !visible.assistant && !overlay) void assistantComposerControl?.cancelRecording();
+  assistant.hidden = !visible.assistant && !overlay;
+  assistant.classList.toggle('assistant-overlay', overlay);
+  keepButton.hidden = !overlay;
+  for (const [key, card] of Object.entries(cards)) {
+    const id = state.layout[key];
+    card.setStream(id, id && admitted?.stream_id === id ? admitted : null);
+    card.setVisible(visible.cards.includes(key), state.layout.solo === key);
+  }
   designCard.hidden = !visible.cards.includes('dash') || !state.layout.dash.startsWith('design:');
   const melodyVisible = visible.cards.includes('dash') && state.layout.dash === 'melody';
   if (melodyVisible === melodyCard.hidden) {
@@ -264,6 +275,7 @@ function syncLayout() {
     if (melodyVisible) {
       melodyViewer ??= createMelodyViewer(melodyCard, { onFullScreen: toggleDashboardFullScreen, onClose: closeDashboard });
       melodyViewer.show();
+      melodyCard.querySelector('.melody-head').dataset.grab = 'dash';
     } else {
       melodyViewer?.hide();
     }
@@ -281,12 +293,10 @@ function syncLayout() {
   full.title = fullLabel;
   lanesCard.hidden = !visible.cards.includes('lanes');
   lanesCard.classList.toggle('alone', !lanesCard.hidden && visible.cards.length === 1 && assistant.hidden);
-  grip.hidden = assistant.hidden || !visible.cards.length || innerWidth < layout.PHONE_WIDTH;
-  const cardsWidth = visible.cards.reduce((sum, key) => sum + layout.MIN_WIDTH[key], 0);
-  const width = Math.max(layout.MIN_WIDTH.assistant, Math.min(state.layout.assistantWidth || 0, stage.clientWidth - cardsWidth));
-  assistant.style.flex = state.layout.assistantWidth && !grip.hidden ? `0 0 ${width}px` : '';
-  brand.classList.toggle('on', visible.assistant);
-  chatsButton.classList.toggle('on', !card.hidden);
+  stageLayout.paint();
+  brand.classList.toggle('on', visible.assistant || overlay);
+  brand.setAttribute('aria-pressed', String(visible.assistant || overlay));
+  chatsButton.classList.toggle('on', visible.cards.some(key => key === 'chat' || key === 'chat2'));
   dashboardsButton.classList.toggle('on', dashboardVisible);
   dashboardsButton.setAttribute('aria-pressed', String(dashboardVisible));
   lanesButton.classList.toggle('on', !lanesCard.hidden);
@@ -299,13 +309,14 @@ function syncLayout() {
   if (state.layout.dash !== 'melody' && location.hash === '#melody') {
     history.replaceState(history.state, '', '/next/');
   }
+  anchorPopover();
   syncDesignLinkMarks();
 }
 
 function syncDesignLinkMarks() {
   const path = designCard.hidden ? null : currentDesignPath;
   markDesignLinks(assistantInner, path);
-  markDesignLinks(cardInner, path);
+  for (const card of Object.values(cards)) markDesignLinks(card.transcript, path);
 }
 
 function onDesignNavigate(target) {
@@ -358,25 +369,64 @@ function closeDashboard() {
   syncLayout();
 }
 
-grip.addEventListener('pointerdown', event => { event.preventDefault(); grip.setPointerCapture(event.pointerId); document.body.classList.add('dragging'); });
-grip.addEventListener('pointermove', event => { if (!grip.hasPointerCapture(event.pointerId)) return; state.layout = layout.setAssistantWidth(state.layout, event.clientX - stage.getBoundingClientRect().left, stage.clientWidth, innerWidth); syncLayout(); });
-grip.addEventListener('pointerup', event => { if (grip.hasPointerCapture(event.pointerId)) grip.releasePointerCapture(event.pointerId); document.body.classList.remove('dragging'); });
-let newChatControl = null; let newChatGeneration = 0;
-function leaveNewChat() { newChatGeneration++; newChatControl?.destroy(); newChatControl = null; newChatMount.hidden = true; head.hidden = false; cardComposer.hidden = false; }
-function openChat(id, admittedSession = null) { leaveNewChat(); disposeTerminal(); state.selected = id; state.admittedSession = admittedSession; state.mode = 'thread'; terminalButton.hidden = false; cardBody.hidden = false; terminalMount.hidden = statusMount.hidden = true; state.layout = layout.show(state.layout, 'chat', id, innerWidth); mountCardComposer(id); syncLayout(); requestHistory(id); render(); }
-async function openNewChat() {
-  leaveNewChat(); disposeTerminal(); mountCardComposer(null); state.selected = null; state.mode = 'new'; state.layout = layout.show(state.layout, 'chat', '__new__', innerWidth); syncLayout();
-  const generation = newChatGeneration; title.textContent = ''; statusButton.hidden = terminalButton.hidden = true; cardBody.hidden = terminalMount.hidden = statusMount.hidden = cardComposer.hidden = true; newChatMount.hidden = false; newChatMount.textContent = 'Loading…';
-  try {
-    const response = await catalogLoader.load({ refresh: true }); if (generation !== newChatGeneration) return;
-    if (!response?.ok) throw new Error(response?.error || 'Unable to load models');
-    const hostIds = Array.isArray(config.hostIds) && config.hostIds.length ? config.hostIds : ['local'];
-    newChatControl = mountNewChatForm(newChatMount, { catalog: response.catalog, machineOptions: hostIds.map(id => ({ id, label: hostPresentation.hostLabel(config, id) })), localHostId: config.chatStream?.localHost || config.localHostId || 'local', accountLabels: config.chatStream?.accountLabels || {}, spawn: request => cc.chatSpawnV2(request), store,
-      onStarted: ({ streamId, session }) => openChat(streamId, session) });
-  } catch (error) { if (generation === newChatGeneration) newChatMount.textContent = error.message || 'Unable to load models'; }
+const stageLayout = mountStageLayout({
+  stage, panes: () => ({ assistant, chat: cards.chat.element, chat2: cards.chat2.element,
+    dash: melodyCard.hidden ? designCard : melodyCard, lanes: lanesCard }),
+  getState: () => state.layout,
+  onLayout: next => { state.layout = next; syncLayout(); },
+  onLift: () => { closePopover(); dismissOverlay(); },
+});
+function dismissOverlay() {
+  if (!state.layout.overlay) return;
+  state.layout = layout.dismissAssistant(state.layout);
+  syncLayout();
 }
-function closeCard() { leaveNewChat(); disposeTerminal(); mountCardComposer(null); state.selected = null; state.mode = 'thread'; state.layout = layout.shut(state.layout, 'chat', innerWidth); syncLayout(); render(); }
-brand.onclick = () => { closePopover(); const wasSolo = !!state.layout.solo; state.layout = layout.toAssistant(state.layout, innerWidth); if (!wasSolo && !state.layout.chat) { leaveNewChat(); disposeTerminal(); mountCardComposer(null); state.selected = null; } syncLayout(); render(); };
+function anchorPopover() {
+  if (!state.popover) return;
+  const anchor = ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton,
+    limits: limitsButton, settings: settingsButton })[state.popover].getBoundingClientRect();
+  const top = rail.getBoundingClientRect().bottom;
+  const maxLeft = innerWidth - popover.offsetWidth - 8;
+  const maxTop = innerHeight - popover.offsetHeight - 8;
+  popover.style.setProperty('--anchor-x', `${Math.max(8, Math.min(anchor.left, maxLeft))}px`);
+  popover.style.setProperty('--anchor-y', `${Math.max(8, Math.min(anchor.top, maxTop))}px`);
+  popover.style.setProperty('--rail-bottom', `${top}px`);
+}
+function openChat(id) {
+  state.layout = layout.show(state.layout, 'chat', id, innerWidth);
+  syncLayout();
+  cards[state.layout.last]?.focus();
+  render();
+}
+function openNewChat() { openChat(NEW_CHAT); }
+function admitChat(key, id, session) {
+  state.layout = layout.replaceChat(state.layout, key, id);
+  syncLayout(session);
+  cards[state.layout.last]?.focus();
+  render();
+}
+function closeCard(key) {
+  state.layout = layout.shut(state.layout, key, innerWidth);
+  syncLayout();
+  render();
+}
+function toggleChatFullScreen(key) {
+  state.layout = layout.toggleFullScreen(state.layout, key, innerWidth);
+  syncLayout();
+}
+brand.onclick = () => {
+  closePopover();
+  const wasOnStage = layout.fits(state.layout, innerWidth).assistant;
+  const wasOverlay = state.layout.overlay;
+  state.layout = layout.toAssistant(state.layout, innerWidth);
+  syncLayout();
+  if (!wasOnStage && !wasOverlay && !assistant.hidden && innerWidth >= layout.PHONE_WIDTH) assistantComposerControl?.focus();
+};
+keepButton.onclick = () => {
+  state.layout = layout.keepAssistant(state.layout, innerWidth);
+  syncLayout();
+  if (!assistant.hidden) assistantComposerControl?.focus();
+};
 lanesButton.onclick = () => { closePopover(); state.layout = layout.fits(state.layout, innerWidth).cards.includes('lanes') ? layout.shut(state.layout, 'lanes', innerWidth) : layout.show(state.layout, 'lanes', true, innerWidth); syncLayout(); };
 dashboardsButton.onclick = () => {
   if (innerWidth < layout.PHONE_WIDTH) {
@@ -388,33 +438,37 @@ dashboardsButton.onclick = () => {
   togglePopover('dashboards');
   dashboardsButton.setAttribute('aria-expanded', String(state.popover === 'dashboards'));
 };
-chatsButton.onclick = () => togglePopover('chats'); questionsButton.onclick = () => togglePopover('questions'); limitsButton.onclick = () => togglePopover('limits'); settingsButton.onclick = () => togglePopover('settings'); closeButton.onclick = closeCard;
-terminalButton.onclick = () => setMode('terminal'); statusButton.onclick = () => setMode('status');
-fullButton.onclick = () => { state.layout = layout.toggleFullScreen(state.layout, 'chat', innerWidth); syncLayout(); };
+chatsButton.onclick = () => togglePopover('chats');
+questionsButton.onclick = () => togglePopover('questions');
+limitsButton.onclick = () => togglePopover('limits');
+settingsButton.onclick = () => togglePopover('settings');
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && state.layout.overlay) { event.preventDefault(); dismissOverlay(); return; }
   if (state.popover && event.key === 'Escape') { closePopover(); return; }
   if (!designCard.hidden && (designCard.contains(event.target) || event.target === document.body) && designViewer.handleKey(event)) {
     event.preventDefault();
     return;
   }
-  if (event.key === 'Escape' && state.layout.solo) {
+  if (event.key === 'Escape' && state.layout.solo && innerWidth >= layout.PHONE_WIDTH) {
     state.layout = layout.toggleFullScreen(state.layout, state.layout.solo, innerWidth);
     syncLayout();
   }
 });
 document.addEventListener('click', event => { const path = event.composedPath?.() || []; if (state.popover && !path.includes(popover) && !path.includes(rail) && !popover.contains(event.target) && !rail.contains(event.target)) closePopover(); });
-window.addEventListener('resize', () => syncLayout());
-assistant.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'assistant'); });
-card.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'chat'); });
-assistant.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'assistant'); });
-card.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'chat'); });
-lanesCard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
-lanesCard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'lanes'); });
+document.addEventListener('pointerdown', event => {
+  if (state.layout.overlay && !event.composedPath().includes(assistant) && !event.composedPath().includes(brand)) dismissOverlay();
+});
+document.addEventListener('click', event => {
+  if (event.detail === 0 && state.layout.overlay && !event.composedPath().includes(assistant) && !event.composedPath().includes(brand)) dismissOverlay();
+});
+window.addEventListener('resize', () => { stageLayout.cancel(); syncLayout(); });
+assistant.addEventListener('focusin', () => usePane('assistant'));
+assistant.addEventListener('pointerdown', () => usePane('assistant'));
 for (const dashboard of [designCard, melodyCard]) {
   dashboard.addEventListener('pointerdown', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
   dashboard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
 }
-const theme = localStorage.getItem('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
+const theme = readSetting('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
 let assistantHistory = null;
 questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(), questionReadFailed: () => questionNotifications.readFailed(),
   onOpenSpec: specId => { const placement = questionsControl.getSnapshot().list.find(item => item.placement?.specId === specId)?.placement; closePopover(); if (placement?.laneId) { openLaneTarget(placement.laneId, placement.goalId); lanesControl?.openSpec(placement.laneId, placement.goalId, specId); } },
@@ -441,7 +495,7 @@ async function loadSnapshot() {
       const unresolved = Object.values(store.getState().optimisticSends || {}).filter(send => ['queued','dispatched','indeterminate'].includes(send.status));
       for (const id of new Set(unresolved.map(send => send.stream_id))) { const result = await cc.requestStreamEvents({ streamId:id, limit:1 }); if (!result?.ok) return; }
       if (cc.webConnectionState?.()?.epoch === recoveryEpoch) { store.webHostReady?.(recoveryEpoch); recoveryEpoch = null; }
-      if (assistantSession()?.stream_id) requestHistory(assistantSession().stream_id); if (state.selected) requestHistory(state.selected);
+      if (assistantSession()?.stream_id) requestHistory(assistantSession().stream_id); for (const card of Object.values(cards)) if (card.id && card.id !== NEW_CHAT) requestHistory(card.id);
     }
     render();
   } finally { recoveryPending = false; if (recoveryEpoch !== null && readySignals !== signal && cc.webConnectionState?.()?.open) void loadSnapshot().catch(() => {}); }

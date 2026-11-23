@@ -16,6 +16,7 @@ const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 const ATTACHMENT_MIMES = new Set(['image/jpeg', 'image/png']);
 
 let captureOwner = null;
+let voiceRequest = 0;
 
 const clampLevel = value => Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
 const nowMs = env => env.performance?.now?.() ?? Date.now();
@@ -455,7 +456,11 @@ function mountComposer({
   }
 
   function releaseCapture() {
-    if (captureOwner === owner) captureOwner = null;
+    if (captureOwner === owner) {
+      captureOwner = null;
+      owner.release?.();
+      owner.release = null;
+    }
   }
 
   function clearPendingBubble() {
@@ -549,14 +554,21 @@ function mountComposer({
       setError('Microphone recording is unavailable in this browser.');
       return;
     }
-    if (captureOwner && captureOwner !== owner) {
-      setError('Another chat is recording. Finish or cancel that take first.');
-      return;
-    }
     const target = currentStreamId();
     if (!target) { setError('Select a connected chat before recording.'); return; }
+    const request = ++voiceRequest;
+    const previous = captureOwner;
+    if (previous && previous !== owner) {
+      const generation = voiceGeneration;
+      try { await previous.stopForHandoff(); } catch (error) {
+        if (request === voiceRequest) setError(error.message || 'Unable to stop the other recording.');
+        return;
+      }
+      if (disposed || request !== voiceRequest || generation !== voiceGeneration) return;
+    }
     setError('');
     captureOwner = owner;
+    owner.released = new Promise(resolve => { owner.release = resolve; });
     voicePhase = 'starting';
     const generation = ++voiceGeneration;
     startInterrupted = false;
@@ -681,7 +693,13 @@ function mountComposer({
     }
   }
 
-  const owner = {};
+  const owner = {
+    async stopForHandoff() {
+      const released = owner.released;
+      await cancelRecording();
+      await released;
+    },
+  };
   on(input, 'input', () => { setError(''); setDraftText(input.value); });
   on(input, 'paste', event => {
     const clipboard = event.clipboardData;
