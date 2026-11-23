@@ -210,3 +210,90 @@ def test_active_repin_refuses_pre_enforcement_target_file_before_rpc(tmp_path,mo
     pair=tmp_path/"pair.json";pair.write_text('{}')
     args=cli.build_parser().parse_args(["account","repin","--target-pin-file",str(pair),"--expected-pin-revision","1"])
     assert args.func(args)==2
+
+
+@pytest.mark.parametrize(
+    "selector, json_output, expected",
+    [
+        pytest.param(["--account", ""], True, (2, 0, 0, 0), id="empty"),
+        pytest.param(["--account", " \t\n"], True, (2, 0, 0, 0), id="whitespace"),
+        pytest.param(["--account="], False, (2, 0, 0, 0), id="empty-equals"),
+        pytest.param(["--account", "fixture-account"], True, (0, 0, 1, 1), id="named-json"),
+        pytest.param(["--account", "fixture-account"], False, (0, 0, 1, 1), id="named-text"),
+        pytest.param([], True, (0, 1, 0, 0), id="omitted-json"),
+        pytest.param([], False, (0, 1, 0, 0), id="omitted-text"),
+    ],
+)
+def test_usage_selector_routes_through_the_public_cli(
+    monkeypatch, capsys, selector, json_output, expected
+):
+    from agent_orch import config, stream_id, usage_readback, wsclient
+
+    calls = {"host": [], "registry": [], "config": []}
+    fixture_config = object()
+    host_rows = [{"host": "fixture-host", "provider": "codex", "pct": 25, "outcome": "fresh"}]
+    account = {
+        "provider": "codex", "alias": "fixture-account", "host": "fixture-host",
+        "generation": "fixture-generation", "pool_id": "fixture-pool", "health": "unknown",
+    }
+    pool = {"provider": "codex", "pool_id": "fixture-pool", "fresh": False, "age_seconds": 901}
+
+    def load_fixture():
+        calls["config"].append(True)
+        return fixture_config
+
+    def read_host(host, *, max_age_s):
+        calls["host"].append((host, max_age_s))
+        return host_rows
+
+    async def registry(conf, payload, *, timeout):
+        assert conf is fixture_config
+        calls["registry"].append((payload["action"], payload["from_stream_id"], timeout))
+        return {
+            "type": "account.ok", "enabled": True,
+            "accounts": [
+                account,
+                {**account, "host": "fixture-other-host", "pool_id": "fixture-other-pool"},
+            ],
+            "quota_pools": [pool, {**pool, "pool_id": "fixture-other-pool"}],
+        }
+
+    monkeypatch.setattr(config, "load_config", load_fixture)
+    monkeypatch.setattr(cli, "load_config", load_fixture)
+    monkeypatch.setattr(stream_id, "discover_leader_stream_id_short", lambda _: "fixture-host:front-desk")
+    monkeypatch.setattr(usage_readback, "read_host", read_host)
+    monkeypatch.setattr(wsclient, "account_once", registry)
+
+    argv = ["usage", "--host", "fixture-host", "--max-age-seconds", "900", *selector]
+    if json_output:
+        argv.append("--json")
+    try:
+        status = cli.main(argv)
+    except SystemExit as exc:
+        status = exc.code
+    output = capsys.readouterr()
+
+    # Exit status plus host reader, registry transport and config call counts.
+    assert (status, len(calls["host"]), len(calls["registry"]), len(calls["config"])) == expected
+    if status:
+        assert not output.out
+        assert "usage:" in output.err and "--account" in output.err
+        assert "non-empty" in output.err
+    elif selector:
+        assert calls["registry"] == [("status", "fixture-host:front-desk", 30)]
+        assert not output.err
+        if json_output:
+            assert json.loads(output.out) == {"enabled": True, "accounts": [account], "quota_pools": [pool]}
+        else:
+            assert output.out.splitlines() == [
+                "PROVIDER ACCOUNT HOST GENERATION POOL HEALTH",
+                "codex fixture-account fixture-host fixture-generation fixture-pool unknown",
+                "codex fixture-pool: unknown/stale (age_seconds=901)",
+            ]
+    else:
+        assert calls["host"] == [("fixture-host", 900)]
+        assert not output.err
+        if json_output:
+            assert json.loads(output.out) == host_rows
+        else:
+            assert output.out == usage_readback.render_table(host_rows) + "\n"
