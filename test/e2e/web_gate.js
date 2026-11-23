@@ -91,15 +91,18 @@ function parseArgs(argv) {
   return args;
 }
 
-function resolveChrome() {
+function resolveChrome({ required = true, absolute = false } = {}) {
   for (const bin of CHROME_CANDIDATES) {
     if (path.isAbsolute(bin)) {
       try { fs.accessSync(bin, fs.constants.X_OK); return bin; } catch { /* next */ }
     } else {
-      try { execFileSync('which', [bin], { stdio: 'ignore' }); return bin; } catch { /* next */ }
+      try {
+        const executable = execFileSync('which', [bin], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        return absolute ? path.resolve(executable) : bin;
+      } catch { /* next */ }
     }
   }
-  throw new Error(`no Chrome/Chromium on PATH (tried ${CHROME_CANDIDATES.join(', ')})`);
+  if (required) throw new Error(`no Chrome/Chromium on PATH (tried ${CHROME_CANDIDATES.join(', ')})`);
 }
 
 function tmux(args, opts = {}) {
@@ -412,6 +415,23 @@ async function startDaemon(args, scratch, runtime, fixtures = [
 }
 
 async function run(args) {
+  // These scenarios own their local stores, sandboxed browser and web hosts.
+  // When selected alone they need no POSIX daemon/process group or tmux setup,
+  // so the same fixture command can run on native Windows.
+  if (!args.profile && !args.servedUrl && !process.env.PENTACLE_WEB_GATE_CONSUMER_ROOT &&
+      args.scenarios?.length && args.scenarios.every(name => ['model-library-publish', 'model-library-picture'].includes(name))) {
+    const report = new Report(allocateReportDir());
+    const chromeBin = resolveChrome({ required: false, absolute: true });
+    let failedScenarios = 0;
+    for (const [name, scenario] of scenarios.SCENARIOS.filter(([name]) => args.scenarios.includes(name))) {
+      console.log(`\n▸ ${name}`);
+      try { await scenario({ report, chromeBin }); }
+      catch (error) { failedScenarios++; report.note(`scenario ${name} FAILED: ${error.message}`); }
+    }
+    const verdict = report.write({ failedScenarios });
+    console.log(`\n◀ web_gate: ${verdict.status}\n  artifacts: ${report.dir}`);
+    return verdict.status === 'PASS' ? 0 : 1;
+  }
   return withRuntimeDirectory((runtimeDir, cleanupRuntime) => runIsolated(args, runtimeDir, cleanupRuntime));
 }
 
@@ -710,7 +730,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       await new Promise((resolve) => setTimeout(resolve, args.timeoutMs));
     }
 
-    const ctx = { session, report, cdp, cdpPort, url, python: args.python, wrapProof: args.wrapProof, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
+    const ctx = { session, report, cdp, cdpPort, chromeBin: resolveChrome({ absolute: true }), url, python: args.python, wrapProof: args.wrapProof, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
       configureModeler, configureMic, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS.filter(([name]) => !args.scenarios?.length || args.scenarios.includes(name))) {

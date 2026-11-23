@@ -10,6 +10,39 @@ test('web gate keeps the full default and rejects unknown named scopes before st
   assert.throws(() => parseArgs(['--scenario']), /unknown scenario/);
 });
 
+test('focused Model Library scenarios receive the absolute path to the gate browser', () => {
+  const { execFileSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'model-library-selection-'));
+  try {
+    const script = `
+      const assert = require('node:assert/strict');
+      const { run } = require('./test/e2e/web_gate');
+      const { SCENARIOS } = require('./test/e2e/lib/web_scenarios');
+      const names = ['model-library-publish', 'model-library-picture'];
+      const seen = [];
+      for (const entry of SCENARIOS.filter(([name]) => names.includes(name))) {
+        entry[1] = ({ chromeBin }) => seen.push([entry[0], chromeBin]);
+      }
+      run({ scenarios: names }).then(code => {
+        assert.equal(code, 0);
+        assert.deepEqual(seen, names.map(name => [name, process.execPath]));
+      }).catch(error => { console.error(error); process.exitCode = 1; });
+    `;
+    execFileSync(process.execPath, ['-e', script], { cwd: path.join(__dirname, '..'), timeout: 10000, env: {
+      ...process.env,
+      PATH: [path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
+      PENTACLE_CHROME: process.platform === 'win32' ? process.execPath : path.basename(process.execPath),
+      PENTACLE_WEB_GATE_CONSUMER_ROOT: '',
+      PENTACLE_WEB_GATE_REPORT_ROOT: root,
+    } });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 test('owned Chrome inspection failure cannot be reported as successful cleanup', async () => {
   const { stopOwnedGroup } = require('./e2e/web_gate');

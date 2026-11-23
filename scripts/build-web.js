@@ -234,6 +234,12 @@ async function build({ minify = false } = {}) {
     format: 'iife', target: 'es2020', platform: 'browser',
     outfile: path.join(nextOut, 'design-embed.bundle.js'), minify, logLevel: 'info',
   });
+  await esbuild.build({
+    entryPoints: [path.join(nextSource, 'model_viewer.js')], bundle: true,
+    format: 'iife', globalName: 'PentacleModelViewer', target: 'chrome134',
+    banner: { js: '/*!\n' + fs.readFileSync(path.join(ROOT, 'node_modules', 'three', 'LICENSE'), 'utf8').trimEnd() + '\n*/' },
+    outfile: path.join(nextOut, 'model-viewer.bundle.js'), minify: true, logLevel: 'info',
+  });
   fs.copyFileSync(path.join(nextSource, 'design-embed.html'), path.join(nextOut, 'design-embed.html'));
   fs.copyFileSync(path.join(nextSource, 'index.html'), path.join(nextOut, 'index.html'));
   for (const file of ['melody.css', 'melody_instrument.css']) {
