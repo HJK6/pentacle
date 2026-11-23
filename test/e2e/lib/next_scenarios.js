@@ -199,8 +199,29 @@ async function limitsSettings(ctx) {
   report.ok('machine CPU, RAM and disk figures use separate mock table columns', await session.eval("(() => {const row=document.querySelector('[data-machine-host=\"fixture-machine\"]');const cells=[...row.querySelectorAll('[role=cell]')].map(x=>x.textContent);return JSON.stringify(cells)===JSON.stringify(['24%','25%','40%'])&&!!document.querySelector('.limits-view h3')})()"));
   await session.screenshot(path.join(report.dir,'next-repair-stats-1440.png'));
   await session.send('Emulation.setDeviceMetricsOverride', {width:440,height:956,deviceScaleFactor:1,mobile:false});
-  await session.waitFor("window.innerWidth===440", {timeoutMs:ctx.timeoutMs});
-  report.ok('phone stats table does not overflow', await session.eval("document.documentElement.scrollWidth===document.documentElement.clientWidth && !!document.querySelector('[data-machine-host=\"fixture-machine\"]')"));
+  try {
+    await session.waitFor(`window.innerWidth === 440
+      && document.documentElement.scrollWidth === document.documentElement.clientWidth
+      && !!document.querySelector('[data-machine-host="fixture-machine"]')`,
+      { timeoutMs: ctx.timeoutMs, label: '440 px stats table without horizontal overflow' });
+  } catch (error) {
+    if (!error.message.startsWith('waitFor timed out')) throw error;
+    const detail = await session.eval(`(() => {
+      const { scrollWidth, clientWidth } = document.documentElement;
+      const machineRowPresent = !!document.querySelector('[data-machine-host="fixture-machine"]');
+      let widestElement = null;
+      for (const element of document.body.querySelectorAll('*')) {
+        const width = element.getBoundingClientRect().width;
+        if (!width || (widestElement && width <= widestElement.width)) continue;
+        const selector = element.id ? '#' + CSS.escape(element.id)
+          : element.localName + [...element.classList].map(name => '.' + CSS.escape(name)).join('');
+        widestElement = { selector, width };
+      }
+      return { scrollWidth, clientWidth, machineRowPresent, widestElement };
+    })()`);
+    report.ok('phone stats table does not overflow', false, detail);
+  }
+  report.ok('phone stats table does not overflow', true);
   await session.screenshot(path.join(report.dir,'next-repair-stats-440.png'));
   await session.send('Emulation.setDeviceMetricsOverride', {width:1440,height:900,deviceScaleFactor:1,mobile:false});
   await session.waitFor("window.innerWidth===1440", {timeoutMs:ctx.timeoutMs});
