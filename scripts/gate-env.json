@@ -8,7 +8,7 @@
     "tmux": {
       "exact_major_minor": {
         "darwin": "3.7",
-        "linux": "3.4"
+        "linux": "3.9"
       }
     },
     "zsh": {
