@@ -11,7 +11,9 @@ import importlib.util
 import hashlib
 import json
 import os
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -184,6 +186,11 @@ class ConfigFailsClosed(Tmp):
             "invalid required selection": lambda c: c["profiles"]["pentacle"]["targets"]["v2-pytest"].update(required_select="tests/test_x.py"),
             "no targets": lambda c: c["profiles"]["pentacle"].update(targets={}),
             "deadline budget": lambda c: c["deadline"].update(slack_s=-1),
+            "tmux platform pins": lambda c: c["tools"]["tmux"].update(exact_major_minor={"darwin": "3.7"}),
+            "zsh minimum": lambda c: c["tools"]["zsh"].update(minimum=5.9),
+            "lsof rule": lambda c: c["tools"].update(lsof="optional"),
+            "browser minimum": lambda c: c["tools"]["chrome"].update(minimum_major=True),
+            "umask": lambda c: c.update(umask="099"),
         }
         for label, mutate in bad.items():
             with self.subTest(label), self.assertRaises(ge.SetupFailure):
@@ -845,6 +852,7 @@ class EntrypointReceipts(Tmp):
             raise AssertionError("prepare launched a subject")
         with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
                                  ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
+                                 check_host_tools=lambda *a, **k: ({}, []),
                                  check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
                                  build_command=boom, source_identity=lambda *a, **k: {"sha": "x", "dirty": False}), mock.patch.object(ge.subprocess, "Popen", boom):
             code = ge.main(["prepare", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev"), "--checkout", str(self.tmp / "co"),
@@ -889,6 +897,7 @@ class EntrypointReceipts(Tmp):
         # (TZ unset) observed local time and rejected the same live owner.
         with mock.patch.dict(os.environ, {"TZ": ""}), mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
                                  ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
+                                 check_host_tools=lambda *a, **k: ({}, []),
                                  check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
                                  build_command=lambda *a, **k: (argv, {"cwd": self.tmp, "wall_s": 120, "classify": lambda rc, to: ("pass", None, {})}),
                                  source_identity=lambda *a, **k: {"sha": "x", "dirty": False}):
@@ -940,6 +949,193 @@ class EntrypointReceipts(Tmp):
 
 
 
+class EnvironmentContract(Tmp):
+    run_main = EntrypointReceipts.run_main
+
+    def setUp(self):
+        EntrypointReceipts.setUp(self)
+        self.tools = self.tmp / "tools"
+        self.tools.mkdir()
+        self.config = ge.load_config()
+        self.config["search_path"] = {"darwin": [], "linux": []}
+        self.config["system_path"] = [str(self.tools)]
+        self.system = "darwin" if sys.platform == "darwin" else "linux"
+        self.version = self.config["tools"]["tmux"]["exact_major_minor"][self.system]
+        fake_exe(self.tools, "python3.13", "Python 3.13.15")
+        fake_exe(self.tools, "npm", "10.9.0")
+        fake_exe(self.tools, "tmux", "tmux " + self.version + "c")
+        fake_exe(self.tools, "zsh", "zsh 5.10 (test)")
+        fake_exe(self.tools, "lsof", "")
+        self.chrome = fake_exe(self.tools, "fixture-chrome", "Chromium 130.0.1.2")
+        node = fake_exe(self.tools, "node", "")
+        node.write_text("""#!/bin/sh
+case "$1:$2" in
+  --version:) echo v22.4.1 ;;
+  -e:*resolveChrome*) echo fixture-chrome ;;
+esac
+""")
+        self.setup_output = self.tmp / "setup-output"
+        self.subject_output = self.tmp / "subject-output"
+        self.subject_browser = self.tmp / "subject-browser"
+        co = self.tmp / "co"
+        (co / "services/chat-stream-v2").mkdir(parents=True)
+        (co / "services/chat-stream-v2/requirements.txt").touch()
+        (co / "package-lock.json").write_text("{}")
+        (co / "renderer/dist/web").mkdir(parents=True)
+        (co / "renderer/dist/web/web.html").touch()
+        (co / "test/e2e").mkdir(parents=True)
+        for name in ("web_wrap_paste_gate", "web_gate_interrupt", "viewport_live"):
+            (co / "test/e2e" / (name + ".test.js")).touch()
+
+    def run_policy(self, *args):
+        relocated_evidence = self.tmp / "relocated"
+        attempt_id = ga.new_attempt_id()
+        relocated_workspace = Path("/tmp/gw-%d-%s" % (os.getuid(), attempt_id[:8]))
+        self.addCleanup(shutil.rmtree, relocated_workspace, ignore_errors=True)
+
+        def prepare(run, *args):
+            run([sys.executable, "-c", "from pathlib import Path; Path(%r).touch()" % str(self.setup_output)],
+                check=True)
+            return self.tmp / "venv", {}, []
+
+        def subject(*args):
+            snippet = ("import os; from pathlib import Path; Path(%r).touch(); "
+                       "Path(%r).write_text(os.environ.get('PENTACLE_CHROME', ''))" %
+                       (str(self.subject_output), str(self.subject_browser)))
+            return [sys.executable, "-c", snippet], {"cwd": self.tmp, "classify": lambda rc, _: (
+                "pass" if rc == 0 else "product_failure", None, {})}
+
+        with mock.patch.multiple(ge, load_config=lambda *a: self.config,
+                                 ensure_python_env=prepare, ensure_npm_env=lambda *a: ({}, []),
+                                 check_capabilities=lambda *a: [], check_dependencies=lambda *a: [],
+                                 check_process_listing=lambda *a: [], run_preflight_script=lambda *a: [],
+                                 build_command=subject), mock.patch.dict(os.environ, {"PATH": str(self.tools)}), \
+                mock.patch.object(ga, "new_attempt_id", return_value=attempt_id), \
+                mock.patch.object(ge.tempfile, "mkdtemp", return_value=str(relocated_evidence)):
+            code = self.run_main("--spec", "s", "--series", "environment", "--purpose", "diagnostic", *args)
+        events = sorted(self.tmp.glob("*/attempts/%s/*.json" % attempt_id))
+        return code, [json.loads(p.read_text()) for p in events]
+
+    def test_version_drift_and_missing_lsof_refuse_before_the_subject(self):
+        fake_exe(self.tools, "tmux", "tmux 3.10a")
+        fake_exe(self.tools, "zsh", "zsh 5.8.1 (test)")
+        (self.tools / "lsof").unlink()
+        code, events = self.run_policy("--target", "v2-unit")
+        self.assertEqual(code, 3)
+        self.assertEqual([e["state"] for e in events], ["started", "terminal"])
+        failures = events[-1]["detail"]["failures"]
+        self.assertEqual([f["code"] for f in failures], ["toolchain"] * 3)
+        for failure, installed, required in zip(failures, ("3.10", "5.8.1", "missing"),
+                                                (self.version, "5.9", "executable")):
+            self.assertIn(installed, failure["detail"])
+            self.assertIn(required, failure["detail"])
+            self.assertTrue(failure["remediation"])
+        self.assertFalse(self.subject_output.exists())
+
+    def test_tmux_policy_rechecks_effective_path_after_provisioning(self):
+        venv_bin = self.tmp / "venv/bin"
+        venv_bin.mkdir(parents=True)
+        fake_exe(venv_bin, "tmux", "tmux 3.99")
+        code, events = self.run_policy("--target", "v2-unit")
+        self.assertEqual(code, 3)
+        self.assertEqual([e["state"] for e in events], ["started", "terminal"])
+        self.assertIn("3.99", events[-1]["detail"]["failures"][0]["detail"])
+
+    def test_child_umask_overrides_ambient_without_changing_parent(self):
+        previous = os.umask(0o002)
+        try:
+            code, events = self.run_policy("--target", "v2-unit")
+            parent = self.tmp / "parent"
+            parent.touch()
+        finally:
+            os.umask(previous)
+        self.assertEqual(code, 0)
+        self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o664)
+        self.assertEqual(stat.S_IMODE(self.setup_output.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.subject_output.stat().st_mode), 0o644)
+        prepared = events[1]
+        self.assertEqual(prepared["umask"], "022")
+        self.assertEqual(prepared["toolchain"]["tmux"]["version"], self.version)
+        self.assertEqual(prepared["toolchain"]["zsh"]["version"], "5.10")
+
+    def test_browser_drift_is_limited_to_browser_targets_and_selections(self):
+        fake_exe(self.tools, self.chrome.name, "Chromium 129.10.0.0")
+        for args in (("--target", "web-gate"),
+                     ("--target", "npm-test", "--select", "test/e2e/*.test.js"),
+                     ("--target", "npm-test", "--select", "test/e2e/viewport_live.test.js")):
+            with self.subTest(args=args):
+                code, events = self.run_policy(*args)
+                self.assertEqual(code, 3)
+                self.assertEqual([e["state"] for e in events], ["started", "terminal"])
+                failure = events[-1]["detail"]["failures"][0]
+                self.assertEqual(failure["code"], "toolchain")
+                self.assertIn("129.10.0.0", failure["detail"])
+                self.assertIn("130", failure["detail"])
+        self.assertFalse(self.subject_output.exists())
+        code, events = self.run_policy("--target", "npm-test")
+        self.assertEqual(code, 0)
+        self.assertNotIn("chrome", events[1]["toolchain"])
+        self.assertEqual(self.subject_browser.read_text(), "")
+
+    def test_browser_uses_the_qualified_path(self):
+        code, events = self.run_policy("--target", "web-gate")
+        self.assertEqual(code, 0)
+        self.assertEqual(events[1]["toolchain"]["chrome"]["version"], "130.0.1.2")
+        self.assertEqual(self.subject_browser.read_text(), str(self.chrome))
+
+    def test_long_tmp_and_timeout_record_requested_and_effective_values(self):
+        requested = self.tmp / ("x" * 60)
+        code, events = self.run_policy("--target", "v2-unit", "--tmp-root", str(requested),
+                                       "--timeout-seconds", "99999")
+        self.assertEqual(code, 0)
+        warnings = {item["option"]: item for item in events[1]["warnings"]}
+        self.assertEqual(events[-1]["warnings"], events[1]["warnings"])
+        self.assertEqual(warnings["--tmp-root"]["requested"], str(requested))
+        effective_tmp = warnings["--tmp-root"]["effective"]
+        self.assertLessEqual(len(os.fsencode(effective_tmp)) + 9, self.config["max_tmpdir_bytes"])
+        self.assertEqual(warnings["--timeout-seconds"], {
+            "option": "--timeout-seconds", "requested": 99999, "effective": events[2]["timeout_s"]})
+        self.assertEqual(events[2]["timeout_s"], self.config["profiles"]["pentacle"]["targets"]["v2-unit"]["max_timeout_s"])
+        self.assertFalse(requested.exists())
+
+    def test_incompatible_requests_relocate_and_leave_caller_paths_untouched(self):
+        nested = self.tmp / "ws/runs"
+        in_checkout = self.tmp / "co/evidence"
+        for args, refused_path in (
+            (("--tmp-root", str(nested)), nested),
+            (("--evidence-dir", str(in_checkout), "--attempt-manifest", str(in_checkout / "attempt.json")), in_checkout),
+        ):
+            with self.subTest(args=args):
+                code, events = self.run_policy("--target", "v2-unit", *args)
+                self.assertEqual(code, 0)
+                self.assertFalse(refused_path.exists())
+                warnings = {item["option"]: item for item in events[-1]["warnings"]}
+                self.assertIn("--workspace", warnings)
+                self.assertEqual(warnings["--evidence-dir"]["effective"], str(self.tmp / "relocated"))
+        self.assertTrue((self.tmp / "relocated/attempt-manifest.json").is_file())
+
+    def test_invalid_effective_layout_refuses_without_removing_paths(self):
+        protected = self.tmp / "protected"
+        protected.mkdir()
+        marker = protected / "existing"
+        marker.touch()
+        real_scratch_paths = ge.scratch_paths
+
+        def scratch_paths(workspace, tmp_root, attempt_id):
+            if workspace.name.startswith("gw-"):
+                return protected / "b/home", protected, protected / "b"
+            return real_scratch_paths(workspace, tmp_root, attempt_id)
+
+        with mock.patch.object(ge, "scratch_paths", side_effect=scratch_paths):
+            code, events = self.run_policy("--target", "v2-unit", "--evidence-dir", str(self.tmp / "co/evidence"))
+        self.assertEqual(code, 3)
+        self.assertEqual([e["state"] for e in events], ["started", "terminal"])
+        self.assertEqual(events[-1]["first_failure"]["code"], "layout")
+        self.assertTrue(marker.is_file())
+        self.assertFalse((protected / "b").exists())
+        self.assertFalse(self.subject_output.exists())
+
+
 class WebTerminalPreflight(Tmp):
     run_main = EntrypointReceipts.run_main
 
@@ -976,6 +1172,7 @@ class WebTerminalPreflight(Tmp):
             return SimpleNamespace(pid=123456789, returncode=0, wait=lambda **k: 0, poll=lambda: 0)
         with mock.patch.multiple(ge, resolve_toolchain=lambda *a: ({}, []),
                 pick_locale=lambda *a: ("C.UTF-8", None), check_layout=lambda *a: [],
+                check_host_tools=lambda *a, **k: ({}, []), check_chrome=lambda *a: (None, []),
                 prepared_key=lambda *a: "fixture", ensure_python_env=lambda *a: (None, {}, []),
                 build_env=lambda *a, **k: {}, check_scratch=lambda *a: [],
                 check_node_npm=lambda *a: [], check_process_listing=lambda *a: [],
@@ -1112,6 +1309,7 @@ class ScratchRetention(Tmp):
         patches = dict(resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []),
             pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
             ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []),
+            check_host_tools=lambda *a, **k: ({}, []),
             check_scratch=lambda *a, **k: [], check_node_npm=lambda *a, **k: [],
             check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
             run_preflight_script=lambda *a, **k: [],
