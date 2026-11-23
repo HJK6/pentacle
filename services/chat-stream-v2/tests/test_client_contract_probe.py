@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -686,3 +687,298 @@ def test_restore_status_broadcast_is_a_push_not_a_reply():
     from tools import client_contract_probe
 
     assert "assistant.restore.changed" in client_contract_probe._PUSH_TYPES
+
+
+@asynccontextmanager
+async def _contract_daemon(env, tmp_path, *, interleaved=None):
+    """A real wire/Store/Comms fixture; only provider pane I/O is synthetic."""
+    from uuid import uuid4
+
+    from _shared import operator_auth
+    from comms import Comms
+    from notification_answer_fixture import Provider
+    from spawnctl import SpawnCtl
+    from work_lanes_projection import WorkLanesInventory
+
+    store = env.store
+    host = "fixture"
+    name = f"v2-client-contract-{uuid4().hex}"
+    stream = f"{host}:{name}"
+    pastes = []
+
+    async def append(identity, text, kind="USER"):
+        event = _ev(identity, text, stream_id=stream)
+        event.update(kind=kind, provider="codex", session_id=target["session_generation"])
+        seq = await store.append_session_event(stream, event, identity=identity, limit=100)
+        assert type(seq) is int
+        await server.broadcast({"type": "chat.event", "event": {**event, "daemon_seq": seq}})
+        return seq
+
+    class ContractProvider(Provider):
+        async def paste(self, pane, text):
+            assert pane == name, "fixture provider refuses other panes"
+            pastes.append(text)
+            if interleaved is not None:
+                # The provider is reached after both history pages and before
+                # the durable echo; append() also sends the real live push.
+                interleaved.append(await append("interleaved", "synthetic live event", "ASSIST_TEXT"))
+            await append("echo:" + str(len(pastes)), text)
+
+    provider = ContractProvider(store, host=host)
+    sessions = Sessions(store, tmux=provider, local_host=host)
+    target = await sessions.open(host, name, provider="codex", visibility="visible")
+    hidden = await sessions.open(host, "v2-hidden-control", provider="codex", visibility="hidden")
+    lane = (await env.adopt(key="stream:protocol", state="paused", owner="operator"))["lane"]
+    comms = Comms(store, sessions, SpawnCtl(store, sessions, tmux=provider),
+                  attachment_root=tmp_path / "attachments")
+    server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions, comms=comms, local_host=host)
+    server.work_lanes = WorkLanesInventory(store, sessions, server.broadcast)
+    registry = operator_auth.OperatorCredentialRegistry(tmp_path / "auth" / "credentials.json")
+    credential_id, envelope = registry.issue("pentacle", label="Example Presentation")
+    envelope_path = tmp_path / "operator-envelope"
+    fd = os.open(envelope_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(envelope)
+    server.operator_credential_registry = registry
+    try:
+        port = await server.bind()
+        seed = [await append(f"seed-{i}", "synthetic history") for i in range(4)]
+        yield (server, f"ws://127.0.0.1:{port}", stream, target["session_generation"],
+               hidden["stream_id"], lane["lane_id"], registry, credential_id, envelope_path, seed, append, pastes)
+    finally:
+        try:
+            await server.close()
+        finally:
+            try:
+                registry.revoke(credential_id)
+            finally:
+                envelope_path.unlink()
+
+
+@pytest.mark.parametrize("live_only, interleave", [
+    pytest.param(False, False, id="backfill"),
+    pytest.param(True, False, id="live-only-control"),
+    pytest.param(False, True, id="interleaved-before-echo"),
+])
+def test_independent_client_contract_journey(tmp_path, monkeypatch, capsys, live_only, interleave):
+    import independent_client_example as example
+    from test_work_lanes import run
+
+    async def journey(env):
+        buffered = []
+        async with _contract_daemon(env, tmp_path, interleaved=buffered if interleave else None) as fixture:
+            server, url, stream, generation, hidden, lane, _, _, key_file, seed, append, pastes = fixture
+            state = tmp_path / "checkpoint.json"
+            options = ["--url", url, "--credential-file", str(key_file), "--stream", stream,
+                       "--generation", generation, "--checkpoint", str(state)]
+            assert await asyncio.to_thread(example.main, ["start", *options]) == 0
+            start_counts = json.loads(capsys.readouterr().out)
+            assert start_counts == {"snapshot_sessions": 1, "active_sessions": 1, "lanes": 1,
+                                    "newer_rows": 2, "older_rows": 2, "send_results": 1,
+                                    "live_echoes": 1}
+            cursor = json.loads(state.read_text())
+            assert len(buffered) == int(interleave)
+            first_rows = [*seed, *buffered]
+            assert cursor["sequences"] == [*first_rows, cursor["anchor"]]
+            send_seq = cursor["sequences"][-1]
+            assert cursor["anchor"] == send_seq
+            async with asyncio.timeout(3):
+                while server._clients:
+                    await asyncio.sleep(0.01)  # Server has consumed the close.
+            assert len(pastes) == 1
+            missing = [await append(f"offline-{i}", "synthetic offline event", "ASSIST_TEXT")
+                       for i in range(3)]
+            durable = await env.store.fetch_session_event_tail(stream, limit=20)
+            assert [e["daemon_seq"] for e in durable] == [*first_rows, send_seq, *missing]
+            assert sum(e["text"] == example.FIXTURE_INPUT for e in durable) == 1
+            assert await env.store.fetch_session_event_tail(hidden, limit=20) == []
+            assert (await server.work_lanes.current())["lanes"][0]["lane_id"] == lane
+
+            if live_only:
+                from types import SimpleNamespace
+
+                # Receive a real new live push after reconnect, without
+                # requesting history. It is not the intervening offline gap.
+                async def read_only_new_pushes(client, anchor):
+                    live_seq = await append("live-control", "synthetic new live push", "ASSIST_TEXT")
+                    while live_seq not in client.events:
+                        await client.receive()
+                    return client.events.copy()
+
+                monkeypatch.setattr(example, "recover_history", read_only_new_pushes)
+                counts = await example.run(
+                    SimpleNamespace(phase="resume", url=url, stream=stream, generation=generation,
+                                    checkpoint=state), example.load_credential(key_file),
+                )
+                expected_tail = (await env.store.fetch_session_event_tail(stream, limit=1))[0]["daemon_seq"]
+            else:
+                assert await asyncio.to_thread(example.main, ["resume", *options]) == 0
+                counts = json.loads(capsys.readouterr().out)
+                expected_tail = missing[-1]
+
+            assert counts["resumed_sessions"] == 1
+            assert len(pastes) == 1
+            checkpoint = json.loads(state.read_text())
+            assert checkpoint["anchor"] == expected_tail
+            found = checkpoint["sequences"]
+            expected = [*first_rows, send_seq, *missing]
+            if live_only:
+                expected.append(expected_tail)
+
+            def check_order():
+                assert found == expected, "offline durable events missing or out of order"
+
+            if live_only:
+                assert counts["new_rows"] == 1
+                assert found == [*first_rows, send_seq, expected_tail]
+                with pytest.raises(AssertionError, match="offline durable events missing"):
+                    check_order()
+            else:
+                check_order()
+                assert counts["new_rows"] == 3
+                # A second reconnect replays the last identity again; it
+                # must not create a new row or submit another turn.
+                assert await asyncio.to_thread(example.main, ["resume", *options]) == 0
+                assert json.loads(capsys.readouterr().out)["new_rows"] == 0
+                assert json.loads(state.read_text())["sequences"] == expected
+                assert len(pastes) == 1
+
+    run(journey, str(tmp_path / "sessions.db"))
+
+
+@pytest.mark.parametrize("case", ["missing", "invalid", "display-name", "revoked"])
+def test_independent_client_contract_rejects_untrusted_inventory(tmp_path, case):
+    import independent_client_example as example
+    from test_work_lanes import run
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import ConnectionClosed
+
+    async def check(env):
+        async with _contract_daemon(env, tmp_path) as fixture:
+            _, url, stream, _, _, _, registry, cid, key_file, _, _, _ = fixture
+            credential = example.load_credential(key_file)
+            # First establish that this same endpoint and credential work.
+            async with example.open_client(url, credential, stream=stream) as client:
+                assert client.snapshot["sessions"][0]["stream_id"] == stream
+                assert client.snapshot["work_lanes"]["lanes"]
+            if case == "revoked":
+                registry.revoke(cid)
+            async with connect(url, origin=example.FIXTURE_ORIGIN, proxy=None, open_timeout=3) as wire:
+                welcome = json.loads(await wire.recv())
+                hello = example.authenticated_hello(welcome, credential, "fixture-hello")
+                if case == "missing":
+                    del hello["auth_v2"]
+                    hello["client"] = "Example Presentation"
+                elif case == "invalid":
+                    hello["auth_v2"]["proof"] = "A" * 43
+                elif case == "display-name":
+                    hello["client"] = "Example Presentation"
+                await wire.send(json.dumps(hello))
+                expected = "authentication_required" if case == "missing" else "operator_auth_invalid"
+                first = json.loads(await asyncio.wait_for(wire.recv(), 3))
+                assert first == {"type": "hello.error", "error_code": expected, "request_id": "fixture-hello"}
+                # A denied peer neither sees a bootstrap projection nor can
+                # fetch inventory, protected history or lanes explicitly.
+                for verb in ("list_sessions", "request_stream_events", "work_lanes.list"):
+                    try:
+                        await wire.send(json.dumps({"type": verb, "request_id": verb, "stream_id": stream}))
+                        reply = json.loads(await asyncio.wait_for(wire.recv(), 3))
+                    except ConnectionClosed:
+                        break
+                    assert reply["type"] == f"{verb}.error"
+                    assert reply["request_id"] == verb
+                    assert reply["error_code"] in ("authentication_required", "operator_auth_invalid")
+                    assert not {"sessions", "active", "events", "lanes", "work_lanes"} & reply.keys()
+                else:
+                    with pytest.raises((TimeoutError, ConnectionClosed)):
+                        await asyncio.wait_for(wire.recv(), 0.1)
+
+    run(check, str(tmp_path / "sessions.db"))
+
+
+@pytest.mark.parametrize("mismatch", ["ordinary-stream", "wrong-generation"])
+def test_independent_client_contract_send_is_fixture_only(tmp_path, capsys, mismatch):
+    import independent_client_example as example
+    from test_work_lanes import run
+
+    async def check(env):
+        async with _contract_daemon(env, tmp_path) as fixture:
+            _, url, stream, generation, _, _, _, _, key_file, _, _, pastes = fixture
+            if mismatch == "ordinary-stream":
+                stream = "fixture:v2-ordinary"
+            else:
+                generation = "different-synthetic-generation"
+            result = await asyncio.to_thread(example.main, [
+                "start", "--url", url, "--credential-file", str(key_file),
+                "--stream", stream, "--generation", generation,
+                "--checkpoint", str(tmp_path / "checkpoint.json"),
+            ])
+            assert result == 1
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            assert captured.err in {
+                "Select an explicitly provisioned disposable fixture stream and generation.\n",
+                "Selected fixture stream and generation are not visible.\n",
+            }
+            assert pastes == []
+
+    run(check, str(tmp_path / "sessions.db"))
+
+
+def test_independent_client_contract_documented_credential_file(tmp_path, capsys):
+    import re
+
+    import independent_client_example as example
+    from test_work_lanes import run
+
+    root = SERVICE_DIR.parents[1]
+    guide = (root / "docs/chat_protocol.md").read_text()
+    issuance = re.search(r"<!-- fixture-credential-issuance -->\n```bash\n(.*?)\n```", guide, re.S)
+    # Reproduce the former prose instruction literally on the base: direct
+    # the whole CLI response to the private envelope file.
+    issue_command = issuance[1] if issuance else (
+        'umask 077; python services/chat-stream-v2/tools/operator_auth_cli.py '
+        '--registry "$FIXTURE_REGISTRY" issue --client-kind pentacle > "$FIXTURE_KEY_FILE"'
+    )
+
+    async def check(env):
+        async with _contract_daemon(env, tmp_path) as fixture:
+            _, url, stream, generation, _, _, registry, _, _, _, _, _ = fixture
+            key = tmp_path / "documented-envelope"
+            cid_file = tmp_path / "documented-credential-id"
+            registry_path = tmp_path / "auth" / "credentials.json"
+            before = set(registry.load().credentials)
+            process = await asyncio.create_subprocess_exec(
+                "bash", "-c", issue_command, cwd=root,
+                env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+                     "FIXTURE_REGISTRY": str(registry_path), "FIXTURE_KEY_FILE": str(key),
+                     "FIXTURE_CREDENTIAL_ID_FILE": str(cid_file)},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), 5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                raise
+            issued = set(registry.load().credentials) - before
+            try:
+                assert process.returncode == 0 and not stdout and not stderr
+                assert key.stat().st_mode & 0o777 == 0o600
+                result = await asyncio.to_thread(example.main, [
+                    "start", "--url", url, "--credential-file", str(key),
+                    "--stream", stream, "--generation", generation,
+                    "--checkpoint", str(tmp_path / "documented-checkpoint"),
+                ])
+                assert result == 0, "documented credential file must authenticate the example"
+                captured = capsys.readouterr()
+                assert not captured.err and json.loads(captured.out)["send_results"] == 1
+                assert cid_file.stat().st_mode & 0o777 == 0o600
+                assert len(issued) == 1 and cid_file.read_text().strip() in issued
+            finally:
+                for credential_id in issued:
+                    registry.revoke(credential_id)
+                key.unlink(missing_ok=True)
+                cid_file.unlink(missing_ok=True)
+
+    run(check, str(tmp_path / "sessions.db"))
