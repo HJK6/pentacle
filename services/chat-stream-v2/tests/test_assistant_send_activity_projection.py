@@ -313,18 +313,27 @@ async def _direct_pair(tmp_path, monkeypatch, *, selected, mode="sound", trace=T
         store.stop()
 
 
+def _refresh_work_misses(run):
+    misses = []
+    for refresh in run["refreshes"]:
+        window = run["calls"][refresh["begin"]:refresh["end"]]
+        calls = [call for call in window if StoreWork.projection(call)]
+        assert len(calls) == 1, refresh
+        call = calls[0]
+        queries = sum(count for key, count in call["statements"].items()
+                      if key not in {"retention_metadata", "transaction"})
+        if call["individual"] or call["hydrated"] > 100 or queries > 12:
+            misses.append({"stage": refresh["stage"], "queries": queries, "hydrated": call["hydrated"],
+                           "individual": call["individual"], "vm_ticks": call["vm_ticks"]})
+    return misses
+
+
 def _work_contract(run, *, drain=True):
     calls = run["calls"]
-    for refresh in run["refreshes"]:
-        window = calls[refresh["begin"]:refresh["end"]]
-        calls_in_refresh = [call for call in window if StoreWork.projection(call)]
-        assert len(calls_in_refresh) == 1, refresh
-        call = calls_in_refresh[0]
-        assert not call["individual"] and call["hydrated"] <= 100, (
-            "full activity work in awaited refresh", run["selected"], refresh["stage"], call,
-        )
-        assert sum(count for key, count in call["statements"].items()
-                   if key not in {"retention_metadata", "transaction"}) <= 12, call
+    misses = _refresh_work_misses(run)
+    send_misses = [miss for miss in misses if miss["stage"] != "startup"]
+    assert not send_misses, ("full activity work in awaited send refresh", run["selected"], send_misses)
+    assert not misses, ("full activity work in startup refresh", run["selected"], misses)
     if drain:
         assert not any(FULL_READER in call["callback"] for call in calls), (
             "full activity work through worker drain", run["selected"],
@@ -355,12 +364,16 @@ def test_fixed_output_work_and_drain(tmp_path, monkeypatch, record_property):
     assert [_normalized_output(slot) for slot in small["snapshots"]] == [
         _normalized_output(slot) for slot in large["snapshots"]
     ]
+    misses = {run["selected"]: _refresh_work_misses(run) for run in (small, large)}
+    assert not any(miss["stage"] != "startup" for values in misses.values() for miss in values), (
+        "full activity work in awaited send refresh", misses,
+    )
     _work_contract(small)
     _work_contract(large)
     restored = drive(1024, "restore_full")
     displaced = drive(1024, "displace_full")
     _receipt(tmp_path, record_property, "work-controls", {"arms": [restored, displaced]})
-    with pytest.raises(AssertionError, match="full activity work in awaited refresh"):
+    with pytest.raises(AssertionError, match="full activity work in awaited send refresh"):
         _work_contract(restored)
     _work_contract(displaced, drain=False)
     with pytest.raises(AssertionError, match="full activity work through worker drain"):
@@ -368,3 +381,498 @@ def test_fixed_output_work_and_drain(tmp_path, monkeypatch, record_property):
     def projection_ticks(run):
         return sum(call["vm_ticks"] for call in run["calls"] if StoreWork.projection(call))
     assert projection_ticks(large) * 2 <= projection_ticks(restored)
+
+
+async def _check_projection(store, stream=ASSISTANT, composite=None):
+    full = await store.assistant_composite_activity(stream_id=stream)
+    reference = assistant_activity.summarize_activity(full)
+    if composite is not None:
+        await composite.refresh_activity()
+        actual = composite.activity_snapshot()
+    else:
+        reader = getattr(store, SUMMARY_READER, None)
+        actual = await reader(stream_id=stream) if reader else reference
+    assert actual == reference
+    assert list(actual["inputs"]) == list(reference["inputs"])
+    return full, actual
+
+
+def test_authenticated_send_fanout_and_proof(tmp_path, record_property):
+    import websockets
+    from _shared import operator_auth
+    from server import Server
+    from test_voice_context import CHAT, CONTEXT, FIXTURE, read_recipient_context
+
+    async def run():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        server = composite = registry = None
+        frames, pushes, sent, publications = [], [], [], []
+        entered, release = asyncio.Event(), asyncio.Event()
+        try:
+            await _open(comms, sessions)
+            root = await store.fetch_session(HOST, NAME)
+            config = AssistantCompositeConfig.from_env({
+                "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+                "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": CHAT,
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": TARGET,
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": root["session_generation"],
+            })
+            main_dispatch = main_dispatch_subject(comms, store)
+
+            async def broadcast(frame):
+                frames.append(frame)
+                await server.broadcast(frame)
+
+            async def notify(*args, **kwargs):
+                pushes.append((args, kwargs))
+
+            async def recipient(route):
+                entered.set()
+                await release.wait()
+                proof = await main_dispatch(route)
+                assert proof["submission_confirmed"] is True
+                assert read_recipient_context(tmux.pastes[-1]) == CONTEXT
+                publication = {
+                    "request_id": "publish:" + route["dispatch_id"], "composite_stream_id": CHAT,
+                    "dispatch_id": route["dispatch_id"], "reply_to_message_id": route["input_identity"],
+                    "publish_kind": "prose", "response_state": "final", "message": "Synthetic final",
+                }
+                publications.append(await composite.publish(publication, actor_stream_id=TARGET))
+                publications.append(await composite.publish(publication, actor_stream_id=TARGET))
+                return proof
+
+            server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions, comms=comms, local_host=HOST)
+            composite = AssistantComposite(store, config=config, dispatch=recipient, broadcast=broadcast)
+            composite.reply_push = notify
+            server.assistant_composite = composite
+            await composite.ensure_projection()
+            await sessions.refresh()
+            auth_dir = tmp_path / "operator-auth"
+            auth_dir.mkdir(mode=0o700)
+            registry = operator_auth.OperatorCredentialRegistry(auth_dir / "credentials.json")
+            credential_id, envelope = registry.issue("pentacle-mobile")
+            proof_key = operator_auth.decode_envelope(envelope)["proof_key"]
+            server.operator_credential_registry = registry
+            port = await server.bind()
+
+            async def read(socket, predicate):
+                async with asyncio.timeout(5):
+                    while True:
+                        frame = json.loads(await socket.recv())
+                        if predicate(frame):
+                            return frame
+
+            async def hello(socket):
+                greeting = json.loads(await socket.recv())
+                nonce = greeting["auth"]["operator"]["nonce"]
+                await socket.send(json.dumps({
+                    "type": "hello", "client": "pentacle-mobile",
+                    "capabilities": {"assistant_composite_v1": True},
+                    "auth_v2": {"scheme": operator_auth.AUTH_SCHEME, "credential_id": credential_id,
+                                "proof": operator_auth.make_proof(proof_key, nonce, credential_id, "pentacle-mobile")},
+                }))
+                return await read(socket, lambda frame: frame["type"] == "snapshot")
+
+            async def write(socket, request_id, text="Synthetic recording"):
+                sent.append({"request_id": request_id, "socket_write": monotonic()})
+                await socket.send(json.dumps({"type": "send", "stream_id": CHAT, "text": text,
+                                               "msg_id": "take-1", "request_id": request_id, "meta": FIXTURE}))
+
+            url = f"ws://127.0.0.1:{port}"
+            async with websockets.connect(url) as socket:
+                await hello(socket)
+                await write(socket, "rpc-1")
+                observed = []
+
+                def admitted(frame):
+                    if frame["type"] == "chat.event":
+                        observed.append({"received": monotonic(), "frame": frame})
+                    return frame.get("request_id") == "rpc-1"
+
+                result = await read(socket, admitted)
+                received_ack = monotonic()
+                assert result["type"] == "send.result" and result["submission_confirmed"]
+                canonical = result["assistant_composite"]
+                echo, = [row["frame"]["event"] for row in observed if row["frame"]["event"]["kind"] == "USER"]
+                assert echo["daemon_seq"] == canonical["event_id"]
+                assert echo["raw"]["assistant_activity"]["response_state"] == "queued"
+                assert echo["daemon_seq"] > 0 and canonical["receipt_id"] == result["receipt_id"]
+                await asyncio.wait_for(entered.wait(), 5)
+                preimage = await store.get_assistant_composite_route(stream_id=CHAT, input_identity="take-1")
+                assert preimage["delivery_state"] == "intent" and tmux.pastes == []
+                release.set()
+                await asyncio.wait_for(asyncio.shield(composite._worker), 5)
+                after = await store.get_assistant_composite_route(stream_id=CHAT, input_identity="take-1")
+                recipient_receipt = await store.get_send_receipt(TARGET, after["dispatch_id"])
+                assert after["delivery_state"] == "landed"
+                assert after["route_target_generation"] == root["session_generation"]
+                assert recipient_receipt["state"] == "landed" and recipient_receipt["submission_confirmed"] is True
+                result_event = await read(socket, lambda frame: frame["type"] == "chat.event"
+                                          and frame["event"]["kind"] == "ASSIST_TEXT")
+                assert result_event["event"]["daemon_seq"] == publications[0]["event_id"]
+                assert [publication["duplicate"] for publication in publications] == [False, True]
+                await write(socket, "rpc-2")
+                retry = await read(socket, lambda frame: frame.get("request_id") == "rpc-2")
+                assert retry["assistant_composite"]["duplicate"]
+                await write(socket, "rpc-3", "Changed intent")
+                conflict = await read(socket, lambda frame: frame.get("request_id") == "rpc-3")
+                assert "idempotency_conflict" in json.dumps(conflict)
+            async with websockets.connect(url) as socket:
+                snapshot = await hello(socket)
+                assert any(row.get("assistant_activity", {}).get("inputs", {}).get("take-1", {})
+                           .get("response_state") == "answered" for row in snapshot["sessions"])
+            assert len(tmux.pastes) == len(pushes) == 1
+            assert [frame["type"] for frame in frames] == [
+                "working.state", "chat.event", "working.state", "working.state",
+                "chat.event", "working.state", "working.state",
+            ]
+            assert [frame["assistant_activity"]["inputs"]["take-1"]["response_state"] for frame in frames
+                    if frame["type"] == "working.state"] == [
+                "queued", "routing", "awaiting_reply", "answered", "answered",
+            ]
+            await _check_projection(store, CHAT, composite)
+            _receipt(tmp_path, record_property, "authenticated", {
+                "socket": sent, "received_ack": received_ack, "result": result, "echo_received": observed,
+                "frames": frames, "publications": publications, "landed": after, "recipient": recipient_receipt,
+            })
+        finally:
+            release.set()
+            if composite is not None:
+                await asyncio.wait_for(composite.stop(), 5)
+            if server is not None:
+                await asyncio.wait_for(server.close(), 5)
+            if registry is not None:
+                registry.revoke(credential_id)
+            store.stop()
+
+    asyncio.run(run())
+
+
+async def _copy_synthetic_routes(store, archive, selection, *, delete):
+    """Place invented historical rows whose unsettled form cannot use the mover."""
+    rows = await store.submit(lambda conn: [tuple(row) for row in conn.execute(
+        f"SELECT * FROM {ROUTE_TABLE} WHERE {selection}")])
+    with sqlite3.connect(archive) as db:
+        db.executemany(f"INSERT INTO {ROUTE_TABLE} VALUES ({','.join('?' for _ in rows[0])})", rows)
+    if delete:
+        def remove(conn):
+            conn.execute(f"DELETE FROM {ROUTE_TABLE} WHERE {selection}")
+            conn.commit()
+        await store.submit(remove)
+    return len(rows)
+
+
+def _edge_rows(conn):
+    def change(identity, **fields):
+        conn.execute(f"UPDATE {ROUTE_TABLE} SET " + ",".join(f"{key}=?" for key in fields)
+                     + " WHERE stream_id=? AND input_identity=?", (*fields.values(), ASSISTANT, identity))
+
+    def remove_result(i):
+        conn.execute("DELETE FROM v2_assistant_composite_publications WHERE publication_key=?",
+                     (f"{ASSISTANT}:pub-{i}",))
+
+    def publish(i, number, kind, marker):
+        conn.execute(
+            "INSERT INTO v2_assistant_composite_publications "
+            "(publication_key, stream_id, payload_digest, canonical_payload_json, dispatch_id, "
+            "reply_to_message_id, publish_kind, event_id, created_at) "
+            "VALUES (?, ?, 'digest', ?, '', ?, ?, ?, ?)",
+            (f"edge-publication-{number}", ASSISTANT, json.dumps({"response_state": marker}),
+             f"seed-{i:05}", kind, number, _stamp(-i)),
+        )
+
+    # Tie runs across both cutoffs. The original query's order is the oracle
+    # per layout because archive and hot rows can legitimately interleave differently.
+    for i in (98, 99, 100, 101):
+        change(f"seed-{i:05}", created_at=_stamp(-100))
+    for i in (1998, 1999, 2000, 2001):
+        change(f"seed-{i:05}", created_at=_stamp(-2000))
+    for i in (2040, 2041, 2042, 2043, 2044, 2045, 2046):
+        remove_result(i)
+    change("seed-02040", routing_state="queued", delivery_state=None)
+    publish(2041, 10, "status", "acknowledged")
+    change("seed-02042", routing_state="routing_failed")
+    change("seed-02043", delivery_state="failed")
+    publish(2043, 11, "status", "acknowledged")
+    change("seed-02044", route_json=json.dumps({"desk_dispatch": True}))
+    change("seed-02045", routing_state="deferred")
+    change("seed-02046", delivery_state="uncertain")
+    # Conflicting response evidence and embedded/admitted lanes on a visible input.
+    change("seed-00002", delivery_state="failed", error_code="delivery_failure",
+           route_json=json.dumps({"lane_id": f"{ASSISTANT}:lane-3", "timings": {"routed_at": _stamp(1)}}))
+    publish(2, 1, "question", None)
+    publish(2, 2, "status", "acknowledged")
+    publish(2, 3, "prose", "final")
+    conn.commit()
+
+
+async def _retained_case(path, layout):
+    from store import Store
+
+    path.parent.mkdir()
+    store = Store(":memory:" if layout == "hot" else str(path))
+    store.start()
+    cells = []
+    try:
+        await _check_projection(store)
+        await store.submit(lambda conn: _seed(conn, 2060))
+        await store.submit(_edge_rows)
+        archive = await store.submit(lambda conn: conn.history_archive_path)
+        if layout == "archive":
+            cold_count = await _copy_synthetic_routes(store, archive, "1", delete=True)
+        elif layout == "mixed":
+            cold_count = await _copy_synthetic_routes(
+                store, archive, "CAST(SUBSTR(input_identity, 6) AS INTEGER) % 2 = 0", delete=True,
+            )
+        else:
+            cold_count = 0
+        hot_count = await store.submit(lambda conn: conn.execute(f"SELECT COUNT(*) FROM {ROUTE_TABLE}").fetchone()[0])
+        assert (hot_count, cold_count) == {"hot": (2060, 0), "archive": (0, 2060), "mixed": (1030, 1030)}[layout]
+        full, live = await _check_projection(store)
+        assert len(full) == 2006
+        assert live["pending_count"] == 4 and live["waiting_for_operator_count"] == 1
+        assert live["oldest_pending_at"] == _stamp(-2044)
+        assert live["has_more"] and len(live["inputs"]) == 100
+        assert full["seed-02043"]["response_state"] == "failed"  # Older ack branch is independent.
+        assert full["seed-02045"]["response_state"] == "waiting_for_dependency"
+        assert full["seed-02046"]["response_state"] == "uncertain"
+        assert "seed-02042" not in full and "seed-02049" not in full
+        assert live["inputs"]["seed-00002"]["lane_ids"] == [f"{ASSISTANT}:lane-2", f"{ASSISTANT}:lane-3"]
+        assert live["inputs"]["seed-00002"]["response_state"] == "answered"
+        assert live["inputs"]["seed-00002"]["error_code"] is None
+        assert live["inputs"]["seed-00002"]["publication_ids"][-3:] == [
+            "edge-publication-1", "edge-publication-2", "edge-publication-3",
+        ]
+        cells.append({"layout": layout, "hot": hot_count, "archive": cold_count,
+                      "full": list(full), "live": live})
+        keyed = store.assistant_composite_activity
+        requested = [f"seed-{i:05}" for i in range(1998)] + ["seed-00001", "absent", "seed-02049", "seed-02050"]
+        detail = await keyed(stream_id=ASSISTANT, input_ids=requested)
+        assert len(detail) == 1999 and "seed-02049" in detail and "seed-02050" not in detail
+        assert "absent" not in detail and await keyed(stream_id=ASSISTANT, input_ids=[]) == {}
+        # Caller order is applied to the event list, not to the Store result map.
+        composite = AssistantComposite(store, config=AssistantCompositeConfig(enabled=True, stream_id=ASSISTANT))
+        events = [{"kind": "USER", "message_id": key, "raw": {"original": index}}
+                  for index, key in enumerate(requested)]
+        enriched = await composite.enrich_events(events)
+        assert [event["message_id"] for event in enriched] == requested
+        assert [event["raw"]["original"] for event in enriched] == list(range(len(events)))
+        assert enriched[-2]["raw"]["assistant_activity"] == detail["seed-02049"]
+        assert enriched[-1] == events[-1]
+
+        assert await store.strict_publication_state(ASSISTANT) == {"enabled": False, "source": "unbound"}
+        await store.configure_assistant_mirror(composite_stream_id=ASSISTANT, source_stream_id=TARGET,
+                                               source_generation="fixture-1", enabled_default=False,
+                                               strict_publication_default=True, name="fixture-strict")
+        await store.configure_assistant_mirror(composite_stream_id="other:assistant", source_stream_id=TARGET,
+                                               source_generation="fixture-2", enabled_default=False,
+                                               strict_publication_default=False, name="fixture-other")
+        key = "assistant.strict_publication.fixture-strict.enabled"
+        for value, expected, source in [
+            (None, True, "env"), ("off", False, "kv"), ("on", True, "kv"),
+            ("invalid", False, "kv_invalid"), (None, True, "env"),
+        ]:
+            def policy(conn):
+                if value is None:
+                    conn.execute("DELETE FROM kv WHERE k=?", (key,))
+                else:
+                    conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", (key, value))
+                conn.commit()
+            await store.submit(policy)
+            assert await store.strict_publication_state(ASSISTANT) == {"enabled": expected, "source": source}
+            assert await store.strict_publication_state("other:assistant") == {"enabled": False, "source": "env"}
+            _, summary = await _check_projection(store)
+            assert summary["pending_count"] == (3 if expected else 4)
+            assert summary["oldest_pending_at"] == _stamp(-2041 if expected else -2044)
+        return cells
+    finally:
+        store.stop()
+
+
+def test_retained_summary_matches_reference(tmp_path, record_property):
+    from retention import RetentionError
+    from store import Store
+    from test_receipt_route_retention import archive_path, hot_count, move
+
+    async def run():
+        cells = []
+        store = Store(":memory:")
+        store.start()
+        try:
+            previous = 0
+            for width in (0, 1, 100, 101, 2000):
+                await store.submit(lambda conn: _seed(conn, width - previous, offset=previous))
+                full, summary = await _check_projection(store)
+                assert len(full) == width and len(summary["inputs"]) == min(100, width)
+                assert summary["has_more"] is (width > 100)
+                previous = width
+        finally:
+            store.stop()
+        for layout in ("hot", "archive", "mixed"):
+            cells.extend(await _retained_case(tmp_path / layout / "hot.db", layout))
+
+        path = tmp_path / "mover.db"
+        store = Store(str(path))
+        store.start()
+        try:
+            await store.ensure_assistant_composite_projection(stream_id=ASSISTANT)
+            values = dict(stream_id=ASSISTANT, input_identity="moves", input_request_id="move-request", body="old",
+                          attachments=[], reply_to_message_id=None, reply_to_question_id=None, actor_stream_id=None)
+            first = await store.admit_assistant_composite_input(**values)
+            def settle(conn):
+                conn.execute(f"UPDATE {ROUTE_TABLE} SET routing_state='resolved',delivery_state='landed',"
+                             "created_at=?,updated_at=?", (_stamp(0), _stamp(0)))
+                conn.commit()
+            await store.submit(settle)
+            _, before = await _check_projection(store)
+            moved = await move(store, ROUTE_TABLE)
+            assert moved["moved"] == 1 and await hot_count(store, ROUTE_TABLE) == 0
+            _, after = await _check_projection(store)
+            assert after == before
+            retry = await store.admit_assistant_composite_input(**dict(values, input_request_id="rotated"))
+            assert retry["duplicate"] and retry["route_id"] == first["route_id"]
+        finally:
+            store.stop()
+        store = Store(str(path))
+        store.start()
+        try:
+            _, reopened = await _check_projection(store)
+            assert reopened == before
+            archive = await archive_path(store)
+            await store.submit(lambda conn: _seed(conn, 1))
+            assert await _copy_synthetic_routes(store, archive, "input_identity='seed-00000'", delete=False) == 1
+            full, _ = await _check_projection(store)
+            assert list(full).count("seed-00000") == 1
+            with sqlite3.connect(archive) as db:
+                db.execute(f"UPDATE {ROUTE_TABLE} SET body='different' WHERE input_identity='seed-00000'")
+            for reader in (store.assistant_composite_activity, getattr(store, SUMMARY_READER, None)):
+                if reader is not None:
+                    with pytest.raises((RetentionError, sqlite3.OperationalError)):
+                        await reader(stream_id=ASSISTANT)
+            with sqlite3.connect(archive) as db:
+                db.execute(f"DELETE FROM {ROUTE_TABLE} WHERE input_identity='seed-00000'")
+            await _check_projection(store)
+            archive.rename(archive.with_suffix(".unavailable"))
+            for reader in (store.assistant_composite_activity, getattr(store, SUMMARY_READER, None)):
+                if reader is not None:
+                    with pytest.raises(RetentionError, match="path unavailable"):
+                        await reader(stream_id=ASSISTANT)
+        finally:
+            store.stop()
+        _receipt(tmp_path, record_property, "retained", {"cells": cells})
+
+    asyncio.run(run())
+
+
+def test_inflight_refresh_and_restart(tmp_path, monkeypatch, record_property):
+    from comms import Comms
+    from sessions import Sessions
+    from spawnctl import SpawnCtl
+    from store import Store
+
+    async def run(barrier):
+        path = tmp_path / barrier / "hot.db"
+        path.parent.mkdir()
+        tmux = FakeTmux()
+        store = Store(str(path))
+        store.start()
+        frames = []
+        reached = asyncio.Event()
+        hold = asyncio.Event()
+        proof = None
+
+        async def broadcast(frame):
+            frames.append(frame)
+
+        def dispatcher(store):
+            sessions = Sessions(store, tmux=tmux, local_host=HOST)
+            comms = Comms(store, sessions, SpawnCtl(store, sessions, tmux=tmux))
+            return comms, sessions, main_dispatch_subject(comms, store)
+
+        comms, sessions, send = dispatcher(store)
+        await _open(comms, sessions)
+        root = await store.fetch_session(HOST, NAME)
+        config = AssistantCompositeConfig.from_env({
+            "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+            "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT,
+            "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": TARGET,
+            "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": root["session_generation"],
+        })
+
+        async def recipient(route):
+            nonlocal proof
+            if barrier == "post-paste":
+                proof = await send(route)
+                assert proof["submission_confirmed"] is True
+            reached.set()
+            await hold.wait()
+            raise AssertionError("Owned worker must be stopped while held")
+
+        first = AssistantComposite(store, config=config, dispatch=recipient, broadcast=broadcast)
+        try:
+            await first.ensure_projection()
+            with monkeypatch.context() as patch:
+                if barrier == "pre-claim":
+                    async def before_claim(**kwargs):
+                        reached.set()
+                        await hold.wait()
+                        raise AssertionError("Owned worker must be stopped while held")
+                    patch.setattr(store, "claim_assistant_composite_route", before_claim)
+                await first.accept_input({"message": "First", "msg_id": "first", "request_id": "rpc-a"},
+                                         operator_principal="operator:fixture")
+                await asyncio.wait_for(reached.wait(), 5)
+                preimage = await store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity="first")
+                assert preimage["delivery_state"] == (None if barrier == "pre-claim" else "intent")
+                if barrier != "pre-claim":
+                    assert preimage["route_target_generation"] == root["session_generation"]
+                    ack = await first.publish({
+                        "request_id": "pub-ack", "composite_stream_id": ASSISTANT,
+                        "reply_to_message_id": "first", "dispatch_id": preimage["dispatch_id"],
+                        "publish_kind": "status", "response_state": "acknowledged", "message": "Seen",
+                    }, actor_stream_id=TARGET)
+                    assert not ack["duplicate"]
+                    assert first.activity_snapshot()["inputs"]["first"]["response_state"] == "acknowledged"
+
+                await first.accept_input({"message": "Second", "msg_id": "second", "request_id": "rpc-b"},
+                                         operator_principal="operator:fixture")
+                _, queued = await _check_projection(store, composite=first)
+                assert queued["inputs"]["second"]["response_state"] == "queued"
+                await asyncio.wait_for(first.stop(), 5)
+                assert first._worker.done() and not first._dispatch_tasks
+                await store.submit(lambda conn: conn.execute("SELECT 1").fetchone())
+        finally:
+            await asyncio.wait_for(first.stop(), 5)
+            store.stop()
+
+        store = Store(str(path))
+        store.start()
+        _, _, send = dispatcher(store)
+        recovered = AssistantComposite(store, config=config, dispatch=send, broadcast=broadcast)
+        try:
+            await recovered.ensure_projection()
+            repair = await recovered.recover()
+            assert repair["retained_uncertain"] == int(barrier != "pre-claim")
+            await asyncio.wait_for(asyncio.shield(recovered._worker), 5)
+            _, fresh = await _check_projection(store, composite=recovered)
+            first_row = await store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity="first")
+            second_row = await store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity="second")
+            assert second_row["delivery_state"] == "landed"
+            assert second_row["route_target_generation"] == root["session_generation"]
+            assert first_row["delivery_state"] == ("landed" if barrier == "pre-claim" else "uncertain")
+            assert fresh["inputs"]["first"]["response_state"] == (
+                "awaiting_reply" if barrier == "pre-claim" else "uncertain")
+            assert len(tmux.pastes) == (1 if barrier == "held-intent" else 2)
+            events = [frame["event"] for frame in frames if frame["type"] == "chat.event"]
+            assert [e["message_id"] for e in events if e["kind"] == "USER"] == ["first", "second"]
+            if proof is not None:
+                receipt = await store.get_send_receipt(TARGET, first_row["dispatch_id"])
+                assert receipt["receipt_id"] == proof["receipt_id"] and receipt["submission_confirmed"]
+            return {"barrier": barrier, "before": preimage, "after": [first_row, second_row],
+                    "proof_before_stop": proof, "frames": frames, "pastes": len(tmux.pastes), "recovery": repair}
+        finally:
+            await asyncio.wait_for(recovered.stop(), 5)
+            store.stop()
+
+    cells = [asyncio.run(run(barrier)) for barrier in ("pre-claim", "held-intent", "post-paste")]
+    _receipt(tmp_path, record_property, "restart", {"cells": cells})
