@@ -487,6 +487,51 @@ async def _measure_retained_summary(path, monkeypatch, *, layout, width, other_s
         store.stop()
 
 
+def _record_hosted_work(record_property, sound, restored, displaced):
+    """Preserve the measured stage and fault counters in the uploaded JUnit."""
+    arms = []
+    for run, observed in [
+        *((arm, "sound_pass") for arm in sound),
+        (restored, "awaited_send_work_rejected"),
+        (displaced, "drain_work_rejected"),
+    ]:
+        calls = run["calls"]
+        projections = [call for call in calls if StoreWork.projection(call)]
+        full = [call for call in projections if f".{FULL_READER}." in call["callback"]]
+        stages = []
+        for refresh in run["refreshes"]:
+            index = refresh["index"]
+            call, = [entry for entry in projections if entry["refresh"] == index]
+            statements = call["statements"]
+            metadata = statements.get("retention_metadata", 0)
+            transactions = statements.get("transaction", 0)
+            stages.append([
+                0 if index == 0 else (index - 1) // 4 + 1, refresh["stage"], call["hydrated"],
+                sum(statements.values()) - metadata - transactions, metadata, transactions,
+                *[call["individual"].get(family, 0) for family in ("publications", "operations", "lanes")],
+                call["vm_ticks"],
+            ])
+        arms.append({
+            "scenario": run["mode"], "width": run["selected"], "observed_predicate": observed, "stages": stages,
+            "confirmed_recipient_receipts": sum(join["recipient_receipt"]["submission_confirmed"] for join in run["joins"]),
+            "fenced_landings": sum(join["landed"]["delivery_state"] == "landed" for join in run["joins"]),
+            "worker_drain": {
+                "callbacks": len(calls), "projection_callbacks": len(projections), "full_detail_callbacks": len(full),
+                "detached_full_detail_callbacks": sum(call["refresh"] is None for call in full),
+                "vm_ticks": sum(call["vm_ticks"] for call in calls),
+            },
+        })
+    record_property("activity_work_v1", json.dumps({
+        "stage_fields": [
+            "send_ordinal", "stage", "hydrated", "data_statements", "retention_statements", "transaction_statements",
+            "individual_publication", "individual_operation", "individual_lane", "vm_ticks",
+        ],
+        "sqlite_version": sqlite3.sqlite_version,
+        "progress_interval": PROGRESS_INTERVAL,
+        "arms": arms,
+    }, separators=(",", ":")))
+
+
 def test_fixed_output_work_and_drain(tmp_path, monkeypatch, record_property):
     def drive(width, mode="sound", *, trace=True, backlog=False):
         with monkeypatch.context() as patch:
@@ -538,6 +583,7 @@ def test_fixed_output_work_and_drain(tmp_path, monkeypatch, record_property):
         assert list(small_arm["result"]["inputs"]) == list(large_arm["result"]["inputs"])
         assert large_arm["call"]["vm_ticks"] < 3 * small_arm["call"]["vm_ticks"], arms
     _receipt(tmp_path, record_property, "retained-work", {"arms": retained})
+    _record_hosted_work(record_property, (small, large), restored, displaced)
 
 
 async def _check_projection(store, stream=ASSISTANT, composite=None):
