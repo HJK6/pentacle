@@ -11,6 +11,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -738,6 +739,7 @@ class EntrypointReceipts(Tmp):
                 ensure_npm_env=lambda *a: ({'reused': True}, []), check_scratch=lambda *a: [],
                 check_node_npm=lambda *a: [], check_dependencies=lambda *a: [],
                 check_process_listing=lambda *a: [], group_alive=lambda *a: False,
+                discover_npm_files=lambda *a: set(),
                 build_command=lambda *a: (['npm', 'test'], {'cwd': self.tmp, 'classify':
                     lambda rc, to: ('pass' if rc == 0 else 'product_failure', None, {})})), \
                 mock.patch.object(ge.subprocess, 'run', return_value=done()), \
@@ -802,21 +804,25 @@ class EntrypointReceipts(Tmp):
         events = [json.loads(p.read_text()) for p in files]
         self.assertEqual([e["state"] for e in events], ["started", "terminal"])
         self.assertEqual(events[-1]["effective_selection"], REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["default_patterns"])
-        self.assertEqual(default_needs, [REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["needs"]])
+        self.assertEqual(default_needs, [["node"]])
         interrupt = self.tmp / "co/test/e2e/web_gate_interrupt.test.js"
         interrupt.parent.mkdir(parents=True)
         interrupt.write_text("")
         observed = []
         def toolchain(config, needs):
             observed.append(needs)
+            if needs == ["node"]:
+                return {"node": {"path": "node", "version": "22.4.1", "sha256": "aa", "realpath": "node"}}, []
             return {}, [ge.fail("toolchain", "fixture setup failure")]
         with mock.patch.multiple(ge, resolve_toolchain=toolchain,
-                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
+                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: [],
+                                 discover_npm_files=lambda *a: {"test/e2e/web_gate_interrupt.test.js"}):
             self.assertEqual(self.run_main("--target", "npm-test", "--select", "test/e2e/web_gate_interrupt.test.js",
                                            "--spec", "s", "--series", "x", "--purpose", "negative_control"), 3)
-        self.assertEqual(observed, [REAL_CONFIG["profiles"]["pentacle"]["targets"]["web-gate"]["needs"]])
+        self.assertEqual(observed, [["node"], REAL_CONFIG["profiles"]["pentacle"]["targets"]["web-gate"]["needs"]])
         with mock.patch.multiple(ge, resolve_toolchain=toolchain,
-                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
+                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: [],
+                                 discover_npm_files=lambda *a: {"test/e2e/web_gate_interrupt.test.js"}):
             self.assertEqual(self.run_main("--target", "npm-test", "--select", "test/e2e/*.test.js",
                                            "--spec", "s", "--series", "x", "--purpose", "negative_control"), 3)
         self.assertEqual(observed[-1], REAL_CONFIG["profiles"]["pentacle"]["targets"]["web-gate"]["needs"])
@@ -968,17 +974,26 @@ class EnvironmentContract(Tmp):
         fake_exe(self.tools, "lsof", "")
         self.chrome = fake_exe(self.tools, "fixture-chrome", "Chromium 130.0.1.2")
         node = fake_exe(self.tools, "node", "")
+        real_node = shutil.which("node")
+        if not real_node:
+            raise RuntimeError("Node is required for the npm discovery contract test")
         node.write_text("""#!/bin/sh
-case "$1:$2" in
-  --version:) echo v22.4.1 ;;
-  -e:*resolveChrome*) echo fixture-chrome ;;
+if [ "$1" = "--version" ]; then echo v22.4.1; exit 0; fi
+case "$2" in
+  *resolveChrome*) echo fixture-chrome; exit 0 ;;
+  *discover*) exec %s "$@" ;;
 esac
-""")
+exit 0
+""" % shlex.quote(real_node))
+        node.chmod(0o755)
         self.setup_output = self.tmp / "setup-output"
         self.subject_output = self.tmp / "subject-output"
         self.subject_browser = self.tmp / "subject-browser"
         co = self.tmp / "co"
         (co / "services/chat-stream-v2").mkdir(parents=True)
+        runner = co / "scripts/lib/test-runner.js"
+        runner.parent.mkdir(parents=True)
+        shutil.copyfile(HERE / "lib/test-runner.js", runner)
         (co / "services/chat-stream-v2/requirements.txt").touch()
         (co / "package-lock.json").write_text("{}")
         (co / "renderer/dist/web").mkdir(parents=True)
@@ -986,8 +1001,12 @@ esac
         (co / "test/e2e").mkdir(parents=True)
         for name in ("web_wrap_paste_gate", "web_gate_interrupt", "viewport_live"):
             (co / "test/e2e" / (name + ".test.js")).touch()
+        (co / "test/e2e/web_gate.js").touch()
+        (co / "test/unit.test.js").touch()
 
     def run_policy(self, *args):
+        self.subject_output.unlink(missing_ok=True)
+        self.subject_browser.unlink(missing_ok=True)
         relocated_evidence = self.tmp / "relocated"
         attempt_id = ga.new_attempt_id()
         relocated_workspace = Path("/tmp/gw-%d-%s" % (os.getuid(), attempt_id[:8]))
@@ -1062,7 +1081,9 @@ esac
         fake_exe(self.tools, self.chrome.name, "Chromium 129.10.0.0")
         for args in (("--target", "web-gate"),
                      ("--target", "npm-test", "--select", "test/e2e/*.test.js"),
-                     ("--target", "npm-test", "--select", "test/e2e/viewport_live.test.js")):
+                     ("--target", "npm-test", "--select", "test/e2e/viewport_live.test.js"),
+                     ("--target", "npm-test", "--select", "test/e2e/viewport**.ts"),
+                     ("--target", "npm-test", "--select", "test/e2e/web_gate.js")):
             with self.subTest(args=args):
                 code, events = self.run_policy(*args)
                 self.assertEqual(code, 3)
@@ -1072,16 +1093,26 @@ esac
                 self.assertIn("129.10.0.0", failure["detail"])
                 self.assertIn("130", failure["detail"])
         self.assertFalse(self.subject_output.exists())
-        code, events = self.run_policy("--target", "npm-test")
-        self.assertEqual(code, 0)
-        self.assertNotIn("chrome", events[1]["toolchain"])
-        self.assertEqual(self.subject_browser.read_text(), "")
+        for args in (("--target", "npm-test"),
+                     ("--target", "npm-test", "--select", "test/unit.test.js")):
+            code, events = self.run_policy(*args)
+            self.assertEqual(code, 0)
+            self.assertNotIn("chrome", events[1]["toolchain"])
+            self.assertEqual(self.subject_browser.read_text(), "")
 
     def test_browser_uses_the_qualified_path(self):
         code, events = self.run_policy("--target", "web-gate")
         self.assertEqual(code, 0)
         self.assertEqual(events[1]["toolchain"]["chrome"]["version"], "130.0.1.2")
         self.assertEqual(self.subject_browser.read_text(), str(self.chrome))
+
+    def test_explicit_browser_selections_keep_the_qualified_browser(self):
+        for selector in ("test/e2e/viewport_live.test.js", "test/e2e/web_gate.js"):
+            with self.subTest(selector=selector):
+                code, events = self.run_policy("--target", "npm-test", "--select", selector)
+                self.assertEqual(code, 0)
+                self.assertEqual(events[1]["toolchain"]["chrome"]["version"], "130.0.1.2")
+                self.assertEqual(self.subject_browser.read_text(), str(self.chrome))
 
     def test_long_tmp_and_timeout_record_requested_and_effective_values(self):
         requested = self.tmp / ("x" * 60)
@@ -1170,13 +1201,15 @@ class WebTerminalPreflight(Tmp):
         def subject(*a, **kw):
             subjects.append(a)
             return SimpleNamespace(pid=123456789, returncode=0, wait=lambda **k: 0, poll=lambda: 0)
-        with mock.patch.multiple(ge, resolve_toolchain=lambda *a: ({}, []),
+        with mock.patch.multiple(ge, resolve_toolchain=lambda *a: ({"node": {"path": "node", "version": "22.4.1",
+                                                                               "sha256": "aa", "realpath": "node"}}, []),
                 pick_locale=lambda *a: ("C.UTF-8", None), check_layout=lambda *a: [],
                 check_host_tools=lambda *a, **k: ({}, []), check_chrome=lambda *a: (None, []),
                 prepared_key=lambda *a: "fixture", ensure_python_env=lambda *a: (None, {}, []),
                 build_env=lambda *a, **k: {}, check_scratch=lambda *a: [],
                 check_node_npm=lambda *a: [], check_process_listing=lambda *a: [],
                 run_preflight_script=lambda *a: [], group_alive=lambda *a: False,
+                discover_npm_files=lambda *a: ({selected} if web else set()),
                 build_command=lambda *a: (["synthetic-subject"], {"cwd": checkout,
                     "classify": lambda rc, to: ("pass", None, {})})), \
                 mock.patch.object(ge.subprocess, "run", side_effect=runner), \

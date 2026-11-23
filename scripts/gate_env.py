@@ -15,7 +15,6 @@ Stdlib only; runs on any python3 >= 3.9, the prepared venv carries 3.13.
 from __future__ import annotations
 
 import argparse
-import glob
 import hashlib
 import json
 import os
@@ -519,6 +518,32 @@ def check_chrome(run, checkout, env, minimum):
                        "install a qualified Chrome or Chromium executable visible to the web gate")]
 
 
+def discover_npm_files(run, node_path, checkout: Path, selection: List[str]) -> set[str]:
+    """Ask the shared JS runner which files its normal npm selection will launch."""
+    script = ("const { discover } = require('./scripts/lib/test-runner');"
+              "process.stdout.write(JSON.stringify(discover(process.cwd(), JSON.parse(process.argv[1]))));")
+    argv = [node_path, "-e", script, json.dumps(selection)]
+    try:
+        result = run(argv, cwd=str(checkout), env={}, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupFailure([fail("selection", "npm runner file discovery could not run (%s)" % type(exc).__name__,
+                                 "verify Node can load the shared npm runner from this checkout")]) from exc
+    if result.returncode:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        detail = lines[0][:300] if lines else "exit %d" % result.returncode
+        raise SetupFailure([fail("selection", "npm runner file discovery failed: %s" % detail,
+                                 "verify Node can load the shared npm runner from this checkout")])
+    try:
+        files = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise SetupFailure([fail("selection", "npm runner file discovery returned invalid JSON",
+                                 "verify the shared npm runner discovery result")]) from exc
+    if not isinstance(files, list) or any(not isinstance(file, str) for file in files):
+        raise SetupFailure([fail("selection", "npm runner file discovery returned an invalid file list",
+                                 "verify the shared npm runner discovery result")])
+    return set(files)
+
+
 def check_scratch(evidence: Path, home: Path, tmp: Path, min_free_mb: int, timeout_s: int, reserve_s: int) -> List[Dict[str, str]]:
     failures = []
     for label, path in (("evidence", evidence), ("home", home), ("tmp", tmp)):
@@ -990,14 +1015,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         resolved_selection = list(selection)  # retained even when setup fails before prepared
         # This explicitly selected integration file boots the same fixture as web-gate.
         # Reuse its declared prerequisites before preparing the exact child context.
-        selected_files = {str(Path(file).relative_to(checkout))
-                          for pattern in selection for file in glob.glob(str(checkout / pattern), recursive=True)} if target["kind"] == "npm_test" else set()
+        selected_files = set()
+        if target["kind"] == "npm_test":
+            node_tools, tool_failures = resolve_toolchain(config, ["node"])
+            if tool_failures:
+                raise SetupFailure(tool_failures)
+            selected_files = discover_npm_files(run_child, node_tools["node"]["path"], checkout, selection)
         interrupt_selected = "test/e2e/web_gate_interrupt.test.js" in selected_files
         web_selected = bool(selected_files & {
             "test/e2e/web_gate_interrupt.test.js", "test/e2e/web_wrap_paste_gate.test.js",
             "test/e2e/web_wrap_paste_served.test.js"})
         browser_needed = args.target == "web-gate" or web_selected or bool(selected_files & {
-            "test/e2e/console_capture.test.js", "test/e2e/viewport_live.test.js"})
+            "test/e2e/console_capture.test.js", "test/e2e/viewport_live.test.js", "test/e2e/web_gate.js"})
         if web_selected:
             web = profile["targets"]["web-gate"]
             target = dict(target, npm_build=web["npm_build"], test_file_timeout_ms=web["timeout_s"] * 1000)
