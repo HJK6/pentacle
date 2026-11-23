@@ -15,11 +15,28 @@ import stat
 import time
 import tempfile
 import uuid
+from datetime import datetime, timezone
 
 from deploy import coordinated as c
 
 ACTIVE = contextvars.ContextVar('ordinary_recovery_writer', default=None)
 SCHEMA = 'pentacle.ordinary-recovery.v1'
+MANUAL_SCHEMA = 'pentacle.ordinary-manual-recovery.v1'
+MANUAL_OUTCOME = 'manual_recovered_serving_target'
+MANUAL_SEQUENCE = 9
+MANUAL_PROOF_SECONDS = 30
+MANUAL_GO_SECONDS = 600
+MANUAL_LISTENER = '127.0.0.1:7791'
+# Exact incident pins prevent this administrative entry from admitting another operation.
+MANUAL_LEGACY = {
+    'operation': 'ffbf544888944aa895e1c40065361a85',
+    'bundle_sha256': '2651d5f472f7808542c9e80051f9d12e3188a0734b235c30c88edf0e49f27a54',
+    'bundle_bytes_sha256': '77f8fff57aa1032543266c9270e6a8c6f2aac8d3fadfc2891f1ecc70858fc1d1',
+    'pointer_bytes_sha256': 'f862bbc1fbcd14a9b17c9ba0e0f0d76bddbae064790d6d2f8bb1bc8c4ddf4e3e',
+    'journal_sha256': 'abf358ca4015d4d11f18dd2f2f99b83c61a3dcfe5fea8760a7bd2f3ed6582f5e',
+    'journal_bytes_sha256': '8e408853b96a47823a7769bb25586b780040a6a7b495f7f963b1db88416c7c70',
+    'operator_receipt_sha256': '2cab705873e80c17a50ddd7f813788ffd58699a73d9af6e69c6ba9cba4b285d7',
+}
 TERMINAL = {'qualified', 'restored_unqualified', 'aborted'}
 PHASES = {'forward', 'serving_unqualified', 'recovering', 'restoring', 'starting',
           'recovery_required', *TERMINAL}
@@ -260,9 +277,135 @@ class Bundle:
         now = self.a.observe(self.bundle)
         return {**now, 'journal_sha256':self.journal['sha256']}
 
+    def record_manual_recovery(self, authorization, operator_receipt, credential, go):
+        self.load()
+        bundle, journal = self.bundle, self.journal
+        if (bundle['operation'] != MANUAL_LEGACY['operation']
+                or bundle['sha256'] != MANUAL_LEGACY['bundle_sha256']):
+            raise c.Invalid('manual recovery is outside the enrolled legacy operation')
+
+        pointer = c.state_root(self.a.repo)/'ordinary-active.json'
+        journal_path = self.folder/'journal.json'
+        pointer_bytes = c.private_file(pointer).read_bytes()
+        bundle_bytes = c.private_file(self.folder/'bundle.json').read_bytes()
+        journal_bytes = c.private_file(journal_path).read_bytes()
+        auth_bytes = c.private_file(authorization).read_bytes()
+        receipt_bytes = c.private_file(operator_receipt).read_bytes()
+        auth = c.strict_json(auth_bytes)
+        original = journal.get('manual_recovery_audit')
+        failed_bytes = journal_bytes if original is None else base64.b64decode(original['original_journal_bytes'], validate=True)
+        failed = c.strict_json(failed_bytes)
+        def sha(data):
+            return hashlib.sha256(data).hexdigest()
+
+        if (c.strict_json(pointer_bytes) != {'operation': bundle['operation'], 'bundle': str(self.folder)}
+                or sha(pointer_bytes) != MANUAL_LEGACY['pointer_bytes_sha256']
+                or c.strict_json(bundle_bytes) != bundle or c.strict_json(journal_bytes) != journal
+                or sha(bundle_bytes) != MANUAL_LEGACY['bundle_bytes_sha256']
+                or sha(failed_bytes) != MANUAL_LEGACY['journal_bytes_sha256']
+                or failed['sha256'] != MANUAL_LEGACY['journal_sha256']
+                or failed['phase'] != 'recovery_required' or failed['sequence'] != MANUAL_SEQUENCE
+                or sha(receipt_bytes) != MANUAL_LEGACY['operator_receipt_sha256']):
+            raise c.Invalid('manual recovery pointer, bundle, failed journal or operator receipt mismatch')
+
+        common = {'schema': MANUAL_SCHEMA, **MANUAL_LEGACY,
+                  'failed_sequence': MANUAL_SEQUENCE,
+                  'original_controller_sha': bundle['metadata']['controller_sha'],
+                  'prior_sha': bundle['prior_sha'], 'target_sha': bundle['target_sha'],
+                  'deployer_stream_id': self.a.stream}
+        if (not isinstance(auth, dict) or set(auth) != common.keys() | {'replacement_controller_sha', 'expected_serving'}
+                or c.canonical({key: auth[key] for key in common}) != c.canonical(common)):
+            raise c.Invalid('manual recovery authority does not bind the exact operation and state')
+        replacement = auth['replacement_controller_sha']
+        if (not isinstance(replacement, str) or not re.fullmatch('[0-9a-f]{40}', replacement)
+                or replacement == common['original_controller_sha']
+                or not isinstance(go, str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', go)):
+            raise c.Invalid('manual recovery replacement controller or FD GO identity refused')
+        authority = {'authorization_sha256': sha(auth_bytes), 'go_tell_id': go,
+                     'original_controller_sha': common['original_controller_sha'],
+                     'replacement_controller_sha': replacement,
+                     'operator_receipt_sha256': common['operator_receipt_sha256'],
+                     'deployer_stream_id': self.a.stream}
+        self.a.validate_controller(bundle, replacement)
+
+        def result(audit):
+            return {'outcome': MANUAL_OUTCOME, 'operation': bundle['operation'], 'phase': 'aborted',
+                    'full_fleet_acceptance': False, 'audit_sha256': audit['sha256']}
+
+        def terminal(audit):
+            body = {**failed, 'phase': 'aborted', 'sequence': MANUAL_SEQUENCE + 1,
+                    'result': result(audit), 'manual_recovery_audit': audit}
+            body.pop('sha256')
+            return body
+
+        def readback(audit):
+            body = terminal(audit)
+            if (c.private_file(journal_path).read_bytes() != c.canonical({**body, 'sha256': c.digest(body)}) + b"\n"
+                    or c.private_file(pointer).read_bytes() != pointer_bytes
+                    or c.private_file(self.folder/'bundle.json').read_bytes() != bundle_bytes):
+                raise c.Invalid('manual recovery terminal readback mismatch')
+            fence(self.a.repo)
+            return result(audit)
+
+        if original is not None:
+            body = {k: v for k, v in original.items() if k != 'sha256'}
+            if (original['sha256'] != c.digest(body) or original['authority'] != authority
+                    or c.canonical(original['serving']) != c.canonical(auth['expected_serving'])
+                    or original['original_failure'] != failed['result']):
+                raise c.Invalid('manual recovery terminal audit or replay authority mismatch')
+            return readback(original)
+
+        if journal['phase'] != 'recovery_required':
+            raise c.Invalid('manual recovery requires the original failed journal')
+        if Path(credential) in (authorization, operator_receipt, pointer, journal_path):
+            raise c.Invalid('manual recovery inputs must have distinct roles')
+        serving = self.a.observe_manual(bundle)
+        process = serving['process']
+        historical = failed['process']
+        if (c.canonical(serving) != c.canonical(auth['expected_serving']) or serving['source'] != bundle['target_sha']
+                or process['sha'] != bundle['target_sha'] or process['loaded'] is not True
+                or type(process['pid']) is not int or process['pid'] <= 0 or not process['birth']
+                or process['pid'] == historical['pid'] or process['birth'] == historical['birth']
+                or historical['sha'] != bundle['prior_sha']):
+            raise c.Invalid('manual recovery serving identity or historical generation mismatch')
+        def confirm_serving():
+            if self.a.observe_manual(bundle) != serving:
+                raise c.Invalid('manual recovery serving state changed before commit')
+
+        started = time.monotonic()
+        proof = self.a.prove_manual(serving, credential, authority, confirm_serving)
+        if (proof.get('outcome') != 'passed' or proof.get('verb') != 'ledger_get'
+                or not isinstance(proof.get('request_id'), str) or not proof['request_id']
+                or proof.get('go_tell_id') != go or proof.get('runtime_sha') != serving['source']):
+            raise c.Invalid('manual recovery authenticated Store readback missing')
+
+        audit = {'schema': MANUAL_SCHEMA, 'operation': bundle['operation'],
+                 'pointer_bytes_sha256': sha(pointer_bytes), 'bundle_sha256': bundle['sha256'],
+                 'original_journal_bytes': base64.b64encode(failed_bytes).decode(),
+                 'original_journal_bytes_sha256': sha(failed_bytes),
+                 'original_failure': failed['result'],
+                 'authority': authority, 'serving': serving, 'authenticated_readback': proof}
+        audit['sha256'] = c.digest(audit)
+        terminal_body = terminal(audit)
+        self.a.validate_controller(bundle, replacement)
+        confirm_serving()
+        if (c.private_file(pointer).read_bytes() != pointer_bytes
+                or c.private_file(self.folder/'bundle.json').read_bytes() != bundle_bytes
+                or c.private_file(journal_path).read_bytes() != journal_bytes
+                or c.private_file(authorization).read_bytes() != auth_bytes
+                or c.private_file(operator_receipt).read_bytes() != receipt_bytes
+                or time.monotonic() - started >= MANUAL_PROOF_SECONDS):
+            raise c.Invalid('manual recovery state changed or authenticated readback expired before commit')
+
+        # The original failure and its replacement audit share one atomic commit.
+        sealed_write(journal_path, terminal_body)
+        return readback(audit)
+
     def admit(self, authorization, go):
         b, j = self.bundle, self.journal
         self.a.recovery_authorization = None
+        if 'manual_recovery_audit' in j:
+            raise c.Invalid('manually recovered operation is terminal')
         if j['phase'] == 'qualified':
             raise c.Invalid('qualified operation is not an ordinary failure recovery')
         now = self.state()
@@ -477,6 +620,155 @@ class OrdinaryRuntime:
                 'files':{k:file_state(Path(v['path'])) for k,v in bundle['preimages'].items()},
                 'process':self.process([bundle['prior_sha'],bundle['target_sha']]), 'collector':self.job(self.d.USAGE_COLLECTOR_LABEL)}
 
+    def observe_manual(self, bundle):
+        from deploy.packet.log_scan import freeze, generation_ranges
+
+        label = self.service.launchd_label
+        source = self.git('rev-parse', 'HEAD')
+        process = self.job(label)
+        pid, birth = process['pid'], process['birth']
+        if source != bundle['target_sha'] or not process['loaded'] or not pid or not birth:
+            raise c.Invalid('manual recovery requires the registered target process')
+
+        paths = self.paths(bundle['metadata'])
+        files = {name: file_state(path) for name, path in paths.items()}
+        for name in ('policy', 'machines', 'settings', 'schedule'):
+            row = bundle['preimages'][name]
+            if files[name] != {'sha256': row['sha256'], 'mode': row['mode']}:
+                raise c.Invalid('manual recovery immutable managed input changed')
+        stamp = paths['stamp'].read_bytes()
+        if (c.strict_json(stamp).get('sha') != source
+                or hashlib.sha256(stamp).hexdigest() != files['stamp']['sha256']):
+            raise c.Invalid('manual recovery target stamp unavailable')
+
+        plist = plistlib.loads(paths['plist'].read_bytes())
+        argv = plist['ProgramArguments']
+        workdir = self.repo/'services/chat-stream-v2'
+        main = str(workdir/'main.py')
+        python = self.d._venv_python(self.repo, self.service)
+        configured_main = argv[2] if argv[1] == '-u' else argv[1]
+        if (plist['Label'] != label or plist['WorkingDirectory'] != str(workdir)
+                or argv[0] != str(python) or configured_main != main):
+            raise c.Invalid('manual recovery plist does not identify the runtime checkout')
+        loaded = self.runtime.checked(('launchctl', 'print', self.d._launchctl_target(label))).stdout
+        program = re.search(r'^\s*program = (.+)$', loaded, re.M)
+        arguments = re.search(r'\n\s*arguments = \{\n(.*?)\n\s*\}', loaded, re.S)
+        if (not program or program[1].strip() != argv[0] or not arguments
+                or [line.strip() for line in arguments[1].splitlines()] != argv
+                or file_state(paths['plist']) != files['plist']):
+            raise c.Invalid('manual recovery loaded launchd arguments do not match the managed plist')
+        command = self.runtime.checked(('ps', '-ww', '-p', str(pid), '-o', 'command=')).stdout.strip()
+        interpreter = python.resolve()
+        framework = interpreter.parent.parent/'Resources/Python.app/Contents/MacOS/Python'
+        if (not command or command.split()[0] not in {str(python), str(interpreter), str(framework)}
+                or not any(command.startswith(f'{command.split()[0]} {prefix}{main} ')
+                           for prefix in ('', '-u '))):
+            raise c.Invalid('manual recovery live process does not run the registered checkout')
+
+        port = MANUAL_LISTENER.split(':')[1]
+        listeners = self.runtime.checked(('/usr/sbin/lsof', '-nP', '-iTCP:' + port,
+                                          '-sTCP:LISTEN', '-Fpn')).stdout.splitlines()
+        if (not listeners or {row for row in listeners if row.startswith('p')} != {'p' + str(pid)}
+                or [row for row in listeners if row == 'n' + MANUAL_LISTENER] != ['n' + MANUAL_LISTENER]):
+            raise c.Invalid('manual recovery loopback listener ownership unproven')
+
+        managed = self.d._managed_log_config(self.service)
+        groups = []
+        for path in self.d._daemon_log_paths(self.service):
+            candidates = list(reversed(managed.paths(path))) if managed else [path]
+            groups.append([freeze(item) for item in candidates if item.is_file()])
+        if sum(item['bytes_read'] for group in groups for item in group) > 128 * 1024 * 1024:
+            raise c.Invalid('manual recovery boot evidence exceeds the read bound')
+        _, _, markers = generation_ranges(groups, pid, birth)
+        if self.job(label) != process:
+            raise c.Invalid('manual recovery process changed during observation')
+        return {'source': source, 'process': {**process, 'sha': source},
+                'boot_uuid': markers[0]['identity']['boot_uuid'], 'listener': MANUAL_LISTENER,
+                'launchd_label': label, 'launch_arguments_sha256': c.digest(argv),
+                'files': files, 'collector': self.job(self.d.USAGE_COLLECTOR_LABEL)}
+
+    def prove_manual(self, serving, credential, authority, confirm_serving):
+        from tools.live_window.core import operator_hello
+
+        go = authority['go_tell_id']
+        deadline = time.monotonic() + MANUAL_PROOF_SECONDS
+
+        def remaining():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise c.Invalid('manual recovery authenticated readback deadline expired')
+            return left
+
+        def receive(socket):
+            value = c.strict_json(socket.recv(timeout=remaining()))
+            remaining()
+            if not isinstance(value, dict):
+                raise c.Invalid('manual recovery malformed daemon reply')
+            return value
+
+        def correlated(socket, payload, expected):
+            rid = uuid.uuid4().hex
+            socket.send(json.dumps({**payload, 'request_id': rid}))
+            while True:
+                value = receive(socket)
+                if value.get('request_id') == rid:
+                    if value['type'] != expected:
+                        raise c.Invalid('manual recovery authenticated request refused')
+                    confirm_serving()
+                    remaining()
+                    return value
+
+        try:
+            with self.d.connect('ws://' + MANUAL_LISTENER, proxy=None, close_timeout=0,
+                                origin='https://example.invalid', open_timeout=remaining(),
+                                max_size=128 * 1024 * 1024) as socket:
+                welcome = receive(socket)
+                if welcome.get('type') != 'welcome' or welcome.get('runtime_sha') != serving['source']:
+                    raise c.Invalid('manual recovery listener reports a different serving release')
+                hello = operator_hello(c.private_file(credential), welcome)
+                correlated(socket, hello, 'hello')
+                binding = correlated(socket, {'type': 'assistant.binding'}, 'assistant.binding.ok')
+                ledger = correlated(socket, {'type': 'ledger_get', 'tell_id': go}, 'ledger_get.ok')
+                seat = correlated(socket, {'type': 'inspect_stream', 'stream_id': binding['stream_id'],
+                                           'event_tail': 0}, 'inspect_stream.ok')
+                current = correlated(socket, {'type': 'assistant.binding'}, 'assistant.binding.ok')
+        except c.Invalid:
+            raise
+        except Exception:
+            raise c.Invalid('manual recovery authenticated connection failed') from None
+
+        def role(value):
+            return {key: value.get(key) for key in ('composite_stream_id', 'stream_id', 'generation', 'revision', 'source')}
+
+        sender = role(binding)
+        session = seat.get('session') or {}
+        tell = ledger.get('tell') or {}
+        expected_text = (f'GO record-ordinary-manual-recovery {MANUAL_LEGACY["operation"]} '
+                         f'{authority["authorization_sha256"]} {authority["replacement_controller_sha"]}')
+        delivered = datetime.fromisoformat(tell['delivered_at'])
+        age = (datetime.now(timezone.utc) - delivered).total_seconds()
+        if (sender != role(current) or not sender['stream_id'] or not sender['generation']
+                or not sender['composite_stream_id'] or type(sender['revision']) is not int
+                or sender['source'] not in {'durable', 'env'}
+                or seat.get('stream_id') != sender['stream_id'] or session.get('status') != 'open'
+                or session.get('session_generation') != sender['generation']
+                or ledger.get('read_only') is not True or ledger.get('source') != 'v2_tell_deliveries'
+                or ledger.get('tell_id') != go or tell.get('tell_id') != go
+                or type(ledger.get('ledger_row_id')) is not int or ledger['ledger_row_id'] <= 0
+                or ledger['ledger_row_id'] != tell.get('ledger_row_id')
+                or tell.get('sender_verified') is not True or tell.get('sender_kind') != 'peer'
+                or tell.get('from_stream_id') != sender['stream_id']
+                or tell.get('sender_generation') != sender['generation']
+                or tell.get('to_stream_id') != authority['deployer_stream_id']
+                or tell.get('original_to_stream_id') != authority['deployer_stream_id']
+                or tell.get('delivery_status') != 'delivered' or tell.get('text') != expected_text
+                or not 0 <= age <= MANUAL_GO_SECONDS):
+            raise c.Invalid('manual recovery FD GO does not match current binding, authority or freshness')
+        return {'outcome': 'passed', 'verb': 'ledger_get', 'request_id': ledger['request_id'],
+                'ledger_row_id': ledger['ledger_row_id'], 'go_tell_id': go, 'go_delivered_at': tell['delivered_at'],
+                'front_desk': sender, 'runtime_sha': welcome['runtime_sha'],
+                'observed_at': datetime.now(timezone.utc).isoformat()}
+
     def capture(self, prior, target, ancestry, entries):
         from deploy.coordinated_runtime import code_identity_at, helper_release_root
         if self.controller == self.repo or self.d._dirty_entries(self.controller,self.runner):
@@ -586,6 +878,14 @@ print(json.dumps(result))
         self.source_repo=Path(self._source_validation.name)/'source.git'
         self.runtime.checked(('git','clone','--bare',str(archive),str(self.source_repo)))
 
+    def validate_controller(self, bundle, allowed_controller):
+        m = bundle['metadata']
+        if (self.controller == self.repo or self.git('rev-parse','HEAD',repo=self.controller) != allowed_controller
+                or self.d._dirty_entries(self.controller,self.runner) or self.d._dirty_entries(self.repo,self.runner)
+                or self.git('remote','get-url','origin') != m['origin']
+                or self.git('remote','get-url','origin',repo=self.controller) != m['origin']):
+            raise c.Invalid('ordinary recovery controller/source drift')
+
     def validate(self, bundle):
         from deploy.restoration import inherited_receipt_seal
         from deploy.coordinated_runtime import code_identity_at
@@ -597,11 +897,7 @@ print(json.dumps(result))
                     or grant['original_controller_sha'] != m['controller_sha']):
                 raise c.Invalid('ordinary replacement controller scope drift')
             allowed_controller = grant['replacement_controller_sha']
-        if (self.controller == self.repo or self.git('rev-parse','HEAD',repo=self.controller) != allowed_controller
-                or self.d._dirty_entries(self.controller,self.runner) or self.d._dirty_entries(self.repo,self.runner)
-                or self.git('remote','get-url','origin') != m['origin']
-                or self.git('remote','get-url','origin',repo=self.controller) != m['origin']):
-            raise c.Invalid('ordinary recovery controller/source drift')
+        self.validate_controller(bundle, allowed_controller)
         for sha in (bundle['prior_sha'],bundle['target_sha']):
             if code_identity_at(getattr(self,'source_repo',self.repo),sha,self.runner) != m['identity']:
                 raise c.Invalid('ordinary recovery identity drift')

@@ -195,7 +195,7 @@ def _read_stamp(repo: Path, service: ServiceConfig) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-from deploy.ordinary_recovery import ACTIVE as _ORDINARY_RECOVERY
+from deploy.ordinary_recovery import ACTIVE as _ORDINARY_RECOVERY, MANUAL_OUTCOME
 
 def _write_stamp(repo: Path, service: ServiceConfig, stamp: dict[str, object]) -> None:
     path = _stamp_path(repo, service)
@@ -2318,18 +2318,32 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
            read_timing_receipt: Path | None = None,
            ordinary_recovery_bundle: Path | None = None, recover_ordinary: Path | None = None,
            ordinary_recovery_authorization: Path | None = None, ordinary_recovery_status: Path | None = None,
+           record_ordinary_manual_recovery: Path | None = None,
+           manual_recovery_authorization: Path | None = None, operator_recovery_receipt: Path | None = None,
+           manual_recovery_operator_credential: Path | None = None,
            runner: Runner) -> dict[str, object]:
+    ordinary_manual = record_ordinary_manual_recovery is not None
+    manual_inputs = (manual_recovery_authorization, operator_recovery_receipt, manual_recovery_operator_credential)
+    if ordinary_manual and (not all(manual_inputs) or not recovery_go_tell_id or not deployer_stream_id):
+        raise DeployError("manual ordinary recovery requires exact authorization, operator receipt, credential, GO and deployer")
+    if ordinary_manual and (ref != DEFAULT_REF or gate_evidence is not None or read_timing_receipt is not None
+                            or smoke_accounts is not None or log_guard_dir is not None):
+        raise DeployError("manual ordinary recovery cannot combine with forward deployment inputs")
+    if not ordinary_manual and any(value is not None for value in manual_inputs):
+        raise DeployError("manual recovery inputs require --record-ordinary-manual-recovery")
     ordinary_read = ordinary_recovery_status is not None
     ordinary_recover = recover_ordinary is not None
-    if sum(v is not None for v in (ordinary_recovery_bundle, recover_ordinary, ordinary_recovery_status)) > 1:
+    ordinary_modes = (ordinary_recovery_bundle, recover_ordinary, ordinary_recovery_status,
+                      record_ordinary_manual_recovery)
+    if sum(v is not None for v in ordinary_modes) > 1:
         raise DeployError("ordinary recovery modes are mutually exclusive")
-    if any(v is not None for v in (ordinary_recovery_bundle, recover_ordinary, ordinary_recovery_status)):
+    if any(v is not None for v in ordinary_modes):
         if (service.name != 'chat-streamd-v2' or skip_kickstart or rollback or coordinated_plan is not None
                 or coordinated_receipt is not None or prepare_only or recovery_authorization is not None):
             raise DeployError("ordinary recovery cannot combine with another deployment mode")
     if (ordinary_recovery_authorization is not None) != ordinary_recover or (ordinary_recover and not recovery_go_tell_id):
         raise DeployError("ordinary recovery requires its separate authorization and GO id")
-    if not ordinary_recover and (recovery_authorization is not None or recovery_go_tell_id is not None) and (
+    if not (ordinary_recover or ordinary_manual) and (recovery_authorization is not None or recovery_go_tell_id is not None) and (
             not rollback or coordinated_receipt is None or coordinated_plan is not None or prepare_only
             or recovery_authorization is None or not recovery_go_tell_id):
         raise DeployError("recovery controller authorization requires --rollback --coordinated-receipt and --recovery-go-tell-id")
@@ -2347,11 +2361,15 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
     try:
         with coordinated.transaction_lock(repo) as root:
             from deploy.ordinary_recovery import Bundle, OrdinaryRuntime, fence
-            fence(repo, recovering=recover_ordinary or ordinary_recovery_status)
-            if ordinary_recover or ordinary_read:
+            selected_bundle = recover_ordinary or ordinary_recovery_status or record_ordinary_manual_recovery
+            fence(repo, recovering=selected_bundle)
+            if ordinary_recover or ordinary_read or ordinary_manual:
                 adapter = OrdinaryRuntime(sys.modules[__name__], service, repo, runner,
                     stream=deployer_stream_id or "", boot_wait_seconds=boot_wait_seconds)
-                bundle = Bundle(adapter, recover_ordinary or ordinary_recovery_status)
+                bundle = Bundle(adapter, selected_bundle)
+                if ordinary_manual:
+                    return bundle.record_manual_recovery(manual_recovery_authorization, operator_recovery_receipt,
+                                                         manual_recovery_operator_credential, recovery_go_tell_id)
                 if ordinary_read:
                     bundle.load()
                     return {"ordinary_recovery_status": bundle.state(), "bundle_sha256": bundle.bundle['sha256'],
@@ -2767,6 +2785,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recover-ordinary", type=Path, help="Recover one durable ordinary operation under separate FD authority.")
     parser.add_argument("--ordinary-recovery-authorization", type=Path)
     parser.add_argument("--ordinary-recovery-status", type=Path, help="Read exact current ordinary recovery state without mutation.")
+    parser.add_argument("--record-ordinary-manual-recovery", type=Path,
+                        help="Record the verified manual recovery of the named legacy ordinary operation.")
+    parser.add_argument("--manual-recovery-authorization", type=Path)
+    parser.add_argument("--operator-recovery-receipt", type=Path)
+    parser.add_argument("--manual-recovery-operator-credential", type=Path)
     parser.add_argument("--gate-evidence", type=Path)
     parser.add_argument("--read-timing-receipt", type=Path,
                         help="Passing tools/read_timing.py receipt for the exact forward daemon SHA.")
@@ -2831,6 +2854,10 @@ def main(argv: list[str] | None = None) -> int:
             recover_ordinary=args.recover_ordinary,
             ordinary_recovery_authorization=args.ordinary_recovery_authorization,
             ordinary_recovery_status=args.ordinary_recovery_status,
+            record_ordinary_manual_recovery=args.record_ordinary_manual_recovery,
+            manual_recovery_authorization=args.manual_recovery_authorization,
+            operator_recovery_receipt=args.operator_recovery_receipt,
+            manual_recovery_operator_credential=args.manual_recovery_operator_credential,
             runner=_run,
         )
     except DeployError as exc:
@@ -2839,6 +2866,8 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(stamp, sort_keys=True))
     if stamp.get('outcome') == 'restored_unqualified':
         return EXIT_PRIOR_RESTORED
+    if stamp.get("outcome") == MANUAL_OUTCOME:
+        return EXIT_OK
     if stamp.get("prepared_only") or stamp.get("phase") == "discarded":
         return EXIT_OK
     disposition = stamp.get("disposition")

@@ -1,10 +1,15 @@
 """Actual recovery entry with real Git/files/child loss, synthetic OS/account probes."""
+import base64
 import copy
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from deploy import ordinary_recovery as o
@@ -567,3 +572,365 @@ def test_replacement_controller_grant_survives_restoration_revalidation(operatio
     assert journal['controller_used']=='e'*40
     assert journal['controller_authorization_sha256']==o.c.file_digest(auth)
     assert (b.folder/'bundle.json').read_bytes()==original_bundle
+
+
+def manual_failure(operation):
+    a,b,prior,target,git=operation
+    forward(operation)
+    historical={'loaded':True,'pid':101,'birth':'synthetic-prior','sha':prior,
+                'provenance':{'launchd_answered':True,'pid':101,
+                              'processes':[{'pid':101,'start':'synthetic-prior'}]}}
+    b.persist(phase='restoring')
+    b.persist(phase='starting',process=historical,allowed_source=[prior])
+    b.persist(phase='recovery_required',result={'disposition':'target not active, restore unproven',
+                                              'failure':'synthetic Store startup deadline'})
+    assert b.journal['sequence']==9
+    probes=a.probes()
+    probes['process']={'loaded':True,'pid':32202,'birth':'synthetic-manual-birth','sha':target,
+                       'provenance':{'launchd_answered':True,'pid':32202,
+                                     'processes':[{'pid':32202,'start':'synthetic-manual-birth'}]}}
+    a.save_probes(probes)
+    return copy.deepcopy(b.journal)
+
+
+@pytest.fixture
+def manual_operation(operation, monkeypatch):
+    a,b,_,target,_=operation
+    failed=manual_failure(operation)
+    operator=a.root/'operator-receipt'
+    o.c.atomic_bytes(operator,b'synthetic operator authority and incident recovery receipt\n')
+    pointer=o.c.state_root(a.repo)/'ordinary-active.json'
+    journal=b.folder/'journal.json'
+    immutable=b.folder/'bundle.json'
+    pins={'operation':b.bundle['operation'],'bundle_sha256':b.bundle['sha256'],
+          'bundle_bytes_sha256':o.c.file_digest(immutable),'pointer_bytes_sha256':o.c.file_digest(pointer),
+          'journal_sha256':failed['sha256'],'journal_bytes_sha256':o.c.file_digest(journal),
+          'operator_receipt_sha256':o.c.file_digest(operator)}
+    monkeypatch.setattr(o,'MANUAL_LEGACY',pins)
+
+    replacement='e'*40
+    probes=a.probes()
+    probes.update(controller_sha=replacement,boot_uuid='0d38fe9d-6292-414c-8ecf-ab400a1fc404',
+                  listener=o.MANUAL_LISTENER)
+    a.save_probes(probes)
+    def controller(self,bundle,sha):
+        assert bundle['sha256']==pins['bundle_sha256']
+        if self.probes()['controller_sha']!=sha:
+            raise o.c.Invalid('synthetic controller identity drift')
+
+    def observe(self,bundle):
+        p=self.probes()
+        return {**self.observe(bundle),'boot_uuid':p['boot_uuid'],'listener':p['listener'],
+                'launchd_label':d.V2_DAEMON_LABEL,'launch_arguments_sha256':'4'*64}
+
+    monkeypatch.setattr(SyntheticRuntime,'validate_controller',controller)
+    monkeypatch.setattr(SyntheticRuntime,'observe_manual',observe)
+    auth=a.root/'manual-authority.json'
+    expected={'schema':o.MANUAL_SCHEMA,**pins,'failed_sequence':9,'original_controller_sha':'f'*40,
+              'prior_sha':b.bundle['prior_sha'],'target_sha':target,'deployer_stream_id':'synthetic-owner',
+              'replacement_controller_sha':replacement,'expected_serving':a.observe_manual(b.bundle)}
+    o.c.atomic_json(auth,expected)
+    from _shared import operator_auth
+    token=a.root/'operator-credential'
+    envelope=operator_auth.encode_envelope('12345678-1234-4234-8234-123456789abc','pentacle',bytes(32))
+    o.c.atomic_bytes(token,envelope.encode())
+    go='synthetic-current-go'
+    binding={'type':'assistant.binding.ok','composite_stream_id':'fixture:assistant','stream_id':'fixture:desk',
+             'generation':'fd-generation','revision':5,'source':'durable'}
+    tell={'tell_id':go,'ledger_row_id':10,'from_stream_id':binding['stream_id'],'sender_verified':True,'sender_kind':'peer',
+          'sender_generation':binding['generation'],'to_stream_id':'synthetic-owner',
+          'original_to_stream_id':'synthetic-owner','delivery_status':'delivered',
+          'delivered_at':datetime.now(timezone.utc).isoformat(),
+          'text':f'GO record-ordinary-manual-recovery {pins["operation"]} {o.c.file_digest(auth)} {replacement}'}
+    ledger={'type':'ledger_get.ok','tell_id':go,'ledger_row_id':10,'tell':tell,'read_only':True,
+            'source':'v2_tell_deliveries'}
+    wire={'binding':binding,'ledger':ledger,'requests':[],'runtime_sha':target,'on_request':{}}
+    class Socket:
+        def __init__(self):
+            self.pending=[{'type':'welcome','runtime_sha':wire['runtime_sha'],
+                           'auth':{'operator':{'nonce':operator_auth.encode_b64url(bytes(32))}}}]
+        def __enter__(self):
+            return self
+        def __exit__(self,*error):
+            if 'on_disconnect' in wire:
+                wire['on_disconnect']()
+        def send(self,data):
+            frame=json.loads(data)
+            verb=frame['type']
+            wire['requests'].append(verb)
+            if verb=='hello':
+                assert frame['auth_v2']['proof']
+                response={'type':'hello'}
+                if wire.get('reject_hello'):
+                    response={'type':'hello.error'}
+            elif verb=='assistant.binding':
+                response=wire['binding']
+                if wire.get('role_drift') and wire['requests'].count(verb)>1:
+                    response={**response,'revision':6}
+            elif verb=='inspect_stream':
+                assert frame['stream_id']==binding['stream_id'] and frame['event_tail']==0
+                response={'type':'inspect_stream.ok','stream_id':binding['stream_id'],
+                          'session':{'status':'closed' if wire.get('closed_fd') else 'open',
+                                     'session_generation':binding['generation']}}
+            else:
+                assert verb=='ledger_get'
+                response={'type':'ledger_get.error'} if frame.get('tell_id')!=go else wire['ledger']
+                if 'after_request' in wire:
+                    wire['after_request']()
+            hook=wire['on_request'].get((verb,wire['requests'].count(verb)))
+            if hook is not None:
+                hook()
+            self.pending.append({**response,'request_id':frame['request_id']})
+        def recv(self,*,timeout):
+            assert timeout>0
+            return json.dumps(self.pending.pop(0))
+
+    def connect(url,**options):
+        assert url=='ws://127.0.0.1:7791' and options['origin'] and options['proxy'] is None
+        return Socket()
+
+    monkeypatch.setattr(d,'connect',connect)
+    args=['--record-ordinary-manual-recovery',str(b.folder),'--manual-recovery-authorization',str(auth),
+          '--operator-recovery-receipt',str(operator),'--manual-recovery-operator-credential',str(token),
+          '--recovery-go-tell-id',go]
+    return a,b,failed,pointer,journal,immutable,auth,operator,wire,args
+
+
+def test_manual_disposition_cli_closes_old_fence(manual_operation, capsys):
+    a,b,failed,pointer,journal,immutable,_,_,wire,args=manual_operation
+    protected_before=(pointer.read_bytes(),immutable.read_bytes(),a.observe(b.bundle))
+    failed_bytes=journal.read_bytes()
+    with pytest.raises(o.c.Invalid,match='unfinished'):
+        o.fence(a.repo)
+    assert invoke(a,b,authority(a,b))==d.EXIT_REFUSED
+    assert journal.read_bytes()==failed_bytes
+    assert cli(a.root,args)==d.EXIT_OK
+    rendered=json.loads(capsys.readouterr().out)
+    terminal=o.sealed_read(journal)
+    audit=terminal['manual_recovery_audit']
+    assert terminal['sequence']==10 and terminal['phase']=='aborted'
+    assert terminal['result']==rendered
+    assert rendered['outcome']==o.MANUAL_OUTCOME and rendered['full_fleet_acceptance'] is False
+    assert base64.b64decode(audit['original_journal_bytes'])==failed_bytes
+    assert audit['original_failure']==failed['result']
+    assert terminal['process']==failed['process']
+    assert audit['serving']['process']['pid']==32202
+    assert audit['authenticated_readback']['ledger_row_id']==10
+    assert wire['requests']==['hello','assistant.binding','ledger_get','inspect_stream','assistant.binding']
+    o.fence(a.repo)  # This fence is byte-for-byte unchanged from #656.
+    assert (pointer.read_bytes(),immutable.read_bytes(),a.observe(b.bundle))==protected_before
+    assert not (a.root/'events').exists()
+
+    terminal_bytes=journal.read_bytes()
+    wire['requests'].clear()
+    assert cli(a.root,args)==d.EXIT_OK
+    assert json.loads(capsys.readouterr().out)==rendered
+    assert journal.read_bytes()==terminal_bytes and not wire['requests']
+    assert invoke(a,b,authority(a,b))==d.EXIT_REFUSED
+
+
+@pytest.mark.parametrize('damage',[
+    'operation','pointer','sequence','journal','bundle','receipt','no_auth','auth_state',
+    'wrong_go','go_text','unverified_fd','fd_generation','role_drift','closed_fd','stale_go','hello_error',
+    'request_error','release','pid','birth','boot','listener','stamp','controller','file_drift',
+    'cas_pointer','cas_auth','cas_process','proof_expired',
+])
+def test_manual_disposition_mismatch_keeps_fence(manual_operation, damage, monkeypatch):
+    a,b,_,pointer,journal,immutable,auth,operator,wire,args=manual_operation
+    if damage in ('operation','auth_state'):
+        value=o.c.read_json(auth)
+        value['operation' if damage=='operation' else 'expected_serving']='foreign'
+        o.c.atomic_json(auth,value)
+    elif damage in ('pointer','journal','bundle'):
+        path={'pointer':pointer,'journal':journal,'bundle':immutable}[damage]
+        with path.open('ab') as out:
+            out.write(b' ')
+    elif damage=='sequence':
+        value=o.sealed_read(journal)
+        value.pop('sha256')
+        o.sealed_write(journal,{**value,'sequence':8})
+    elif damage=='receipt':
+        o.c.atomic_bytes(operator,b'foreign')
+    elif damage=='no_auth':
+        auth.unlink()
+    elif damage=='wrong_go':
+        args[-1]='other-go'
+    elif damage=='go_text':
+        wire['ledger']['tell']['text']='old authorization'
+    elif damage=='unverified_fd':
+        wire['ledger']['tell']['sender_verified']=False
+    elif damage=='fd_generation':
+        wire['ledger']['tell']['sender_generation']='retired'
+    elif damage in ('role_drift','closed_fd'):
+        wire[damage]=True
+    elif damage=='stale_go':
+        wire['ledger']['tell']['delivered_at']=(datetime.now(timezone.utc)-timedelta(minutes=11)).isoformat()
+    elif damage=='hello_error':
+        wire['reject_hello']=True
+    elif damage=='request_error':
+        wire['ledger']['type']='ledger_get.error'
+    elif damage=='release':
+        wire['runtime_sha']='1'*40
+    elif damage in ('pid','birth','boot','listener','controller'):
+        p=a.probes()
+        if damage in ('pid','birth'):
+            p['process'][damage]=17 if damage=='pid' else 'foreign'
+        else:
+            p[{'boot':'boot_uuid','controller':'controller_sha'}.get(damage,damage)]='foreign'
+        a.save_probes(p)
+    elif damage in ('stamp','file_drift'):
+        (a.root/'files'/('stamp' if damage=='stamp' else 'plist')).write_bytes(b'foreign')
+    elif damage in ('cas_pointer','cas_auth'):
+        def during_request():
+            path=pointer if damage=='cas_pointer' else auth
+            with path.open('ab') as out:
+                out.write(b' ')
+        wire['after_request']=during_request
+    elif damage=='cas_process':
+        def during_request():
+            p=a.probes()
+            p['process']['pid']=70
+            a.save_probes(p)
+        wire['after_request']=during_request
+    elif damage=='proof_expired':
+        monkeypatch.setattr(o,'MANUAL_PROOF_SECONDS',0.0)
+    before=(pointer.read_bytes(),journal.read_bytes(),immutable.read_bytes(),a.observe(b.bundle))
+    assert cli(a.root,args)==d.EXIT_REFUSED
+    after=(pointer.read_bytes(),journal.read_bytes(),immutable.read_bytes(),a.observe(b.bundle))
+    assert after[1:3]==before[1:3]
+    if damage!='cas_pointer':
+        assert after[0]==before[0]
+    if damage!='cas_process':
+        assert after[3]==before[3]
+    assert not (a.root/'events').exists()
+    with pytest.raises(o.c.Invalid,match='unfinished'):
+        o.fence(a.repo)
+
+
+@pytest.mark.parametrize('edge,damage',[
+    pytest.param(('inspect_stream',1),'process',id='inspect-process'),
+    pytest.param(('assistant.binding',2),'stamp',id='final-binding-stamp'),
+    pytest.param(None,'process',id='post-rpc-disconnect-process'),
+])
+def test_manual_disposition_rejects_late_serving_drift(manual_operation, monkeypatch, edge, damage):
+    a,b,_,pointer,journal,immutable,auth,operator,wire,args=manual_operation
+    protected=(pointer,journal,immutable,auth,operator)
+    before=[path.read_bytes() for path in protected]
+    injected=[]
+    journal_writes=[]
+    def change_serving():
+        if damage=='process':
+            probes=a.probes()
+            probes['process'].update(pid=33303,birth='synthetic-replacement-birth')
+            probes['boot_uuid']=str(uuid4())
+            a.save_probes(probes)
+        else:
+            (a.root/'files'/'stamp').write_bytes(b'synthetic external stamp drift')
+        injected.append(a.observe_manual(b.bundle))
+
+    if edge is None:
+        wire['on_disconnect']=change_serving
+    else:
+        wire['on_request'][edge]=change_serving
+
+    atomic_bytes=o.c.atomic_bytes
+    def record_writes(path,data,**options):
+        if path==journal:
+            journal_writes.append(path)
+        return atomic_bytes(path,data,**options)
+    monkeypatch.setattr(o.c,'atomic_bytes',record_writes)
+
+    status=cli(a.root,args)
+    assert len(injected)==1
+    assert status==d.EXIT_REFUSED and not journal_writes, 'late serving drift reached terminal publication'
+    assert [path.read_bytes() for path in protected]==before
+    assert a.observe_manual(b.bundle)==injected[0]
+    assert not (a.root/'events').exists()
+    with pytest.raises(o.c.Invalid,match='unfinished'):
+        o.fence(a.repo)
+
+
+@pytest.mark.parametrize('stage',['before_commit','after_commit'])
+def test_manual_disposition_atomic_audit_and_replay(manual_operation, monkeypatch,stage):
+    a,b,_,pointer,journal,immutable,auth,_,wire,args=manual_operation
+    before=(pointer.read_bytes(),journal.read_bytes(),immutable.read_bytes(),a.observe(b.bundle))
+    real=o.c.atomic_bytes
+    def interrupted(path,data,**kwargs):
+        assert path==journal
+        if stage=='after_commit':
+            real(path,data,**kwargs)
+        raise OSError('synthetic commit interrupted')
+    with monkeypatch.context() as patch:
+        patch.setattr(o.c,'atomic_bytes',interrupted)
+        assert cli(a.root,args)==d.EXIT_REFUSED
+    assert (pointer.read_bytes(),immutable.read_bytes(),a.observe(b.bundle))==(before[0],before[2],before[3])
+    if stage=='before_commit':
+        assert journal.read_bytes()==before[1]
+        with pytest.raises(o.c.Invalid,match='unfinished'):
+            o.fence(a.repo)
+    else:
+        assert base64.b64decode(o.sealed_read(journal)['manual_recovery_audit']['original_journal_bytes'])==before[1]
+    assert cli(a.root,args)==d.EXIT_OK
+    after=journal.read_bytes()
+    different_go=[*args[:-1],'other-fresh-go']
+    assert cli(a.root,different_go)==d.EXIT_REFUSED
+    value=o.c.read_json(auth)
+    o.c.atomic_json(auth,{**value,'replacement_controller_sha':'a'*40})
+    assert cli(a.root,args)==d.EXIT_REFUSED
+    assert journal.read_bytes()==after
+    assert not (a.root/'events').exists()
+
+
+def test_manual_disposition_cli_uses_common_lock(manual_operation):
+    a,_,_,_,journal,_,_,_,wire,args=manual_operation
+    before=journal.read_bytes()
+    with o.c.transaction_lock(a.repo):
+        assert cli(a.root,args)==d.EXIT_REFUSED
+    assert journal.read_bytes()==before
+    assert not wire['requests']
+
+
+@pytest.mark.parametrize('drift',[None,'launch_arguments','listener_pid','boot','stamp_release','managed_input'])
+def test_concrete_manual_observation_binds_runtime_and_boot(manual_operation, monkeypatch,drift):
+    a,b,_,_,_,_,_,_,_,_=manual_operation
+    label=d.V2_DAEMON_LABEL
+    workdir=a.repo/'services/chat-stream-v2'
+    python=d._venv_python(a.repo,a.service)
+    argv=[str(python),str(workdir/'main.py'),'--host','127.0.0.1','--port','7791']
+    launchd=f'\n program = {argv[0]}\n arguments = {{\n'+'\n'.join(argv)+'\n }\n'
+    paths=a.paths(b.bundle['metadata'])
+    paths['plist'].write_bytes(plistlib.dumps({'Label':label,'WorkingDirectory':str(workdir),'ProgramArguments':argv}))
+    source=a.git('rev-parse','HEAD')
+    paths['stamp'].write_bytes(o.c.canonical({'sha':source if drift!='stamp_release' else '1'*40}))
+    if drift=='managed_input':
+        paths['settings'].write_bytes(b'configuration changed')
+    process=a.probes()['process']
+    generation={'pid':process['pid'],'start':process['birth'],'boot_uuid':a.probes()['boot_uuid']}
+    logs=[a.root/'stdout.log',a.root/'stderr.log']
+    for index,path in enumerate(logs):
+        ident={**generation,'boot_uuid':str(uuid4())} if drift=='boot' and index else generation
+        path.write_text(f'generation={json.dumps(ident)} chat_streamd_v2 listening on {o.MANUAL_LISTENER}\n')
+    monkeypatch.setattr(d,'_daemon_log_paths',lambda service: logs)
+    monkeypatch.setattr(d,'_managed_log_config',lambda service: None)
+    monkeypatch.setattr(a,'job',lambda target: {key:process[key] for key in ('loaded','pid','birth')}
+                        if target==label else a.probes()['collector'])
+
+    def checked(cmd):
+        if cmd[0]=='launchctl':
+            return SimpleNamespace(stdout=launchd.replace('--host','--changed') if drift=='launch_arguments' else launchd)
+        if cmd[0]=='ps':
+            return SimpleNamespace(stdout=' '.join(argv))
+        assert cmd[0]=='/usr/sbin/lsof'
+        pid=1 if drift=='listener_pid' else process['pid']
+        return SimpleNamespace(stdout=f'p{pid}\nn{o.MANUAL_LISTENER}\n')
+
+    monkeypatch.setattr(a.runtime,'checked',checked)
+    if drift:
+        with pytest.raises((o.c.Invalid, ValueError),match='manual recovery|generation identities'):
+            o.OrdinaryRuntime.observe_manual(a,b.bundle)
+    else:
+        evidence=o.OrdinaryRuntime.observe_manual(a,b.bundle)
+        assert evidence['source']==source and evidence['boot_uuid']==generation['boot_uuid']
+        assert evidence['process']=={'sha':source,'loaded':True,'pid':process['pid'],'birth':process['birth']}
+        assert evidence['launch_arguments_sha256']==o.c.digest(argv)
+        assert evidence['files']['stamp']==o.file_state(paths['stamp'])
