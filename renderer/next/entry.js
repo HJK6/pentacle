@@ -32,6 +32,10 @@ const { mountChatList } = require('./chat_list');
 const { isProtectedAssistant } = require('../chat_presentation');
 const { configuredAssistantRole } = require('../assistant_role');
 const { isWorking, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines } = require('./chat_status');
+const { createReadingWidth } = require('./reading_width');
+const { createMicrophonePreference } = require('./microphone');
+const { mountSettingsFields } = require('./settings_fields');
+const { trackScroll } = require('./scroll_activity');
 const store = window.PentacleChatStore;
 const view = window.PentacleChatView;
 const core = window.PentacleChatCore;
@@ -78,6 +82,11 @@ function applyLaneFrame(frame) {
 let storage;
 try { storage = window.localStorage; } catch {}
 const readSetting = key => { try { return storage?.getItem(key); } catch { return null; } };
+const saveSetting = (key, value) => { try { storage?.setItem(key, value); } catch {} };
+const reading = createReadingWidth(document.documentElement, storage);
+let settingsFields = null;
+const microphone = createMicrophonePreference(window, storage, () => settingsFields?.paintMicrophone());
+trackScroll(document);
 const seen = createSeenMarks(storage);
 const clock = workingClock();
 const pendingNames = new Map();
@@ -128,7 +137,7 @@ const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, moun
   paintTranscript, attachTranscript, requestHistory, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
-  onSwitch: openChatSwitch, nameFor: chatName,
+  onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions,
 })]));
 const designCard = node('section', 'card design-card', stage); designCard.hidden = true;
 designCard.setAttribute('aria-label', 'Design');
@@ -154,8 +163,9 @@ chatsButton.setAttribute('aria-expanded', 'false');
 chatsButton.setAttribute('aria-controls', popover.id);
 let assistantComposerControl = null; let assistantComposerStream = null; let limitsControl = null;
 let unmountQuestionList = null;
-function mountAssistantComposer(id) { if (!id || id === assistantComposerStream) return; assistantComposerControl?.dispose(); assistantComposerStream = id; assistantComposerControl = mountComposer({ host: assistantComposer, transcript: assistantVoice, streamId: id, drafts, cc, chatStore: store }); }
+function mountAssistantComposer(id) { if (!id || id === assistantComposerStream) return; assistantComposerControl?.dispose(); assistantComposerStream = id; assistantComposerControl = mountComposer({ host: assistantComposer, transcript: assistantVoice, streamId: id, drafts, cc, chatStore: store, env: window, recorderOptions: microphone.recorderOptions }); }
 function closePopover() {
+  settingsFields?.destroy(); settingsFields = null;
   chatList?.destroy(); chatList = null;
   if (switchSeat) cards[switchSeat].title.setAttribute('aria-expanded', 'false');
   switchSeat = null;
@@ -342,7 +352,9 @@ function attachTranscript(transcript, source) { transcript.addEventListener('cli
 attachTranscript(assistantInner, 'assistant');
 assistantInner.addEventListener('keydown', event => { const update = event.target.closest('.slot-chat-lane-update[data-lane-id]'); if (update && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openLaneTarget(update.dataset.laneId); } });
 function renderPopover() {
-  if (state.popover === 'chats' || state.popover === 'switch') {
+  const isChatList = state.popover === 'chats' || state.popover === 'switch';
+  popover.classList.toggle('next-chat-list-popover', isChatList);
+  if (isChatList) {
     if (!chatList) {
       popover.replaceChildren();
       chatList = mountChatList(popover, { choose: chooseChat, rename: renameChat, remove: deleteChat });
@@ -351,6 +363,7 @@ function renderPopover() {
     paintChatList();
     return;
   }
+  if (state.popover === 'settings' && settingsFields) return;
   if (state.popover === 'limits' && limitsControl) { limitsControl.update({ limits: store.getLimits(), hosts: state.hosts }); return; }
   popover.replaceChildren();
   if (state.popover === 'dashboards') {
@@ -362,26 +375,52 @@ function renderPopover() {
   } else if (state.popover === 'questions') {
     unmountQuestionList = questionsControl?.mountList(popover) || null;
   } else if (state.popover === 'settings') {
-    const heading = node('div', 'theme-heading', popover); heading.textContent = 'Theme'; const grid = node('div', 'themes', popover); const selected = document.documentElement.dataset.theme || 'dark';
-    for (const theme of ['dark', 'light', 'cosmic']) { const row = button(theme, `<span class="theme-preview sw-${theme}" aria-hidden="true"><span class="theme-mini"><i></i><b></b></span></span><span>${theme[0].toUpperCase() + theme.slice(1)}</span>`, `theme-choice${selected === theme ? ' on' : ''}`); row.setAttribute('aria-pressed', String(selected === theme)); row.onclick = () => { document.documentElement.classList.add('swap'); document.documentElement.dataset.theme = theme; localStorage.setItem('pentacle.next.theme', theme); renderPopover(); requestAnimationFrame(() => document.documentElement.classList.remove('swap')); }; grid.append(row); }
+    const heading = node('div', 'theme-heading', popover);
+    heading.textContent = 'Theme';
+    const grid = node('div', 'themes', popover);
     const sidebar = node('div', 'sidebar-setting', popover);
     node('div', 'theme-heading', sidebar).textContent = 'Sidebar';
     const choices = node('div', 'sidebar-choices', sidebar);
     choices.setAttribute('role', 'group');
     choices.setAttribute('aria-label', 'Sidebar');
+    const themeChoices = new Map();
+    const railChoices = new Map();
+    const paintSettings = () => {
+      const currentTheme = document.documentElement.dataset.theme || 'dark';
+      for (const [name, control] of themeChoices) {
+        control.classList.toggle('on', currentTheme === name);
+        control.setAttribute('aria-pressed', String(currentTheme === name));
+      }
+      for (const [name, control] of railChoices)
+        control.setAttribute('aria-pressed', String(state.layout.rail === name));
+    };
+    for (const theme of ['dark', 'light', 'cosmic']) {
+      const row = button(theme, `<span class="theme-preview sw-${theme}" aria-hidden="true"><span class="theme-mini"><i></i><b></b></span></span><span>${theme[0].toUpperCase() + theme.slice(1)}</span>`, 'theme-choice');
+      row.onclick = () => {
+        document.documentElement.classList.add('swap');
+        document.documentElement.dataset.theme = theme;
+        saveSetting('pentacle.next.theme', theme);
+        paintSettings();
+        requestAnimationFrame(() => document.documentElement.classList.remove('swap'));
+      };
+      themeChoices.set(theme, row);
+      grid.append(row);
+    }
     for (const value of ['left', 'top']) {
       const label = value === 'left' ? 'Left' : 'Top';
       const choice = button(label, label, 'sidebar-choice');
-      choice.setAttribute('aria-pressed', String(state.layout.rail === value));
       choice.onclick = () => {
         state.layout = layout.setRail(state.layout, value);
-        localStorage.setItem(railKey, value);
+        saveSetting(railKey, value);
         syncLayout();
-        renderPopover();
-        popover.querySelector(`.sidebar-choice[aria-label="${label}"]`)?.focus();
+        paintSettings();
+        choice.focus();
       };
+      railChoices.set(value, choice);
       choices.append(choice);
     }
+    paintSettings();
+    settingsFields = mountSettingsFields(popover, {reading, microphone});
   } else if (state.popover === 'limits') {
     const hostIds = Array.isArray(config.hostIds) && config.hostIds.length ? config.hostIds : ['local'];
     const hostOrder = hostIds.map(id => hostPresentation.streamHost(config, id));

@@ -10,7 +10,7 @@ const entryRequire = createRequire(entry);
 const laneCore = require('../pentacle-chat-core/src/services/workLanes.ts');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function openShell(t, width = 1440, storedRail = null, storageUnavailable = false) {
+function openShell(t, width = 1440, storedRail = null, storageUnavailable = false, configure = () => {}) {
   const dom = new JSDOM('<main id="app"></main>', { url: 'https://fixture.invalid/next/', runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   t.after(() => window.close());
@@ -21,6 +21,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   if (storageUnavailable) Object.defineProperty(window, 'localStorage', {
     get() { throw new window.DOMException('Storage unavailable', 'SecurityError'); },
   });
+  configure(window);
   window.requestAnimationFrame = fn => setImmediate(fn);
   window.ResizeObserver = class { observe() {} disconnect() {} };
   if (!window.HTMLElement.prototype.setPointerCapture) {
@@ -346,4 +347,106 @@ test('rename suppresses Escape/blur saves, rejects empty names and rolls back a 
   assert.equal(row('a'),null);
   assert.equal(s.$('[data-pane=chat]').hidden,true);
   assert.equal(s.$('[data-pane=chat2]').hidden,false);
+});
+
+test('U1 Settings applies an exact shared width, keeps focus during renders and restores invalid input', async t => {
+  const s = openShell(t, 1440, null, false, window => window.localStorage.setItem('pentacle.next.read', '640'));
+  await flush();
+  const root = s.$('html');
+  assert.equal(root.style.getPropertyValue('--read'), '640px', 'a stored width reaches the live workspace');
+  s.$('[aria-label=Settings]').click();
+  const field = s.$('#next-text-width');
+  const slider = s.$('.next-width-slider');
+  assert.equal(field.value, '640');
+  assert.equal(field.maxLength, 4);
+  field.focus();
+  assert.ok(root.classList.contains('next-read-guides'));
+  const input = (el, text) => { el.value = text; el.dispatchEvent(new s.window.Event('input', {bubbles:true})); };
+  input(field, '905');
+  assert.equal(root.style.getPropertyValue('--read'), '905px');
+  assert.equal(s.window.localStorage.getItem('pentacle.next.read'), '905');
+  s.update();
+  assert.equal(s.window.document.activeElement, field);
+  input(field, '12a'); assert.equal(root.style.getPropertyValue('--read'), '905px');
+  field.blur(); assert.equal(field.value, '905');
+  assert.ok(!root.classList.contains('next-read-guides'));
+  slider.focus(); input(slider, '1200');
+  assert.equal(field.value, '1200');
+  assert.equal(root.style.getPropertyValue('--read'), '1200px');
+  input(field, '2400');
+  assert.equal(slider.value, '1200');
+  assert.equal(slider.getAttribute('aria-valuetext'), '1200 pixels');
+  assert.equal(field.value, '2400');
+  s.$('[aria-label=Settings]').click();
+  assert.ok(!root.classList.contains('next-read-guides'));
+});
+
+test('U2 Settings lists named physical microphones, preserves a sole selected mic and falls back on device loss', async t => {
+  const d = (deviceId,label) => ({kind:'audioinput',deviceId,label});
+  const alias = d('default','Default');
+  const one = d('a','Input A'), two = d('b','Input B'), three = d('c','Input C');
+  let devices = [alias, one, two];
+  let target, selectionFailure;
+  const requests = [];
+  const s = openShell(t, 1440, null, false, window => {
+    Object.defineProperty(window,'isSecureContext',{value:true});
+    target = new window.EventTarget();
+    target.enumerateDevices = async () => devices;
+    target.getUserMedia = async opts => {
+      requests.push(JSON.parse(JSON.stringify(opts)));
+      throw new window.DOMException('Fixture, no capture', selectionFailure || 'NotAllowedError');
+    };
+    Object.defineProperty(window.navigator,'mediaDevices',{value:target});
+    window.localStorage.setItem('pentacle.next.mic','b');
+  });
+  const store = s.window.localStorage;
+  await flush(); s.choose('a'); s.$('[aria-label=Settings]').click();
+  const current = () => s.$('.next-mic-choice')?.firstElementChild.textContent ?? '';
+  assert.equal(current(), 'Input B', 'a saved microphone restores as a concrete choice');
+  s.$('.next-mic-choice').click();
+  assert.deepEqual([...s.window.document.querySelectorAll('.next-mic-options button')].map(el=>el.textContent),
+    ['System default','Input A','Input B']);
+  s.$('[aria-label=Settings]').click();
+  const record = async pane => {
+    s.$(`[data-pane=${pane}] [data-next-mic]`).click();
+    await flush(); await flush();
+  };
+  await record('chat'); await record('assistant');
+  assert.deepEqual(requests, [{audio:{deviceId:{exact:'b'}}},{audio:{deviceId:{exact:'b'}}}]);
+  assert.equal(store.getItem('pentacle.next.mic'),'b', 'permission refusal is not unplugging');
+  const updateDevices = async rows => { devices=rows; target.dispatchEvent(new s.window.Event('devicechange')); await flush(); };
+  await updateDevices([alias, d('b','')]);
+  s.$('[aria-label=Settings]').click();
+  assert.equal(s.$('.next-mic-setting').hidden,true);
+  assert.equal(store.getItem('pentacle.next.mic'),'b');
+  s.$('[aria-label=Settings]').click();
+  await record('chat');
+  assert.deepEqual(requests.at(-1),{audio:{deviceId:{exact:'b'}}});
+  selectionFailure='NotFoundError';
+  await record('chat');
+  assert.equal(store.getItem('pentacle.next.mic'),null);
+  await updateDevices([alias,one,three]);
+  s.$('[aria-label=Settings]').click();
+  assert.equal(current(),'System default');
+  s.$('[aria-label=Settings]').click();
+  await record('assistant');
+  assert.deepEqual(requests.at(-1),{audio:true});
+});
+
+
+test('only rail and title chat lists opt into the narrow scrollbar', async t => {
+  const s=openShell(t);
+  await flush();
+  const popover=s.$('.popover');
+  s.$('.chats-button').click();
+  assert.ok(popover.classList.contains('next-chat-list-popover'));
+  s.$('.popover [data-stream-id="fixture:a"]').click();
+  s.$('[data-pane=chat] .next-chat-title').click();
+  assert.ok(popover.classList.contains('next-chat-list-popover'));
+  s.$('[aria-label=Settings]').click();
+  assert.equal(popover.classList.contains('next-chat-list-popover'),false);
+  const limits=s.$('[aria-label="Limits and machines"]');
+  limits.click();
+  try { assert.equal(popover.classList.contains('next-chat-list-popover'),false); }
+  finally { limits.click(); }
 });

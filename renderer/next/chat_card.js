@@ -12,7 +12,7 @@ const NEW_CHAT = '__new__';
 // store remains the source for transcript/status, and drafts stay per stream.
 function mountChatCard(stage, { key, slot, icons, node, button, sessions, store, cc, config,
   drafts, history, paintTranscript, attachTranscript, requestHistory, catalogLoader,
-  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor }) {
+  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor, recorderOptions }) {
   const env = stage.ownerDocument.defaultView;
   const card = node('section', 'card chat-card', stage);
   card.dataset.pane = key;
@@ -234,7 +234,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     renderMode();
     if (id === NEW_CHAT) void paintNewChat(selection);
     else if (id) {
-      composer = mountComposer({ host: composerMount, transcript: voice, streamId: id, drafts, cc, chatStore: store, env });
+      composer = mountComposer({ host: composerMount, transcript: voice, streamId: id, drafts, cc, chatStore: store, env, recorderOptions });
       requestHistory(id);
     }
     render();
