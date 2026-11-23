@@ -360,12 +360,26 @@ def test_root_config_parent_check_is_not_bypassed(tmp_path):
 
 
 @pytest.fixture
-def frozen_report_reader(monkeypatch):
-    """Import the pinned installed module without invoking its launcher or daemon."""
+def frozen_report_reader(monkeypatch, tmp_path):
+    """Import the pinned module without invoking its launcher or daemon.
+
+    Without an installed release the fixture freezes a copy of this checkout's
+    reader package, so the cases always run; deployment sets the release path
+    and module hash to exercise the installed bytes.
+    """
     release_value = os.environ.get("PENTACLE_WORK_REPORT_RELEASE_DIR")
     expected_sha256 = os.environ.get("PENTACLE_WORK_REPORT_MODULE_SHA256")
     if not release_value or not expected_sha256:
-        pytest.skip("installed-release fixture requires a release path and module hash")
+        release_value = str(tmp_path / "frozen-release")
+        shutil.copytree(
+            Path(__file__).parents[1] / "agent_orch",
+            Path(release_value) / "app/services/agent-orch/agent_orch",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        (Path(release_value) / "app/runtime-deps/websockets").mkdir(parents=True)
+        expected_sha256 = digest(
+            Path(release_value) / "app/services/agent-orch/agent_orch/work_report_cli.py"
+        )
 
     release = Path(release_value).resolve(strict=True)
     package_dir = release / "app/services/agent-orch/agent_orch"
