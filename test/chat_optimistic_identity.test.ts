@@ -78,7 +78,10 @@ test('ordinary retry and reconnect keep the input identity while old RPC receipt
   controller.setSendBridge(async args => { sends.push(args); return { ok: false, error: 'unavailable' }; });
   const id = controller.sendTurn(STREAM, 'retry this');
   await flush();
+  assert.equal(controller.getTurnPhase(STREAM), 'idle', 'the definitive dispatch failure settles its own turn');
   assert.equal(controller.retryOptimisticSend(id), true);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, id, 'Retry owns a new pending turn');
+  assert.equal(controller.getState().optimisticSends?.[id]?.status, 'dispatched');
   await flush();
   assert.equal(sends.length, 2);
   assert.equal(sends[0].optimisticId, id);
@@ -99,6 +102,116 @@ test('ordinary retry and reconnect keep the input identity while old RPC receipt
   assert.equal(replay.length, 2, 'eligible reconnect replay is dispatched');
   assert.equal(replay[1].optimisticId, replayId);
   assert.equal(replay[1].requestId, requestId, 'reconnect preserves the current request identity');
+});
+
+test('a failure receipt preserves other pending, confirmed and provider-held work', async t => {
+  const controller = store(t);
+  const sends: Parameters<ChatSendBridge>[0][] = [];
+  const inventory = (working: boolean, generation = 'one') =>
+    controller.applyFrame({ type: 'session.inventory', sessions: controller.getState().sessions.map(session =>
+      session.stream_id === STREAM ? { ...session, working, session_generation: generation } : session) });
+  const fail = (index: number) =>
+    controller.applyFrame({ type: 'send.result', request_id: sends[index].requestId, delivery: 'not_landed' });
+  controller.setSendBridge(async args => {
+    sends.push(args);
+    return { ok: true, provider_queued: args.text === 'provider-held' };
+  });
+  inventory(false);
+  const owner = controller.sendTurn(STREAM, 'owns the pending turn');
+  controller.sendTurn(STREAM, 'another send');
+  await flush();
+  fail(1);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, owner);
+  inventory(true);
+  fail(0);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, owner, 'inventory confirmed independent work');
+  inventory(false, 'two');
+  const held = controller.sendTurn(STREAM, 'provider-held');
+  await flush();
+  assert.equal(controller.getState().optimisticSends?.[held]?.provider_queued, true);
+  fail(2);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, held, 'provider-held work keeps its turn');
+  inventory(false, 'three');
+  const replacement = controller.sendTurn(STREAM, 'replacement owns the turn');
+  await flush();
+  fail(2);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, replacement);
+});
+
+test('inventory replaces the predecessor draft and accepts the successor draft', t => {
+  const controller = store(t);
+  const ordinary = controller.getState().sessions.find(session => session.stream_id === STREAM)!;
+  const predecessor = { ...ordinary, session_generation: 'first' };
+  const inventory = (session: typeof predecessor) =>
+    controller.applyFrame({ type: 'session.inventory', sessions: [session] });
+  const draft = (session: typeof predecessor, label: string) => controller.applyFrame({
+    type: 'chat.event', event: { ...session, kind: 'DRAFT', text: 'fixture draft',
+      timestamp: new Date().toISOString(), raw: { working: true, working_label: label } },
+  });
+
+  inventory(predecessor);
+  draft(predecessor, '17s');
+  inventory(predecessor);
+  assert.equal(controller.getState().drafts[STREAM]?.raw?.working_label, '17s');
+
+  const successor = { ...ordinary, session_generation: 'second', working: false,
+    draft: 'successor inventory draft' };
+  inventory(successor);
+  assert.equal(controller.getState().drafts[STREAM], undefined);
+  assert.equal(controller.getState().sessions[0].draft, successor.draft);
+  draft(successor, '3s');
+  assert.equal(controller.getState().drafts[STREAM]?.raw?.working_label, '3s');
+});
+
+test('definitive Retry waits for fresh provider custody before enabling Send now', async t => {
+  const controller = store(t);
+  const sends: Parameters<ChatSendBridge>[0][] = [];
+  controller.applyFrame({ type: 'session.inventory', sessions: controller.getState().sessions.map(session =>
+    session.stream_id === STREAM
+      ? { ...session, session_generation: 'fixture-generation', capabilities: { queued_send_now: true } }
+      : session) });
+  controller.setSendBridge(async args => {
+    sends.push(args);
+    return { ok: true, provider_queued: sends.length === 1 };
+  });
+  controller.setQueuedSendNowBridge(async () => ({ ok: true }));
+  const id = controller.sendTurn(STREAM, 'retry a provider-held send');
+  await flush();
+  assert.equal(controller.canSendQueuedNow(STREAM, id), true);
+  controller.applyFrame({ type: 'send.result', request_id: sends[0].requestId, delivery: 'not_landed' });
+
+  assert.equal(controller.retryOptimisticSend(id), true);
+  await flush();
+  assert.notEqual(sends[1].requestId, sends[0].requestId);
+  assert.equal(sends[1].optimisticId, id);
+  assert.equal(controller.sendQueuedNow(STREAM, id), false);
+  const row = controller.selectSessionDetail(STREAM).transcriptItems.find(item => item.optimisticId === id);
+  assert.equal(row?.sendState, 'sending');
+
+  controller.applyFrame({ type: 'send.result', request_id: sends[1].requestId, delivery: 'landed', provider_queued: true });
+  assert.equal(controller.canSendQueuedNow(STREAM, id), true);
+});
+
+test('weaker completions preserve the landed row and pending turn for the same request', async t => {
+  const controller = store(t);
+  const sends: Parameters<ChatSendBridge>[0][] = [];
+  controller.setSendBridge(async args => { sends.push(args); return { ok: true }; });
+  const id = controller.sendTurn(STREAM, 'landed before a weaker completion');
+  await flush();
+  const requestId = sends[0].requestId;
+  controller.applyFrame({ type: 'send.result', request_id: requestId, delivery: 'landed' });
+  const landed = controller.getState();
+  assert.equal(landed.optimisticSends?.[id]?.status, 'acked');
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, id);
+
+  for (const frame of [
+    { type: 'send.result', delivery: 'not_landed', confirmation_pending: true },
+    { type: 'send.result', delivery: 'not_landed', action_committed: true },
+    { type: 'send.indeterminate' },
+    { type: 'send.result', delivery: 'not_landed' },
+  ]) {
+    assert.equal(controller.applyFrame({ ...frame, request_id: requestId }), landed);
+  }
 });
 
 for (const reason of ['server_overloaded', 'Request is already pending', 'unavailable', 'socket closed']) {

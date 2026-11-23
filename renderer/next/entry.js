@@ -11,11 +11,12 @@ const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11');
 const { WebglAddon } = require('@xterm/addon-webgl');
 const layout = require('./layout');
+const pictures = require('./picture');
 const { createMelodyViewer } = require('./melody_viewer');
 const { createDesignViewer } = require('./design_viewer');
 const { initialDesignRoute, replaceDesignAddress } = require('./design_location');
 const { hydrateDesignPreviews, markDesignLinks } = require('./design_links');
-const { hydrateImageAttachments } = require('./image_attachments');
+const { createImageAttachments } = require('./image_attachments');
 const { parseDesignRoute } = require('../../lib/design_routes.cjs');
 const { mountComposer } = require('./composer');
 const { mountChatCard, NEW_CHAT } = require('./chat_card');
@@ -31,7 +32,7 @@ const { applyVersionedConnectionState } = require('../chat_stream_connection_sta
 const { mountChatList } = require('./chat_list');
 const { isProtectedAssistant } = require('../chat_presentation');
 const { configuredAssistantRole } = require('../assistant_role');
-const { isWorking, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines } = require('./chat_status');
+const { isWorking, hasConfirmedWork, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines } = require('./chat_status');
 const { createReadingWidth } = require('./reading_width');
 const { createMicrophonePreference } = require('./microphone');
 const { mountSettingsFields } = require('./settings_fields');
@@ -155,6 +156,29 @@ melodyCard.hidden = true;
 let melodyViewer;
 let designOpen = false;
 let currentDesignPath = null;
+const pictureCard = node('section', 'card picture-card', stage);
+pictureCard.hidden = true;
+pictureCard.dataset.pane = 'dash';
+pictureCard.setAttribute('aria-label', 'Picture');
+const pictureFull = button('Full screen', icons.full, 'icon-button fullscreen picture-full');
+const pictureClose = button('Close picture', icons.close, 'icon-button picture-close');
+const pictureViewer = pictures.createPictureCard(pictureCard, { full: pictureFull, close: pictureClose });
+const imageAttachments = createImageAttachments(key => cc.chatFetchBlob(key));
+let currentPicture = null;
+const transcripts = [assistantInner, ...Object.values(cards).map(card => card.transcript)];
+pictureFull.onclick = toggleDashboardFullScreen;
+pictureClose.onclick = () => {
+  const origin = currentPicture?.id;
+  closeDashboard();
+  for (const transcript of transcripts) {
+    for (const thumb of transcript.querySelectorAll(pictures.selector)) {
+      if (pictures.pictureFrom(transcript, thumb).id === origin && !thumb.closest('[hidden]')) {
+        thumb.focus({ preventScroll: true });
+        return;
+      }
+    }
+  }
+};
 const lanesCard = node('section', 'card lanes-card', stage); lanesCard.hidden = true; lanesCard.dataset.pane = 'lanes';
 const brand = button('Assistant', '<span class="logo"></span>', 'rail-button brand on'); const group = node('div', 'rail-group', rail); const lanesButton = button('Lanes', icons.lanes, 'rail-button'); const dashboardsButton = button('Dashboards', icons.dashboards, 'rail-button'); const chatsButton = button('Chats', icons.chats, 'rail-button'); const questionsButton = button('Questions', icons.questions, 'rail-button'); group.append(lanesButton, dashboardsButton, chatsButton, questionsButton); rail.prepend(brand); node('div', 'rail-spacer', rail); const limitsButton = button('Limits and machines', icons.limits, 'rail-button'); const settingsButton = button('Settings', icons.settings, 'rail-button'); rail.append(limitsButton, settingsButton);
 const popover = node('div', 'popover', root.querySelector('.next-app')); popover.hidden = true; popover.id = 'next-workspace-popover';
@@ -245,7 +269,10 @@ function paintChatStatus() {
   if (unread) chatsButton.dataset.count = String(unread); else delete chatsButton.dataset.count;
   chatsButton.setAttribute('aria-label', unread ? 'Chats, ' + unread + ' unread' : 'Chats');
   brand.classList.toggle('assistant-unread', assistant.hidden && seen.unread(a));
-  clock.retain(new Set(sessions().map(s => s.stream_id)));
+  clock.retain(new Set(sessions().filter(s => {
+    const turn = store.getTurnState?.(s.stream_id);
+    return hasConfirmedWork(s, draftFor(s), turn?.phase);
+  }).map(s => s.stream_id)));
   paintWorking();
   if (chatList) paintChatList();
 }
@@ -254,7 +281,7 @@ function paintWorking() {
   brand.classList.toggle('assistant-working', !!working(a));
   const tick = (s, draw) => {
     const now = Date.now();
-    draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnPhase?.(s.stream_id) : undefined,
+    draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnState?.(s.stream_id) : undefined,
       s ? store.getWorkingElapsedMs?.(s.stream_id, now) : null, now));
   };
   tick(a, showAssistantWorking);
@@ -303,10 +330,11 @@ function openLaneTarget(laneId, goalId) {
   state.layout = layout.show(state.layout, 'lanes', true, innerWidth); syncLayout();
 }
 function paintTranscript(element, id) {
+  if (element.dataset.streamId !== (id || '')) delete element.dataset.rendered;
   element.dataset.streamId = id || '';
   if (!id) { element.textContent = 'Loading chat…'; return; }
   const detail = store.selectSessionDetail(id, { visibleCount: 120, includeDraft: false });
-  const html = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, streamId: id, allowQueuedSendNow: true });
+  const html = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true });
   const targets = element === assistantInner ? laneNameTargets() : [];
   const linkVersion = JSON.stringify(targets);
   if (element.dataset.rendered === html && element.dataset.linkVersion === linkVersion) {
@@ -327,8 +355,9 @@ function paintTranscript(element, id) {
     }
   }
   markDesignLinks(element, designCard.hidden ? null : currentDesignPath);
+  pictures.markPictures(element, pictureCard.hidden ? null : currentPicture?.id);
   hydrateDesignPreviews(element, key => cc.chatFetchBlob(key));
-  hydrateImageAttachments(element, key => cc.chatFetchBlob(key));
+  imageAttachments.hydrate(element);
   void view.hydrateFileAttachments(element);
   if (stick) scroller.scrollTop = scroller.scrollHeight;
 }
@@ -336,6 +365,17 @@ function attachTranscript(transcript, source) { transcript.addEventListener('cli
   const designLink = event.target.closest('[data-next-design-link]');
   if (designLink) {
     followDesignLink(source, designLink.dataset.nextDesignLink);
+    return;
+  }
+  const thumbnail = event.target.closest(pictures.selector);
+  if (thumbnail) {
+    const picture = pictures.pictureFrom(transcript, thumbnail);
+    state.layout = layout.follow(state.layout, source, picture.id, innerWidth);
+    if (state.layout.dash === picture.id) {
+      currentPicture = picture;
+      void pictureViewer.open(picture, () => imageAttachments.source(thumbnail));
+    }
+    syncLayout();
     return;
   }
   const laneLink = event.target.closest('.next-lane-name-link');
@@ -469,6 +509,8 @@ function syncLayout(admitted = null) {
   }
   const dashboardVisible = !designCard.hidden || melodyVisible;
   stage.classList.toggle('has-design', dashboardVisible);
+  pictureCard.hidden = !visible.cards.includes('dash') || !layout.isPicture(state.layout.dash);
+  stage.classList.toggle('has-picture', !pictureCard.hidden);
   const full = designCard.querySelector('.design-full');
   const fullLabel = state.layout.solo === 'dash' ? 'Leave full screen' : 'Full screen';
   const melodyFull = melodyCard.querySelector('[data-action="fullscreen"]');
@@ -478,6 +520,10 @@ function syncLayout(admitted = null) {
   }
   full.setAttribute('aria-label', fullLabel);
   full.title = fullLabel;
+  pictureFull.hidden = innerWidth < layout.PHONE_WIDTH;
+  pictureFull.setAttribute('aria-label', fullLabel);
+  pictureFull.title = fullLabel;
+  pictureFull.setAttribute('aria-pressed', String(state.layout.solo === 'dash'));
   lanesCard.hidden = !visible.cards.includes('lanes');
   lanesCard.classList.toggle('alone', !lanesCard.hidden && visible.cards.length === 1 && assistant.hidden);
   stageLayout.paint();
@@ -487,6 +533,11 @@ function syncLayout(admitted = null) {
   dashboardsButton.classList.toggle('on', dashboardVisible);
   dashboardsButton.setAttribute('aria-pressed', String(dashboardVisible));
   lanesButton.classList.toggle('on', !lanesCard.hidden);
+  if (currentPicture && state.layout.dash !== currentPicture.id) {
+    currentPicture = null;
+    pictureViewer.close();
+  }
+  for (const transcript of transcripts) pictures.markPictures(transcript, pictureCard.hidden ? null : currentPicture?.id);
   if (designOpen && !state.layout.dash?.startsWith('design:')) {
     designOpen = false;
     currentDesignPath = null;
@@ -560,7 +611,7 @@ function closeDashboard() {
 
 const stageLayout = mountStageLayout({
   stage, panes: () => ({ assistant, chat: cards.chat.element, chat2: cards.chat2.element,
-    dash: melodyCard.hidden ? designCard : melodyCard, lanes: lanesCard }),
+    dash: !pictureCard.hidden ? pictureCard : melodyCard.hidden ? designCard : melodyCard, lanes: lanesCard }),
   getState: () => state.layout,
   onLayout: next => { state.layout = next; syncLayout(); },
   onLift: () => { closePopover(); dismissOverlay(); },
@@ -589,7 +640,7 @@ function anchorPopover() {
   popover.style.setProperty('--rail-bottom', `${top}px`);
 }
 function openChat(id) {
-  state.layout = layout.show(state.layout, 'chat', id, innerWidth);
+  state.layout = layout.show(pictures.leavePicture(state.layout, innerWidth), 'chat', id, innerWidth);
   syncLayout();
   cards[state.layout.last]?.focus();
   render();

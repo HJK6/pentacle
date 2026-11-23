@@ -18,7 +18,9 @@ import {
   markOptimisticIndeterminateByRequestId,
   markOptimisticCancelledByOptimisticId,
   reconcileOptimisticSendWithServerEvent,
+  beginPentacleTurn,
   clearPentacleTurn,
+  clearPentacleStreamDraft,
   onReconnect,
   selectChatList,
   selectSessionDetail,
@@ -436,6 +438,18 @@ export class ChatStoreController {
 
   private setState(next: PentacleStreamState): void {
     if (next === this.state) return;
+    for (const streamId of Object.keys(this.workingElapsedAnchors)) {
+      const previous = this.state.sessions.find(item => item.stream_id === streamId);
+      const session = next.sessions.find(item => item.stream_id === streamId);
+      if (session?.session_kind === 'assistant_composite') continue;
+      const priorTurn = this.state.workingByStream?.[streamId];
+      const turn = next.workingByStream?.[streamId];
+      if (!session || previous?.session_generation !== session.session_generation
+          || (priorTurn && priorTurn.phase !== 'idle' && (!turn || turn.phase === 'idle'))
+          || (this.hasConfirmedWork(previous, this.state) && !this.hasConfirmedWork(session, next))) {
+        delete this.workingElapsedAnchors[streamId];
+      }
+    }
     this.state = next;
     for (const id of this.voiceMetas.keys()) {
       const send = next.optimisticSends?.[id];
@@ -476,6 +490,13 @@ export class ChatStoreController {
   getTurnPhase(streamId: string): 'idle' | 'pending' | 'working' {
     if (this.state.sessions.some(session => session.stream_id === streamId && session.session_kind === 'assistant_composite')) return 'idle';
     return (this.state.workingByStream?.[streamId] as TurnState | undefined)?.phase ?? 'idle';
+  }
+
+  private hasConfirmedWork(session: PentacleSessionSummary | undefined, state = this.state): boolean {
+    if (!session) return false;
+    const id = session.stream_id;
+    return session.working === true || state.drafts?.[id]?.raw?.working === true
+      || state.workingByStream?.[id]?.phase === 'working';
   }
 
   /** Full turn state for a stream (or undefined when idle/unknown). */
@@ -780,10 +801,20 @@ export class ChatStoreController {
     if (this.sendDispatches.has(send.request_id)) return false;
     const uncertain = send.status === 'indeterminate';
     const requestId = uncertain ? send.request_id : this.nextRequestId('retry');
-    const generation = this.state.sessions.find(item => item.stream_id === send.stream_id)?.session_generation;
+    const session = this.state.sessions.find(item => item.stream_id === send.stream_id);
+    const generation = session?.session_generation;
     if (generation) this.sendSessionGenerations.set(optimisticId, generation);
     else this.sendSessionGenerations.delete(optimisticId);
-    if (!uncertain) this.setState(rotateOptimisticSendRequestId(this.state, optimisticId, requestId));
+    if (!uncertain) {
+      const now = Date.now();
+      let next = rearmOptimisticSend(this.state, optimisticId, now);
+      next = rotateOptimisticSendRequestId(next, optimisticId, requestId);
+      if (session?.session_kind !== 'assistant_composite' && this.getTurnPhase(send.stream_id) === 'idle'
+          && !this.hasConfirmedWork(session) && !this.hasProviderQueuedRows(send.stream_id)) {
+        next = beginPentacleTurn(next, send.stream_id, optimisticId, now);
+      }
+      this.setState(next);
+    }
     const retry = this.state.optimisticSends?.[optimisticId];
     if (!retry) return false;
     this.dispatchOptimistic(retry.stream_id, optimisticId, requestId, retry.text, this.socketGeneration, retry.attachments ?? [], uncertain);
@@ -1158,6 +1189,23 @@ export class ChatStoreController {
     return false;
   }
 
+  private failOptimisticSend(requestId: string, reason: string): void {
+    const optimisticId = this.state.optimisticByRequestId?.[requestId];
+    const send = optimisticId ? this.state.optimisticSends?.[optimisticId] : undefined;
+    if (!send || send.request_id !== requestId) return;
+    const next = markOptimisticFailedByRequestId(this.state, requestId, reason);
+    if (next === this.state) return;
+
+    const streamId = send.stream_id;
+    const turn = this.getTurnState(streamId);
+    const session = this.state.sessions.find(item => item.stream_id === streamId);
+    const ownsPending = turn?.phase === 'pending' && turn.optimisticId === optimisticId
+      && session && session.session_generation === this.sendSessionGenerations.get(send.optimistic_id)
+      && session.session_kind !== 'assistant_composite' && !send.provider_queued
+      && !this.hasConfirmedWork(session);
+    this.setState(ownsPending ? clearPentacleTurn(next, streamId) : next);
+  }
+
   /**
    * Resolve a send-dispatch error (IPC rejected or returned ok:false). Mirrors
    * mobile: a TRANSIENT failure (the ws is down / reconnecting, or the error
@@ -1182,7 +1230,7 @@ export class ChatStoreController {
       this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
       return;
     }
-    this.setState(markOptimisticFailedByRequestId(this.state, requestId, reason));
+    this.failOptimisticSend(requestId, reason);
     logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_OPTIMISTIC_FAILED, {
       stream_id: streamId, optimistic_id: optimisticId, request_id: requestId, reason,
     });
@@ -1324,28 +1372,22 @@ export class ChatStoreController {
       return this.state;
     }
 
-    if (type === 'send.result' && typeof frame.request_id === 'string') {
-      // Phase 5: daemon send-completion frame forwarded by main. landed → ack
-      // the optimistic; not_landed (or any non-landed delivery) → fail it. Both
-      // map by request_id (the renderer-owned id we put on the wire). No-op if
-      // the optimistic was already reconciled/pruned by the server USER echo.
-      const requestId = frame.request_id as string;
-      if (frame.delivery === 'landed') {
-        this.setState(markOptimisticAckedByRequestId(this.state, requestId, Date.now(), { providerQueued: frame.provider_queued === true }));
-      } else if (frame.action_committed === true || frame.confirmation_pending === true) {
-        this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
-      } else {
-        const reason = String(frame.reason || frame.delivery || 'send_failed');
-        this.setState(markOptimisticFailedByRequestId(this.state, requestId, reason));
-      }
-      return this.state;
-    }
+    if ((type === 'send.result' || type === 'send.indeterminate') && typeof frame.request_id === 'string') {
+      const requestId = frame.request_id;
+      const optimisticId = this.state.optimisticByRequestId?.[requestId];
+      const send = optimisticId ? this.state.optimisticSends?.[optimisticId] : undefined;
+      if (!send || send.request_id !== requestId) return this.state;
 
-    if (type === 'send.indeterminate' && typeof frame.request_id === 'string') {
-      // Mirror mobile: the daemon could not confirm delivery (e.g. across a
-      // disconnect). Keep the optimistic reconcilable (indeterminate) so a later
-      // server USER echo can still reconcile it, rather than failing it.
-      this.setState(markOptimisticIndeterminateByRequestId(this.state, frame.request_id as string, Date.now()));
+      if (type === 'send.result' && frame.delivery === 'landed') {
+        this.setState(markOptimisticAckedByRequestId(this.state, requestId, Date.now(), { providerQueued: frame.provider_queued === true }));
+      } else if (!['acked', 'echoed', 'reconciled'].includes(send.status)) {
+        // A weaker completion can arrive after the landed receipt on the relay.
+        if (type === 'send.indeterminate' || frame.action_committed === true || frame.confirmation_pending === true) {
+          this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
+        } else {
+          this.failOptimisticSend(requestId, String(frame.reason || frame.delivery || 'send_failed'));
+        }
+      }
       return this.state;
     }
 
@@ -1375,13 +1417,13 @@ export class ChatStoreController {
     if (type === 'working.state') {
       // Mobile casts the whole frame as WorkingStateData — the working-state
       // fields are top-level on the frame, not nested. Mirror that exactly.
-      this.setState(applyPentacleWorkingState(this.state, frame as unknown as WorkingStateData));
       const wsStreamId = typeof frame.stream_id === 'string' ? (frame.stream_id as string) : '';
       if (wsStreamId) {
         // B2: anchor the daemon's authoritative per-turn elapsed for the timer.
         this.updateWorkingElapsedAnchor(wsStreamId, frame.elapsed_ms);
         this.armStaleTurnSettle(wsStreamId);
       }
+      this.setState(applyPentacleWorkingState(this.state, frame as unknown as WorkingStateData));
       return this.state;
     }
 
@@ -1391,9 +1433,17 @@ export class ChatStoreController {
     }
 
     if (type === 'session.inventory' && Array.isArray(frame.sessions)) {
-      this.setState(
-        applyPentacleSessionInventory(this.state, frame.sessions as PentacleSessionSummary[]),
-      );
+      const sessions = frame.sessions as PentacleSessionSummary[];
+      let current = this.state;
+      for (const session of sessions) {
+        if (!session.session_generation || !current.drafts[session.stream_id]) continue;
+        const previous = current.sessions.find(item => item.stream_id === session.stream_id);
+        if (previous?.session_generation && previous.session_generation !== session.session_generation) {
+          // Inventory carries drafts forward by stream ID. The old draft belongs to the replaced pane.
+          current = clearPentacleStreamDraft(current, session.stream_id);
+        }
+      }
+      this.setState(applyPentacleSessionInventory(current, sessions));
       return this.state;
     }
 
