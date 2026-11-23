@@ -25,11 +25,18 @@ The server sends `welcome` first:
   "type": "welcome",
   "runtime_sha": "<checkout-sha-or-empty>",
   "auth_required": false,
-  "auth": {"protocol_version": 2}
+  "auth": {"operator": {
+    "protocol_version": 2, "scheme": "hmac-sha256-v2",
+    "nonce": "<challenge>", "expires_at": 0
+  }}
 }
 ```
 
-The client then sends `hello`:
+The nonce is fresh per connection and `expires_at` is a Unix timestamp (shown
+as a placeholder above). Do not use the legacy `auth_required` field to decide
+whether the endpoint requires proof.
+
+A native loopback client may use the legacy `hello` without operator proof:
 
 ```json
 {
@@ -40,7 +47,10 @@ The client then sends `hello`:
 }
 ```
 
-The optional subscription controls visibility and event detail. Invalid event modes fall back to `full`; `snapshot: false` requests RPC-only mode. A successful handshake returns a typed `hello` result and, when requested, a snapshot of the caller's visible sessions.
+The optional subscription controls visibility and event detail. Invalid event modes fall back to `full`; `snapshot: false` or `mode: "rpc"`
+opts out of the snapshot and the server replies `ready`. With a snapshot
+subscription, a successful handshake sends the correlated `hello` and then a
+separate `snapshot` of the caller's visible sessions.
 
 ## Event backfill
 
@@ -117,6 +127,96 @@ Authentication is optional for a loopback fixture daemon. A deployment that enab
 
 Session ownership tokens are separate from operator credentials. A caller stream may include a short-lived token supplied through its process environment or a protected local file. The server derives authorization context from the verified token and ignores client-supplied private fields.
 
+## Independent client walkthrough
+
+Use a disposable daemon and its private credential registry. The daemon operator
+issues a per-client envelope with
+[`operator_auth_cli.py issue --client-kind pentacle`](../services/chat-stream-v2/tools/operator_auth_cli.py).
+Direct the output to an owned, mode-0600 file (`umask 077` before creating it),
+not the terminal. This is enrollment by an authorized operator, not a public
+self-registration verb. Revoke that fixture credential with
+`operator_auth_cli.py revoke <credential-id>` when finished. If using
+`--registry`, point issuance and revocation at the **same disposable registry**
+used by the daemon. See [network access](REMOTE_AUTH.md) for trust boundaries.
+
+1. On every connection, receive `welcome` and answer its `auth.operator`
+   challenge before it expires. Send `hello` with a unique `request_id`, the
+   envelope's `client_kind` in **`client`**, and `auth_v2` containing exactly
+   `scheme`, `credential_id`, and `proof`. Use the
+   [existing proof helper](../services/_shared/operator_auth.py), which binds
+   the HMAC to the nonce, credential ID and registered kind. The two accepted
+   wire labels are `pentacle` and `pentacle-mobile`; “Example Presentation”
+   is a local display name, not a wire label or a grant.
+2. Use `hello.subscribe` to select the event projection (for example,
+   `{"events_mode":"summary","include_subagents":false}`). Inspect
+   `snapshot.sessions` or send `list_sessions` and read
+   `list_sessions.ok.active`; use the visible row's `stream_id`, not its
+   title. Do not dispatch unsolicited pushes as replies. Match `request_id`
+   on replies and history chunks; handle a matching `*.error` separately
+   and do not display its raw contents in logs.
+3. If the daemon advertises `snapshot.capabilities.work_lanes_v1: true`,
+   offer `capabilities: {"work_lanes_v1":true}` in hello to receive
+   `snapshot.work_lanes` and subsequent `work_lanes.inventory` pushes.
+   Read-only RPC example: send
+   `{"type":"work_lanes.list","request_id":"lanes-1","limit":20}`;
+   read `work_lanes.list.ok.lanes`, keyed by `lane_id`. Lanes require the
+   server's lane projection plus an operator or eligible verified seat (or
+   trusted native loopback); scoped credentials do not qualify. Hello's
+   capability opt-in controls projection delivery, not authorization.
+4. Read the newest `request_stream_events` page for the fixture stream, then
+   a second one with the exclusive `before_daemon_seq` cursor described
+   below. To exercise input, send one `send` with `to_stream_id`, `text`,
+   and unique `request_id` and `optimistic_id`. Check its `send.result`,
+   including the resolved target and `submission_confirmed`; an accepted or
+   pending result is not proof of a durable echo. Observe the durable
+   `chat.event.event` for the fixture turn (with `stream_id`, `daemon_seq`,
+   `kind` and `timestamp`). Before disconnecting persist
+   the greatest observed sequence with its stream and session generation.
+5. Reconnect and subscribe first, then fetch history from newest backward
+   until it includes the saved anchor. Combine history and buffered live rows
+   by `(stream_id, daemon_seq)`, sort by sequence, and keep each identity
+   once. Sequences need not be contiguous. If the anchor is no longer
+   retained, fail gap-free recovery rather than silently advancing. A new
+   subscription alone does not replay what arrived while it was offline.
+
+| Client or change | Compatibility |
+|---|---|
+| Independent trusted native client or server-side host | Keep the long-lived operator secret here. A valid unscoped credential grants broad operator rights (including operator RPCs and visible inventory), subject to daemon policy; do not give it to arbitrary code or browser JavaScript. On a proof-required endpoint, missing or invalid proof receives `hello.error`, not a protected inventory. A revoked credential cannot authenticate a new socket. |
+| Stream-scoped credential | Confined to its configured assistant stream and a small verb allowlist; hello has no fleet inventory, and lane reads and cross-stream history/send are not granted. A seat token is a separate principal, not this operator credential. |
+| First-party browser, optional native features | The shipping web host's RPC bridge and server-side credential serve its own UI; the bridge is not this public API. Provider launch, local pane control, OS notifications, device approval keys, and OS audio capture are outside this subset. Keep proof and keys on the trusted host or native side. |
+| Old clients and future evolution | Existing projections and defaults are unchanged. Ignore additive fields and unknown unsolicited event kinds, but not mismatched request IDs, errors, or missing required identities. Incompatible changes to this subset require a major release and a migration note in the [release manifest](../releases/manifest.json) and [changelog](../CHANGELOG.md). |
+
+**Run it.** With the service requirements installed, use the standalone
+[example](../services/chat-stream-v2/tools/independent_client_example.py)
+against an owned loopback fixture daemon. Provision a fresh, non-forwarding
+`fixture:v2-client-contract-<32 lowercase hex digits>` stream, its generation,
+at least four history events, a provider fixture that echoes the synthetic turn
+and a capable lane projection. No other process should replace or forward this
+session: the generation comparison is an admission check, not an atomic wire
+fence for `send`. Use a private temporary directory and a new checkpoint file.
+Set `FIXTURE_URL`, `FIXTURE_KEY_FILE`, `FIXTURE_STREAM`, `FIXTURE_GENERATION`
+and `FIXTURE_CHECKPOINT` to the resources your fixture owns:
+
+```sh
+probe=services/chat-stream-v2/tools/independent_client_example.py
+python "$probe" start --url "$FIXTURE_URL" --credential-file "$FIXTURE_KEY_FILE" \
+  --stream "$FIXTURE_STREAM" --generation "$FIXTURE_GENERATION" --checkpoint "$FIXTURE_CHECKPOINT"
+# While disconnected, have the fixture append and confirm an event on this stream.
+python "$probe" resume --url "$FIXTURE_URL" --credential-file "$FIXTURE_KEY_FILE" \
+  --stream "$FIXTURE_STREAM" --generation "$FIXTURE_GENERATION" --checkpoint "$FIXTURE_CHECKPOINT"
+```
+
+The example prints counts only and persists identities, not transcript content
+or credentials. Do not rerun `start` after an ambiguous send. Revoke and remove
+only your fixture's credential, session and files after the run. Public checks
+run this same example against the real socket/server and a durable Store with a
+synthetic provider. From `services/chat-stream-v2`, run
+`python -m pytest -q tests/test_client_contract_probe.py -k independent_client_contract`.
+The test checks proof denial and revocation, exact cursor recovery and the
+live-only failure control; it does not prove native provider behavior or
+deployment access. A trusted-host repeat runs the same fixture and example on
+that host, not against its live chats or credentials.
+
 ## Public request families
 
 The public service may expose the following generic families:
@@ -128,7 +228,7 @@ The public service may expose the following generic families:
 | `spawn`, `send`, `close`, `rename` | session lifecycle and input |
 | `compact` | authenticated self-only context compaction through ordinary input; see the [CLI contract](../services/agent-orch/README.md#request-context-compaction) |
 | `send_image` | attach an already-uploaded image to the caller's OWN conversation as an agent-authored transcript event |
-| `subscribe`, `unsubscribe` | event visibility controls |
+| `hello.subscribe` | event visibility controls on the connection |
 | `watch`, `wake` | optional local notifications |
 | `household.*` | operator-only adapter to the Cosmo household store (see below) |
 
