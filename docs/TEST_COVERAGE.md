@@ -97,6 +97,10 @@ work owner for bounded, change-relevant follow-up.
 
 ## Reading the map
 
+[`scripts/gate-env.json`](../scripts/gate-env.json) defines the environment
+contract that local gates and Public checks enforce before running their
+respective suites.
+
 **Inspected** means the named assertion/call path was read. **UNKNOWN** means
 assertions or invocation have not been established in the stated inspection.
 **GAP** requires a specific expected behavior and inspected absence within a

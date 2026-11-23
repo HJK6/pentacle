@@ -6,9 +6,13 @@ name: Public checks
   pull_request:
 permissions:
   contents: read
+env:
+  # Acquire a known runner package independently of the gate's qualification
+  # check so declared-version drift reaches gate_env and gets a receipt.
+  TMUX_APT_PACKAGE: 'tmux=3.4*'
 jobs:
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
     - uses: actions/checkout@v4
@@ -25,9 +29,8 @@ jobs:
       timeout-minutes: 5
       run: |
         missing=()
-        for package in tmux; do
-          command -v "$package" >/dev/null || missing+=("$package")
-        done
+        installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
+        [[ "$installed_tmux" == "installed "${TMUX_APT_PACKAGE#*=} ]] || missing+=("$TMUX_APT_PACKAGE")
         if ((${#missing[@]})); then
           # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
           # priorities, fallbacks, suites and signing stay as the image configured them.
@@ -36,8 +39,8 @@ jobs:
             echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${missing[@]}"
-          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
+          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
         fi
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
@@ -84,7 +87,7 @@ jobs:
         if-no-files-found: warn
         path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   web:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
     - uses: actions/checkout@v4
@@ -101,7 +104,9 @@ jobs:
       timeout-minutes: 5
       run: |
         missing=()
-        for package in tmux lsof ffmpeg; do
+        installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
+        [[ "$installed_tmux" == "installed "${TMUX_APT_PACKAGE#*=} ]] || missing+=("$TMUX_APT_PACKAGE")
+        for package in lsof zsh ffmpeg; do
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
@@ -112,8 +117,8 @@ jobs:
             echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${missing[@]}"
-          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
+          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
         fi
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
@@ -165,8 +170,10 @@ jobs:
       timeout-minutes: 5
       run: |
         missing=()
+        installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
+        [[ "$installed_tmux" == "installed "${TMUX_APT_PACKAGE#*=} ]] || missing+=("$TMUX_APT_PACKAGE")
         # Daemon unit tests need no media binaries; web and microphone jobs install ffmpeg.
-        for package in tmux lsof zsh; do
+        for package in lsof zsh; do
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
@@ -177,17 +184,13 @@ jobs:
             echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${missing[@]}"
-          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
+          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
         fi
-    - name: Require qualified tmux 3.4
+    - name: Verify owned tmux server
       run: |
         version="$(tmux -V)"
         echo "$version"
-        if [ "$version" != "tmux 3.4" ]; then
-          echo "::error::Daemon close-anchor controls require qualified tmux 3.4."
-          exit 1
-        fi
         tmux_socket_dir="$(mktemp -d)"
         cleanup_tmux() {
           tmux -S "$tmux_socket_dir/server" kill-server >/dev/null 2>&1 || true
@@ -198,15 +201,14 @@ jobs:
         tmux -S "$tmux_socket_dir/server" -f /dev/null new-session -d -s close-ci 'exec sleep 60'
         server_version="$(tmux -S "$tmux_socket_dir/server" display-message -p '#{version}')"
         echo "tmux server $server_version"
-        if [ "$server_version" != "3.4" ]; then
-          echo "::error::Daemon close-anchor controls require server version 3.4."
+        if [ "$server_version" != "${version#tmux }" ]; then
+          echo "::error::Owned tmux server version does not match its client."
           exit 1
         fi
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
     - name: Daemon unit partition
       run: |
-        umask 077
         python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/daemon" --target v2-unit-ci-shard --shard-index "${{ matrix.shard }}" --shard-count 6 --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon-unit-${{ matrix.shard }}" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
     - name: Source integrity at gate end
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
@@ -253,7 +255,9 @@ jobs:
       timeout-minutes: 5
       run: |
         missing=()
-        for package in tmux lsof; do
+        installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
+        [[ "$installed_tmux" == "installed "${TMUX_APT_PACKAGE#*=} ]] || missing+=("$TMUX_APT_PACKAGE")
+        for package in lsof zsh; do
           command -v "$package" >/dev/null || missing+=("$package")
         done
         if ((${#missing[@]})); then
@@ -264,17 +268,13 @@ jobs:
             echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${missing[@]}"
-          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
+          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
         fi
-    - name: Require qualified tmux 3.4
+    - name: Verify owned tmux server
       run: |
         version="$(tmux -V)"
         echo "$version"
-        if [ "$version" != "tmux 3.4" ]; then
-          echo "::error::Daemon close-anchor controls require qualified tmux 3.4."
-          exit 1
-        fi
         tmux_socket_dir="$(mktemp -d)"
         cleanup_tmux() {
           tmux -S "$tmux_socket_dir/server" kill-server >/dev/null 2>&1 || true
@@ -285,15 +285,14 @@ jobs:
         tmux -S "$tmux_socket_dir/server" -f /dev/null new-session -d -s close-ci 'exec sleep 60'
         server_version="$(tmux -S "$tmux_socket_dir/server" display-message -p '#{version}')"
         echo "tmux server $server_version"
-        if [ "$server_version" != "3.4" ]; then
-          echo "::error::Daemon close-anchor controls require server version 3.4."
+        if [ "$server_version" != "${version#tmux }" ]; then
+          echo "::error::Owned tmux server version does not match its client."
           exit 1
         fi
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
     - name: Daemon smoke once
       run: |
-        umask 077
         python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/smoke" --target v2-smoke --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon-smoke" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
     - name: Source integrity at gate end
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
@@ -321,7 +320,7 @@ jobs:
         if-no-files-found: warn
         path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   contracts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
     - uses: actions/checkout@v4
@@ -344,9 +343,8 @@ jobs:
       timeout-minutes: 5
       run: |
         missing=()
-        for package in tmux; do
-          command -v "$package" >/dev/null || missing+=("$package")
-        done
+        installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
+        [[ "$installed_tmux" == "installed "${TMUX_APT_PACKAGE#*=} ]] || missing+=("$TMUX_APT_PACKAGE")
         command -v ffprobe >/dev/null || missing+=(ffmpeg)
         if ((${#missing[@]})); then
           # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
@@ -356,8 +354,8 @@ jobs:
             echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${missing[@]}"
-          for package in "${missing[@]}"; do echo "installed $package: $(command -v "$package")"; done
+          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
         fi
     - name: Installed doctor and exact upgrade checklist
       run: |
@@ -371,11 +369,9 @@ jobs:
         PYTHONPATH=mic-server python3 -m pytest mic-server/test
     - name: CLI checks
       run: |
-        umask 077
         python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/cli" --target cli-pytest --select tests --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-cli" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
     - name: Shared checks
       run: |
-        umask 077
         python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/shared" --target shared-pytest --select tests --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-shared" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
     - name: Source integrity at gate end
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
