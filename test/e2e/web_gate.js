@@ -412,6 +412,22 @@ async function startDaemon(args, scratch, runtime, fixtures = [
 }
 
 async function run(args) {
+  // These scenarios own their local stores, sandboxed browser and web hosts.
+  // When selected alone they need no POSIX daemon/process group or tmux setup,
+  // so the same fixture command can run on native Windows.
+  if (!args.profile && !args.servedUrl && !process.env.PENTACLE_WEB_GATE_CONSUMER_ROOT &&
+      args.scenarios?.length && args.scenarios.every(name => ['model-library-publish', 'model-library-picture'].includes(name))) {
+    const report = new Report(allocateReportDir());
+    let failedScenarios = 0;
+    for (const [name, scenario] of scenarios.SCENARIOS.filter(([name]) => args.scenarios.includes(name))) {
+      console.log(`\n▸ ${name}`);
+      try { await scenario({ report }); }
+      catch (error) { failedScenarios++; report.note(`scenario ${name} FAILED: ${error.message}`); }
+    }
+    const verdict = report.write({ failedScenarios });
+    console.log(`\n◀ web_gate: ${verdict.status}\n  artifacts: ${report.dir}`);
+    return verdict.status === 'PASS' ? 0 : 1;
+  }
   return withRuntimeDirectory((runtimeDir, cleanupRuntime) => runIsolated(args, runtimeDir, cleanupRuntime));
 }
 

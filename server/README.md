@@ -472,3 +472,21 @@ and allowlisted `/design-media/` routes. Media supports HEAD and byte ranges;
 original exports are not executable public files. See
 [design library](../docs/design-library.md) for the drop format, offline sandbox,
 agent edit/publish/rollback procedure, dependency pins and sync verification.
+
+### Forge read binding
+
+Forge starts closed. To enable it, use `--auth tailscale` with exactly one
+parsed `--allow-login` entry and a matching, case-sensitive
+`--operator-login <login>`. Repeating the same allow-list entry is still two
+entries. Point `PENTACLE_MODEL_LIBRARY_ROOT` at the verified model library.
+These values stay server-side. The proxy must overwrite supplied identity and
+forwarded headers and exclusively control access to the loopback identity
+listener. Neither a token cookie nor anonymous loopback grants Forge access.
+
+**The process guard is not host isolation.** Every admitted login can reach
+the full `/cc` bridge, including host terminals. The operator must be the
+sole admitted login on **any** Pentacle instance or other execution path on the
+web host while Forge is enabled. The startup check only sees its own process
+configuration. Otherwise, leave the binding unset and Forge closed. General
+logins, including Design viewers, need per-viewer host-capability gating or
+host isolation before deployment. See [Model library](../docs/model-library.md).
