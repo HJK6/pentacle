@@ -541,7 +541,7 @@ def discover_npm_files(run, node_path, checkout: Path, selection: List[str]) -> 
     if not isinstance(files, list) or any(not isinstance(file, str) for file in files):
         raise SetupFailure([fail("selection", "npm runner file discovery returned an invalid file list",
                                  "verify the shared npm runner discovery result")])
-    return set(files)
+    return {os.path.normpath(file) for file in files}
 
 
 def check_scratch(evidence: Path, home: Path, tmp: Path, min_free_mb: int, timeout_s: int, reserve_s: int) -> List[Dict[str, str]]:

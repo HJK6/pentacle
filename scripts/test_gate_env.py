@@ -1024,11 +1024,15 @@ exit 0
             return [sys.executable, "-c", snippet], {"cwd": self.tmp, "classify": lambda rc, _: (
                 "pass" if rc == 0 else "product_failure", None, {})}
 
+        def subject_command(*args):
+            self.last_command_selection = list(args[7])
+            return subject(*args)
+
         with mock.patch.multiple(ge, load_config=lambda *a: self.config,
                                  ensure_python_env=prepare, ensure_npm_env=lambda *a: ({}, []),
                                  check_capabilities=lambda *a: [], check_dependencies=lambda *a: [],
                                  check_process_listing=lambda *a: [], run_preflight_script=lambda *a: [],
-                                 build_command=subject), mock.patch.dict(os.environ, {"PATH": str(self.tools)}), \
+                                 build_command=subject_command), mock.patch.dict(os.environ, {"PATH": str(self.tools)}), \
                 mock.patch.object(ga, "new_attempt_id", return_value=attempt_id), \
                 mock.patch.object(ge.tempfile, "mkdtemp", return_value=str(relocated_evidence)):
             code = self.run_main("--spec", "s", "--series", "environment", "--purpose", "diagnostic", *args)
@@ -1082,6 +1086,8 @@ exit 0
         for args in (("--target", "web-gate"),
                      ("--target", "npm-test", "--select", "test/e2e/*.test.js"),
                      ("--target", "npm-test", "--select", "test/e2e/viewport_live.test.js"),
+                     ("--target", "npm-test", "--select", "test/e2e/./viewport_live.test.js"),
+                     ("--target", "npm-test", "--select", "test/e2e//viewport_live.test.js"),
                      ("--target", "npm-test", "--select", "test/e2e/viewport**.ts"),
                      ("--target", "npm-test", "--select", "test/e2e/web_gate.js")):
             with self.subTest(args=args):
@@ -1107,12 +1113,30 @@ exit 0
         self.assertEqual(self.subject_browser.read_text(), str(self.chrome))
 
     def test_explicit_browser_selections_keep_the_qualified_browser(self):
-        for selector in ("test/e2e/viewport_live.test.js", "test/e2e/web_gate.js"):
+        for selector in ("test/e2e/viewport_live.test.js", "test/e2e/./viewport_live.test.js",
+                         "test/e2e//viewport_live.test.js", "test/e2e/viewport**.ts",
+                         "test/e2e/web_gate.js"):
             with self.subTest(selector=selector):
                 code, events = self.run_policy("--target", "npm-test", "--select", selector)
                 self.assertEqual(code, 0)
                 self.assertEqual(events[1]["toolchain"]["chrome"]["version"], "130.0.1.2")
                 self.assertEqual(self.subject_browser.read_text(), str(self.chrome))
+
+    def test_mixed_aliases_keep_original_runner_selection(self):
+        selectors = ["test/e2e/viewport_live.test.js", "test/e2e/./viewport_live.test.js",
+                     "test/e2e//viewport_live.test.js"]
+        args = [item for selector in selectors for item in ("--select", selector)]
+        code, events = self.run_policy("--target", "npm-test", *args)
+        self.assertEqual(code, 0)
+        self.assertEqual(events[1]["toolchain"]["chrome"]["version"], "130.0.1.2")
+        self.assertEqual(self.subject_browser.read_text(), str(self.chrome))
+        self.assertEqual(self.last_command_selection, selectors)
+
+        target = self.config["profiles"]["pentacle"]["targets"]["npm-test"]
+        command, _ = ge.build_command(self.config, target, self.tmp / "venv", self.tmp,
+                                       self.tmp / "co", self.tmp / "evidence", self.tmp / "basetemp",
+                                       selectors, target["timeout_s"], {})
+        self.assertEqual(command, ["node", "scripts/run-tests.js", *selectors])
 
     def test_long_tmp_and_timeout_record_requested_and_effective_values(self):
         requested = self.tmp / ("x" * 60)
