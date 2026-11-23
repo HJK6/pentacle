@@ -48,6 +48,67 @@ prepare-only, another service or skip-kickstart. Existing ordinary and coordinat
 rollback routes are not substitutes for a failed enrolled ordinary operation.
 The inherited coordinated receipt never authorizes this recovery.
 
+## Recording the named legacy manual recovery
+
+FD may record a manually recovered serving target for the one legacy operation
+pinned by the controller. Use a clean, separately reviewed controller checkout
+and the original private bundle and operator recovery receipt.
+
+```sh
+python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
+  --release-checkout <serving-runtime> \
+  --record-ordinary-manual-recovery <original-bundle-directory> \
+  --manual-recovery-authorization <private-fd-authority.json> \
+  --operator-recovery-receipt <original-operator-recovery-receipt> \
+  --manual-recovery-operator-credential <private-operator-v2-envelope> \
+  --recovery-go-tell-id <exact-delivered-fd-tell-id> \
+  --deployer-stream-id <exact-go-recipient>
+```
+
+The 0600 FD JSON has exactly these fields.
+
+- `schema` is `pentacle.ordinary-manual-recovery.v1`.
+- `operation`, `bundle_sha256`, `bundle_bytes_sha256`, `pointer_bytes_sha256`,
+  `journal_sha256`, `journal_bytes_sha256` and `operator_receipt_sha256` match
+  the controller's incident pins. The unmodified failed journal is at
+  `failed_sequence` 9 with phase `recovery_required`.
+- `original_controller_sha`, `prior_sha` and `target_sha` match the sealed
+  bundle. `replacement_controller_sha` is the reviewed controller commit.
+  `deployer_stream_id` is the physical stream receiving this GO.
+- `expected_serving` has `source` (clean runtime HEAD), `process` (exact
+  `loaded`, `pid`, `birth` and `sha` for the current launchd job),
+  `boot_uuid` (paired stdout/stderr generation markers for that PID and UTC
+  birth), `listener` (`127.0.0.1:7791`), `launchd_label`,
+  `launch_arguments_sha256` (the canonical JSON SHA-256 of the loaded plist
+  argument list), `files` (each captured bundle role mapped to current
+  `sha256` and numeric `mode`, using null for verified absence) and
+  `collector` (current `loaded`, `pid` and `birth`). FD records this from
+  current host evidence. The stamp entry binds exact observed stamp bytes.
+
+After reviewing that authority, the currently bound FD must deliver this exact
+single-line tell body to the named physical recipient.
+
+```text
+GO record-ordinary-manual-recovery <operation> <authority-file-bytes-sha256> <replacement-controller-sha>
+```
+
+The controller reads the matching delivered tell through the serving daemon's
+Store on a nonce-authenticated operator connection to the loopback listener it
+just verified. The tell must have a verified peer sender and generation matching
+the current open FD binding, and must have been delivered in the preceding
+10 minutes. The controller rechecks managed files, process and binding within a
+30-second monotonic budget. The common deployment lock covers the exact pointer,
+bundle and journal comparisons, persistence and readback.
+
+The result `manual_recovered_serving_target` records the old operation as
+`aborted` and unqualified. One atomic terminal journal retains the original
+failed journal bytes, its failure result and a separately sealed receipt of
+the verified serving generation, authority and controller. Source, daemon,
+active pointer, stamp and immutable bundle remain untouched. Repeating the
+identical authority and GO on the same active pointer returns the same
+terminal receipt. A different grant cannot replace it. A later forward requires
+its own enrollment, rollback preimage and authorization.
+
 ## Immutable bundle, authority and mutable journal
 
 Schema `pentacle.ordinary-recovery.v1` has a unique operation identifier and a
