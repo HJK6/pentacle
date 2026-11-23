@@ -54,6 +54,20 @@ def file_state(path):
     return {'sha256': c.file_digest(path), 'mode': stat.S_IMODE(info.st_mode)}
 
 
+def _logs_postdate_boot(items, birth):
+    try:
+        started = datetime.strptime(birth, '%a %b %d %H:%M:%S %Y').replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return False
+    # The process birth probe has whole-second precision.
+    for item in items:
+        info = Path(item['path']).stat()
+        if ((info.st_dev, info.st_ino) != (item['device'], item['inode'])
+                or getattr(info, 'st_birthtime', 0) < started + 1):
+            return False
+    return True
+
+
 def sealed_write(path, value):
     value = copy.deepcopy(value)
     value['sha256'] = c.digest(value)
@@ -647,7 +661,8 @@ class OrdinaryRuntime:
         main = str(workdir/'main.py')
         python = self.d._venv_python(self.repo, self.service)
         configured_main = argv[2] if argv[1] == '-u' else argv[1]
-        if (plist['Label'] != label or plist['WorkingDirectory'] != str(workdir)
+        configured_cwd = plist.get('WorkingDirectory')
+        if (plist['Label'] != label or configured_cwd not in (None, str(workdir))
                 or argv[0] != str(python) or configured_main != main):
             raise c.Invalid('manual recovery plist does not identify the runtime checkout')
         loaded = self.runtime.checked(('launchctl', 'print', self.d._launchctl_target(label))).stdout
@@ -665,6 +680,12 @@ class OrdinaryRuntime:
                            for prefix in ('', '-u '))):
             raise c.Invalid('manual recovery live process does not run the registered checkout')
 
+        working_directory = '/' if configured_cwd is None else configured_cwd
+        cwd_rows = self.runtime.checked(('/usr/sbin/lsof', '-nP', '-a', '-p', str(pid), '-d', 'cwd',
+                                         '-Fpn')).stdout.splitlines()
+        if cwd_rows != [f'p{pid}', 'fcwd', f'n{working_directory}']:
+            raise c.Invalid('manual recovery live process working directory unproven')
+
         port = MANUAL_LISTENER.split(':')[1]
         listeners = self.runtime.checked(('/usr/sbin/lsof', '-nP', '-iTCP:' + port,
                                           '-sTCP:LISTEN', '-Fpn')).stdout.splitlines()
@@ -673,18 +694,24 @@ class OrdinaryRuntime:
             raise c.Invalid('manual recovery loopback listener ownership unproven')
 
         managed = self.d._managed_log_config(self.service)
+        log_paths = self.d._daemon_log_paths(self.service)
         groups = []
-        for path in self.d._daemon_log_paths(self.service):
+        for path in log_paths:
             candidates = list(reversed(managed.paths(path))) if managed else [path]
             groups.append([freeze(item) for item in candidates if item.is_file()])
         if sum(item['bytes_read'] for group in groups for item in group) > 128 * 1024 * 1024:
             raise c.Invalid('manual recovery boot evidence exceeds the read bound')
-        _, _, markers = generation_ranges(groups, pid, birth)
+        rotated_stderr = (managed is not None and len(groups) == 2
+                          and len(groups[1]) == len(managed.paths(log_paths[1])) > 1
+                          and _logs_postdate_boot(groups[1], birth))
+        _, _, markers = generation_ranges(groups, pid, birth, allow_rotated_stderr=rotated_stderr)
         if self.job(label) != process:
             raise c.Invalid('manual recovery process changed during observation')
         return {'source': source, 'process': {**process, 'sha': source},
                 'boot_uuid': markers[0]['identity']['boot_uuid'], 'listener': MANUAL_LISTENER,
+                'boot_evidence': 'paired' if len(markers) == 2 else 'stdout_stderr_rotated',
                 'launchd_label': label, 'launch_arguments_sha256': c.digest(argv),
+                'working_directory': working_directory,
                 'files': files, 'collector': self.job(self.d.USAGE_COLLECTOR_LABEL)}
 
     def prove_manual(self, serving, credential, authority, confirm_serving):

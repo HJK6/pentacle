@@ -611,7 +611,7 @@ def manual_operation(operation, monkeypatch):
     replacement='e'*40
     probes=a.probes()
     probes.update(controller_sha=replacement,boot_uuid='0d38fe9d-6292-414c-8ecf-ab400a1fc404',
-                  listener=o.MANUAL_LISTENER)
+                  listener=o.MANUAL_LISTENER,working_directory='/')
     a.save_probes(probes)
     def controller(self,bundle,sha):
         assert bundle['sha256']==pins['bundle_sha256']
@@ -621,6 +621,8 @@ def manual_operation(operation, monkeypatch):
     def observe(self,bundle):
         p=self.probes()
         return {**self.observe(bundle),'boot_uuid':p['boot_uuid'],'listener':p['listener'],
+                'boot_evidence':'paired',
+                'working_directory':p['working_directory'],
                 'launchd_label':d.V2_DAEMON_LABEL,'launch_arguments_sha256':'4'*64}
 
     monkeypatch.setattr(SyntheticRuntime,'validate_controller',controller)
@@ -715,6 +717,7 @@ def test_manual_disposition_cli_closes_old_fence(manual_operation, capsys):
     assert audit['original_failure']==failed['result']
     assert terminal['process']==failed['process']
     assert audit['serving']['process']['pid']==32202
+    assert audit['serving']['working_directory']=='/'
     assert audit['authenticated_readback']['ledger_row_id']==10
     assert wire['requests']==['hello','assistant.binding','ledger_get','inspect_stream','assistant.binding']
     o.fence(a.repo)  # This fence is byte-for-byte unchanged from #656.
@@ -811,6 +814,7 @@ def test_manual_disposition_mismatch_keeps_fence(manual_operation, damage, monke
     pytest.param(('inspect_stream',1),'process',id='inspect-process'),
     pytest.param(('assistant.binding',2),'stamp',id='final-binding-stamp'),
     pytest.param(None,'process',id='post-rpc-disconnect-process'),
+    pytest.param(None,'cwd',id='post-rpc-disconnect-cwd'),
 ])
 def test_manual_disposition_rejects_late_serving_drift(manual_operation, monkeypatch, edge, damage):
     a,b,_,pointer,journal,immutable,auth,operator,wire,args=manual_operation
@@ -823,6 +827,10 @@ def test_manual_disposition_rejects_late_serving_drift(manual_operation, monkeyp
             probes=a.probes()
             probes['process'].update(pid=33303,birth='synthetic-replacement-birth')
             probes['boot_uuid']=str(uuid4())
+            a.save_probes(probes)
+        elif damage=='cwd':
+            probes=a.probes()
+            probes['working_directory']='/different'
             a.save_probes(probes)
         else:
             (a.root/'files'/'stamp').write_bytes(b'synthetic external stamp drift')
@@ -890,8 +898,25 @@ def test_manual_disposition_cli_uses_common_lock(manual_operation):
     assert not wire['requests']
 
 
-@pytest.mark.parametrize('drift',[None,'launch_arguments','listener_pid','boot','stamp_release','managed_input'])
-def test_concrete_manual_observation_binds_runtime_and_boot(manual_operation, monkeypatch,drift):
+@pytest.mark.parametrize(('has_workdir', 'drift'), [
+    pytest.param(True, None, id='None'),
+    pytest.param(False, None, id='default-cwd'),
+    pytest.param(True, 'launch_arguments', id='launch_arguments'),
+    pytest.param(True, 'listener_pid', id='listener_pid'),
+    pytest.param(True, 'boot', id='boot'),
+    pytest.param(True, 'stamp_release', id='stamp_release'),
+    pytest.param(True, 'managed_input', id='managed_input'),
+    (True, 'plist_cwd'),
+    (True, 'cwd'),
+    (False, 'cwd'),
+    (False, 'cwd_pid'),
+    (False, 'cwd_missing'),
+    pytest.param(False, 'rotated_stderr', id='rotated-stderr'),
+    pytest.param(False, 'preboot_stderr', id='preboot-stderr'),
+    pytest.param(False, 'later_stderr_boot', id='later-stderr-boot'),
+    pytest.param(False, 'malformed_stderr', id='malformed-stderr'),
+])
+def test_concrete_manual_observation_binds_runtime_and_boot(manual_operation, monkeypatch, has_workdir, drift):
     a,b,_,_,_,_,_,_,_,_=manual_operation
     label=d.V2_DAEMON_LABEL
     workdir=a.repo/'services/chat-stream-v2'
@@ -899,12 +924,16 @@ def test_concrete_manual_observation_binds_runtime_and_boot(manual_operation, mo
     argv=[str(python),str(workdir/'main.py'),'--host','127.0.0.1','--port','7791']
     launchd=f'\n program = {argv[0]}\n arguments = {{\n'+'\n'.join(argv)+'\n }\n'
     paths=a.paths(b.bundle['metadata'])
-    paths['plist'].write_bytes(plistlib.dumps({'Label':label,'WorkingDirectory':str(workdir),'ProgramArguments':argv}))
+    plist = {'Label': label, 'ProgramArguments': argv}
+    if has_workdir:
+        plist['WorkingDirectory'] = '/different' if drift == 'plist_cwd' else str(workdir)
+    paths['plist'].write_bytes(plistlib.dumps(plist))
+    expected_cwd = str(workdir) if has_workdir else '/'
     source=a.git('rev-parse','HEAD')
     paths['stamp'].write_bytes(o.c.canonical({'sha':source if drift!='stamp_release' else '1'*40}))
     if drift=='managed_input':
         paths['settings'].write_bytes(b'configuration changed')
-    process=a.probes()['process']
+    process={**a.probes()['process'], 'birth':'Thu Jan 1 00:00:10 1970'}
     generation={'pid':process['pid'],'start':process['birth'],'boot_uuid':a.probes()['boot_uuid']}
     logs=[a.root/'stdout.log',a.root/'stderr.log']
     for index,path in enumerate(logs):
@@ -912,6 +941,29 @@ def test_concrete_manual_observation_binds_runtime_and_boot(manual_operation, mo
         path.write_text(f'generation={json.dumps(ident)} chat_streamd_v2 listening on {o.MANUAL_LISTENER}\n')
     monkeypatch.setattr(d,'_daemon_log_paths',lambda service: logs)
     monkeypatch.setattr(d,'_managed_log_config',lambda service: None)
+    if drift in {'rotated_stderr', 'preboot_stderr', 'later_stderr_boot', 'malformed_stderr'}:
+        stderr = logs[1]
+        older_stderr = stderr.with_suffix('.log.1')
+        stderr.write_text('current diagnostic\n')
+        older_stderr.write_text('earlier diagnostic\n')
+        if drift == 'later_stderr_boot':
+            ident = {**generation, 'pid': process['pid'] + 1, 'boot_uuid': str(uuid4())}
+            older_stderr.write_text(f'generation={json.dumps(ident)} chat_streamd_v2 listening on {o.MANUAL_LISTENER}\n')
+        if drift == 'malformed_stderr':
+            older_stderr.write_text(f'generation=invalid chat_streamd_v2 listening on {o.MANUAL_LISTENER}\n')
+        monkeypatch.setattr(d, '_managed_log_config', lambda service: SimpleNamespace(
+            paths=lambda path: [stderr, older_stderr] if path == stderr else [path]))
+        real_stat = Path.stat
+
+        def stat(path, *args, **kwargs):
+            observed = real_stat(path, *args, **kwargs)
+            if path not in (stderr, older_stderr):
+                return observed
+            birth = 10.5 if path == older_stderr and drift == 'preboot_stderr' else 20
+            return SimpleNamespace(st_mode=observed.st_mode, st_size=observed.st_size,
+                                   st_dev=observed.st_dev, st_ino=observed.st_ino, st_birthtime=birth)
+
+        monkeypatch.setattr(Path, 'stat', stat)
     monkeypatch.setattr(a,'job',lambda target: {key:process[key] for key in ('loaded','pid','birth')}
                         if target==label else a.probes()['collector'])
 
@@ -921,16 +973,24 @@ def test_concrete_manual_observation_binds_runtime_and_boot(manual_operation, mo
         if cmd[0]=='ps':
             return SimpleNamespace(stdout=' '.join(argv))
         assert cmd[0]=='/usr/sbin/lsof'
+        if '-d' in cmd:
+            assert cmd == ('/usr/sbin/lsof', '-nP', '-a', '-p', str(process['pid']), '-d', 'cwd', '-Fpn')
+            pid = 1 if drift == 'cwd_pid' else process['pid']
+            cwd = '/different' if drift == 'cwd' else expected_cwd
+            stdout = '' if drift == 'cwd_missing' else f'p{pid}\nfcwd\nn{cwd}\n'
+            return SimpleNamespace(stdout=stdout)
         pid=1 if drift=='listener_pid' else process['pid']
         return SimpleNamespace(stdout=f'p{pid}\nn{o.MANUAL_LISTENER}\n')
 
     monkeypatch.setattr(a.runtime,'checked',checked)
-    if drift:
-        with pytest.raises((o.c.Invalid, ValueError),match='manual recovery|generation identities'):
+    if drift and drift != 'rotated_stderr':
+        with pytest.raises((o.c.Invalid, ValueError),match='manual recovery|generation identities|boot marker'):
             o.OrdinaryRuntime.observe_manual(a,b.bundle)
     else:
         evidence=o.OrdinaryRuntime.observe_manual(a,b.bundle)
         assert evidence['source']==source and evidence['boot_uuid']==generation['boot_uuid']
+        assert evidence['boot_evidence'] == ('stdout_stderr_rotated' if drift else 'paired')
         assert evidence['process']=={'sha':source,'loaded':True,'pid':process['pid'],'birth':process['birth']}
         assert evidence['launch_arguments_sha256']==o.c.digest(argv)
+        assert evidence['working_directory'] == expected_cwd
         assert evidence['files']['stamp']==o.file_state(paths['stamp'])

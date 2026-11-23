@@ -77,13 +77,25 @@ The 0600 FD JSON has exactly these fields.
   `deployer_stream_id` is the physical stream receiving this GO.
 - `expected_serving` has `source` (clean runtime HEAD), `process` (exact
   `loaded`, `pid`, `birth` and `sha` for the current launchd job),
-  `boot_uuid` (paired stdout/stderr generation markers for that PID and UTC
-  birth), `listener` (`127.0.0.1:7791`), `launchd_label`,
+  `boot_uuid` (a generation marker for that PID and UTC birth), `boot_evidence`
+  (`paired` or `stdout_stderr_rotated`), `listener` (`127.0.0.1:7791`), `launchd_label`,
   `launch_arguments_sha256` (the canonical JSON SHA-256 of the loaded plist
-  argument list), `files` (each captured bundle role mapped to current
+  argument list), `working_directory` (the current daemon PID's cwd),
+  `files` (each captured bundle role mapped to current
   `sha256` and numeric `mode`, using null for verified absence) and
   `collector` (current `loaded`, `pid` and `birth`). FD records this from
   current host evidence. The stamp entry binds exact observed stamp bytes.
+
+The controller independently reads the PID's cwd. It requires the runtime
+service directory when `WorkingDirectory` is configured and `/` when the key
+is absent, as in the manually recovered registration. It also checks the loaded
+launchd arguments and live interpreter and entry-point path.
+
+When managed rotation has removed the stderr boot marker, the controller
+requires a unique matching stdout marker and every configured stderr file to
+have been created after that PID's birth. It scans all retained stderr bytes
+and requires no boot marker there. This exception applies to the named manual
+recovery. Release observation still requires paired markers.
 
 After reviewing that authority, the currently bound FD must deliver this exact
 single-line tell body to the named physical recipient.

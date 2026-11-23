@@ -83,12 +83,14 @@ def _slice_ranges(items, begin, end):
     return result
 
 
-def generation_ranges(groups, expected_pid, expected_start):
+def generation_ranges(groups, expected_pid, expected_start, *, allow_rotated_stderr=False):
     """Select only bytes from the paired activated generation markers.
 
     Lifecycle ordering must be qualified separately on the target service
     manager. Retained markers from other valid generations bound separate
     ranges; timestamps and connection age never establish this boundary.
+    Manual recovery may prove that the entire retained stderr history
+    postdates the boot. A marker-free stderr then contributes no bytes.
     """
     import json
     import uuid
@@ -98,7 +100,7 @@ def generation_ranges(groups, expected_pid, expected_start):
     if len(groups) != 2:
         raise AttributionAmbiguous('both stdout and stderr generation proofs are required')
     selected, preceding, markers = [], [], []
-    for group in groups:
+    for stream, group in enumerate(groups):
         position = 0
         boot_markers = []
         for line in lines_many(group):
@@ -126,6 +128,10 @@ def generation_ranges(groups, expected_pid, expected_start):
         matching = [row for row in boot_markers if row[2] is not None
                     and row[2]['pid'] == expected_pid
                     and ' '.join(row[2]['start'].split()) == expected_start]
+        if stream == 1 and allow_rotated_stderr and not boot_markers:
+            selected.append([])
+            preceding.append(group)
+            continue
         if len(matching) != 1:
             raise AttributionAmbiguous('missing or duplicate activated boot marker')
         begin, end, identity = matching[0]
@@ -138,6 +144,6 @@ def generation_ranges(groups, expected_pid, expected_start):
         preceding.append(_slice_ranges(group, 0, begin) + _slice_ranges(group, boundary, position))
         selected.append(_slice_ranges(group, end, boundary))
         markers.append({'identity': identity, 'inputs': _slice_ranges(group, begin, end)})
-    if markers[0]['identity'] != markers[1]['identity']:
+    if len(markers) == 2 and markers[0]['identity'] != markers[1]['identity']:
         raise AttributionAmbiguous('stdout/stderr generation identities conflict')
     return selected, preceding, markers
