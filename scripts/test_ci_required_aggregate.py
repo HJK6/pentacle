@@ -126,6 +126,26 @@ class WorkflowControls(unittest.TestCase):
                     self.assertEqual(args[args.index('--attempt-manifest') + 1], manifest + 'attempt-manifest.json')
                     self.assertNotIn('--timeout-seconds', args)
 
+    def test_apt_archive_policy(self):
+        for job_id in ('web', 'contracts'):
+            with self.subTest(job=job_id):
+                steps = [step for step in self.workflow['jobs'][job_id]['steps']
+                         if step.get('name') == 'System packages']
+                self.assertEqual(len(steps), 1)
+                step = steps[0]
+                with self.subTest(control='timeout'):
+                    self.assertEqual(step.get('timeout-minutes'), '10')
+                with self.subTest(control='install'):
+                    commands = [shlex.split(line, comments=True)
+                                for line in step['run'].splitlines()
+                                if line.lstrip().startswith('sudo apt-get ')]
+                    installs = [args for args in commands if 'install' in args[2:]]
+                    self.assertEqual(len(installs), 1)
+                    args = installs[0]
+                    self.assertEqual(args[2:args.index('install')],
+                                     ['-o', 'Acquire::Retries=1',
+                                      '-o', 'Acquire::http::Timeout=30'])
+
     def test_old_command_and_selection_union(self):
         commands = [(step.get('working-directory', ''), step.get('run', ''))
                     for name, job in self.workflow['jobs'].items() if name != 'checks' for step in job['steps']]

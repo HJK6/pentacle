@@ -101,7 +101,7 @@ jobs:
       with:
         python-version: '3.13'
     - name: System packages
-      timeout-minutes: 5
+      timeout-minutes: 10
       run: |
         missing=()
         installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
@@ -117,7 +117,7 @@ jobs:
             echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=30 install -y --no-install-recommends --allow-downgrades "${missing[@]}"
           for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
         fi
     - name: Source integrity after setup
@@ -340,7 +340,7 @@ jobs:
         python3 tools/release_manifest.py verify --ref HEAD --base "$RELEASE_BASE"
         python3 -m unittest discover -s tools/pentacle/tests
     - name: System packages
-      timeout-minutes: 5
+      timeout-minutes: 10
       run: |
         missing=()
         installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
@@ -354,7 +354,7 @@ jobs:
             echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=30 install -y --no-install-recommends --allow-downgrades "${missing[@]}"
           for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
         fi
     - name: Installed doctor and exact upgrade checklist
