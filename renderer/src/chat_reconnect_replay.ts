@@ -61,7 +61,8 @@ export function rotateOptimisticSendRequestId(
   if (!send || send.request_id === newRequestId) return state;
   const optimisticSends = {
     ...(state.optimisticSends ?? {}),
-    [optimisticId]: { ...send, request_id: newRequestId },
+    // Provider custody belongs to the previous request.
+    [optimisticId]: { ...send, request_id: newRequestId, provider_queued: undefined },
   };
   const optimisticByRequestId = { ...(state.optimisticByRequestId ?? {}) };
   delete optimisticByRequestId[send.request_id];

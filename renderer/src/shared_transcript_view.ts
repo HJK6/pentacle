@@ -57,6 +57,7 @@ export type TranscriptRenderOptions = {
   streamId?: string;
   allowReplies?: boolean;
   showDashboardLinks?: boolean;
+  pictureCards?: boolean;
   allowQueuedSendNow?: boolean;
   resolvedQuestions?: readonly ResolvedQuestionRecord[];
 };
@@ -411,10 +412,11 @@ function attachmentImageSrc(attachment: RenderAttachment): string {
   return String(attachment.uri || attachment.localUri || '');
 }
 
-function renderAttachmentHtml(attachment: RenderAttachment, index: number): string {
+function renderAttachmentHtml(attachment: RenderAttachment, index: number, pictureId?: string): string {
   const src = attachmentImageSrc(attachment);
   const key = String(attachment.key || '');
-  const alt = attachment.name || `Image attachment ${index + 1}`;
+  const name = pictureId ? String(attachment.filename || attachment.name || '').split(/[\\/]/).pop()?.replace(/[\u0000-\u001f\u007f]/g, '') : attachment.name;
+  const alt = name || `Image attachment ${index + 1}`;
   const mime = String(attachment.mime || '').toLowerCase();
   const fileTypes = ['application/pdf', 'application/zip', 'model/3mf', 'model/stl', 'model/step', 'application/x-openscad'];
   const fileSize = Number(attachment.size ?? attachment.bytes);
@@ -431,15 +433,16 @@ function renderAttachmentHtml(attachment: RenderAttachment, index: number): stri
   const ratioStyle = Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
     ? ` style="aspect-ratio:${width}/${height}"`
     : '';
-  return `<button type="button" class="slot-chat-media-button"${src ? ` data-viewer-src="${escapeHtml(src)}"` : ''}${key ? ` data-attachment-key="${escapeHtml(key)}"` : ''} data-attachment-mime="${escapeHtml(attachment.mime || '')}" aria-label="${escapeHtml(alt)}"${ratioStyle}>
+  return `<button type="button" class="slot-chat-media-button"${pictureId ? ` data-next-picture="${escapeHtml(pictureId)}" aria-pressed="false"` : ''}${src ? ` data-viewer-src="${escapeHtml(src)}"` : ''}${key ? ` data-attachment-key="${escapeHtml(key)}"` : ''} data-attachment-mime="${escapeHtml(attachment.mime || '')}" aria-label="${escapeHtml(alt)}"${ratioStyle}>
     <img class="slot-chat-media-img"${src ? ` src="${escapeHtml(src)}"` : ' data-needs-blob="1"'} alt="${escapeHtml(alt)}" loading="lazy">
     ${!src && key ? '<span class="slot-chat-media-loading">Loading image</span>' : ''}
   </button>`;
 }
 
-function renderAttachmentsHtml(attachments: RenderAttachment[] | undefined): string {
+function renderAttachmentsHtml(attachments: RenderAttachment[] | undefined, pictureItem?: string): string {
   if (!Array.isArray(attachments) || attachments.length === 0) return '';
-  return `<div class="slot-chat-media-grid">${attachments.map(renderAttachmentHtml).join('')}</div>`;
+  return `<div class="slot-chat-media-grid">${attachments.map((attachment, index) => renderAttachmentHtml(attachment, index,
+    pictureItem ? JSON.stringify([pictureItem, index, attachment.key || '']) : undefined)).join('')}</div>`;
 }
 
 function renderCodeBody(text: string): string {
@@ -562,7 +565,8 @@ function renderTranscriptItemBodyHtml(
     const activityLabel = activity && ACTIONABLE_ASSISTANT_STATES.has(activity.response_state) ? formatAssistantActivity(activity) : '';
     const activityStatus = activityLabel ? `<div class="slot-chat-assistant-activity" role="status">${escapeHtml(activityLabel)}</div>` : '';
 
-    const attachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
+    const attachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments,
+      options.pictureCards ? item.id : undefined);
     const voice = validVoiceMetadata((item as PentacleTranscriptItem & { voice?: unknown }).voice);
     const seconds = voice ? Math.floor(voice.duration_s) : 0;
     const duration = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -600,10 +604,11 @@ function renderTranscriptItemBodyHtml(
   // bubble:assistant (and any unmapped fallback) -> assistant card.
   // An agent-authored image (the send_image path) rides as an assistant event
   // carrying attachments: render the same media button+img the operator's own
-  // user-attachment bubble uses (line ~468) so the shared image viewer opens
-  // identically from either side.
+  // user-attachment bubble uses so whichever entry owns the viewer can
+  // open images from either side of the chat.
   const assistantAttachments = (options.showDashboardLinks && renderDesignLink(item)) ||
-    renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
+    renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments,
+      options.pictureCards ? item.id : undefined);
   const blocks = parseAssistantBlocks(item.text);
   return `<article class="slot-chat-row" data-copy-kind="message"><div class="slot-chat-assistant-card">
     ${blocks.map((block, index) => {

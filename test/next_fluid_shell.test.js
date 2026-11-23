@@ -63,6 +63,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   window.PentacleChatStore = {
     getState: () => ({ sessions: rows, drafts: wireDrafts }), getLimits: () => [], subscribe(fn) { notify = fn; },
     getTurnPhase: id => activity[id] ?? 'idle',
+    getTurnState: id => ({ phase: activity[id] ?? 'idle' }),
     getWorkingElapsedMs: id => elapsed[id] ?? null,
     canSendQueuedNow: (id, oid) => id === 'fixture:a' && oid === 'receipt' && sendNowAllowed,
     sendQueuedNow: (...args) => calls.push(['queued-now', ...args]),
@@ -203,7 +204,7 @@ test('storage denial falls back to a left rail and still starts the workspace', 
   assert.equal(s.shown()[0].querySelector('.thread-inner').dataset.streamId, 'fixture:a');
 });
 
-test('U1: the Next working time uses hours and falls back to a seeded label, not a made-up zero', async t => {
+test('U1: the Next working time uses authoritative elapsed, then the carried start, a label or zero', async t => {
   const s = openShell(t);
   await flush(); s.choose('a');
   const a = s.rows[1]; a.working = true;
@@ -215,8 +216,10 @@ test('U1: the Next working time uses hours and falls back to a seeded label, not
     s.elapsed[a.stream_id] = ms; s.update(); assert.equal(timer(), want);
   }
   delete s.elapsed[a.stream_id];
-  a.working_label = '7s'; s.update(); assert.equal(timer(), '7s');
-  a.working_label = ''; s.update(); assert.equal(timer(), '');
+  a.working_label = '7s'; s.update(); assert.equal(timer(), '1m 04s');
+  a.working = false; s.update(); assert.equal(timer(), '');
+  a.working = true; s.update(); assert.equal(timer(), '7s');
+  a.session_generation = 'replacement'; a.working_label = ''; s.update(); assert.equal(timer(), '0s');
   assert.equal(s.$('[data-pane=chat] .next-working').hidden, false);
 });
 
@@ -229,6 +232,9 @@ test('U2: session, draft, and phase each work independently but the composite tr
   a.working = false; s.update(); assert.equal(active('chat'), false);
   s.wireDrafts[a.stream_id] = {raw: {working:true}}; s.update(); assert.equal(active('chat'), true);
   delete s.wireDrafts[a.stream_id]; s.activity[a.stream_id] = 'pending'; s.update(); assert.equal(active('chat'), true);
+  assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '', 'pending alone leaves the duration blank');
+  s.activity[a.stream_id] = 'working'; s.update();
+  assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '0s', 'confirmed phase starts the clock');
   s.activity[a.stream_id] = 'idle'; s.update(); assert.equal(active('chat'), false);
   s.activity[assistant.stream_id] = 'working';
   s.wireDrafts[assistant.stream_id] = {raw:{working:true,working_label:'20s'}};

@@ -10,17 +10,24 @@ const status = fs.existsSync(candidate) ? require(candidate) : null;
 // next_fluid_shell; these supplementary tests cover pure edge cases at tip.
 const edge = (name, fn) => test(name, {skip: !status && 'pure edge case: pinned-base behavior exercised via Next shell'}, fn);
 
-edge('elapsed fallback is seeded once, ticks, and discards the seed on idle or replacement', () => {
+edge('ordinary elapsed carries the authoritative start and resets across turn, idle and generation', () => {
   const {workingClock} = status;
-  const clock=workingClock();
-  const row={stream_id:'fixture:a',working:true,working_label:'7s'};
-  assert.equal(clock.elapsed(row,null,'idle',null,0), '7s');
-  assert.equal(clock.elapsed(row,null,'idle',null,2200), '9s');
-  assert.equal(clock.elapsed(row,null,'idle',64000,2200), '1m 04s');
-  assert.equal(clock.elapsed({...row,working:false},null,'idle',null,2300), '');
-  assert.equal(clock.elapsed(row,null,'idle',null,3500), '7s');
+  const clock = workingClock();
+  const row = {stream_id:'fixture:a', session_generation:'a', working:true};
+  const turn = {phase:'pending', optimisticId:'send-a', sentAt:1};
+  assert.equal(clock.elapsed({...row, working:false}, null, turn, 7000, 0), '', 'pending alone has no duration');
+  assert.equal(clock.elapsed({...row, working_label:'7s'}, null, turn, null, 0), '7s');
+  assert.equal(clock.elapsed(row, null, turn, null, 2200), '9s');
+  assert.equal(clock.elapsed(row, null, turn, 64000, 2200), '1m 04s');
+  const confirmed = {...turn, phase:'working', firstServerEventAt:2300};
+  assert.equal(clock.elapsed(row, null, confirmed, null, 3200), '1m 05s');
+  assert.equal(clock.elapsed(row, null, {...confirmed, phase:'idle', endedAt:3300}, null, 3300), '0s');
+  assert.equal(clock.elapsed({...row, working:false}, null, undefined, null, 3500), '');
+  assert.equal(clock.elapsed(row, null, undefined, null, 5500), '0s');
+  assert.equal(clock.elapsed(row, null, undefined, null, 9500), '4s');
+  assert.equal(clock.elapsed({...row, session_generation:'b'}, null, undefined, null, 9600), '0s');
   clock.retain(new Set());
-  assert.equal(clock.elapsed(row,null,'idle',null,5500), '7s');
+  assert.equal(clock.elapsed({...row, session_generation:'b'}, null, undefined, null, 11000), '0s');
 });
 
 edge('seen marks key by stream, survive temporary absence and reload, collapse identical messages and drop explicit closes', () => {
