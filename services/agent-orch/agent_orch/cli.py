@@ -5571,11 +5571,17 @@ def watch_wake(args: argparse.Namespace) -> int:
     return _coordination_request(args, payload)
 
 
+def _usage_account_selector(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("expected a non-empty account selector")
+    return value
+
+
 def usage(args: argparse.Namespace) -> int:
     """Read one host's current Claude/Codex account-period usage (/usage limits)."""
     from agent_orch import usage_readback
 
-    if getattr(args, "account", None):
+    if getattr(args, "account", None) is not None:
         from . import account_cli
         return account_cli.usage(args)
 
@@ -6952,7 +6958,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "`agent-orch usage rollup --help` for the per-spec/project rollup and calibration",
     )
     usage_parser.add_argument("--host", help="host name from machines.json")
-    usage_parser.add_argument("--account", help="read the immutable account registry and coherent pool observations")
+    usage_parser.add_argument(
+        "--account", type=_usage_account_selector,
+        help="read the immutable account registry and coherent pool observations",
+    )
     usage_parser.add_argument(
         "--unplaced", action="store_true",
         help="list refused/unplaced satellite usage and held-span losses from the daemon DB "
