@@ -244,5 +244,7 @@ else:
             return await original_close(self, **kwargs)
 
         Server.bind, Server.close = seam_bind, seam_close
+    from next_chat_tools_fixture import install as install_chat_tools_fixture
+    install_chat_tools_fixture(fixture_server.Server, uiverbs.UIVerbs, uiverbs.VerbError, scratch)
     sys.argv = [str(ROOT / 'services/chat-stream-v2/main.py'), *sys.argv[2:]]
     runpy.run_path(sys.argv[0], run_name='__main__')
