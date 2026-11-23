@@ -27,7 +27,7 @@ function start({ decode = async () => {} } = {}) {
   const fetched = [];
   const noop = () => {};
   const sessions = [
-    { stream_id: ids.assistant, session_kind: 'assistant_composite', title: 'Bart' },
+    { stream_id: ids.assistant, session_kind: 'assistant_composite', title: 'Assistant' },
     { stream_id: ids.first, title: 'First' }, { stream_id: ids.second, title: 'Second' },
   ];
   window.cc = {

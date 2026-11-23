@@ -86,7 +86,7 @@ const desktop = isolated(async ctx => {
   // recognized by the real lane-link renderer in the same assistant reply.
   await wait(ctx, `!!document.querySelector(${JSON.stringify(thumb('.pane', wide))})`, 'assistant picture fixture');
   await image(ctx, '.pane', wide, 420, 150);
-  await check(ctx, 'Bart and the picture have even widths, and Design is not lit',
+  await check(ctx, 'the assistant chat and the picture have even widths, and Design is not lit',
     `(() => { const pane=document.querySelector('.pane'), picture=document.querySelector('${card}');
       return !pane.hidden && Math.abs(pane.clientWidth-picture.clientWidth)<3 &&
       !document.querySelector('.rail [aria-label="Dashboards"]').classList.contains('on')
@@ -111,7 +111,7 @@ const desktop = isolated(async ctx => {
   await openChat(ctx, firstChat);
   await session.click(chat + ':not([hidden]) .fullscreen');
   await image(ctx, chatThread(firstChat), tall, 150, 420);
-  await check(ctx, 'opening from a solo chat brings it beside the picture instead of Bart',
+  await check(ctx, 'opening from a solo chat brings it beside the picture instead of the assistant chat',
     `${visible(chat)} && !document.querySelector('.pane:not([hidden])') &&
       Math.abs(document.querySelector(${JSON.stringify(chat + ':not([hidden])')}).clientWidth-document.querySelector('${card}').clientWidth)<3`);
   await shot(ctx, 'next-picture-tall');
@@ -120,7 +120,7 @@ const desktop = isolated(async ctx => {
     !document.querySelector('.lanes-card:not([hidden])')`);
   await image(ctx, chatThread(firstChat), wide, 420, 150);
   await session.click('.rail .brand');
-  await check(ctx, 'dim logo brings Bart beside the picture', `${visible('.pane')} && !${visible(chat)} && !!document.querySelector('${shown}')`);
+  await check(ctx, 'dim logo brings the assistant chat beside the picture', `${visible('.pane')} && !${visible(chat)} && !!document.querySelector('${shown}')`);
   await openChat(ctx, secondChat);
   await check(ctx, 'rail chat ends picture arrangement without keeping solo', `${visible('.pane')} && ${visible(chat)} && !document.querySelector('${shown}')`);
   const linkRows = '.pane a.slot-chat-md-link';
@@ -157,7 +157,7 @@ const themes = isolated(async ctx => {
     await ctx.session.click('.rail [aria-label="Settings"]');
     await ctx.session.click(`.theme-choice[aria-label="${theme}"]`);
     await ctx.session.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
-    await check(ctx, `${theme} theme has lanes beside Bart`, `document.documentElement.dataset.theme === '${theme}' &&
+    await check(ctx, `${theme} theme has lanes beside the assistant chat`, `document.documentElement.dataset.theme === '${theme}' &&
       ${visible('.pane')} && ${visible('.lanes-card')} && !document.querySelector('${shown}')`);
     await shot(ctx, 'next-themes-composed-' + theme);
   }
