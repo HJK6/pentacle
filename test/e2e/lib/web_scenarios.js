@@ -635,6 +635,7 @@ const SCENARIOS = [
   ['composer-draft-pending-send', composerDraftPendingSend],
   ['composer-draft-retire', composerDraftRetire],
   ...require('./next_design_scenarios.cjs'),
+  ...require('./next_picture_scenarios.cjs'),
   ['next-melody', require('./next_scenarios').melody],
   ['next-settings-width', require('./next_settings_scenarios').width],
   ['next-settings-mic', require('./next_settings_scenarios').mic],

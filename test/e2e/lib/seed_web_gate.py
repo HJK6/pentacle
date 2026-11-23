@@ -24,6 +24,8 @@ import hashlib
 import os
 from pathlib import Path
 import sys
+import struct
+import zlib
 
 # Import the daemon's own store/ingest so the seed goes through the exact code
 # paths the daemon reads back (session_created_at linkage, event identity).
@@ -259,6 +261,56 @@ async def seed_next_thumbnail(db: str, blob_root: str) -> dict:
         store.stop()
 
 
+def picture_png(width: int, height: int, accent: tuple[int, int, int]) -> bytes:
+    """Pure synthetic artwork with a distinct, visible aspect ratio."""
+    def chunk(kind, body):
+        return (struct.pack(">I", len(body)) + kind + body
+                + struct.pack(">I", zlib.crc32(kind + body)))
+
+    colors = [bytes(accent), bytes((20, 40, 53)), bytes((180, 227, 210))]
+    rows = [
+        b"\x00" + b"".join(colors[(x * 3 // width + y * 3 // height) % 3] for x in range(width))
+        for y in range(height)
+    ]
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+            + chunk(b"IEND", b""))
+
+
+async def seed_next_pictures(db: str, blob_root: str) -> dict:
+    """Only the three new scenarios opt in; old web seeds are unchanged."""
+    images = []
+    for filename, width, height, accent in [
+        ('fixture-wide.png', 420, 150, (50, 170, 142)),
+        ('fixture-tall.png', 150, 420, (172, 102, 190)),
+    ]:
+        body = picture_png(width, height, accent)
+        digest = hashlib.sha256(body).hexdigest()
+        location = Path(blob_root) / digest[:2] / digest
+        location.parent.mkdir(parents=True, exist_ok=True)
+        location.write_bytes(body)
+        images.append(dict(key=digest, mime='image/png', bytes=len(body), size=len(body),
+                           width=width, height=height, filename=filename, name=filename))
+    store = Store(db)
+    store.start()
+    count = 0
+    try:
+        for stream, index, text in [
+            ('local:web-gate-1', 181, 'Fixture pictures from another chat.'),
+            ('local:web-gate-assistant', 182,
+             'Fixture picture lane and Fixture picture goal. '
+             '[Outside link](https://example.invalid/picture) and [Ordinary designs link](/designs/).'),
+        ]:
+            event = _event(stream, 'ASSIST_TEXT', text, index)
+            event['attachments'] = images
+            if await store.append_session_event(stream, event, identity=_identity_key(event), limit=500):
+                count += 1
+        return {'picture_events_added': count}
+    finally:
+        store.stop()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True)
@@ -267,12 +319,15 @@ def main() -> int:
     parser.add_argument("--objective", default="web gate fixture")
     parser.add_argument("--token-file")
     parser.add_argument("--blob-root")
-    parser.add_argument("--next-thumbnail", action="store_true")
+    fixture = parser.add_mutually_exclusive_group()
+    fixture.add_argument("--next-thumbnail", action="store_true")
+    fixture.add_argument("--next-pictures", action="store_true")
     args = parser.parse_args()
-    if args.next_thumbnail:
+    if args.next_thumbnail or args.next_pictures:
         if not args.blob_root:
-            parser.error("--next-thumbnail requires --blob-root")
-        result = asyncio.run(seed_next_thumbnail(args.db, args.blob_root))
+            parser.error("image fixtures require --blob-root")
+        seed_fixture = seed_next_thumbnail if args.next_thumbnail else seed_next_pictures
+        result = asyncio.run(seed_fixture(args.db, args.blob_root))
     else:
         result = asyncio.run(seed(args.db, args.host, args.session, args.objective, args.token_file, args.blob_root))
     print(json.dumps(result))
