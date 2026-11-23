@@ -10,12 +10,13 @@ const card = '.picture-card';
 const shown = card + ':not([hidden])';
 const close = card + ' .picture-close';
 const full = card + ' .picture-full';
-const chat = '.stage > .chat-card:not([hidden])';
+const chat = '.stage > .chat-card';
 const wide = 'fixture-wide.png';
 const tall = 'fixture-tall.png';
 const firstChat = 'local:web-gate-1';
 const secondChat = 'local:web-gate-survivor';
 const lane = F.makeOrdinaryLane({ title: 'Fixture picture lane', goalTitle: 'Fixture picture goal', memberCount: 3 });
+const chatThread = id => `${chat} .thread-inner[data-stream-id="${id}"]`;
 const thumb = (container, name) => `${container} .slot-chat-media-button[aria-label="${name}"]`;
 const wait = (ctx, expr, label) => ctx.session.waitFor(expr, { timeoutMs: ctx.timeoutMs, label });
 const visible = selector => `!!document.querySelector(${JSON.stringify(selector + ':not([hidden])')})`;
@@ -39,7 +40,7 @@ function seed(ctx) {
 async function openChat(ctx, id) {
   await ctx.session.click('.rail [aria-label="Chats"]');
   await ctx.session.click(`.popover [data-stream-id="${id}"]`);
-  await wait(ctx, `document.querySelector(${JSON.stringify(chat + ' .thread-inner')})?.dataset.streamId === ${JSON.stringify(id)}`, 'source chat opened');
+  await wait(ctx, `document.querySelector(${JSON.stringify(chatThread(id))})?.closest('.chat-card').hidden === false`, 'source chat opened');
 }
 
 async function image(ctx, container, name, width, height) {
@@ -108,16 +109,16 @@ const desktop = isolated(async ctx => {
   await check(ctx, 'Escape also restores the previous split', visible('.pane'));
   await session.click(close);
   await openChat(ctx, firstChat);
-  await session.click(chat + ' .fullscreen');
-  await image(ctx, chat, tall, 150, 420);
+  await session.click(chat + ':not([hidden]) .fullscreen');
+  await image(ctx, chatThread(firstChat), tall, 150, 420);
   await check(ctx, 'opening from a solo chat brings it beside the picture instead of Bart',
     `${visible(chat)} && !document.querySelector('.pane:not([hidden])') &&
-      Math.abs(document.querySelector(${JSON.stringify(chat)}).clientWidth-document.querySelector('${card}').clientWidth)<3`);
+      Math.abs(document.querySelector(${JSON.stringify(chat + ':not([hidden])')}).clientWidth-document.querySelector('${card}').clientWidth)<3`);
   await shot(ctx, 'next-picture-tall');
   await session.click(close);
   await check(ctx, 'closing restores the full-screen chat', `${visible(chat)} && !document.querySelector('.pane:not([hidden])') &&
     !document.querySelector('.lanes-card:not([hidden])')`);
-  await image(ctx, chat, wide, 420, 150);
+  await image(ctx, chatThread(firstChat), wide, 420, 150);
   await session.click('.rail .brand');
   await check(ctx, 'dim logo brings Bart beside the picture', `${visible('.pane')} && !${visible(chat)} && !!document.querySelector('${shown}')`);
   await openChat(ctx, secondChat);
@@ -140,7 +141,7 @@ const narrow = isolated(async ctx => {
     await session.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
     await wait(ctx, `innerWidth === ${width}`, 'compact viewport applied');
     await openChat(ctx, firstChat);
-    await image(ctx, chat, tall, 150, 420);
+    await image(ctx, chatThread(firstChat), tall, 150, 420);
     await check(ctx, `picture fills the stage with no horizontal overflow at ${width}`, `${overflow} &&
       !${visible(chat)} && !${visible('.pane')} && !${visible('.lanes-card')} &&
       document.querySelector('${full}').hidden === ${width < 600}`);
