@@ -271,6 +271,15 @@ function replaceChat(state, slot, id) {
   return { ...state, [slot]: id, last: slot };
 }
 
+// A title switch acts on a seat rather than on the rail's replacement policy.
+function switchChat(state, seat, id) {
+  if (!chatKey(seat) || !state[seat] || !id || state[seat] === id) return state;
+  const other = seat === 'chat' ? 'chat2' : 'chat';
+  const next = { ...state, [seat]: id, last: seat };
+  if (state[other] === id) next[other] = state[seat];
+  return next;
+}
+
 /** Toggle a chat/dashboard into or out of full screen. The mock has no such control on phones. */
 function toggleFullScreen(state, key, width) {
   if (!chatKey(key) && key !== 'dash') throw new TypeError(`card cannot fill the screen: ${key}`);
@@ -442,7 +451,7 @@ module.exports = {
   MIN_WIDTH,
   PHONE_WIDTH,
   RAIL_WIDTH, GAP, LANE_DRAWN,
-  readRail, setRail, roomAt, replaceChat,
+  readRail, setRail, roomAt, replaceChat, switchChat,
   keepAssistant, dismissAssistant,
   visibleSeats, seatWidths, seatGap, canResize, resizeBoundary, resetWidths,
   positions, liftReached, aimDrag, dropSection,

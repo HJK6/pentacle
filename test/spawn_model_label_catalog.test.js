@@ -5,11 +5,13 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const root = path.join(__dirname, '..');
-const app = fs.readFileSync(path.join(root, 'renderer', 'app.js'), 'utf8');
+const shared = path.join(root, 'renderer', 'chat_presentation.js');
+const source = fs.readFileSync(fs.existsSync(shared) ? shared : path.join(root, 'renderer', 'app.js'), 'utf8');
 
 function loadModelLabel() {
-  const src = app.match(/function modelLabel\(model\) \{[\s\S]*?\n\}/);
-  assert.ok(src, 'modelLabel function found in renderer/app.js');
+  if (fs.existsSync(shared)) return require(shared).modelLabel;
+  const src = source.match(/function modelLabel\(model\) \{[\s\S]*?\n\}/);
+  assert.ok(src, 'modelLabel function found in the renderer model-name source');
   return new Function(`${src[0]}; return modelLabel;`)();
 }
 
@@ -32,6 +34,6 @@ test('every daemon catalog model renders a label, not its raw id', {
 });
 
 test('modelLabel holds no provider model-id list', () => {
-  const src = app.match(/function modelLabel\(model\) \{[\s\S]*?\n\}/)[0];
+  const src = source.match(/function modelLabel\(model\) \{[\s\S]*?\n\}/)[0];
   assert.doesNotMatch(src, /'(claude|gpt)-[^']*'\s*:/, 'modelLabel enumerates model ids');
 });

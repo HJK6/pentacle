@@ -338,3 +338,46 @@ div.design-empty{padding:15vh 0 0;color:var(--text)}
 @media(prefers-reduced-motion:reduce){
   .stage>[data-pane]{transition:none!important}
 }
+
+/* Both Next chat entry points share the same row and activity language. */
+.next-chat-title{display:inline-flex;align-items:center;gap:7px;max-width:100%;min-height:20px;text-align:left;color:var(--text)}
+.next-chat-title>span,.next-chat-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.next-chat-title:hover,.next-chat-title[aria-expanded=true]{color:var(--accent)}
+.next-title-chevron{width:6px;height:6px;margin:0 3px 3px 0;flex:none;border-right:1px solid currentColor;border-bottom:1px solid currentColor;transform:rotate(45deg);opacity:.7}
+.next-chat-model{overflow:hidden;text-overflow:ellipsis;font:400 11px var(--display);color:var(--faint)}
+html[data-rail] .next-app>.popover.chat-switch{right:auto;bottom:auto;left:var(--switch-x,8px);top:var(--switch-y,50px);width:min(316px,calc(100% - 16px));max-height:min(520px,calc(100% - var(--switch-y,50px) - 8px))}
+.next-chat-row{display:flex;align-items:center;min-height:35px;border-radius:9px;color:var(--dim)}
+.popover .next-chat-pick{display:flex;align-items:center;min-width:0;gap:8px;flex:1;text-align:left;color:inherit}
+.next-chat-row.selected,.next-chat-row.unread{color:var(--text)}
+.next-chat-lead{width:15px;flex:none;display:grid;place-items:center}
+.next-chat-dot,.brand.assistant-unread::after{width:8px;height:8px;flex:none;margin:0 10px 0 3px;border-radius:50%;background:var(--accent)}
+.next-chat-actions{align-items:center;display:flex;opacity:0;width:0;overflow:hidden;pointer-events:none}
+.next-chat-row:hover .next-chat-actions,.next-chat-row:focus-within .next-chat-actions{width:auto;overflow:visible;opacity:1;pointer-events:auto}
+.next-chat-row:has(.next-chat-actions):is(:hover,:focus-within) .next-chat-dot{display:none}
+.popover .next-chat-actions button{width:27px;padding:4px;display:grid;place-items:center;color:var(--dim)}
+.popover .next-chat-actions button:hover,.popover .next-chat-actions button:focus-visible{color:var(--text)}
+.next-chat-edit{width:100%;min-width:0;border:1px solid var(--accent);border-radius:8px;padding:6px 9px;color:var(--text);background:var(--surface)}
+.next-chat-question{padding-left:12px;flex:1}
+.popover .next-chat-cancel,.popover .next-chat-confirm{width:auto;padding:5px 8px}
+.popover .next-chat-confirm{color:var(--accent)}
+.rail-button.chats-button[data-count]::after{background:var(--accent)}
+.brand.assistant-unread::after{content:'';position:absolute;top:2px;right:2px;width:9px;height:9px;margin:0}
+.next-ring{display:inline-block;width:13px;height:13px;box-sizing:border-box;flex:none;border:2px solid var(--accent-line);border-top-color:var(--accent);border-radius:50%;animation:next-chat-spin .8s linear infinite}
+.next-working{display:flex;align-items:center;gap:7px;flex:none;height:20px;margin:0 20px 8px;color:var(--dim);font-size:12.5px}
+.next-working-time{color:var(--accent);font-variant-numeric:tabular-nums}
+.brand.assistant-working .logo{animation:next-assistant-breathe 2.4s ease-in-out infinite}
+@keyframes next-chat-spin{to{transform:rotate(360deg)}}
+@keyframes next-assistant-breathe{50%{opacity:.55;transform:scale(.91)}}
+.next-app .slot-chat-send-status{font-size:12px}
+.next-send-glyph{display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:5px;color:var(--accent);font-weight:700;height:13px}
+.next-send-glyph.stream{width:16px;overflow:hidden;justify-content:flex-start}
+.next-send-glyph.stream>span{display:flex;flex:none;align-items:center;animation:next-send-stream 550ms linear infinite}
+.next-send-glyph.stream i{width:8px;display:grid;place-items:center}
+.next-send-glyph.stream i::after{content:'';width:4px;height:4px;border-top:1.5px solid currentColor;border-right:1.5px solid currentColor;transform:rotate(45deg)}
+@keyframes next-send-stream{from{transform:translateX(-8px)}to{transform:translateX(0)}}
+.next-app .slot-chat-send-now{height:22px;border:1px solid currentColor;border-radius:8px;padding:0 7px;margin-left:7px;color:var(--accent);font-size:12px}
+@media(prefers-reduced-motion:reduce){
+  .next-ring{animation-duration:3.2s}
+  .brand.assistant-working .logo{animation:none;outline:1px solid var(--accent);outline-offset:2px}
+  .next-send-glyph.stream>span{animation:none}
+}

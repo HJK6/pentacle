@@ -50,3 +50,26 @@ began there. Lanes can move without resizing. Press Escape while carrying a
 section to cancel. Resize adjacent panes by dragging the gap between them;
 double-click a resize gap to reset all sizes. There is no resize gap next to
 Lanes. The phone layout still shows one section at a time and does not change.
+
+### Chat tools in Next
+
+Use a chat's title to switch it in place. Picking the chat already in the
+other card swaps the two sessions without moving their seats. The rail still
+opens chats with its existing placement rules. Both lists show working and
+unread state and reveal Rename and Delete on hover or keyboard focus. Rename
+saves on Enter or blur; Escape cancels. Delete asks in the row before closing
+the actual session, and the configured assistant cannot be renamed or deleted.
+
+An unread chat has a latest non-operator message different from the one last
+displayed while the page and the card were visible. The Assistant has the same
+check on its mark when aside. The first inventory seeds the browser's marks.
+Identical consecutive kind/text pairs count as one; an offline host does not
+erase marks. The marks stay in this browser under `pentacle.next.chat.seen`;
+if local storage is unavailable they last only for the page.
+
+The working row sits above the composer, uses the live elapsed clock or a
+chat's reported label, and leaves off the time if neither is known. The
+Assistant uses its own elapsed clock only. Reduced motion slows the working
+ring, makes the Assistant's mark still, and stops the send chevrons. The queue
+line only offers Send now when the store permits it for that specific message.
+The shared transcript and ordinary desktop/web send behavior are unchanged.

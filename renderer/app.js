@@ -19,7 +19,8 @@ const dashboardCatalog = require('./dashboards/catalog_loader');
 const dashboardReports = require('./dashboards/report_board');
 const { showToast } = require('./toast');
 const { decideUseChatClose } = require('./delete_session_gate');
-const { configuredAssistantRole, isConfiguredAssistant, isCompositeAssistant } = require('./assistant_role');
+const { configuredAssistantRole, isCompositeAssistant } = require('./assistant_role');
+const { modelLabel, isProtectedAssistant } = require('./chat_presentation');
 const { resolveAssistantDirectTarget } = require('./assistant_direct_entry');
 const { createClosedChatSlots } = require('./closed_chat_slots');
 const { applyVersionedConnectionState } = require('./chat_stream_connection_state');
@@ -229,7 +230,7 @@ function assistantRole() {
 }
 
 function isProtectedAssistantSession(session) {
-  return isConfiguredAssistant(session, assistantRole());
+  return isProtectedAssistant([session], assistantRole());
 }
 
 const ACTIVITY_SPINNER_PERIOD_MS = 1050;
@@ -2421,8 +2422,9 @@ function canonicalChatSessionStateForNameHost(sessionName, hostId) {
 }
 
 function isProtectedAssistantNameHost(sessionName, hostId) {
-  return isProtectedAssistantSession(canonicalChatSessionStateForNameHost(sessionName, hostId))
-    || isProtectedAssistantSession(sessionStateForNameHost(sessionName, hostId))
+  const candidates = [canonicalChatSessionStateForNameHost(sessionName, hostId),
+    sessionStateForNameHost(sessionName, hostId)];
+  return isProtectedAssistant(candidates, assistantRole())
     || state.sessions.some((entry) => entry.name === sessionName
       && (entry.hostId || (IS_CLIENT ? 'remote' : 'local')) === hostId
       && isProtectedAssistantSession(entry));
@@ -6977,20 +6979,6 @@ function catalogProviders(catalog) {
   const models = catalog?.models || {};
   return Object.keys(models).filter((provider) =>
     Array.isArray(profile[provider]) && Object.keys(models[provider] || {}).length > 0);
-}
-
-function modelLabel(model) {
-  // Catalog ids carry their display name (claude-<family>-<major>[-<minor>],
-  // gpt-<version>-<tier>); anything else renders raw.
-  const id = String(model ?? '');
-  const title = (word) => word[0].toUpperCase() + word.slice(1);
-  const claude = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?$/);
-  if (claude) return `${title(claude[1])} ${claude[2]}${claude[3] ? `.${claude[3]}` : ''}`;
-  if (id === 'auto' || id === 'cursor-auto') return 'Cursor Auto';
-  const gemini = id.match(/^gemini-(\d+(?:\.\d+)?)-([a-z]+(?:-[a-z]+)*)$/);
-  if (gemini) return `Gemini ${gemini[1]} ${gemini[2].split('-').map(title).join(' ')}`;
-  const gpt = id.match(/^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/);
-  return gpt ? `${gpt[1]} ${title(gpt[2])}` : model;
 }
 
 function updateNewSessionStatus(message = '', isError = false) {
