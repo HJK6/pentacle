@@ -5,6 +5,8 @@ const { parseWorkingSeconds } = require('../chat_ui_state');
 
 const SEEN_KEY = 'pentacle.next.chat.seen';
 const composite = session => session?.session_kind === 'assistant_composite';
+const hasConfirmedWork = (session, draft, phase) => !!session
+  && !!(session.working || (!composite(session) && (draft?.raw?.working || phase === 'working')));
 
 function formatElapsed(ms) {
   if (!Number.isFinite(ms)) return '';
@@ -16,22 +18,30 @@ function formatElapsed(ms) {
 }
 
 function isWorking(session, draft, phase = 'idle') {
-  return !!session && !!(session.working || (!composite(session) && (draft?.raw?.working || phase !== 'idle')));
+  return hasConfirmedWork(session, draft, phase) || (!!session && !composite(session) && phase === 'pending');
 }
 
 function workingClock() {
-  const fallback = new Map();
+  const starts = new Map();
   return {
-    retain(ids) { for (const id of fallback.keys()) if (!ids.has(id)) fallback.delete(id); },
-    elapsed(session, draft, phase, elapsed, now) {
+    retain(ids) { for (const id of starts.keys()) if (!ids.has(id)) starts.delete(id); },
+    elapsed(session, draft, turn, elapsed, now) {
       const id = session?.stream_id;
-      if (!isWorking(session, draft, phase)) { fallback.delete(id); return ''; }
-      if (composite(session)) return formatElapsed(elapsed);
-      const seed = parseWorkingSeconds(draft?.raw?.working_label || session.working_label);
-      if (seed == null) fallback.delete(id);
-      else if (fallback.get(id)?.seed !== seed) fallback.set(id, { seed, at: now });
-      const saved = fallback.get(id);
-      return formatElapsed(elapsed ?? (saved ? saved.seed * 1000 + Math.max(0, now - saved.at) : null));
+      if (composite(session)) return session.working ? formatElapsed(elapsed) : '';
+      if (!id || !hasConfirmedWork(session, draft, turn?.phase)) { starts.delete(id); return ''; }
+
+      const generation = session.session_generation;
+      const turnStart = turn?.sentAt ?? turn?.firstServerEventAt;
+      const optimisticId = turn?.optimisticId;
+      const endedAt = turn?.endedAt;
+      const previous = starts.get(id);
+      const sameTurn = previous?.generation === generation && previous?.endedAt === endedAt
+        && (previous?.turnStart == null || previous.turnStart === turnStart)
+        && previous?.optimisticId === optimisticId;
+      const start = elapsed != null ? now - elapsed : (sameTurn ? previous?.start : undefined) ??
+        now - 1000 * (parseWorkingSeconds(draft?.raw?.working_label) ?? parseWorkingSeconds(session.working_label) ?? 0);
+      starts.set(id, { generation, turnStart, optimisticId, endedAt, start });
+      return formatElapsed(now - start);
     },
   };
 }
@@ -130,4 +140,4 @@ function decorateSendLines(element, store) {
   }
 }
 
-module.exports = { SEEN_KEY, formatElapsed, isWorking, workingClock, modelAndEffort, createSeenMarks, sendLine, mountWorkingRow, decorateSendLines };
+module.exports = { SEEN_KEY, formatElapsed, isWorking, hasConfirmedWork, workingClock, modelAndEffort, createSeenMarks, sendLine, mountWorkingRow, decorateSendLines };

@@ -31,7 +31,7 @@ const { applyVersionedConnectionState } = require('../chat_stream_connection_sta
 const { mountChatList } = require('./chat_list');
 const { isProtectedAssistant } = require('../chat_presentation');
 const { configuredAssistantRole } = require('../assistant_role');
-const { isWorking, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines } = require('./chat_status');
+const { isWorking, hasConfirmedWork, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines } = require('./chat_status');
 const { createReadingWidth } = require('./reading_width');
 const { createMicrophonePreference } = require('./microphone');
 const { mountSettingsFields } = require('./settings_fields');
@@ -245,7 +245,10 @@ function paintChatStatus() {
   if (unread) chatsButton.dataset.count = String(unread); else delete chatsButton.dataset.count;
   chatsButton.setAttribute('aria-label', unread ? 'Chats, ' + unread + ' unread' : 'Chats');
   brand.classList.toggle('assistant-unread', assistant.hidden && seen.unread(a));
-  clock.retain(new Set(sessions().map(s => s.stream_id)));
+  clock.retain(new Set(sessions().filter(s => {
+    const turn = store.getTurnState?.(s.stream_id);
+    return hasConfirmedWork(s, draftFor(s), turn?.phase);
+  }).map(s => s.stream_id)));
   paintWorking();
   if (chatList) paintChatList();
 }
@@ -254,7 +257,7 @@ function paintWorking() {
   brand.classList.toggle('assistant-working', !!working(a));
   const tick = (s, draw) => {
     const now = Date.now();
-    draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnPhase?.(s.stream_id) : undefined,
+    draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnState?.(s.stream_id) : undefined,
       s ? store.getWorkingElapsedMs?.(s.stream_id, now) : null, now));
   };
   tick(a, showAssistantWorking);

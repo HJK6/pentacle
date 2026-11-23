@@ -78,7 +78,10 @@ test('ordinary retry and reconnect keep the input identity while old RPC receipt
   controller.setSendBridge(async args => { sends.push(args); return { ok: false, error: 'unavailable' }; });
   const id = controller.sendTurn(STREAM, 'retry this');
   await flush();
+  assert.equal(controller.getTurnPhase(STREAM), 'idle', 'the definitive dispatch failure settles its own turn');
   assert.equal(controller.retryOptimisticSend(id), true);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, id, 'Retry owns a new pending turn');
+  assert.equal(controller.getState().optimisticSends?.[id]?.status, 'dispatched');
   await flush();
   assert.equal(sends.length, 2);
   assert.equal(sends[0].optimisticId, id);
@@ -99,6 +102,40 @@ test('ordinary retry and reconnect keep the input identity while old RPC receipt
   assert.equal(replay.length, 2, 'eligible reconnect replay is dispatched');
   assert.equal(replay[1].optimisticId, replayId);
   assert.equal(replay[1].requestId, requestId, 'reconnect preserves the current request identity');
+});
+
+test('a failure receipt preserves other pending, confirmed and provider-held work', async t => {
+  const controller = store(t);
+  const sends: Parameters<ChatSendBridge>[0][] = [];
+  const inventory = (working: boolean, generation = 'one') =>
+    controller.applyFrame({ type: 'session.inventory', sessions: controller.getState().sessions.map(session =>
+      session.stream_id === STREAM ? { ...session, working, session_generation: generation } : session) });
+  const fail = (index: number) =>
+    controller.applyFrame({ type: 'send.result', request_id: sends[index].requestId, delivery: 'not_landed' });
+  controller.setSendBridge(async args => {
+    sends.push(args);
+    return { ok: true, provider_queued: args.text === 'provider-held' };
+  });
+  inventory(false);
+  const owner = controller.sendTurn(STREAM, 'owns the pending turn');
+  controller.sendTurn(STREAM, 'another send');
+  await flush();
+  fail(1);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, owner);
+  inventory(true);
+  fail(0);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, owner, 'inventory confirmed independent work');
+  inventory(false, 'two');
+  const held = controller.sendTurn(STREAM, 'provider-held');
+  await flush();
+  assert.equal(controller.getState().optimisticSends?.[held]?.provider_queued, true);
+  fail(2);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, held, 'provider-held work keeps its turn');
+  inventory(false, 'three');
+  const replacement = controller.sendTurn(STREAM, 'replacement owns the turn');
+  await flush();
+  fail(2);
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, replacement);
 });
 
 for (const reason of ['server_overloaded', 'Request is already pending', 'unavailable', 'socket closed']) {

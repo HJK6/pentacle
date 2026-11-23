@@ -18,6 +18,7 @@ import {
   markOptimisticIndeterminateByRequestId,
   markOptimisticCancelledByOptimisticId,
   reconcileOptimisticSendWithServerEvent,
+  beginPentacleTurn,
   clearPentacleTurn,
   onReconnect,
   selectChatList,
@@ -436,6 +437,18 @@ export class ChatStoreController {
 
   private setState(next: PentacleStreamState): void {
     if (next === this.state) return;
+    for (const streamId of Object.keys(this.workingElapsedAnchors)) {
+      const previous = this.state.sessions.find(item => item.stream_id === streamId);
+      const session = next.sessions.find(item => item.stream_id === streamId);
+      if (session?.session_kind === 'assistant_composite') continue;
+      const priorTurn = this.state.workingByStream?.[streamId];
+      const turn = next.workingByStream?.[streamId];
+      if (!session || previous?.session_generation !== session.session_generation
+          || (priorTurn && priorTurn.phase !== 'idle' && (!turn || turn.phase === 'idle'))
+          || (this.hasConfirmedWork(previous, this.state) && !this.hasConfirmedWork(session, next))) {
+        delete this.workingElapsedAnchors[streamId];
+      }
+    }
     this.state = next;
     for (const id of this.voiceMetas.keys()) {
       const send = next.optimisticSends?.[id];
@@ -476,6 +489,13 @@ export class ChatStoreController {
   getTurnPhase(streamId: string): 'idle' | 'pending' | 'working' {
     if (this.state.sessions.some(session => session.stream_id === streamId && session.session_kind === 'assistant_composite')) return 'idle';
     return (this.state.workingByStream?.[streamId] as TurnState | undefined)?.phase ?? 'idle';
+  }
+
+  private hasConfirmedWork(session: PentacleSessionSummary | undefined, state = this.state): boolean {
+    if (!session) return false;
+    const id = session.stream_id;
+    return session.working === true || state.drafts?.[id]?.raw?.working === true
+      || state.workingByStream?.[id]?.phase === 'working';
   }
 
   /** Full turn state for a stream (or undefined when idle/unknown). */
@@ -780,10 +800,20 @@ export class ChatStoreController {
     if (this.sendDispatches.has(send.request_id)) return false;
     const uncertain = send.status === 'indeterminate';
     const requestId = uncertain ? send.request_id : this.nextRequestId('retry');
-    const generation = this.state.sessions.find(item => item.stream_id === send.stream_id)?.session_generation;
+    const session = this.state.sessions.find(item => item.stream_id === send.stream_id);
+    const generation = session?.session_generation;
     if (generation) this.sendSessionGenerations.set(optimisticId, generation);
     else this.sendSessionGenerations.delete(optimisticId);
-    if (!uncertain) this.setState(rotateOptimisticSendRequestId(this.state, optimisticId, requestId));
+    if (!uncertain) {
+      const now = Date.now();
+      let next = rearmOptimisticSend(this.state, optimisticId, now);
+      next = rotateOptimisticSendRequestId(next, optimisticId, requestId);
+      if (session?.session_kind !== 'assistant_composite' && this.getTurnPhase(send.stream_id) === 'idle'
+          && !this.hasConfirmedWork(session) && !this.hasProviderQueuedRows(send.stream_id)) {
+        next = beginPentacleTurn(next, send.stream_id, optimisticId, now);
+      }
+      this.setState(next);
+    }
     const retry = this.state.optimisticSends?.[optimisticId];
     if (!retry) return false;
     this.dispatchOptimistic(retry.stream_id, optimisticId, requestId, retry.text, this.socketGeneration, retry.attachments ?? [], uncertain);
@@ -1158,6 +1188,23 @@ export class ChatStoreController {
     return false;
   }
 
+  private failOptimisticSend(requestId: string, reason: string): void {
+    const optimisticId = this.state.optimisticByRequestId?.[requestId];
+    const send = optimisticId ? this.state.optimisticSends?.[optimisticId] : undefined;
+    if (!send || send.request_id !== requestId) return;
+    const next = markOptimisticFailedByRequestId(this.state, requestId, reason);
+    if (next === this.state) return;
+
+    const streamId = send.stream_id;
+    const turn = this.getTurnState(streamId);
+    const session = this.state.sessions.find(item => item.stream_id === streamId);
+    const ownsPending = turn?.phase === 'pending' && turn.optimisticId === optimisticId
+      && session && session.session_generation === this.sendSessionGenerations.get(send.optimistic_id)
+      && session.session_kind !== 'assistant_composite' && !send.provider_queued
+      && !this.hasConfirmedWork(session);
+    this.setState(ownsPending ? clearPentacleTurn(next, streamId) : next);
+  }
+
   /**
    * Resolve a send-dispatch error (IPC rejected or returned ok:false). Mirrors
    * mobile: a TRANSIENT failure (the ws is down / reconnecting, or the error
@@ -1182,7 +1229,7 @@ export class ChatStoreController {
       this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
       return;
     }
-    this.setState(markOptimisticFailedByRequestId(this.state, requestId, reason));
+    this.failOptimisticSend(requestId, reason);
     logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_OPTIMISTIC_FAILED, {
       stream_id: streamId, optimistic_id: optimisticId, request_id: requestId, reason,
     });
@@ -1336,7 +1383,7 @@ export class ChatStoreController {
         this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
       } else {
         const reason = String(frame.reason || frame.delivery || 'send_failed');
-        this.setState(markOptimisticFailedByRequestId(this.state, requestId, reason));
+        this.failOptimisticSend(requestId, reason);
       }
       return this.state;
     }
@@ -1375,13 +1422,13 @@ export class ChatStoreController {
     if (type === 'working.state') {
       // Mobile casts the whole frame as WorkingStateData — the working-state
       // fields are top-level on the frame, not nested. Mirror that exactly.
-      this.setState(applyPentacleWorkingState(this.state, frame as unknown as WorkingStateData));
       const wsStreamId = typeof frame.stream_id === 'string' ? (frame.stream_id as string) : '';
       if (wsStreamId) {
         // B2: anchor the daemon's authoritative per-turn elapsed for the timer.
         this.updateWorkingElapsedAnchor(wsStreamId, frame.elapsed_ms);
         this.armStaleTurnSettle(wsStreamId);
       }
+      this.setState(applyPentacleWorkingState(this.state, frame as unknown as WorkingStateData));
       return this.state;
     }
 
