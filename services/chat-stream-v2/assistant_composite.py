@@ -760,10 +760,8 @@ class AssistantComposite:
     async def refresh_activity(self, *, broadcast=True):
         if not self.enabled:
             return
-        from assistant_activity import summarize_activity
         async with self._activity_lock:
-            inputs = await self.store.assistant_composite_activity(stream_id=self.config.stream_id)
-            next_activity = summarize_activity(inputs)
+            next_activity = await self.store.assistant_composite_activity_summary(stream_id=self.config.stream_id)
             changed = next_activity != self._activity
             self._activity = next_activity
             if changed and broadcast and self.broadcast is not None:

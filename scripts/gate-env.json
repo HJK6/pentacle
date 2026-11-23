@@ -4,6 +4,22 @@
     "python": "3.13",
     "node": "22"
   },
+  "tools": {
+    "tmux": {
+      "exact_major_minor": {
+        "darwin": "3.7",
+        "linux": "3.4"
+      }
+    },
+    "zsh": {
+      "minimum": "5.9"
+    },
+    "lsof": "presence",
+    "chrome": {
+      "minimum_major": 130
+    }
+  },
+  "umask": "022",
   "reserve_s": 60,
   "deadline": {
     "preflight_s": 30,

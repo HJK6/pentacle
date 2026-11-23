@@ -5,12 +5,14 @@ const MIN_WIDTH = Object.freeze({ assistant: 280, chat: 312, chat2: 312, dash: 3
 const RAIL_WIDTH = 60;
 const PHONE_WIDTH = 600;
 const AUTO_LANES_STAGE_WIDTH = 900;
+const PICTURE_WITH_LANES_WIDTH = MIN_WIDTH.chat + MIN_WIDTH.dash + MIN_WIDTH.lanes;
 const GAP = 12, EDGE = 44, TOP = 26, STICK = 8, LIFT = 7;
 const LANE_DRAWN = 344;
 const SEATS = Object.freeze(['assistant', ...CARD_KEYS]);
 const SHARE = Object.freeze({ assistant: 420, chat: 420, chat2: 420, dash: 640 });
 const AUTO_SHARE = Object.freeze({ assistant: 1, chat: 1, chat2: 1, dash: 2.2 });
 const chatKey = key => key === 'chat' || key === 'chat2';
+const isPicture = key => typeof key === 'string' && key.startsWith('picture:');
 const readRail = value => value === 'top' ? 'top' : 'left';
 const roomAt = (width, rail) => Math.max(0, width - GAP - (readRail(rail) === 'left' ? RAIL_WIDTH : 0));
 
@@ -105,9 +107,13 @@ function fits(state, width) {
     return { cards: open.slice(-1), assistant: open.length === 0 };
   }
 
+  const room = roomAt(width, current.rail);
+  if (isPicture(current.dash) && open.at(-1) === 'dash' && room < PICTURE_WITH_LANES_WIDTH) {
+    return { cards: ['dash'], assistant: false };
+  }
+
   const mainPair = pair(current);
   const assistantIn = mainPair[0] === 'assistant' && !current.aside;
-  const room = roomAt(width, current.rail);
   open = open.filter(key => key === 'lanes' || mainPair.includes(key));
   const needed = () => open.reduce((sum, key) => sum + MIN_WIDTH[key], assistantIn ? MIN_WIDTH.assistant : 0);
   while (open.length > 1 && needed() > room) open.shift();
@@ -181,7 +187,8 @@ function follow(state, source, id, width) {
   if (state.dash === id && fits(state, width).cards.includes('dash')) return shut(state, 'dash', width);
 
   const next = prepareAction(state, width);
-  if (source !== 'assistant') next.overlay = false;
+  if (source !== 'assistant' || isPicture(id)) next.overlay = false;
+  if (source === 'assistant' && isPicture(id)) next.aside = false;
   if (next.chat && next.chat2) {
     next[source === 'chat2' || (source === 'assistant' && next.last === 'chat2') ? 'chat' : 'chat2'] = null;
   }
@@ -231,6 +238,11 @@ function toAssistant(state, width) {
       front: 'assistant', last: 'assistant', peek: null, aside: false, overlay: false });
   } else if (next.overlay) {
     next.overlay = false;
+  } else if (isPicture(next.dash) && chatKey(next.front) && !next.solo &&
+             roomAt(width, next.rail) >= PICTURE_WITH_LANES_WIDTH) {
+    next.front = 'assistant';
+    next.aside = false;
+    next.last = 'assistant';
   } else if (fits(next, width).assistant) {
     next.aside = true;
     if (next.last === 'assistant') next.last = next.chat ? 'chat' : next.chat2 ? 'chat2' : next.dash ? 'dash' : 'assistant';
@@ -269,6 +281,15 @@ function replaceChat(state, slot, id) {
   const other = slot === 'chat' ? 'chat2' : 'chat';
   if (state[other] === id) return { ...state, [slot]: null, last: other, solo: state.solo === slot ? null : state.solo };
   return { ...state, [slot]: id, last: slot };
+}
+
+// A title switch acts on a seat rather than on the rail's replacement policy.
+function switchChat(state, seat, id) {
+  if (!chatKey(seat) || !state[seat] || !id || state[seat] === id) return state;
+  const other = seat === 'chat' ? 'chat2' : 'chat';
+  const next = { ...state, [seat]: id, last: seat };
+  if (state[other] === id) next[other] = state[seat];
+  return next;
 }
 
 /** Toggle a chat/dashboard into or out of full screen. The mock has no such control on phones. */
@@ -359,12 +380,15 @@ function seatWidths(state, seats, stageWidth) {
     if (!remaining.length) return sizes;
   }
   const shares = state.shares;
-  if (main.includes('assistant') && main.includes('dash') && !main.some(key => shares[key]) && !state.half) {
+  const picture = main.includes('dash') && isPicture(state.dash);
+  const sized = main.some(key => shares[key]);
+  if (!picture && main.includes('assistant') && main.includes('dash') && !sized && !state.half) {
     sizes.assistant = clamp(stageWidth * 0.26, MIN_WIDTH.assistant, Math.min(380, room - MIN_WIDTH.dash));
     room -= sizes.assistant;
     remaining = remaining.filter(key => key !== 'assistant');
   }
-  allocate(remaining, room, main.some(key => shares[key]) ? shares : AUTO_SHARE, sizes);
+  const defaults = picture ? { ...AUTO_SHARE, dash: AUTO_SHARE.chat } : AUTO_SHARE;
+  allocate(remaining, room, sized ? shares : defaults, sizes);
   return sizes;
 }
 
@@ -442,7 +466,7 @@ module.exports = {
   MIN_WIDTH,
   PHONE_WIDTH,
   RAIL_WIDTH, GAP, LANE_DRAWN,
-  readRail, setRail, roomAt, replaceChat,
+  readRail, setRail, roomAt, replaceChat, switchChat, isPicture,
   keepAssistant, dismissAssistant,
   visibleSeats, seatWidths, seatGap, canResize, resizeBoundary, resetWidths,
   positions, liftReached, aimDrag, dropSection,

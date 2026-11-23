@@ -50,3 +50,67 @@ began there. Lanes can move without resizing. Press Escape while carrying a
 section to cancel. Resize adjacent panes by dragging the gap between them;
 double-click a resize gap to reset all sizes. There is no resize gap next to
 Lanes. The phone layout still shows one section at a time and does not change.
+
+### Chat tools in Next
+
+Use a chat's title to switch it in place. Picking the chat already in the
+other card swaps the two sessions without moving their seats. The rail still
+opens chats with its existing placement rules. Both lists show working and
+unread state and reveal Rename and Delete on hover or keyboard focus. Rename
+saves on Enter or blur; Escape cancels. Delete asks in the row before closing
+the actual session, and the configured assistant cannot be renamed or deleted.
+
+An unread chat has a latest non-operator message different from the one last
+displayed while the page and the card were visible. The Assistant has the same
+check on its mark when aside. The first inventory seeds the browser's marks.
+Identical consecutive kind/text pairs count as one; an offline host does not
+erase marks. The marks stay in this browser under `pentacle.next.chat.seen`;
+if local storage is unavailable they last only for the page.
+
+The working row sits above the composer, uses the live elapsed clock or a
+chat's reported label, and leaves off the time if neither is known. The
+Assistant uses its own elapsed clock only. Reduced motion slows the working
+ring, makes the Assistant's mark still, and stops the send chevrons. The queue
+line only offers Send now when the store permits it for that specific message.
+The shared transcript and ordinary desktop/web send behavior are unchanged.
+
+### Reading width, microphone and scrollbars
+
+**Settings → Text width** sets one reading-column cap for Assistant and
+chat transcripts, their composers and voice displays, status views and
+working rows. Type a whole number from 320 to 2400 px, or use the
+480–1200 px slider. The exact field value remains authoritative between
+slider steps. Guides show while either control has focus. Narrow panes
+keep their margins; terminal, Lanes and dashboards do not use this cap.
+The default is 720 px; preferences stay in this browser.
+
+**Microphone** appears when the browser can name more than one physical
+input. **System default** is first. A selected microphone applies across
+all Next conversations. If only that input remains, the picker hides but
+the selection stays active. If the input disappears or the browser says
+it cannot be found, Next forgets it and the following recording uses the
+default. Permission and busy errors do not reset a choice. The current Web
+MIC panel and its preference are separate.
+
+Native thumbs are quiet at rest and clearer on hover or for 900 ms after
+scrolling. They widen under the pointer and take the theme accent when
+dragged. Conversations reserve equal gutters to avoid shifting; lists and
+message fields have a narrower bar. Design tabs keep their hidden scrollbar
+and terminals keep their existing scroller.
+
+## Pictures beside their chat
+
+In the new view, click an ordinary image thumbnail to open Picture in the shared
+slot used by Design. The outlined thumbnail closes the card when clicked again;
+another thumbnail replaces it. Desktop Picture uses the fluid stage and defaults to even widths with
+its source chat. Close returns to the prior chat placement, including a
+full-screen chat. The dim assistant logo brings the assistant chat beside Picture;
+choosing a chat from the rail ends the picture arrangement. When room is
+tight the picture is in front and the chat waits behind it. The full-screen
+control is available only at 600 CSS pixels and above; Escape leaves full
+screen. Lanes retain their own state.
+
+Ordinary images use the existing attachment read and stay separate from typed
+Design previews, which take over the same slot. Ordinary Markdown links,
+including `/designs/`, continue opening in a new tab. The current web's
+attachment viewer, file downloads, and the terminal remain unchanged.

@@ -562,7 +562,7 @@ const linkSelector = path => `[data-next-design-link="${path}"]`;
 const pinnedPhone = design + '/' + project + '/phone-orders/' + phone;
 const pinnedScreen = design + route + '/' + prototype;
 
-async function seedDesignLinks(ctx) {
+async function seedDesignLinks(ctx, { includePicture = false } = {}) {
   if (ctx.fixture) {
     await wait(ctx, `window.PentacleChatStore?.getState().sessions.some(
       row => row.stream_id === ${JSON.stringify(ctx.fixture.streamId)})`, 'workspace snapshot before link seed');
@@ -597,6 +597,11 @@ async function seedDesignLinks(ctx) {
     event(4, linkAssistant, link(target('missing-board'), 'Removed board')),
     event(5, linkChat, link(target('phone-orders', phone), 'Phone order', 'f'.repeat(64))),
   ];
+  if (includePicture) {
+    const ordinary = event(6, linkAssistant);
+    ordinary.attachments[0].filename = 'slot-switch-fixture.png';
+    events.push(ordinary);
+  }
   const image = PNG.toString('base64');
   await ctx.session.eval(`(() => {
     const previous = window.cc.chatFetchBlob;
@@ -606,6 +611,37 @@ async function seedDesignLinks(ctx) {
     for (const event of ${JSON.stringify(events)}) window.PentacleChatStore.applyFrame({type:'chat.event', event});
     return true;
   })()`);
+}
+
+async function pictureDesignSwitch(ctx) {
+  const preview = '.pane ' + linkSelector(pinnedScreen);
+  const thumbnail = '.pane .slot-chat-media-button[data-next-picture][aria-label="slot-switch-fixture.png"]';
+  const picture = '.picture-card:not([hidden])';
+  const visibleDesign = '.design-card:not([hidden])';
+  const mark = selector => `document.querySelector('${selector}').getAttribute('aria-pressed') === 'true'`;
+  await open(ctx, '/next/');
+  await seedDesignLinks(ctx, { includePicture: true });
+  await wait(ctx, `document.querySelector('${thumbnail} img')?.naturalWidth > 0 &&
+    document.querySelector('${preview} img')?.naturalWidth > 0`, 'ordinary and Design previews decoded');
+  await click(ctx, thumbnail);
+  await check(ctx, 'the ordinary picture opens in the shared slot',
+    `!!document.querySelector('${picture}') && !document.querySelector('${visibleDesign}') && ${mark(thumbnail)}`);
+  await click(ctx, preview);
+  await atPath(ctx, pinnedScreen);
+  await boardReady(ctx);
+  await check(ctx, 'typed Design takes the slot and clears the picture',
+    `!!document.querySelector('${visibleDesign} .design-screen.is-current[data-view="${prototype}"]') &&
+      ${mark(preview)} && !(${mark(thumbnail)}) && !document.querySelector('${picture}') &&
+      !document.querySelector('.picture-image').hasAttribute('src')`);
+  await click(ctx, thumbnail);
+  await atPath(ctx, '/next/');
+  await wait(ctx, `document.querySelector('${picture} .picture-image')?.naturalWidth > 0`, 'picture decoded after switching');
+  await check(ctx, 'the picture takes the slot and clears the Design selection',
+    `!document.querySelector('${visibleDesign}') && !(${mark(preview)}) && ${mark(thumbnail)}`);
+  await click(ctx, thumbnail);
+  await check(ctx, 'closing the picture restores the source chat',
+    `!document.querySelector('${picture}') && !document.querySelector('${visibleDesign}') &&
+      !document.querySelector('.pane').hidden && !(${mark(thumbnail)})`);
 }
 
 async function designLinkJourney(ctx) {
@@ -656,7 +692,7 @@ async function designLinkJourney(ctx) {
   await click(ctx, linkSelector(design));
   await atPath(ctx, '/next/');
 
-  await click(ctx, '.rail-button[aria-label="Chats"]');
+  await click(ctx, '.chats-button');
   await click(ctx, `.popover [data-stream-id="${linkChat}"]`);
   const phonePreview = linkSelector(pinnedPhone);
   await wait(ctx, `document.querySelector('${phonePreview} img')?.src.startsWith('data:image/png') &&
@@ -731,4 +767,5 @@ module.exports = [
   ['next-design-embed', isolated(standalone)],
   ['next-design-link', isolated(designLinkJourney)],
   ['next-design-link-phone', isolated(designLinkPhone)],
+  ['next-picture-design-switch', isolated(pictureDesignSwitch)],
 ];

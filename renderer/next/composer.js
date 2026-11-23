@@ -119,6 +119,7 @@ function mountComposer({
   chatStore = globalThis.PentacleChatStore,
   env = globalThis,
   recorder,
+  recorderOptions,
 } = {}) {
   if (!host?.ownerDocument) throw new TypeError('Composer host element is required.');
   if (!chatStore || typeof chatStore.sendTurn !== 'function') throw new TypeError('Shared chat store is required.');
@@ -129,7 +130,7 @@ function mountComposer({
   const key = String(initialStreamId || draftKey || '');
   if (!key) throw new TypeError('A stream id or draft key is required.');
   const draft = makeDraftRecord(draftMap, key);
-  const capture = recorder || createBrowserRecorder(env);
+  const capture = recorder || createBrowserRecorder(env, recorderOptions);
   const maxAttachments = Math.min(ATTACHMENT_LIMIT, Math.max(1, Math.floor(Number(env.PentacleChatCore?.MAX_CHAT_ATTACHMENTS) || ATTACHMENT_LIMIT)));
   const urlApi = env.URL || globalThis.URL;
 
