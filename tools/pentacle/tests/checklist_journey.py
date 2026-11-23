@@ -214,10 +214,42 @@ os.execv({real_git!r},[{real_git!r},*args])
         return json.loads(result.stdout)
 
     def seed_stores(self):
-        self.stores = d.open_stores(d.listener(self.daemon_url))
+        from unittest.mock import patch
+
         expected = {self.home / "state space/sessions.db", self.home / ".local/share/pentacle-stream/notifications.db",
                     self.home / ".local/share/pentacle-stream/assets.db"}
-        assert set(self.stores) == expected, "All three real stores, including README defaults, must be found"
+        daemon = self.active["daemon"]
+        deadline = time.monotonic() + 10
+        run_discovery = d.run
+
+        class ProbeUnavailable(Exception):
+            pass
+
+        def run_before_deadline(argv, *, timeout=20, **kwargs):
+            remaining = deadline - time.monotonic()
+            if remaining < 0.001:
+                raise ProbeUnavailable
+            result = run_discovery(argv, timeout=min(timeout, remaining), **kwargs)
+            if result.returncode == 127:  # Discovery uses this for timeouts and invocation failures.
+                raise ProbeUnavailable
+            return result
+
+        self.stores = []
+        while daemon.poll() is None and time.monotonic() < deadline:
+            try:
+                with patch.object(d, "run", run_before_deadline):
+                    listener = d.listener(self.daemon_url)
+                    if listener is not None and listener.pid == daemon.pid and time.monotonic() < deadline:
+                        self.stores = d.open_stores(listener)
+            except ProbeUnavailable:
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or set(self.stores) == expected:
+                break
+            time.sleep(min(0.1, remaining))
+        assert set(self.stores) == expected and daemon.poll() is None and time.monotonic() < deadline, (
+            f"All three real stores, including README defaults, must be found; observed {sorted(map(str, self.stores))}"
+        )
         for path in self.stores:
             with closing(sqlite3.connect(path)) as db, db:
                 db.execute("CREATE TABLE doctor_rehearsal(value TEXT)")
