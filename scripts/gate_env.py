@@ -15,7 +15,6 @@ Stdlib only; runs on any python3 >= 3.9, the prepared venv carries 3.13.
 from __future__ import annotations
 
 import argparse
-import glob
 import hashlib
 import json
 import os
@@ -26,8 +25,10 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -72,6 +73,28 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
     for key in ("toolchain", "profiles", "capability_sets", "search_path", "locales", "system_path"):
         if not isinstance(config.get(key), (dict, list)):
             problems.append(key)
+    tools = config.get("tools")
+    if not isinstance(tools, dict):
+        problems.append("tools")
+    else:
+        tmux = tools.get("tmux")
+        exact = tmux.get("exact_major_minor") if isinstance(tmux, dict) else None
+        if (not isinstance(exact, dict) or set(exact) != {"darwin", "linux"}
+                or any(not isinstance(v, str) or not re.fullmatch(r"[0-9]+\.[0-9]+", v) for v in exact.values())):
+            problems.append("tools.tmux.exact_major_minor")
+        zsh = tools.get("zsh")
+        minimum = zsh.get("minimum") if isinstance(zsh, dict) else None
+        if not isinstance(minimum, str) or not re.fullmatch(r"[0-9]+\.[0-9]+", minimum):
+            problems.append("tools.zsh.minimum")
+        chrome = tools.get("chrome")
+        major = chrome.get("minimum_major") if isinstance(chrome, dict) else None
+        if type(major) is not int or major <= 0:
+            problems.append("tools.chrome.minimum_major")
+        if tools.get("lsof") != "presence":
+            problems.append("tools.lsof")
+    umask = config.get("umask")
+    if not isinstance(umask, str) or not re.fullmatch(r"0[0-7]{2}", umask):
+        problems.append("umask")
     deadline = config.get("deadline")
     if not isinstance(deadline, dict) or any(not isinstance(deadline.get(k), int) or isinstance(deadline.get(k), bool) or deadline[k] < 0 for k in ("preflight_s", "reserve_s", "slack_s")):
         problems.append("deadline")
@@ -126,6 +149,11 @@ def _version(run, exe: str, flag: str = "--version", env: Optional[Dict[str, str
     return match.group(1) if out.returncode == 0 and match else None
 
 
+def executable_identity(path: str, version: Optional[str]) -> Dict[str, Any]:
+    real = os.path.realpath(path)
+    return {"path": path, "realpath": real, "version": version, "sha256": file_digest(Path(real))}
+
+
 def candidate_dirs(config: Dict[str, Any], ambient_path: str, system: str) -> List[str]:
     dirs = [d for d in ambient_path.split(os.pathsep) if d.startswith("/")]
     dirs += config["search_path"].get(system, [])
@@ -141,7 +169,6 @@ def find_exe(name: str, dirs: List[str], *, want_major: Optional[str] = None, ru
         path = Path(folder) / name
         if not (path.is_file() and os.access(path, os.X_OK)):
             continue
-        real = os.path.realpath(path)
         version = _version(run, str(path), flag)
         if version is None:
             rejected.append("%s does not report a version" % path)
@@ -149,7 +176,7 @@ def find_exe(name: str, dirs: List[str], *, want_major: Optional[str] = None, ru
         if want_major and not (version == want_major or version.startswith(want_major + ".")):
             rejected.append("%s is %s" % (path, version))
             continue
-        return {"path": str(path), "realpath": real, "version": version, "sha256": file_digest(Path(real))}, rejected
+        return executable_identity(str(path), version), rejected
     return None, rejected
 
 
@@ -184,7 +211,10 @@ def resolve_toolchain(config: Dict[str, Any], needs: List[str], *, ambient_path:
     if "tmux" in needs:
         hit, rejected = find_exe("tmux", dirs, run=run, flag="-V")
         if hit is None:
-            failures.append(fail("toolchain", "no working tmux executable found", "install tmux"))
+            required = config["tools"]["tmux"]["exact_major_minor"][system]
+            failures.append(fail("toolchain", "tmux installed: %s; required: %s.x (exact major.minor)" %
+                                 ("; ".join(rejected) or "missing", required),
+                                 "install the platform tmux version in scripts/gate-env.json"))
         else:
             found["tmux"] = hit
     return found, failures
@@ -218,7 +248,7 @@ def _inside(child: Path, parent: Path) -> bool:
 
 def check_layout(checkout: Path, workspace: Path, evidence: Path, home: Path, tmp: Path, basetemp: Path, max_tmp: int) -> List[Dict[str, str]]:
     failures = []
-    for label, path in (("workspace", workspace), ("evidence", evidence)):
+    for label, path in (("workspace", workspace), ("evidence", evidence), ("TMPDIR", tmp)):
         if _inside(path, checkout):
             failures.append(fail("layout", "%s is inside the source checkout (it would dirty the gate's clean-tree check)" % label, "use a directory outside the checkout"))
     for a_label, a, b_label, b in (("evidence", evidence, "home", home), ("evidence", evidence, "tmp", tmp), ("evidence", evidence, "basetemp", basetemp),
@@ -439,6 +469,79 @@ def check_node_npm(run, toolchain: Dict[str, Any], env: Dict[str, str]) -> List[
         if tool in toolchain and _version(run, tool, "--version", env=env) is None:
             failures.append(fail("missing_node" if tool == "node" else "toolchain", "%s does not run from the child PATH" % tool, "fix the owned PATH resolution"))
     return failures
+
+
+def check_host_tools(run, config, target, env, *, system):
+    """Qualify the binaries reached through the actual child PATH."""
+    rules = config["tools"]
+    probes = []
+    if "tmux" in target.get("needs", []):
+        probes.append(("tmux", "-V", rules["tmux"]["exact_major_minor"][system]))
+    if target.get("capabilities") == "v2_host":
+        probes.append(("zsh", "--version", rules["zsh"]["minimum"]))
+
+    found, failures = {}, []
+    for name, flag, required in probes:
+        path = shutil.which(name, path=env["PATH"])
+        version = _version(run, path, flag, env=env) if path else None
+        pair = tuple(map(int, version.split(".")[:2])) if version else ()
+        wanted = tuple(map(int, required.split(".")))
+        matches = pair == wanted if name == "tmux" else pair >= wanted
+        if matches:
+            found[name] = executable_identity(path, version)
+        else:
+            installed = version or ("unreadable" if path else "missing")
+            requirement = required + " (exact major.minor)" if name == "tmux" else required + " or newer"
+            failures.append(fail("toolchain", "%s installed: %s; required: %s" % (name, installed, requirement),
+                                 "install qualified %s and ensure it resolves on the gate child PATH" % name))
+    if target.get("capabilities") == "v2_host" and not shutil.which("lsof", path=env["PATH"]):
+        failures.append(fail("toolchain", "lsof installed: missing; required: executable on the gate child PATH",
+                             "install lsof and ensure it resolves on the gate child PATH"))
+    return found, failures
+
+
+def check_chrome(run, checkout, env, minimum):
+    # Use the browser harness's own resolver, then bind its selection by absolute
+    # path so every browser consumer launches the binary that was checked.
+    try:
+        probe = run(["node", "-e", "console.log(require('./test/e2e/web_gate').resolveChrome())"],
+                    cwd=str(checkout), env=env, capture_output=True, text=True, timeout=30)
+        selected = probe.stdout.strip() if probe.returncode == 0 else ""
+        path = shutil.which(selected, path=env["PATH"]) if selected else None
+    except (OSError, subprocess.SubprocessError):
+        path = None
+    version = _version(run, path, env=env) if path else None
+    if version and int(version.split(".")[0]) >= minimum:
+        return executable_identity(path, version), []
+    installed = version or ("unreadable" if path else "unavailable through the browser resolver")
+    return None, [fail("toolchain", "Chrome/Chromium installed: %s; required: major %d or newer" % (installed, minimum),
+                       "install a qualified Chrome or Chromium executable visible to the web gate")]
+
+
+def discover_npm_files(run, node_path, checkout: Path, selection: List[str]) -> set[str]:
+    """Ask the shared JS runner which files its normal npm selection will launch."""
+    script = ("const { discover } = require('./scripts/lib/test-runner');"
+              "process.stdout.write(JSON.stringify(discover(process.cwd(), JSON.parse(process.argv[1]))));")
+    argv = [node_path, "-e", script, json.dumps(selection)]
+    try:
+        result = run(argv, cwd=str(checkout), env={}, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupFailure([fail("selection", "npm runner file discovery could not run (%s)" % type(exc).__name__,
+                                 "verify Node can load the shared npm runner from this checkout")]) from exc
+    if result.returncode:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        detail = lines[0][:300] if lines else "exit %d" % result.returncode
+        raise SetupFailure([fail("selection", "npm runner file discovery failed: %s" % detail,
+                                 "verify Node can load the shared npm runner from this checkout")])
+    try:
+        files = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise SetupFailure([fail("selection", "npm runner file discovery returned invalid JSON",
+                                 "verify the shared npm runner discovery result")]) from exc
+    if not isinstance(files, list) or any(not isinstance(file, str) for file in files):
+        raise SetupFailure([fail("selection", "npm runner file discovery returned an invalid file list",
+                                 "verify the shared npm runner discovery result")])
+    return {os.path.normpath(file) for file in files}
 
 
 def check_scratch(evidence: Path, home: Path, tmp: Path, min_free_mb: int, timeout_s: int, reserve_s: int) -> List[Dict[str, str]]:
@@ -794,9 +897,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     workspace = args.workspace.resolve()
     checkout = args.checkout.resolve()
     attempt_id = ga.new_attempt_id()
-    tmp_root = (args.tmp_root or Path("/tmp/ge-%d" % os.getuid())).resolve()
+    default_tmp_root = Path("/tmp/ge-%d" % os.getuid()).resolve()
+    tmp_root = (args.tmp_root or default_tmp_root).resolve()
     evidence = (args.evidence_dir or workspace / "evidence" / attempt_id).resolve()
-    requested_evidence = evidence
+    requested_workspace, requested_tmp_root, requested_evidence = workspace, tmp_root, evidence
+    warnings = []
+
+    def warn_default(option, requested, effective):
+        warnings.append({"option": option, "requested": requested, "effective": effective})
+        print("[gate-env] warning: %s requested %s; using %s" % (option, requested, effective), flush=True)
+
     try:
         max_tmp = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))["max_tmpdir_bytes"]
         if type(max_tmp) is not int or max_tmp <= 0:
@@ -807,8 +917,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if check_layout(checkout, workspace, evidence, home, tmp, basetemp, max_tmp):
         short = attempt_id[:8]
         workspace = Path("/tmp/gw-%d-%s" % (os.getuid(), short)).resolve()
-        tmp_root = Path("/tmp/ge-%d" % os.getuid()).resolve()
-        evidence = Path("/tmp/gv-%d-%s" % (os.getuid(), short)).resolve()
+        tmp_root = default_tmp_root
+        evidence = Path(tempfile.mkdtemp(prefix="gv-", dir="/tmp")).resolve()
         home, tmp, basetemp = scratch_paths(workspace, tmp_root, attempt_id)
         print("[gate-env] using owned temporary workspace and evidence: %s %s" % (workspace, evidence), flush=True)
     if args.attempt_manifest and (_inside(args.attempt_manifest.resolve(), checkout) or
@@ -819,11 +929,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         evidence.mkdir(parents=True, exist_ok=True)
     except OSError:
         prior_evidence = evidence
-        evidence = Path("/tmp/gv-%d-%s" % (os.getuid(), attempt_id[:8])).resolve()
-        evidence.mkdir(parents=True, exist_ok=True)
+        evidence = Path(tempfile.mkdtemp(prefix="gv-", dir="/tmp")).resolve()
         if args.attempt_manifest and _inside(args.attempt_manifest.resolve(), prior_evidence):
             args.attempt_manifest = evidence / "attempt-manifest.json"
         print("[gate-env] using temporary evidence directory: %s" % evidence, flush=True)
+
+    for option, requested, effective in (("--workspace", requested_workspace, workspace),
+                                         ("--tmp-root", requested_tmp_root, tmp_root),
+                                         ("--evidence-dir", requested_evidence, evidence)):
+        if requested != effective:
+            warn_default(option, str(requested), str(effective))
 
     missing_identity = [n for n, v in (("spec", args.spec), ("series", args.series), ("purpose", args.purpose)) if not v]
     identity = {
@@ -856,12 +971,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     target: Optional[Dict[str, Any]] = None
     resolved_selection: Optional[List[str]] = None
     instruction_input = None
+    scratch_allocated = False
     try:
         if args.history_complete and (missing_identity or args.prior_attempt):
             raise SetupFailure([fail("identity_args", "--history-complete requires full identity and no prior attempt")])
         if args.command == "run" and not args.target:
             raise SetupFailure([fail("identity_args", "run needs --target")])
         config = load_config(CONFIG_PATH)
+        child_umask = int(config["umask"], 8)
+        run_child = partial(subprocess.run, umask=child_umask)
         profile = config["profiles"].get(args.profile)
         if profile is None:
             raise SetupFailure([fail("config", "unknown profile %r" % args.profile, "choose one of %s" % sorted(config["profiles"]))])
@@ -889,20 +1007,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         timeout_s = args.timeout_seconds if args.timeout_seconds is not None else target["timeout_s"]
         if timeout_s <= 0:
             timeout_s = target["timeout_s"]
-            print("[gate-env] using default timeout: %d seconds" % timeout_s, flush=True)
         elif timeout_s > target["max_timeout_s"]:
             timeout_s = target["max_timeout_s"]
-            print("[gate-env] timeout clamped to %d seconds" % timeout_s, flush=True)
+        if args.timeout_seconds is not None and timeout_s != args.timeout_seconds:
+            warn_default("--timeout-seconds", args.timeout_seconds, timeout_s)
         selection = validate_selection(target, args.select, checkout) if target["kind"] != "prepare" else []
         resolved_selection = list(selection)  # retained even when setup fails before prepared
         # This explicitly selected integration file boots the same fixture as web-gate.
         # Reuse its declared prerequisites before preparing the exact child context.
-        selected_files = {str(Path(file).relative_to(checkout))
-                          for pattern in selection for file in glob.glob(str(checkout / pattern), recursive=True)} if target["kind"] == "npm_test" else set()
+        selected_files = set()
+        if target["kind"] == "npm_test":
+            node_tools, tool_failures = resolve_toolchain(config, ["node"])
+            if tool_failures:
+                raise SetupFailure(tool_failures)
+            selected_files = discover_npm_files(run_child, node_tools["node"]["path"], checkout, selection)
         interrupt_selected = "test/e2e/web_gate_interrupt.test.js" in selected_files
         web_selected = bool(selected_files & {
             "test/e2e/web_gate_interrupt.test.js", "test/e2e/web_wrap_paste_gate.test.js",
             "test/e2e/web_wrap_paste_served.test.js"})
+        browser_needed = args.target == "web-gate" or web_selected or bool(selected_files & {
+            "test/e2e/console_capture.test.js", "test/e2e/viewport_live.test.js", "test/e2e/web_gate.js"})
         if web_selected:
             web = profile["targets"]["web-gate"]
             target = dict(target, npm_build=web["npm_build"], test_file_timeout_ms=web["timeout_s"] * 1000)
@@ -921,10 +1045,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             except ValueError as exc:
                 raise SetupFailure([fail("dependencies", str(exc), "supply the frozen read-only CLI instruction snapshot")]) from exc
 
-        failures: List[Dict[str, str]] = []
+        failures = check_layout(checkout, workspace, evidence, home, tmp, basetemp, config["max_tmpdir_bytes"])
+        if failures:
+            raise SetupFailure(failures)
+        scratch_allocated = True
         for d in (home, basetemp, tmp, tmp_root):
             d.mkdir(parents=True, exist_ok=True)
-        failures += check_layout(checkout, workspace, evidence, home, tmp, basetemp, config["max_tmpdir_bytes"])
         toolchain, tool_fail = resolve_toolchain(config, target.get("needs", []))
         failures += tool_fail
         locale_name, locale_fail = pick_locale(config)
@@ -936,21 +1062,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         prepared_dir = workspace / "prepared" / prepared_key(config, args.profile, profile, toolchain, checkout, bool(target.get("npm_ci")))
         env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=None, home=home, tmp=tmp, locale_name=locale_name,
                         evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
+        system = "darwin" if sys.platform == "darwin" else "linux"
+        _, failures = check_host_tools(run_child, config, target, env, system=system)
+        if failures:
+            raise SetupFailure(failures)
         log = lambda m: print("[gate-env] " + m, flush=True)  # noqa: E731
         log("Python bytecode writes disabled for disposable fixtures")
         venv = None
         dep_info: Dict[str, Any] = {}
         if "python" in target.get("needs", []):
-            venv, dep_info, f = ensure_python_env(subprocess.run, config, profile, toolchain, checkout, prepared_dir, env, args.rebuild, log)
+            venv, dep_info, f = ensure_python_env(run_child, config, profile, toolchain, checkout, prepared_dir, env, args.rebuild, log)
             failures += f
         npm_info: Dict[str, Any] = {}
         if target.get("npm_ci") and not failures:
-            npm_info, f = ensure_npm_env(subprocess.run, checkout, prepared_dir, env, profile, args.rebuild, log)
+            npm_info, f = ensure_npm_env(run_child, checkout, prepared_dir, env, profile, args.rebuild, log)
             failures += f
         if failures:
             raise SetupFailure(failures)
         for build in target.get("npm_build", []):
-            out = subprocess.run(["npm", "run", build], cwd=str(checkout), env=env, capture_output=True, text=True, timeout=300)
+            out = run_child(["npm", "run", build], cwd=str(checkout), env=env, capture_output=True, text=True, timeout=300)
             build_log = evidence / ("build-%s.log" % build.replace(":", "-"))
             build_log.write_text(out.stdout + out.stderr)
             if out.returncode:
@@ -961,12 +1091,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         service_dir = checkout / profile["service_dir"]
         # Preflight from the child's own context; every independent fault in one pass.
         failures += check_scratch(evidence, home, tmp, config["min_free_mb"], timeout_s, config["reserve_s"])
-        failures += check_node_npm(subprocess.run, toolchain, env)
+        failures += check_node_npm(run_child, toolchain, env)
+        verified_tools, tool_fail = check_host_tools(run_child, config, target, env, system=system)
+        failures += tool_fail
+        toolchain.update(verified_tools)
+        if browser_needed:
+            chrome, tool_fail = check_chrome(run_child, checkout, env, config["tools"]["chrome"]["minimum_major"])
+            failures += tool_fail
+            if chrome:
+                toolchain["chrome"] = chrome
+                env["PENTACLE_CHROME"] = chrome["path"]
         if venv is not None:
-            failures += check_dependencies(subprocess.run, venv / "bin" / "python", env, [checkout / r for r in profile["python_requirements"]])
+            failures += check_dependencies(run_child, venv / "bin" / "python", env, [checkout / r for r in profile["python_requirements"]])
             caps = config["capability_sets"].get(target.get("capabilities") or "", [])
             if caps and not failures:
-                unavailable = check_capabilities(subprocess.run, venv / "bin" / "python", env, service_dir / "tests", caps)
+                unavailable = check_capabilities(run_child, venv / "bin" / "python", env, service_dir / "tests", caps)
                 if target.get("strict_capabilities", True):
                     failures += unavailable
                 else:
@@ -974,14 +1113,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                         log("capability unavailable: " + item["detail"])
         if target.get("process_listing"):
             # Node's runner currently needs process listing to reap its owned groups.
-            failures += check_process_listing(subprocess.run, env)
+            failures += check_process_listing(run_child, env)
         if args.command == "run" and (args.target == "web-gate" or web_selected):
             # Optional npm dependencies can be silently dropped by a successful install.
             # Probe from the exact checkout on both fresh and reused preparations.
             terminal_failure = None
             try:
-                probe = subprocess.run(["node", "-e", "require('node-pty')"],
-                                       cwd=str(checkout), env=env, capture_output=True, text=True, timeout=10)
+                probe = run_child(["node", "-e", "require('node-pty')"],
+                                  cwd=str(checkout), env=env, capture_output=True, text=True, timeout=10)
                 if probe.returncode:
                     terminal_failure = "node-pty is unavailable: " + probe.stderr[-400:]
             except (OSError, subprocess.TimeoutExpired) as exc:
@@ -993,18 +1132,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if not npm_info.get("reused") and "ci_output_tail" in npm_info:
                     state["extra"]["npm"] = {"ci_output_tail": npm_info["ci_output_tail"]}
                 failures.append(fail("dependencies", terminal_failure))
-        if args.command == "run" and web_selected:
-            probe = subprocess.run(["node", "-e", "require('./test/e2e/web_gate').resolveChrome()"],
-                                   cwd=str(checkout), env=env, capture_output=True, text=True, timeout=30)
-            if probe.returncode or not (checkout / "renderer/dist/web/web.html").is_file():
-                failures.append(fail("dependencies", "selected web integration needs Chrome and the web build: " + probe.stderr[-400:]))
+        if web_selected and not (checkout / "renderer/dist/web/web.html").is_file():
+            failures.append(fail("dependencies", "selected web integration needs the web build"))
         if target.get("preflight_script") and not failures:
-            failures += run_preflight_script(subprocess.run, checkout / target["preflight_script"], env)
+            failures += run_preflight_script(run_child, checkout / target["preflight_script"], env)
         if failures:
             raise SetupFailure(failures)
         writer.emit("prepared", toolchain={k: {"version": v["version"], "sha256": v["sha256"], "realpath": v["realpath"]} for k, v in toolchain.items()},
                     locale=locale_name, dependency=dep_info, npm=npm_info, prepared_key=prepared_dir.name,
-                    effective_selection=selection,
+                    effective_selection=selection, umask=config["umask"],
+                    **({"warnings": warnings} if warnings else {}),
                     **({"passed_environment": {ENV_NAME: instruction_input}} if instruction_input else {}),
                     env_names=sorted(env), capabilities_checked=config["capability_sets"].get(target.get("capabilities") or "", []))
         log("preflight ok")
@@ -1020,7 +1157,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 env[OwnedProcesses.ENV] = str(owner.path)
             writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
             t_start = time.monotonic()
-            proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
+            proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True, umask=child_umask)
             timed_out = False
             try:
                 proc.wait(timeout=results.get("wall_s", timeout_s + config["reserve_s"]))
@@ -1065,10 +1202,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             retention_reasons.append("subject_cleanup_failed")
         try:
             manifest = basetemp / ".owned.json"
-            if manifest.is_symlink() or manifest.exists():
+            if scratch_allocated and (manifest.is_symlink() or manifest.exists()):
                 retention_reasons.append("owner_manifest_unresolved")
                 unresolved_paths.append(str(manifest))
-            if target and target.get("kind") == "run_gate":
+            if scratch_allocated and target and target.get("kind") == "run_gate":
                 tiers = ("unit", "smoke") if target.get("gate") == "merge" else (target.get("gate"),)
                 for tier in tiers:
                     if tier in ("unit", "smoke", "soak"):
@@ -1083,7 +1220,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             state["secondary"]["retained_scratch"] = {
                 "paths": [str(run_dir), str(tmp)], "reasons": retention_reasons,
                 "unresolved_paths": unresolved_paths}
-        else:
+        elif scratch_allocated:
             # Delete owned HOME/basetemp/TMPDIR only after verified cleanup.
             # Evidence and the prepared cache stay in their existing locations.
             for d in (run_dir, tmp):
@@ -1107,6 +1244,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             try:
                 writer.emit("terminal", outcome=state["outcome"], first_failure=state["first_failure"], secondary=state["secondary"],
                             evidence=state["evidence"], detail=state["extra"], stage=writer._state,
+                            **({"warnings": warnings} if warnings else {}),
                             **({"effective_selection": resolved_selection} if resolved_selection is not None else {}))
             except ga.AttemptError as exc:
                 print("[gate-env] could not write terminal receipt: %s" % exc, file=sys.stderr)

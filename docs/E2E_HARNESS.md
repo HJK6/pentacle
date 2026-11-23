@@ -71,12 +71,17 @@ new or materially changed tests within existing reviews and gates.
 coverage gaps for an exact baseline and proposed head. It runs no tests and
 does not change required gates.
 
-QA briefs and fleet gates run the daemon and npm checks through one entrypoint instead of an ambient shell. It builds an owned venv (Python 3.13) and `npm ci` cache keyed by toolchain and lockfile hashes, gives the child its own `HOME`, a short `TMPDIR` and a UTF-8 locale, drops every other environment variable (including `TMUX`, `MAKEFLAGS` and credentials), and preflights the exact child context before the subject starts. Missing or wrong executables, denied `ps`, absent tmux/lsof/socket capabilities, dependency drift and nested HOME/evidence/basetemp paths are all reported together as a setup failure and never reach the tests.
+[`scripts/gate-env.json`](../scripts/gate-env.json) defines the tool versions,
+host capabilities and child umask for local and hosted runs. The supported
+entrypoint builds an owned Python venv and `npm ci` cache keyed by toolchain
+and lockfile hashes. It gives the child its own `HOME`, short `TMPDIR` and
+UTF-8 locale and passes only declared environment variables. Preflight checks
+the child context before starting the tests. Tool drift reports exit 3 with
+setup code `toolchain`, the installed and required versions and a remediation
+line. The prepared receipt records the verified versions and child umask.
 
-The `npm-test` target declares Python 3.13 alongside Node 22 and npm. Its
-prepared interpreter is injected as `PENTACLE_PYTHON` and `V2_PYTHON_BIN`;
-callers need not supply either variable. Missing or wrong-version Python is
-a setup failure (exit 3) before any npm subject starts.
+The `npm-test` target provisions Python alongside Node and npm and sets
+`PENTACLE_PYTHON` and `V2_PYTHON_BIN` to the prepared interpreter.
 
 Public checks frontend also runs `npm --prefix pentacle-chat-core test` after
 the supported root npm tests, reusing the root installation. This native command
@@ -157,13 +162,12 @@ selects a new prepared cache; a drifted cache is refused until `--rebuild`
 failure, 3 setup failure, 130 cancelled. Direct `run_gate.py` and `pytest`
 remain available lower-level entries, not the supported preparation route.
 
-`--tmp-root` defaults to `/tmp/ge-<uid>`. The child `TMPDIR` adds a slash and
-eight-character attempt suffix; its resolved path must fit the 48-byte
-`max_tmpdir_bytes` limit, not merely the root argument. Leave the default or
-pass a shorter owned `--tmp-root` if preflight rejects the path. This protects
-Unix/tmux socket paths; do not increase the guard or put scratch under a long
-evidence directory. The owned HOME, scratch and evidence layout checks still
-apply.
+`--tmp-root` defaults to `/tmp/ge-<uid>`. The child `TMPDIR` includes an
+attempt suffix and must fit the contract's socket-path limit. An overlong
+temporary root, nested scratch or checkout-local evidence triggers relocation
+to owned temporary paths. An invalid effective layout fails setup. The entry
+also clamps a requested timeout above the target maximum. Receipts record
+requested and effective values for paths and timeouts that change.
 
 Focused `v2-pytest` always includes the four existing repository invariants in
 `tests/test_capabilities.py`: changed-test skip confinement, original assertion
@@ -186,12 +190,12 @@ python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evid
 ```
 
 These selected web integration files (including supported wildcard selections)
-reuse web-gate's builds and Chrome preflight; the interrupt contract additionally
-reuses its Python dependencies, tmux and capabilities. Ordinary npm selections
-retain their existing preparation. The integration file budget uses the existing
-finite web-gate run budget rather than npm's ordinary 60-second file bound.
-Missing Chrome or build is setup failure, not a skipped acceptance PASS. Retain
-actual case counts, browser PID audits, file cleanup and the terminal receipt.
+reuse web-gate's builds. The interrupt contract also reuses its Python
+dependencies, tmux and capabilities. The integration file budget uses the
+finite web-gate run budget. The web gate and browser-backed npm selections
+preflight the browser they will launch. Missing Chrome or a required build is
+a setup failure. Retain actual case counts, browser PID audits, file cleanup
+and the terminal receipt.
 `--keep` now retains debug files only: the existing owner always stops its Chrome
 group, on success, failure and supported signals. Unknown process inspection is
 failed cleanup. It does not handle an uncatchable kill by claiming a finally ran.
@@ -204,10 +208,9 @@ apply only to the probe; caller environments and ownership checks are preserved.
 Sandboxed seats use the same supported entry. Do not hand-build its venv with
 `--system-site-packages`: ambient user packages can disappear under the nested
 isolated interpreter. The prepared venv fully installs the declared requirements.
-The owned `HOME` also owns `.ssh/cm`; ambient SSH control-directory overrides are
-not forwarded. Keep the real SSH directory read-only. Put Python 3.13 and Node 22
-on the launching PATH, then select the merge target below;
-its child PATH and HOME come from the bootstrap rather than the launching shell.
+The owned `HOME` also owns `.ssh/cm`. Keep the real SSH directory read-only.
+Put the contract's Python and Node on the launching PATH, then select the merge
+target below. The bootstrap sets the child PATH and HOME.
 
 `v2-merge` runs the full unit and smoke union with four unit workers and the
 bounds in `scripts/gate-env.json`. The older `v2-merge-capacity` and
