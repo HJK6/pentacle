@@ -492,8 +492,7 @@ class WorkLanesInventory:
                 await self.store.reconcile_lane_lifecycle()
                 await self.store.reconcile_work_lane_episodes(self.episode_sink)
                 if self.worked.needs_refresh():
-                    rows = await self.store.work_lane_rows(include_done=True)
-                    self.worked.refresh({member["spec_id"] for row in rows for member in row.get("_members", [])})
+                    self.worked.refresh(await self.store.work_lane_worked_spec_ids())
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
                 log.exception("work lanes refresh failed")

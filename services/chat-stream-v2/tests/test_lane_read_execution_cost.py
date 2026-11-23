@@ -269,9 +269,10 @@ def test_due_worked_census_fault(tmp_path, monkeypatch, record_property, fixed_c
         assert counts["legacy_installed_entry_called"] == counts["enriched"] == 1
         with pytest.raises(AssertionError) as raised:
             _no_enrichment(counts["enriched"])
-        assert raised.value.args[0] == ("worked_census_enriched_rows", 1, 0)
+        failure = ("worked_census_enriched_rows", 1, 0)
+        assert str(raised.value).partition("\n")[0] == str(failure)
         report(record_property, reader="due worked census", mutation_called=counts["legacy_installed_entry_called"],
-               matching_ids=sorted(fault), assertion=raised.value.args[0],
+               matching_ids=sorted(fault), assertion=failure,
                enriched_calls=counts["enriched"], sound_enriched_calls=sound_counts["enriched"])
 
     run(body, str(tmp_path / "census.sqlite"))
@@ -420,9 +421,10 @@ def _detail_fault(tmp_path, monkeypatch, record_property, *, packets):
         assert dropped == {"lane_row_conn": 2, "work_lane_rows_conn": 1}
         with pytest.raises(AssertionError) as raised:
             _one_resolution(fault_count)
-        assert raised.value.args[0] == ("coherent_lane_identity_resolutions", 4 if packets else 3, 1)
+        failure = ("coherent_lane_identity_resolutions", 4 if packets else 3, 1)
+        assert str(raised.value).partition("\n")[0] == str(failure)
         report(record_property, reader="coherent lane detail", external_packets_enabled=packets,
-               mutation_calls=dict(dropped), assertion=raised.value.args[0], resolutions=fault_count,
+               mutation_calls=dict(dropped), assertion=failure, resolutions=fault_count,
                sound_resolutions=count, full_store_and_wire_equal=True)
 
     run(body, str(tmp_path / "detail.sqlite"))
@@ -442,3 +444,193 @@ def test_coherent_detail_packets_sound(tmp_path, monkeypatch, record_property, f
 
 def test_coherent_detail_packets_fault(tmp_path, monkeypatch, record_property, fixed_clock):
     _detail_fault(tmp_path, monkeypatch, record_property, packets=True)
+
+
+def test_worked_census_unconfigured_index_goal_move_and_empty(tmp_path, fixed_clock):
+    async def body(env):
+        store = env.store
+        assert enriched_ids(await store.work_lane_rows(include_done=True)) == await store.work_lane_worked_spec_ids() == set()
+        await seed(env, done_lanes=4, unrelated=32, trail=0)
+
+        def goal_move(conn):
+            catalog = index._state_conn(conn)
+            catalog.update(available=False, error="work_root_unavailable")
+            goal = catalog["goal_observations"]["epic_excluded_destination"]
+            goal["facts"]["lane_id"] = "blocked-other"
+            goal.update(quality="stale", error="work_goal_source_uncertain")
+            catalog["goal_observations"]["epic_pending"] = {"pending": {"facts": {"lane_id": "blocked-other"}}}
+            conn.execute("UPDATE v2_work_index_state SET state_json=?", (json.dumps(catalog),))
+            conn.commit()
+
+        await store.submit(goal_move)
+        assert (enriched_ids(await store.work_lane_rows(include_done=True))
+                == await store.work_lane_worked_spec_ids() == EXPECTED | {EXCLUDED})
+
+        def clear_index(conn):
+            conn.execute("DELETE FROM v2_work_index_state")
+            conn.commit()
+
+        await store.submit(clear_index)
+        assert (enriched_ids(await store.work_lane_rows(include_done=True))
+                == await store.work_lane_worked_spec_ids() == {*EXPLICIT, TARGET_IDS[0], DONE, ACTIVE, BLOCKED, UNKNOWN, EXCLUDED})
+
+    run(body, str(tmp_path / "census.sqlite"))
+
+
+def test_due_census_ttl_inflight_and_natural_publish(tmp_path, monkeypatch, fixed_clock):
+    clock = [1000.0]
+    entered, release = threading.Event(), threading.Event()
+    reads = []
+    stamps = ("2026-01-02T12:01:00Z", "2026-01-02T12:11:00Z")
+
+    def read(spec_ids, _data_dir, _work_root, _now):
+        reads.append(spec_ids)
+        if len(reads) == 1:
+            entered.set()
+            assert release.wait(5)
+        return {TARGET_IDS[0]: {"as_of": stamps[len(reads) - 1]}}
+
+    async def body(env):
+        lane_id = await seed(env, unrelated=32, trail=0)
+        inv = census_inventory(env.store)
+        inv.store.work_lane_worked_spec_ids = AsyncMock(wraps=env.store.work_lane_worked_spec_ids)
+        inv.worked = WorkedCache(tmp_path, tmp_path, changed=inv.refresh, reader=read, clock=lambda: clock[0])
+        inv.emit_if_changed = AsyncMock(side_effect=lambda: out.append((
+            inv.worked.values.copy(), inv.store.reconcile_lane_lifecycle.await_count,
+            inv.store.reconcile_work_lane_episodes.await_count)))
+        out = []
+        try:
+            await drain(inv)
+            assert await asyncio.to_thread(entered.wait, 3)
+            clock[0] = 1600
+            await drain(inv)
+            assert inv.store.work_lane_worked_spec_ids.await_count == 1
+            clock[0] = 1001
+            release.set()
+            await inv.worked._task
+            await inv._task
+            assert inv.store.work_lane_worked_spec_ids.await_count == 1
+            assert reads == [EXPECTED]
+            assert out[-1][0][TARGET_IDS[0]]["as_of"] == stamps[0]
+
+            async with authorized_show(env) as (show, server):
+                server.work_lanes.worked = inv.worked
+                before = await show(lane_id, goal_id=goal_id(GOAL), members_limit=1)
+                clock[0] = 1599.9
+                await drain(inv)
+                assert inv.store.work_lane_worked_spec_ids.await_count == 1
+                clock[0] = 1600
+                await drain(inv)
+                await inv.worked._task
+                await inv._task
+                after = await show(lane_id, goal_id=goal_id(GOAL), members_limit=1)
+            assert [page["members"][0]["worked"]["as_of"] for page in (before, after)] == list(stamps)
+            assert reads == [EXPECTED, EXPECTED]
+            assert all(lifecycle == episodes == pass_number
+                       for pass_number, (_, lifecycle, episodes) in enumerate(out, 1))
+        finally:
+            release.set()
+            await inv.stop()
+
+    run(body, str(tmp_path / "census.sqlite"))
+
+
+def test_census_read_error_keeps_last_frame_and_ledger(tmp_path, monkeypatch, caplog, fixed_clock):
+    async def body(env):
+        await seed(env, unrelated=32, trail=0)
+        inv = census_inventory(env.store)
+        with monkeypatch.context() as patch:
+            def unavailable(_conn):
+                raise RuntimeError("fixture authoritative read")
+            patch.setattr(lanes, "effective_membership_ids_conn", unavailable)
+            await drain(inv)
+        assert "work lanes refresh failed" in caplog.text
+        inv.worked.refresh.assert_not_called()
+        inv.emit_if_changed.assert_not_awaited()
+        await drain(inv)
+        inv.worked.refresh.assert_called_once_with(EXPECTED)
+        inv.emit_if_changed.assert_awaited_once()
+
+    run(body, str(tmp_path / "census.sqlite"))
+
+
+def test_detail_packet_availability_order_and_nullable_unlinked_id(tmp_path, monkeypatch, fixed_clock):
+    async def body(env):
+        lane_id = await seed(env, packets=True)
+        store = env.store
+
+        def index_health(conn, available):
+            catalog = index._state_conn(conn)
+            catalog.update(available=available, error=None if available else "work_root_unavailable")
+            conn.execute("UPDATE v2_work_index_state SET state_json=?", (json.dumps(catalog),))
+            if available:
+                conn.executemany("INSERT INTO v2_external_work_packets VALUES ('fixture',?,?,?,1,1,1,NULL)", [
+                    ("unlinked", None, "queued"), ("member-missing", EXPLICIT[0], "review"),
+                    ("member-terminal", EXPLICIT[1], "review"),
+                ])
+            conn.commit()
+
+        for available, expected_tags in (
+            (True, ["member", "member-missing", "missing", "packet-only", "unlinked"]),
+            (False, ["member", "member-missing", "member-terminal", "missing", "packet-only", "terminal", "unlinked"]),
+        ):
+            await store.submit(lambda conn: index_health(conn, available))
+            async with authorized_show(env) as (show, _):
+                shown, _, count, decodes, _, _ = await detail_result(store, show, lane_id, monkeypatch)
+            _one_resolution(count)
+            looked_up = Counter(item for _, _, names, _ in decodes for item in names)
+            assert looked_up[EXPLICIT[0]] == looked_up[EXPLICIT[1]] == looked_up[None] == 1
+            assert max(looked_up.values()) == 1
+            other_caller, = [row["_external_packets"] for row in await store.work_lane_rows()
+                             if row["lane_id"] == lane_id]
+            packets = shown["_projection_row"]["_external_packets"]
+            assert packets == other_caller
+            assert packets["label"] == "Fixture"
+            assert [p["tag"] for p in packets["packets"]] == expected_tags
+            assert shown["_work_index"]["available"] is available
+
+    run(body, str(tmp_path / "detail.sqlite"))
+
+
+def test_detail_preserves_auth_and_missing_lane_boundaries(tmp_path, monkeypatch, fixed_clock):
+    async def body(env):
+        lane_id = await seed(env, unrelated=32, trail=0)
+        async with authorized_show(env) as (show, server):
+            read = AsyncMock(wraps=env.store.get_work_lane)
+            authorize = Mock(wraps=server._work_lanes_reader)
+            monkeypatch.setattr(env.store, "get_work_lane", read)
+            monkeypatch.setattr(server, "_work_lanes_reader", authorize)
+            for auth in ({}, {"dot_principal": True, "operator_authenticated": True},
+                         {"scoped_principal": True, "token_verified": True}):
+                with pytest.raises(VerbError) as denied:
+                    await server._on_work_lanes_show({"lane_id": lane_id, "_auth_context": auth})
+                assert denied.value.code == "work_lanes_unauthorized"
+            read.assert_not_awaited()
+            with monkeypatch.context() as patch:
+                patch.setattr(server, "work_lanes", None)
+                with pytest.raises(VerbError) as missing_inventory:
+                    await server._on_work_lanes_show({"lane_id": lane_id, "_auth_context": {"operator_authenticated": True}})
+                assert missing_inventory.value.code == "work_lanes_unavailable"
+            read.assert_not_awaited()
+
+            operator_page = await server._on_work_lanes_show({"lane_id": lane_id, "members_limit": 1,
+                                                               "_auth_context": {"operator_authenticated": True}})
+            with monkeypatch.context() as patch:
+                patch.setattr(server, "_is_loopback_client", lambda _socket: False)
+                verified_page = await show(lane_id, members_limit=1)
+            authenticated = authorize.call_args.args[0]["_auth_context"]
+            assert authenticated["token_verified"] is True and authenticated["stream_id"] == ROOT
+            assert verified_page.pop("request_id") == "fixture-show"
+            assert operator_page == verified_page
+
+            with monkeypatch.context() as patch:
+                never_resolve = Mock(side_effect=AssertionError("missing lane must not resolve membership"))
+                never_prepare_hue = Mock(side_effect=AssertionError("missing lane must not allocate a hue"))
+                patch.setattr(lanes, "effective_membership_ids_conn", never_resolve)
+                patch.setattr(lanes, "prepare_hues_conn", never_prepare_hue)
+                missing = await show("absent-fixture")
+            assert missing["type"] == "work_lanes.show.error" and missing["error_code"] == "work_lane_not_found"
+            never_resolve.assert_not_called()
+            never_prepare_hue.assert_not_called()
+
+    run(body, str(tmp_path / "detail.sqlite"))

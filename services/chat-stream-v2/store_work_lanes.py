@@ -593,13 +593,13 @@ def _consume_confirmation_conn(conn, question_id: str) -> None:
         raise ValueError("work_lane_operator_confirmation_consumed")
 
 
-def lane_row_conn(conn, lane_id: str) -> dict[str, Any] | None:
+def lane_row_conn(conn, lane_id: str, *, membership_snapshot: Callable[[], dict] | None = None) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM v2_assistant_composite_lanes WHERE lane_id=?", (lane_id,)).fetchone()
     if row is None:
         return None
     lane = dict(row)
     lane.pop("hue_open_order", None)
-    lane["members"] = effective_member_ids(conn, lane)
+    lane["members"] = effective_member_ids(conn, lane, membership_snapshot() if membership_snapshot else None)
     return lane
 
 
@@ -674,9 +674,10 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
     )
 
 
-def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None, external_config=None) -> list[dict[str, Any]]:
+def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None,
+                       external_config=None, membership_snapshot: Callable[[], dict] | None = None) -> list[dict[str, Any]]:
     states = WORK_STATES if include_done else OPEN_WORK_STATES
-    ids_snapshot = effective_membership_ids_conn(conn)
+    ids_snapshot = membership_snapshot() if membership_snapshot else effective_membership_ids_conn(conn)
     index_available = bool(ids_snapshot["state"]["available"])
     marks = ",".join("?" for _ in states)
     condition = f"work_state IN ({marks})" + (" AND lane_id=?" if lane_id is not None else "")
@@ -690,7 +691,10 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
     snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
     route_dispatch_map = resolved_route_dispatch_map(conn)
     from store_external_work import current_packets_conn
-    external = current_packets_conn(conn, config=external_config)
+    if membership_snapshot is None:
+        external = current_packets_conn(conn, config=external_config)
+    else:
+        external = current_packets_conn(conn, config=external_config, snapshot=snapshot, observations_read=set(named))
     for lane in lanes:
         lane["_external_packets"] = external
         lane["_members"] = members_conn(conn, lane, snapshot)
@@ -780,7 +784,17 @@ class _WorkLanesStoreMixin:
 
     async def get_work_lane(self, lane_id: str) -> dict[str, Any] | None:
         def _op(conn):
-            lane = lane_row_conn(conn, lane_id)
+            ids_snapshot = None
+
+            def membership_snapshot():
+                # Resolve lazily after finding the row. Hue preparation only
+                # changes hue fields, so all reads can share these identities.
+                nonlocal ids_snapshot
+                if ids_snapshot is None:
+                    ids_snapshot = effective_membership_ids_conn(conn)
+                return ids_snapshot
+
+            lane = lane_row_conn(conn, lane_id, membership_snapshot=membership_snapshot)
             if lane is None or lane.get("work_state") is None:
                 return None
             events = lane_events_conn(conn, lane_id)
@@ -788,9 +802,12 @@ class _WorkLanesStoreMixin:
                         "event_id": e["publication_event_id"], "ts": e["created_at"],
                         "source_id": e["source_id"]} for e in events if e.get("update_kind")]
             prepare_hues_conn(conn, [lane_id])
-            row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id, external_config=getattr(self, "external_work_config", None))), None)
-            lane = lane_row_conn(conn, lane_id)
-            internal_members = row["_members"] if row is not None else members_conn(conn, lane)
+            rows = work_lane_rows_conn(conn, include_done=True, lane_id=lane_id,
+                                       external_config=getattr(self, "external_work_config", None),
+                                       membership_snapshot=membership_snapshot)
+            row = next(iter(rows), None)
+            lane = lane_row_conn(conn, lane_id, membership_snapshot=membership_snapshot)
+            internal_members = row["_members"] if row is not None else members_conn(conn, lane, membership_snapshot())
             # Public Store members retain the observation contract. Projection
             # keeps its private last-good/freshness inputs in _projection_row.
             public_members = [{key: value for key, value in member.items() if not key.startswith("_")}
@@ -836,6 +853,18 @@ class _WorkLanesStoreMixin:
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         # Internal attendance/episode/aggregation readers never allocate hues.
         return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done, external_config=getattr(self, "external_work_config", None)))
+
+    async def work_lane_worked_spec_ids(self) -> set[str]:
+        """Return the effective IDs of all product lanes for the worked ledger."""
+        def read(conn):
+            with conn:
+                conn.execute("BEGIN")
+                membership = effective_membership_ids_conn(conn)["membership"]
+                marks = ",".join("?" for _ in WORK_STATES)
+                lane_ids = conn.execute(
+                    f"SELECT lane_id FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", WORK_STATES)
+                return {spec for (lane_id,) in lane_ids for spec in membership[lane_id]}
+        return await self.submit(read)
 
     async def work_lane_snapshot(self, *, include_done: bool = False,
                                  select_rows: Callable | None = None):
