@@ -656,7 +656,7 @@ async function designLinkJourney(ctx) {
   await click(ctx, linkSelector(design));
   await atPath(ctx, '/next/');
 
-  await click(ctx, '.rail-button[aria-label="Chats"]');
+  await click(ctx, '.chats-button');
   await click(ctx, `.popover [data-stream-id="${linkChat}"]`);
   const phonePreview = linkSelector(pinnedPhone);
   await wait(ctx, `document.querySelector('${phonePreview} img')?.src.startsWith('data:image/png') &&

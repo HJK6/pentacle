@@ -21,12 +21,13 @@ function extractFunction(name) {
 }
 
 function loadModelLabel() {
+  if (fs.existsSync(path.join(__dirname, '../renderer/chat_presentation.js'))) {
+    return require('../renderer/chat_presentation').modelLabel;
+  }
   return new Function(`${extractFunction('modelLabel')}; return modelLabel;`)();
 }
 
 test('modelLabel formats catalog ids and keeps the raw fallback', () => {
-  const src = app.match(/function modelLabel\(model\) \{[\s\S]*?\n\}/);
-  assert.ok(src, 'modelLabel function found in renderer/app.js');
   const modelLabel = loadModelLabel();
   assert.equal(modelLabel('claude-opus-4-8'), 'Opus 4.8');
   assert.equal(modelLabel('claude-opus-5'), 'Opus 5');
@@ -117,7 +118,7 @@ function lateCatalogPicker(previousAccount) {
   let resolveCatalog;
   const arrival = new Promise(resolve => { resolveCatalog = resolve; });
   const submissions = [];
-  const controller = new Function('document', 'catalog', 'arrival', 'submissions', 'previousAccount', `
+  const controller = new Function('document', 'catalog', 'arrival', 'submissions', 'previousAccount', 'modelLabel', `
     const CONFIG = {};
     let newSessionCatalog = catalog;
     let newSessionSelection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium',
@@ -135,12 +136,12 @@ function lateCatalogPicker(previousAccount) {
     const updateNewSessionStatus = () => {}, hideNewSessionModal = () => {};
     const providerLabelForHero = value => value, waitForNewSessionSpawn = promise => promise;
     const renderNewSessionModal = () => renderSpawnProfileOptions(document.getElementById('profile'));
-    ${['catalogForNewSession', 'catalogTuple', 'catalogProviders', 'selectionForProvider', 'modelLabel',
+    ${['catalogForNewSession', 'catalogTuple', 'catalogProviders', 'selectionForProvider',
       'spawnAccountControl', 'renderSpawnProfileOptions', 'loadSpawnCatalog', 'warmSpawnCatalog', 'newSession']
       .map(extractFunction).join('\n')}
     renderNewSessionModal();
     return { loadSpawnCatalog, warmSpawnCatalog, selection: () => newSessionSelection, submit: () => newSession() };
-  `)(dom.window.document, catalog, arrival, submissions, previousAccount);
+  `)(dom.window.document, catalog, arrival, submissions, previousAccount, loadModelLabel());
   return { ...controller, submissions, dom,
     arrive: async () => { resolveCatalog({ ok: true, catalog }); await arrival; await Promise.resolve(); },
     edit: (control, value) => {

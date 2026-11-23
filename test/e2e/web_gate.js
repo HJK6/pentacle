@@ -310,7 +310,7 @@ function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, catalog = n
   };
   const config = {
     appName: 'Pentacle',
-    features: { mic: !!mic, chatUi: true, inputBar: true, dashboards: true },
+    features: { mic: !!mic, chatUi: true, inputBar: true, dashboards: true, assistantRole: 'web-gate-chat-tools-protected' },
     ...(mic ? { micServerUrl: mic.micServerUrl, hostNames: mic.hostNames } : {}),
     ...(modelerFixtureUrl ? { dashboardHub: { url: modelerFixtureUrl, scraperBotUrl: modelerFixtureUrl } } : {}),
     ...(Object.keys(dashboards).length ? { dashboards } : {}),
