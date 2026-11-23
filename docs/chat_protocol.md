@@ -129,15 +129,45 @@ Session ownership tokens are separate from operator credentials. A caller stream
 
 ## Independent client walkthrough
 
-Use a disposable daemon and its private credential registry. The daemon operator
-issues a per-client envelope with
-[`operator_auth_cli.py issue --client-kind pentacle`](../services/chat-stream-v2/tools/operator_auth_cli.py).
-Direct the output to an owned, mode-0600 file (`umask 077` before creating it),
-not the terminal. This is enrollment by an authorized operator, not a public
-self-registration verb. Revoke that fixture credential with
-`operator_auth_cli.py revoke <credential-id>` when finished. If using
-`--registry`, point issuance and revocation at the **same disposable registry**
-used by the daemon. See [network access](REMOTE_AUTH.md) for trust boundaries.
+Use a disposable daemon and its private credential registry. From the checkout
+root, point `FIXTURE_REGISTRY` at the **same disposable registry** the daemon
+uses. Set `FIXTURE_KEY_FILE` and `FIXTURE_CREDENTIAL_ID_FILE` to two different,
+unused paths in your private fixture directory. The
+[issuer](../services/chat-stream-v2/tools/operator_auth_cli.py) returns JSON;
+the example's key file must contain only the raw envelope from `code`.
+
+<!-- fixture-credential-issuance -->
+```bash
+(
+  set -euo pipefail
+  umask 077
+  test "$FIXTURE_KEY_FILE" != "$FIXTURE_CREDENTIAL_ID_FILE"
+  test ! -e "$FIXTURE_KEY_FILE" && test ! -L "$FIXTURE_KEY_FILE" || exit 1
+  test ! -e "$FIXTURE_CREDENTIAL_ID_FILE" && test ! -L "$FIXTURE_CREDENTIAL_ID_FILE" || exit 1
+  python services/chat-stream-v2/tools/operator_auth_cli.py \
+    --registry "$FIXTURE_REGISTRY" issue --client-kind pentacle |
+    python -c '
+import json, sys
+issued = json.load(sys.stdin)
+with open(sys.argv[2], "x", encoding="utf-8") as receipt:
+    receipt.write(issued["credential_id"] + "\n")
+with open(sys.argv[1], "x", encoding="utf-8") as key:
+    key.write(issued["code"] + "\n")
+' "$FIXTURE_KEY_FILE" "$FIXTURE_CREDENTIAL_ID_FILE"
+)
+```
+
+This creates mode-0600 files without printing the envelope. The separate ID
+file is for revocation, not authentication. This is enrollment by an authorized
+operator, not public self-registration. When finished, revoke using the saved
+ID (only the ID, never the envelope, is passed as an argument):
+
+```sh
+python services/chat-stream-v2/tools/operator_auth_cli.py \
+  --registry "$FIXTURE_REGISTRY" revoke "$(cat "$FIXTURE_CREDENTIAL_ID_FILE")"
+```
+
+See [network access](REMOTE_AUTH.md) for trust boundaries.
 
 1. On every connection, receive `welcome` and answer its `auth.operator`
    challenge before it expires. Send `hello` with a unique `request_id`, the

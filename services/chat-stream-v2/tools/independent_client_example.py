@@ -236,7 +236,7 @@ async def run(args, credential):
                 if not echoes:
                     await client.receive()
             require(len(echoes) == 1, "Fixture produced multiple send echoes.")
-            sequences = sorted({*older, *newer, *echoes})
+            sequences = sorted({*older, *newer, *client.events})
             counts = {"snapshot_sessions": session_count, "active_sessions": active_count,
                       "lanes": len(lanes), "newer_rows": len(newer), "older_rows": len(older),
                       "send_results": 1, "live_echoes": len(echoes)}

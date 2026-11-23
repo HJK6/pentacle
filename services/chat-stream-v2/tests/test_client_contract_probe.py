@@ -690,7 +690,7 @@ def test_restore_status_broadcast_is_a_push_not_a_reply():
 
 
 @asynccontextmanager
-async def _contract_daemon(env, tmp_path):
+async def _contract_daemon(env, tmp_path, *, interleaved=None):
     """A real wire/Store/Comms fixture; only provider pane I/O is synthetic."""
     from uuid import uuid4
 
@@ -718,6 +718,10 @@ async def _contract_daemon(env, tmp_path):
         async def paste(self, pane, text):
             assert pane == name, "fixture provider refuses other panes"
             pastes.append(text)
+            if interleaved is not None:
+                # The provider is reached after both history pages and before
+                # the durable echo; append() also sends the real live push.
+                interleaved.append(await append("interleaved", "synthetic live event", "ASSIST_TEXT"))
             await append("echo:" + str(len(pastes)), text)
 
     provider = ContractProvider(store, host=host)
@@ -751,13 +755,18 @@ async def _contract_daemon(env, tmp_path):
                 envelope_path.unlink()
 
 
-@pytest.mark.parametrize("live_only", [False, True], ids=["backfill", "live-only-control"])
-def test_independent_client_contract_journey(tmp_path, monkeypatch, capsys, live_only):
+@pytest.mark.parametrize("live_only, interleave", [
+    pytest.param(False, False, id="backfill"),
+    pytest.param(True, False, id="live-only-control"),
+    pytest.param(False, True, id="interleaved-before-echo"),
+])
+def test_independent_client_contract_journey(tmp_path, monkeypatch, capsys, live_only, interleave):
     import independent_client_example as example
     from test_work_lanes import run
 
     async def journey(env):
-        async with _contract_daemon(env, tmp_path) as fixture:
+        buffered = []
+        async with _contract_daemon(env, tmp_path, interleaved=buffered if interleave else None) as fixture:
             server, url, stream, generation, hidden, lane, _, _, key_file, seed, append, pastes = fixture
             state = tmp_path / "checkpoint.json"
             options = ["--url", url, "--credential-file", str(key_file), "--stream", stream,
@@ -768,8 +777,9 @@ def test_independent_client_contract_journey(tmp_path, monkeypatch, capsys, live
                                     "newer_rows": 2, "older_rows": 2, "send_results": 1,
                                     "live_echoes": 1}
             cursor = json.loads(state.read_text())
-            assert cursor["sequences"][:4] == seed
-            assert len(cursor["sequences"]) == 5
+            assert len(buffered) == int(interleave)
+            first_rows = [*seed, *buffered]
+            assert cursor["sequences"] == [*first_rows, cursor["anchor"]]
             send_seq = cursor["sequences"][-1]
             assert cursor["anchor"] == send_seq
             async with asyncio.timeout(3):
@@ -779,7 +789,7 @@ def test_independent_client_contract_journey(tmp_path, monkeypatch, capsys, live
             missing = [await append(f"offline-{i}", "synthetic offline event", "ASSIST_TEXT")
                        for i in range(3)]
             durable = await env.store.fetch_session_event_tail(stream, limit=20)
-            assert [e["daemon_seq"] for e in durable] == [*seed, send_seq, *missing]
+            assert [e["daemon_seq"] for e in durable] == [*first_rows, send_seq, *missing]
             assert sum(e["text"] == example.FIXTURE_INPUT for e in durable) == 1
             assert await env.store.fetch_session_event_tail(hidden, limit=20) == []
             assert (await server.work_lanes.current())["lanes"][0]["lane_id"] == lane
@@ -811,7 +821,7 @@ def test_independent_client_contract_journey(tmp_path, monkeypatch, capsys, live
             checkpoint = json.loads(state.read_text())
             assert checkpoint["anchor"] == expected_tail
             found = checkpoint["sequences"]
-            expected = [*seed, send_seq, *missing]
+            expected = [*first_rows, send_seq, *missing]
             if live_only:
                 expected.append(expected_tail)
 
@@ -820,7 +830,7 @@ def test_independent_client_contract_journey(tmp_path, monkeypatch, capsys, live
 
             if live_only:
                 assert counts["new_rows"] == 1
-                assert found == [*seed, send_seq, expected_tail]
+                assert found == [*first_rows, send_seq, expected_tail]
                 with pytest.raises(AssertionError, match="offline durable events missing"):
                     check_order()
             else:
@@ -911,5 +921,64 @@ def test_independent_client_contract_send_is_fixture_only(tmp_path, capsys, mism
                 "Selected fixture stream and generation are not visible.\n",
             }
             assert pastes == []
+
+    run(check, str(tmp_path / "sessions.db"))
+
+
+def test_independent_client_contract_documented_credential_file(tmp_path, capsys):
+    import re
+
+    import independent_client_example as example
+    from test_work_lanes import run
+
+    root = SERVICE_DIR.parents[1]
+    guide = (root / "docs/chat_protocol.md").read_text()
+    issuance = re.search(r"<!-- fixture-credential-issuance -->\n```bash\n(.*?)\n```", guide, re.S)
+    # Reproduce the former prose instruction literally on the base: direct
+    # the whole CLI response to the private envelope file.
+    issue_command = issuance[1] if issuance else (
+        'umask 077; python services/chat-stream-v2/tools/operator_auth_cli.py '
+        '--registry "$FIXTURE_REGISTRY" issue --client-kind pentacle > "$FIXTURE_KEY_FILE"'
+    )
+
+    async def check(env):
+        async with _contract_daemon(env, tmp_path) as fixture:
+            _, url, stream, generation, _, _, registry, _, _, _, _, _ = fixture
+            key = tmp_path / "documented-envelope"
+            cid_file = tmp_path / "documented-credential-id"
+            registry_path = tmp_path / "auth" / "credentials.json"
+            before = set(registry.load().credentials)
+            process = await asyncio.create_subprocess_exec(
+                "bash", "-c", issue_command, cwd=root,
+                env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+                     "FIXTURE_REGISTRY": str(registry_path), "FIXTURE_KEY_FILE": str(key),
+                     "FIXTURE_CREDENTIAL_ID_FILE": str(cid_file)},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), 5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                raise
+            issued = set(registry.load().credentials) - before
+            try:
+                assert process.returncode == 0 and not stdout and not stderr
+                assert key.stat().st_mode & 0o777 == 0o600
+                result = await asyncio.to_thread(example.main, [
+                    "start", "--url", url, "--credential-file", str(key),
+                    "--stream", stream, "--generation", generation,
+                    "--checkpoint", str(tmp_path / "documented-checkpoint"),
+                ])
+                assert result == 0, "documented credential file must authenticate the example"
+                captured = capsys.readouterr()
+                assert not captured.err and json.loads(captured.out)["send_results"] == 1
+                assert cid_file.stat().st_mode & 0o777 == 0o600
+                assert len(issued) == 1 and cid_file.read_text().strip() in issued
+            finally:
+                for credential_id in issued:
+                    registry.revoke(credential_id)
+                key.unlink(missing_ok=True)
+                cid_file.unlink(missing_ok=True)
 
     run(check, str(tmp_path / "sessions.db"))
