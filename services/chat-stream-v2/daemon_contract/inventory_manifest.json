@@ -1,0 +1,29 @@
+{
+  "frozen_at_commit": "f153ca8adce2a38e0c5092b2dc98ff5aec16e06e",
+  "inventories": {
+    "F1_protected_core": {
+      "file": "exceptions/F1_protected_core.txt",
+      "sha256": "501e96719f82ba6d1cc89c04de6ebe23eabccc342f64cfcf2cbf699ab9b3377f"
+    },
+    "F2_projections": {
+      "file": "exceptions/F2_projections.txt",
+      "sha256": "be29143b9679b5332f7434fdd42834c256bcdb17de6dc413ff39402fff9251f9"
+    },
+    "F3_policy": {
+      "file": "exceptions/F3_policy.txt",
+      "sha256": "b8a6e722d4838653be22f6b96d2a040c285ac484b20fb737f4130a942cca24c9"
+    },
+    "F4_migrations_and_safe_switch": {
+      "file": "exceptions/P0_release_versioning.txt",
+      "sha256": "f4d2ff67602e5ad1ab7940112b5421efb4ff9bdf3cbe08f6e60a9476e8ab6a56"
+    },
+    "F5_observation": {
+      "file": "exceptions/F5_observation.txt",
+      "sha256": "b67c524bda55743601211cc7acec58d53fb7b2a9a6608518ef2f3be80f814193"
+    },
+    "F6_durable_delivery": {
+      "file": "exceptions/F6_delivery.txt",
+      "sha256": "544e839a86178c0987c70ac31e676b17eefbba46ad5bb6242f6c62319b177285"
+    }
+  }
+}

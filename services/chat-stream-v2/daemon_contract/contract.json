@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "baseline_commit": "f153ca8adce2a38e0c5092b2dc98ff5aec16e06e",
+  "structure_owner": null,
+  "structure_owner_status": "pending",
+  "max_active_daemon_lanes": 2,
+  "layers": [
+    "F1_protected_chat_core",
+    "F2_event_feed_and_projections",
+    "F3_workflow_policy",
+    "F4_migrations_and_safe_switch",
+    "F5_observation",
+    "F6_durable_delivery"
+  ]
+}

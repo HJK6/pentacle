@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -409,6 +410,36 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     return result
 
 
+def _run_daemon_contract(evidence: Path, base: str) -> dict[str, Any]:
+    log = evidence / "daemon_contract.log"
+    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools/daemon_contract_gate.py"),
+               "--base", base]
+    try:
+        completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True,
+                                   check=False, timeout=60)
+        output = (completed.stdout or "") + (completed.stderr or "")
+        log.write_text(output[-200_000:], encoding="utf-8")
+        return _result("daemon_contract", code=completed.returncode, passed=completed.returncode == 0,
+                       reason=None if completed.returncode == 0 else "contract_rejected",
+                       command=command, log=log, contract_base=base)
+    except subprocess.TimeoutExpired as exc:
+        detail = (exc.stdout or b"") + (exc.stderr or b"")
+        log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
+        return _result("daemon_contract", code=124, passed=False, reason="timeout", timed_out=True,
+                       command=command, log=log, contract_base=base)
+
+
+def _merge_contract_base() -> str:
+    result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=REPO_ROOT,
+                            text=True, capture_output=True, check=False, timeout=20)
+    if result.returncode:
+        raise RuntimeError("cannot resolve origin/main merge base for daemon contract gate")
+    value = result.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise RuntimeError("daemon contract gate received an invalid merge base")
+    return value
+
+
 def _run_usage_manifest(manifest: Path, evidence: Path, deployment_contract: Path) -> dict[str, Any]:
     """Validate the candidate-bound usage receipt as part of a merge gate."""
     command = [
@@ -554,6 +585,12 @@ def main() -> int:
         if before:
             results.append(_result("source_integrity", code=125, passed=False, reason="dirty_worktree", command=["git", "status", "--porcelain", "--untracked-files=all"]))
         else:
+            if args.gate == "merge":
+                try:
+                    results.append(_run_daemon_contract(evidence, _merge_contract_base()))
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                    results.append(_result("daemon_contract", code=125, passed=False,
+                                           reason="contract_base_unavailable", error=type(exc).__name__))
             usage_pending = args.gate == "merge" and args.usage_manifest is not None
             refusal = _deadline_check(deadline, clock_start, "deadline", limits, usage_pending=usage_pending)
             if refusal:
