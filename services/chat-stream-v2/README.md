@@ -108,6 +108,12 @@ Without peer configuration, the daemon runs locally. To keep specs and QA record
 
 `python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The web gate explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
 
+Use `tools/daemon_identity_cli.py` to print the candidate release SHA,
+database schema version, and supported wire-protocol range. The daemon's first
+`welcome` frame carries the same schema and protocol identity with its runtime
+SHA. A legacy hello that omits `protocol_version` remains accepted; a peer that
+declares a version outside the advertised range is refused before hello state
+is recorded.
 ## Waiting for notification answers
 
 `notification.await` holds the host-transfer lock only while projecting committed

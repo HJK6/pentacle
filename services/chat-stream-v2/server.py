@@ -76,6 +76,9 @@ from seat_token_telemetry import (
 from sessions import VerbError, _finish_despite_cancel, with_bootstrap_state
 from design_links import validate_design_link
 from store import STREAM_TOKEN_HASH_VERSION, role_source_for
+from daemon_identity import (
+    MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, SCHEMA_VERSION,
+)
 from machine_stats import validate_machine_stats
 from submission_events import COMMITTED_PENDING_PROOF_STATUSES
 from assistant_lane_rulings import AssistantLaneRulings
@@ -705,6 +708,11 @@ def _welcome_frame(*, nonce: str, expires_at: float, runtime_sha: str = "") -> d
     return {
         "type": "welcome",
         "runtime_sha": runtime_sha,
+        "release_sha": runtime_sha,
+        "schema_version": SCHEMA_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
+        "min_protocol_version": MIN_PROTOCOL_VERSION,
+        "max_protocol_version": MAX_PROTOCOL_VERSION,
         "auth_required": False,
         "auth": {
             "operator": {
@@ -2407,6 +2415,20 @@ class Server:
 
         verb = str(msg.get("type") or "")
         request_id = msg.get("request_id")
+        # A declared protocol outside this daemon's compatibility window is
+        # rejected before recording client identity, authentication state, or
+        # any hello side effect. Legacy peers omit the field and retain the v2
+        # handshake behavior.
+        if verb == "hello" and "protocol_version" in msg:
+            peer_protocol = msg.get("protocol_version")
+            if (type(peer_protocol) is not int
+                    or not MIN_PROTOCOL_VERSION <= peer_protocol <= MAX_PROTOCOL_VERSION):
+                return [{
+                    "type": "hello.error", "request_id": request_id,
+                    "error_code": "unsupported_protocol",
+                    "supported_protocol_min": MIN_PROTOCOL_VERSION,
+                    "supported_protocol_max": MAX_PROTOCOL_VERSION,
+                }]
         if websocket is not None:
             first_proof_hello = (verb == "hello" and msg.get("client") == "fast-contact-proof-v1"
                                  and websocket not in self._client_identities

@@ -48,6 +48,7 @@ from loop_watchdog import StoreProgress, request_timing
 import store_call_diag
 from prockill import canonical_start
 from session_summary import SUMMARY_TAIL_LIMIT, apply_message_summary
+from daemon_identity import SCHEMA_VERSION
 
 import attachment_locks
 import store_exchange
@@ -125,7 +126,6 @@ _RECEIPT_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _SEND_REQUEST_ID_RE = re.compile(r"send-[A-Za-z0-9_-]{1,123}\Z")
 _PROVENANCE_ID_MAX = 256
 #: 2 adds the usage provenance tables (store_usage.DDL); older daemons ignore both.
-SCHEMA_VERSION = 2
 _TRUSTED_STATUS_NOTICE_KINDS = frozenset({"status_card", "status_card_combined"})
 _TRUSTED_NOTIFICATION_ANSWER_METADATA_KEYS = frozenset({
     "canonical_intent",
