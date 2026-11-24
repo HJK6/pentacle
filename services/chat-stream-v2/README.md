@@ -123,7 +123,10 @@ registry and paired archive metadata without scanning application rows. Use
 disposable copy. Preparation reuses the current Store schema and repair helpers,
 records the main step, commits the history archive independently, then writes the
 final pair marker only after archive verification. An interrupted preparation
-can resume from its last committed step. The serving startup path is unchanged;
+can resume from its last committed step. If Store's schema transaction committed
+but the separate step receipt did not, the runner checks the committed schema
+version and final-column sentinels before recording the receipt, so it does not
+run Store.start again. The serving startup path is unchanged;
 this command does not authorize preparation or deployment of a production DB.
 ## Waiting for notification answers
 

@@ -79,6 +79,8 @@ def inspect(database: str | Path) -> dict:
                 or not marker["store_schema_version"] == SCHEMA_VERSION
                 or store_version < SCHEMA_VERSION
                 or not sequence["archive_ready"]
+                or main_marker["pair_id"] != sequence["pair_id"]
+                or main_marker["archive_path"] != str(archive_path or "")
                 or marker["pair_id"] != sequence["pair_id"]
                 or marker["archive_path"] != str(archive_path or "")):
             return {"prepared": False, "reason": "main marker and pair metadata disagree"}
@@ -189,6 +191,37 @@ def _has_main_step(db: Path) -> bool:
         conn.close()
 
 
+def _main_schema_commit_present(db: Path) -> bool:
+    """Recognize Store's completed schema transaction if its receipt was lost.
+
+    Store writes ``user_version`` and the final set of schema columns in the
+    same transaction. Checking those sentinels lets prepare record the missing
+    step receipt without running Store.start a second time after a crash in
+    the receipt gap.
+    """
+    try:
+        conn = _readonly(db)
+    except (MigrationError, OSError, sqlite3.Error):
+        return False
+    try:
+        if int(conn.execute("PRAGMA user_version").fetchone()[0]) < SCHEMA_VERSION:
+            return False
+        required = {
+            "sessions": {"observer_binding", "account_binding", "assigned_spec_id"},
+            "v2_reports": {"usage_snapshot"},
+            "v2_schedules": {"objective_source", "no_watch"},
+        }
+        for table, columns in required.items():
+            present = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+            if not columns <= present:
+                return False
+        return True
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+    finally:
+        conn.close()
+
+
 def _record_main_step(db: Path) -> None:
     conn = sqlite3.connect(db, timeout=5.0)
     try:
@@ -210,14 +243,16 @@ def _record_main_step(db: Path) -> None:
         conn.close()
 
 
-def prepare(database: str | Path, *, after_main_commit: Callable[[], None] | None = None,
+def prepare(database: str | Path, *, before_main_step_record: Callable[[], None] | None = None,
+            after_main_commit: Callable[[], None] | None = None,
             after_archive_commit: Callable[[], None] | None = None) -> dict:
     """Converge a disposable DB using Store helpers, then seal its pair marker.
 
-    A main-step receipt is committed after Store's main transaction. Archive
-    initialization then commits independently, and the final pair receipt is
-    committed only after metadata verification. Completed steps are skipped on
-    resume.
+    Store's schema transaction and the main-step receipt are separate commits.
+    If a crash falls between them, the schema version and final-column sentinels
+    identify the completed transaction so resume records its receipt without
+    running Store.start again. Archive initialization then commits
+    independently, and the final pair receipt follows metadata verification.
     """
     db = Path(database).expanduser().absolute()
     db.parent.mkdir(parents=True, exist_ok=True)
@@ -225,10 +260,13 @@ def prepare(database: str | Path, *, after_main_commit: Callable[[], None] | Non
         return inspect(db)
     _ensure_prepare_origin(db)
     if not _has_main_step(db):
-        store = Store(str(db))
-        store.start()
-        if not store.stop(timeout=10):
-            raise MigrationError("Store worker did not stop after main preparation")
+        if not _main_schema_commit_present(db):
+            store = Store(str(db))
+            store.start()
+            if not store.stop(timeout=10):
+                raise MigrationError("Store worker did not stop after main preparation")
+            if before_main_step_record is not None:
+                before_main_step_record()
         _record_main_step(db)
         if after_main_commit is not None:
             after_main_commit()
