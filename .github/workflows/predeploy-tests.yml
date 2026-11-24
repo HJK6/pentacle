@@ -343,6 +343,10 @@ jobs:
       env:
         RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       run: python3 services/chat-stream-v2/tools/daemon_contract_gate.py --base "$RELEASE_BASE"
+    - name: Daemon policy, observation, and delivery selectors
+      env:
+        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: python3 services/chat-stream-v2/tools/daemon_layer_gate.py --base "$RELEASE_BASE"
     - name: System packages
       timeout-minutes: 10
       run: |
