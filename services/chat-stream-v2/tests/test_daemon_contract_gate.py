@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,7 @@ class DaemonContractGateTests(unittest.TestCase):
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
         (path / f"{name}.json").write_text(json.dumps({
+            "control": name,
             "base": base,
             "command": result.args,
             "returncode": result.returncode,
@@ -168,14 +170,14 @@ class Store:
     def __init__(self):
         pass
     def _run(self):
-        conn.executescript("CREATE TABLE item(id INTEGER);")
+        conn.execute("CREATE TABLE item(id INTEGER)")
 '''
         temporary, root, service, base = self._fixture(source)
         try:
             store = service / "store.py"
             store.write_text(store.read_text(encoding="utf-8").replace(
-                'CREATE TABLE item(id INTEGER);',
-                'CREATE TABLE item(id INTEGER); CREATE TABLE item(id INTEGER);',
+                'conn.execute("CREATE TABLE item(id INTEGER)")',
+                'conn.execute("CREATE TABLE item(id INTEGER)"); conn.execute("CREATE TABLE item(id INTEGER)")',
             ), encoding="utf-8")
             result = self._run_fixture_gate(root, service, base)
             self._record_result("duplicate-same-line-write-reject", base, result)
@@ -201,12 +203,15 @@ class Store:
         try:
             active = service / "daemon_contract" / "active" / "F2_projections.txt"
             rows = active.read_text(encoding="utf-8").splitlines()
-            rows[0] = rows[0] + " moved"
+            match = re.fullmatch(r"(.+?):(\d+)(\s+.+)", rows[0])
+            self.assertIsNotNone(match, rows[0])
+            rows[0] = f"{match.group(1)}:{int(match.group(2)) + 1}{match.group(3)}"
             active.write_text("\n".join(rows) + "\n", encoding="utf-8")
             result = self._run_fixture_gate(root, service, base)
             self._record_result("moved-allowance-reject", base, result)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("adds or moves", result.stderr)
+            moved_receipt = json.dumps({"control": "moved-allowance-reject", "stdout": result.stdout, "stderr": result.stderr}, sort_keys=True)
 
             shutil.rmtree(service / "daemon_contract")
             shutil.copytree(Path(daemon_gate.__file__).resolve().parents[1] / "daemon_contract",
@@ -217,6 +222,8 @@ class Store:
             self._record_result("base-list-addition-reject", base, result)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("adds entries beyond", result.stderr)
+            added_receipt = json.dumps({"control": "base-list-addition-reject", "stdout": result.stdout, "stderr": result.stderr}, sort_keys=True)
+            self.assertNotEqual(moved_receipt, added_receipt)
         finally:
             temporary.cleanup()
 
