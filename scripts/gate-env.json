@@ -24,7 +24,14 @@
   "deadline": {
     "preflight_s": 30,
     "reserve_s": 60,
-    "slack_s": 30
+    "slack_s": 30,
+    "merge_check_bounds_s": {
+      "merge_base": 20,
+      "daemon_contract": 60,
+      "daemon_layer_selectors": 90,
+      "daemon_b04_selectors": 90
+    },
+    "merge_unit_advisory_s": 1800
   },
   "max_tmpdir_bytes": 48,
   "min_free_mb": 1024,

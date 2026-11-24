@@ -95,7 +95,11 @@ def test_gate_env_deadline_is_accepted_by_the_real_runner_envelope(tmp_path) -> 
             tiers = [("unit", tier_s), ("smoke", tier_s)] if name == "merge" else [(name, tier_s)]
         for startup_s in (0.0, 5.0, 25.0):  # runner startup before its first check
             deadline = {"deadline_s": deadline_s, "reserve_s": float(config["deadline"]["reserve_s"]), "checks": []}
-            assert run_gate._deadline_check(deadline, time.monotonic() - startup_s, "deadline", tiers, usage_pending=False) is None
+            merge_bounds = config["deadline"]["merge_check_bounds_s"] if name == "merge" else {}
+            pending = [(tier, limit + (config["deadline"]["merge_unit_advisory_s"]
+                                       if name == "merge" and tier == "unit" else 0)) for tier, limit in tiers]
+            assert run_gate._deadline_check(deadline, time.monotonic() - startup_s, "deadline", pending,
+                                            usage_pending=False, merge_bounds=merge_bounds) is None
         assert results["wall_s"] > deadline_s
 
 

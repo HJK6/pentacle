@@ -98,6 +98,13 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
     deadline = config.get("deadline")
     if not isinstance(deadline, dict) or any(not isinstance(deadline.get(k), int) or isinstance(deadline.get(k), bool) or deadline[k] < 0 for k in ("preflight_s", "reserve_s", "slack_s")):
         problems.append("deadline")
+    elif "merge_check_bounds_s" in deadline or "merge_unit_advisory_s" in deadline:
+        bounds = deadline.get("merge_check_bounds_s")
+        advisory = deadline.get("merge_unit_advisory_s")
+        if (not isinstance(bounds, dict) or set(bounds) != {"merge_base", "daemon_contract", "daemon_layer_selectors", "daemon_b04_selectors"}
+                or any(type(v) is not int or v <= 0 for v in bounds.values())
+                or type(advisory) is not int or advisory <= 0):
+            problems.append("merge deadline bounds")
     for key in ("reserve_s", "max_tmpdir_bytes", "min_free_mb"):
         if not isinstance(config.get(key), int) or isinstance(config.get(key), bool) or config[key] < 0:
             problems.append(key)
@@ -672,7 +679,7 @@ def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, can
         return "cancelled", ff, secondary
     if reason == "deadline_envelope_exceeded":
         return "setup_failure", ff, secondary
-    if reason in ("ambient_tmux", "tmux_missing", "preflight_failed", "dirty_worktree", "invalid_soak_tier") or reason.startswith("manifest_error"):
+    if reason in ("ambient_tmux", "tmux_missing", "preflight_failed", "dirty_worktree", "invalid_soak_tier", "invalid_basetemp") or reason.startswith("manifest_error"):
         return "setup_failure", ff, secondary
     if reason == "timeout":
         return "timeout_unclassified", ff, secondary
@@ -1292,6 +1299,10 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
             preflights = 1 if target["gate"] in ("smoke", "merge") else 0
             # The runner measures the envelope from its own start, so launch/git-status time eats a bare sum: keep a start margin.
             deadline_s = (sum(limits.values()) if limits else tier_s * tiers) + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
+            if target["gate"] == "merge":
+                deadline_s += sum(budget.get("merge_check_bounds_s", {}).values())
+                if limits:
+                    deadline_s += budget.get("merge_unit_advisory_s", 0)
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
         if shard_index is not None:

@@ -611,8 +611,9 @@ class DeadlineEnvelope(Tmp):
     def test_deadline_covers_tiers_preflight_and_reserve(self):
         command, results = self.command("merge", "parser.add_argument('--deadline-seconds')")
         self.assertEqual(command[command.index("--timeout-seconds") + 1], "900")
-        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(900 * 2 + 30 + 60 + 30))
-        self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30)
+        check_s = sum(REAL_CONFIG["deadline"]["merge_check_bounds_s"].values())
+        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(900 * 2 + 30 + 60 + 30 + check_s))
+        self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30 + check_s)
         unit, results = self.command("unit", "--deadline-seconds")
         self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
         service = self.tmp / "svc"
@@ -1490,6 +1491,7 @@ class MigratedTargets(Tmp):
         self.assertIn("merge", cmd)
         budget = cfg["deadline"]
         deadline = sum(target["tier_timeouts"].values()) + budget["preflight_s"] + budget["reserve_s"] + budget["slack_s"]
+        deadline += sum(budget["merge_check_bounds_s"].values()) + budget["merge_unit_advisory_s"]
         self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), deadline)
         self.assertEqual(result["wall_s"], deadline + budget["slack_s"])
 

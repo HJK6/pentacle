@@ -247,7 +247,9 @@ def test_merge_runner_executes_b04_cli_and_workflow_requires_it(tmp_path):
     sys.path.insert(0, str(ROOT / SERVICE))
     try:
         from tools import run_gate as runner
-        result = runner._run_daemon_b04_selectors(tmp_path, BASE)
+        import json
+        bounds = json.loads((ROOT / "scripts/gate-env.json").read_text())["deadline"]["merge_check_bounds_s"]
+        result = runner._run_daemon_b04_selectors(tmp_path, BASE, bounds["daemon_b04_selectors"])
     finally:
         sys.path.pop(0)
     assert result['passed'], (tmp_path / 'daemon_b04_selectors.log').read_text()
@@ -601,32 +603,36 @@ def test_cycle2_identity_subjects(cycle2_gate, subject, expected):
     assert any(expected in error for error in errors), errors
 
 
-def test_cycle2_seven_qa_subjects_fail_candidate_cli_and_permitted_controls(checkout):
+@pytest.mark.parametrize(('filename', 'mutation', 'diagnostic'), [
+    ('main.py', '        if feature_job:\n            callbacks.append(feature_job.tick)\n', 'F1 recurring'),
+    ('main.py', '        if feature_job:\n            callbacks = callbacks + [feature_job.tick]\n', 'F1 recurring'),
+    ('sessions.py', '\nimport sqlite3 as sql\ndef b04():\n db = sql\n return db.connect("invented.db")\n', 'F1'),
+    ('sessions.py', '\ndef b04(work_lanes, name): return getattr(work_lanes, name)()\n', 'F2'),
+    ('sessions.py', '\ngetter = getattr\ndef b04(work_lanes, name): return getter(work_lanes, name)()\n', 'F2'),
+    ('sessions.py', '\ndef b04(work_lanes, name, cond):\n view = work_lanes\n def inner():\n  nonlocal view\n  if cond: view = object()\n  return getattr(view, name)()\n return inner()\n', 'F2'),
+    ('sessions.py', '\ndef b04(work_lanes, name):\n for view in [work_lanes]:\n  pass\n return getattr(view, name)()\n', 'F2'),
+    ('sessions.py', '\ndef b04(work_lanes): return opaque({work_lanes: 1})\n', 'F2'),
+    ('sessions.py', '\nimport sqlite3 as sql\ndef b04(): return opaque({sql: "connect"})\n', 'F1'),
+], ids=['scheduler-append', 'scheduler-add', 'sqlite-connect', 'dynamic-getattr', 'getattr-alias',
+        'closure', 'loop', 'opaque-view', 'opaque-sqlite'])
+def test_cycle2_seven_qa_subjects_fail_candidate_cli_and_permitted_controls(checkout, filename, mutation, diagnostic):
+    path = checkout / SERVICE / filename
+    original = path.read_text()
+    if filename == 'main.py':
+        marker = '        if server.assistant_restore is not None:\n'
+        assert original.count(marker) == 1
+        path.write_text(original.replace(marker, mutation + marker, 1))
+    else:
+        path.write_text(original + mutation)
+    rejected = run_gate(checkout)
+    assert rejected.returncode == 1 and diagnostic in rejected.stderr, (diagnostic, rejected.stderr)
+
+
+def test_cycle2_cli_baseline_and_permitted_controls(checkout):
     baseline = run_gate(checkout)
     assert baseline.returncode == 0, baseline.stderr
-    main = checkout / SERVICE / 'main.py'
     sessions = checkout / SERVICE / 'sessions.py'
-    originals = {main: main.read_text(), sessions: sessions.read_text()}
-    marker = '        if server.assistant_restore is not None:\n'
-    assert originals[main].count(marker) == 1
-    subjects = [
-        (main, originals[main].replace(marker, '        if feature_job:\n            callbacks.append(feature_job.tick)\n' + marker, 1), 'F1 recurring'),
-        (main, originals[main].replace(marker, '        if feature_job:\n            callbacks = callbacks + [feature_job.tick]\n' + marker, 1), 'F1 recurring'),
-        (sessions, originals[sessions] + '\nimport sqlite3 as sql\ndef b04():\n db = sql\n return db.connect("invented.db")\n', 'F1'),
-        (sessions, originals[sessions] + '\ndef b04(work_lanes, name): return getattr(work_lanes, name)()\n', 'F2'),
-        (sessions, originals[sessions] + '\ngetter = getattr\ndef b04(work_lanes, name): return getter(work_lanes, name)()\n', 'F2'),
-        (sessions, originals[sessions] + '\ndef b04(work_lanes, name, cond):\n view = work_lanes\n def inner():\n  nonlocal view\n  if cond: view = object()\n  return getattr(view, name)()\n return inner()\n', 'F2'),
-        (sessions, originals[sessions] + '\ndef b04(work_lanes, name):\n for view in [work_lanes]:\n  pass\n return getattr(view, name)()\n', 'F2'),
-        (sessions, originals[sessions] + '\ndef b04(work_lanes): return opaque({work_lanes: 1})\n', 'F2'),
-        (sessions, originals[sessions] + '\nimport sqlite3 as sql\ndef b04(): return opaque({sql: "connect"})\n', 'F1'),
-    ]
-    for path, subject, diagnostic in subjects:
-        path.write_text(subject)
-        rejected = run_gate(checkout)
-        assert rejected.returncode == 1 and diagnostic in rejected.stderr, (diagnostic, rejected.stderr)
-        for original_path, original in originals.items():
-            original_path.write_text(original)
-    sessions.write_text(originals[sessions] + '''
+    sessions.write_text(sessions.read_text() + '''
 import sqlite3 as safe_sqlite
 def b04_permitted(work_lanes, name):
     return getattr(work_lanes, "status")()
@@ -702,34 +708,38 @@ def test_cycle2_scheduler_each_row_and_source_retire_together(cycle2_gate):
         assert cycle2_gate.scheduler_grammar(main, retired), row
 
 
-def test_cycle2_cli_identity_clean_and_seams(checkout):
+@pytest.mark.parametrize(('text', 'diagnostic'), [
+    ('from builtins import getattr as g\ndef b04(work_lanes, n): return g(work_lanes, n)()', 'F2 bulk'),
+    ('import builtins as b\ndef b04(work_lanes, n): return b.getattr(work_lanes, n)()', 'F2 bulk'),
+    ('g = getattr\nh: object = g\ndef b04(work_lanes, n): return h(work_lanes, n)()', 'F2 bulk'),
+    ('def b04(work_lanes): return getattr(work_lanes, "current")', 'F2 bulk'),
+    ('def b04(work_lanes): return getattr(work_lanes, "current")()', 'F2 bulk'),
+    ('def b04(work_lanes, x, n):\n if x: view = work_lanes\n else: view = object()\n return getattr(view, n)()', 'F2 bulk'),
+    ('def b04(work_lanes, n):\n view: object = work_lanes\n def inner(): return getattr(view, n)()\n return inner()', 'F2 bulk'),
+    ('import sqlite3 as s\ndef b04():\n db = s\n connect = db.connect\n return connect("x")', 'F1 SQLite'),
+    ('import sqlite3 as s\ndef b04():\n db = s\n second: object = db\n return second.connect("x")', 'F1 SQLite'),
+    ('import sqlite3 as s\ng = getattr\ndef b04(): return g(s, "connect")("x")', 'F1 SQLite'),
+], ids=['builtin-alias', 'builtin-module', 'annotated-getter', 'current', 'current-call', 'branch',
+        'closure', 'sqlite-alias', 'sqlite-annotation', 'sqlite-getter'])
+def test_cycle2_cli_identity_rejects_seams(checkout, text, diagnostic):
     path = checkout / SERVICE / 'sessions.py'
-    original = path.read_text()
-    for text, diagnostic in (
-        ('from builtins import getattr as g\ndef b04(work_lanes, n): return g(work_lanes, n)()', 'F2 bulk'),
-        ('import builtins as b\ndef b04(work_lanes, n): return b.getattr(work_lanes, n)()', 'F2 bulk'),
-        ('g = getattr\nh: object = g\ndef b04(work_lanes, n): return h(work_lanes, n)()', 'F2 bulk'),
-        ('def b04(work_lanes): return getattr(work_lanes, "current")', 'F2 bulk'),
-        ('def b04(work_lanes): return getattr(work_lanes, "current")()', 'F2 bulk'),
-        ('def b04(work_lanes, x, n):\n if x: view = work_lanes\n else: view = object()\n return getattr(view, n)()', 'F2 bulk'),
-        ('def b04(work_lanes, n):\n view: object = work_lanes\n def inner(): return getattr(view, n)()\n return inner()', 'F2 bulk'),
-        ('import sqlite3 as s\ndef b04():\n db = s\n connect = db.connect\n return connect("x")', 'F1 SQLite'),
-        ('import sqlite3 as s\ndef b04():\n db = s\n second: object = db\n return second.connect("x")', 'F1 SQLite'),
-        ('import sqlite3 as s\ng = getattr\ndef b04(): return g(s, "connect")("x")', 'F1 SQLite'),
-    ):
-        path.write_text(original + '\n' + text + '\n')
-        result = run_gate(checkout)
-        assert result.returncode == 1 and 'sessions.py:b04' in result.stderr and diagnostic in result.stderr, result.stderr
-    for text in (
-        'def b04(getattr, work_lanes, n): return getattr(work_lanes, n)()',
-        'def b04(other, n): return getattr(other, n)()',
-        'def b04(work_lanes): return getattr(work_lanes, "status")()',
-        'import sqlite3 as s\ndef b04():\n connect = s.connect\n return 1',
-        'import sqlite3 as s\ndef b04():\n connect = getattr(s, "connect")\n return 1',
-    ):
-        path.write_text(original + '\n' + text + '\n')
-        result = run_gate(checkout)
-        assert result.returncode == 0, result.stderr
+    path.write_text(path.read_text() + '\n' + text + '\n')
+    result = run_gate(checkout)
+    assert result.returncode == 1 and 'sessions.py:b04' in result.stderr and diagnostic in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize('text', [
+    'def b04(getattr, work_lanes, n): return getattr(work_lanes, n)()',
+    'def b04(other, n): return getattr(other, n)()',
+    'def b04(work_lanes): return getattr(work_lanes, "status")()',
+    'import sqlite3 as s\ndef b04():\n connect = s.connect\n return 1',
+    'import sqlite3 as s\ndef b04():\n connect = getattr(s, "connect")\n return 1',
+], ids=['shadowed', 'unrelated', 'status', 'connection-reference', 'getter-reference'])
+def test_cycle2_cli_identity_clean(checkout, text):
+    path = checkout / SERVICE / 'sessions.py'
+    path.write_text(path.read_text() + '\n' + text + '\n')
+    result = run_gate(checkout)
+    assert result.returncode == 0, result.stderr
 
 
 def test_cycle2_scheduler_restore_retirement_and_unrelated_scope_cli(checkout):
@@ -756,51 +766,54 @@ def test_cycle2_scheduler_restore_retirement_and_unrelated_scope_cli(checkout):
     assert result.returncode == 0, result.stderr
 
 
-def test_cycle2_scheduler_matrix_cli(checkout):
+SCHEDULER_START = '        if server.assistant_restore is not None:\n'
+SCHEDULER_INIT = '        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,\n'
+SCHEDULER_DISPATCH = '        await run_reconcile_callbacks(*callbacks)'
+
+
+@pytest.mark.parametrize(('old', 'new'), [
+    (SCHEDULER_START, '        callbacks = other\n' + SCHEDULER_START),
+    (SCHEDULER_INIT, SCHEDULER_INIT.replace('callbacks =', 'callbacks: list =')),
+    ('event_push.check_pin_drift,', '*[event_push.check_pin_drift],'),
+    (SCHEDULER_START, '        alias = callbacks\n        alias.append(feature.tick)\n' + SCHEDULER_START),
+    (SCHEDULER_START, '        add = callbacks.append\n        add(feature.tick)\n' + SCHEDULER_START),
+    (SCHEDULER_START, '        helper(callbacks)\n' + SCHEDULER_START),
+    (SCHEDULER_DISPATCH, SCHEDULER_DISPATCH.replace('*callbacks)', '*callbacks, feature.tick)')),
+    (SCHEDULER_START, SCHEDULER_START.replace(' is not None', ' is not None or feature')),
+    ('on_reconcile_tick=reconcile_callbacks', 'on_reconcile_tick=other'),
+    ('watch_wake.tick, ', 'watch_wake.tick, watch_wake.tick, '),
+    (SCHEDULER_DISPATCH, SCHEDULER_DISPATCH + '\n' + SCHEDULER_DISPATCH),
+], ids=['replace', 'annotation', 'starred', 'alias', 'method', 'helper', 'extra-argument', 'condition',
+        'wrong-callback', 'duplicate', 'double-dispatch'])
+def test_cycle2_scheduler_matrix_cli(checkout, old, new):
     main = checkout / SERVICE / 'main.py'
     original = main.read_text()
-    start = '        if server.assistant_restore is not None:\n'
-    init = '        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,\n'
-    dispatch = '        await run_reconcile_callbacks(*callbacks)'
-    for old, new in (
-        (start, '        callbacks = other\n' + start),
-        (init, init.replace('callbacks =', 'callbacks: list =')),
-        ('event_push.check_pin_drift,', '*[event_push.check_pin_drift],'),
-        (start, '        alias = callbacks\n        alias.append(feature.tick)\n' + start),
-        (start, '        add = callbacks.append\n        add(feature.tick)\n' + start),
-        (start, '        helper(callbacks)\n' + start),
-        (dispatch, dispatch.replace('*callbacks)', '*callbacks, feature.tick)')),
-        (start, start.replace(' is not None', ' is not None or feature')),
-        ('on_reconcile_tick=reconcile_callbacks', 'on_reconcile_tick=other'),
-        ('watch_wake.tick, ', 'watch_wake.tick, watch_wake.tick, '),
-        (dispatch, dispatch + '\n' + dispatch),
-    ):
-        main.write_text(original.replace(old, new, 1))
-        result = run_gate(checkout)
-        assert result.returncode == 1 and 'main.py:run.reconcile_callbacks' in result.stderr and 'F1 recurring' in result.stderr, (old, result.stderr)
+    assert old in original
+    main.write_text(original.replace(old, new, 1))
+    result = run_gate(checkout)
+    assert result.returncode == 1 and 'main.py:run.reconcile_callbacks' in result.stderr and 'F1 recurring' in result.stderr, (old, result.stderr)
 
 
-def test_cycle2_scheduler_six_one_sided_retirements_cli(checkout):
+@pytest.mark.parametrize(('member', 'row'), [
+    ('event_push.check_pin_drift, ', 'services/chat-stream-v2/main.py:846 EventPush.check_pin_drift'),
+    ('watch_wake.missed_wake_alarm,', 'services/chat-stream-v2/main.py:846 WatchWake.missed_wake_alarm'),
+    ('account_runtime.tick, ', 'services/chat-stream-v2/main.py:847 AccountRuntime.tick'),
+    ('capacity_retry.tick, ', 'services/chat-stream-v2/main.py:847 CapacityRetry.tick'),
+    ('queued_send_now.tick', 'services/chat-stream-v2/main.py:847 QueuedSendNow.tick'),
+    ('watch_wake.tick, ', 'services/chat-stream-v2/main.py:847 WatchWake.tick'),
+], ids=['event-push', 'missed-wake', 'account', 'capacity', 'queued-send', 'watch-wake'])
+def test_cycle2_scheduler_six_one_sided_retirements_cli(checkout, member, row):
     main = checkout / SERVICE / 'main.py'
     inventory = checkout / SERVICE / 'daemon_contract/active/F1_protected_core.txt'
     original, rows = main.read_text(), inventory.read_text()
-    cases = (
-        ('event_push.check_pin_drift, ', 'services/chat-stream-v2/main.py:846 EventPush.check_pin_drift'),
-        ('watch_wake.missed_wake_alarm,', 'services/chat-stream-v2/main.py:846 WatchWake.missed_wake_alarm'),
-        ('account_runtime.tick, ', 'services/chat-stream-v2/main.py:847 AccountRuntime.tick'),
-        ('capacity_retry.tick, ', 'services/chat-stream-v2/main.py:847 CapacityRetry.tick'),
-        ('queued_send_now.tick', 'services/chat-stream-v2/main.py:847 QueuedSendNow.tick'),
-        ('watch_wake.tick, ', 'services/chat-stream-v2/main.py:847 WatchWake.tick'),
-    )
-    for member, row in cases:
-        main.write_text(original.replace(member, '', 1))
-        inventory.write_text(rows)
-        result = run_gate(checkout)
-        assert result.returncode == 1 and 'stale exception' in result.stderr, (row, result.stderr)
-        main.write_text(original)
-        inventory.write_text(rows.replace(row + '\n', '', 1))
-        result = run_gate(checkout)
-        assert result.returncode == 1 and 'F1 recurring' in result.stderr, (row, result.stderr)
+    main.write_text(original.replace(member, '', 1))
+    inventory.write_text(rows)
+    result = run_gate(checkout)
+    assert result.returncode == 1 and 'stale exception' in result.stderr, (row, result.stderr)
+    main.write_text(original)
+    inventory.write_text(rows.replace(row + '\n', '', 1))
+    result = run_gate(checkout)
+    assert result.returncode == 1 and 'F1 recurring' in result.stderr, (row, result.stderr)
 
 
 def test_cycle2_identity_ratchet_uses_per_site_maximum_and_allows_retirement(cycle2_gate):

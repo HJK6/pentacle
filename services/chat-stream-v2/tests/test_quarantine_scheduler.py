@@ -73,7 +73,7 @@ def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, mo
             return 1, False
         Path(junit).write_text(f'<testsuite tests="1" failures="{int(blocking_failure)}" errors="0" skipped="0"/>')
         manifest = next(x.split('=', 1)[1] for x in command if x.startswith('--admission-manifest='))
-        Path(manifest).write_text(json.dumps({'complete': True, 'held': [{'id': held}]}))
+        Path(manifest).write_text(json.dumps({'complete': True, 'held': [{'id': held}], 'separate_tiers': {}}))
         return int(blocking_failure), False
 
     monkeypatch.setattr(run_gate, '_run_process', fake)
@@ -81,9 +81,38 @@ def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, mo
     assert result['passed'] is not blocking_failure
     assert result['reason'] == ('test_failures' if blocking_failure else None)
     advisory = result['advisory']
+    assert Path(advisory['log']).name == f'{tier}-advisory.log'
     assert advisory['command'][1:7] == [
         '-m', 'pytest', f'{prefix}/test_a.py', f'{prefix}/test_b.py', '-m', 'quarantined or admission_hold',
     ]
     assert Path(advisory['junit']).name == f'{tier}-advisory.junit.xml'
     assert advisory['returncode'] == 1
     assert advisory['counts']['tests'] == 2
+
+
+def test_timed_out_advisory_fails_tier(tmp_path, monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    held = "tests/test_a.py::test_new"
+    monkeypatch.setattr(run_gate, "summarize_progress", lambda _: {"present": True, "complete": True})
+    scripts = str(Path(__file__).resolve().parents[3] / "scripts")
+    monkeypatch.syspath_prepend(scripts)
+    import admission_inputs
+    monkeypatch.setattr(admission_inputs, "load_quarantine", lambda _: {"version": 1, "nonblocking_tests": []})
+
+    def run(command, *, env, log_path, timeout, advisory=False):
+        if advisory:
+            return 124, True
+        junit = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml="))
+        Path(junit).write_text('<testsuite tests="1" failures="0" errors="0" skipped="0"/>')
+        (tmp_path / "unit.admission.json").write_text(json.dumps({
+            "complete": True, "held": [{"id": held}], "separate_tiers": {},
+        }))
+        return 0, False
+
+    monkeypatch.setattr(run_gate, "_run_process", run)
+    result = run_gate._run_tier("unit", tmp_path, 30, basetemp=tmp_path / "base",
+                                manifest=tmp_path / "owner", advisory_bound=17)
+    assert result["advisory"]["bound_s"] == 17
+    assert result["advisory"]["returncode"] == 124
+    assert result["reason"] == "quarantine_advisory_incomplete"
+    assert not result["passed"]
