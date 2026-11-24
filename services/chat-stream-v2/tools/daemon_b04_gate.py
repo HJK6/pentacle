@@ -692,11 +692,6 @@ def identity_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
 
     def scan(node, scope, inherited):
         env = {name: set(value) for name, value in inherited.items()}
-        if scope:
-            for name in local_names(node): env[name] = {O}
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
-                    if a.arg == 'work_lanes': env[a.arg] = {W}
         nested = []
         escaping_names = set()
         class Declarations(ast.NodeVisitor):
@@ -708,6 +703,15 @@ def identity_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
             def visit_Lambda(self, n): pass
         if isinstance(node.body, list):
             for stmt in node.body: Declarations().visit(stmt)
+        if scope:
+            for name in local_names(node): env[name] = {O}
+            # A nonlocal/global declaration refers to an enclosing binding, not
+            # a fresh local. Keep its inherited identity for branch/loop joins.
+            for name in escaping_names:
+                if name in inherited: env[name] = set(inherited[name])
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                    if a.arg == 'work_lanes': env[a.arg] = {W}
 
         def value(expr, current, emit=True):
             if isinstance(expr, ast.Lambda):
@@ -775,11 +779,20 @@ def identity_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                         if arg & {W, P} and emit: record(scope, 'F2 bulk opaque escape', expr)
                 return {O}
             if isinstance(expr, ast.Dict):
-                return set().union(*(value(v, current, emit) for v in expr.values)) if expr.values else {O}
+                entries = [part for part in (*expr.keys, *expr.values) if part is not None]
+                return set().union(*(value(part, current, emit) for part in entries)) if entries else {O}
             # Inspect nested expressions even when their resulting value is opaque.
             for child in ast.iter_child_nodes(expr):
                 if isinstance(child, ast.expr): value(child, current, emit)
             return {O}
+
+        def bind_target(target, identities, state):
+            if isinstance(target, ast.Name):
+                state[target.id] = set(identities)
+            elif isinstance(target, ast.Starred):
+                bind_target(target.value, identities, state)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for item in target.elts: bind_target(item, identities, state)
 
         def block(statements, current):
             for stmt in statements:
@@ -833,10 +846,14 @@ def identity_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                     for key in set().union(*(branch.keys() for branch in branches)):
                         current[key] = set().union(*(branch.get(key, {O}) for branch in branches))
                 elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
-                    value(stmt.test if isinstance(stmt, ast.While) else stmt.iter, current)
+                    if isinstance(stmt, ast.While):
+                        value(stmt.test, current)
+                        iter_values = {O}
+                    else:
+                        iter_values = value(stmt.iter, current)
                     loop = {k: set(v) for k, v in current.items()}
-                    if not isinstance(stmt, ast.While) and isinstance(stmt.target, ast.Name):
-                        loop[stmt.target.id] = {O}
+                    if not isinstance(stmt, ast.While):
+                        bind_target(stmt.target, iter_values, loop)
                     if not (isinstance(stmt, ast.While) and isinstance(stmt.test, ast.Constant)
                             and not stmt.test.value):
                         loop = block(stmt.body, loop)

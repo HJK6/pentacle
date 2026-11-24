@@ -584,6 +584,10 @@ def cycle2_gate():
     ('def f(work_lanes, n):\n view = work_lanes\n try: view = object()\n except Exception: pass\n return getattr(view, n)()', 'F2'),
     ('def f(work_lanes, n, x):\n view = work_lanes\n match x:\n  case 1: view = object()\n return getattr(view, n)()', 'F2'),
     ('def f(work_lanes, n):\n match work_lanes:\n  case view: return getattr(view, n)()', 'F2'),
+    ('def f(work_lanes, n, cond):\n view = work_lanes\n def inner():\n  nonlocal view\n  if cond: view = object()\n  return getattr(view, n)()\n return inner()', 'F2'),
+    ('def f(work_lanes, n):\n for view in [work_lanes]:\n  pass\n return getattr(view, n)()', 'F2'),
+    ('def f(work_lanes): return opaque({work_lanes: 1})', 'F2'),
+    ('import sqlite3 as sql\ndef f(): return opaque({sql: "connect"})', 'F1'),
     ('def f(work_lanes):\n global escaped\n escaped = work_lanes', 'F2'),
     ('import sqlite3 as s\ndef f():\n db = s\n db2: object = db\n return db2.connect("x")', 'F1'),
     ('import sqlite3 as s\ndef f():\n db = s\n connect: object = db.connect\n return connect("x")', 'F1'),
@@ -595,6 +599,42 @@ def cycle2_gate():
 def test_cycle2_identity_subjects(cycle2_gate, subject, expected):
     errors = cycle2_gate.new_identity_sites('', '', subject, 'fixture.py')
     assert any(expected in error for error in errors), errors
+
+
+def test_cycle2_seven_qa_subjects_fail_candidate_cli_and_permitted_controls(checkout):
+    baseline = run_gate(checkout)
+    assert baseline.returncode == 0, baseline.stderr
+    main = checkout / SERVICE / 'main.py'
+    sessions = checkout / SERVICE / 'sessions.py'
+    originals = {main: main.read_text(), sessions: sessions.read_text()}
+    marker = '        if server.assistant_restore is not None:\n'
+    assert originals[main].count(marker) == 1
+    subjects = [
+        (main, originals[main].replace(marker, '        if feature_job:\n            callbacks.append(feature_job.tick)\n' + marker, 1), 'F1 recurring'),
+        (main, originals[main].replace(marker, '        if feature_job:\n            callbacks = callbacks + [feature_job.tick]\n' + marker, 1), 'F1 recurring'),
+        (sessions, originals[sessions] + '\nimport sqlite3 as sql\ndef b04():\n db = sql\n return db.connect("invented.db")\n', 'F1'),
+        (sessions, originals[sessions] + '\ndef b04(work_lanes, name): return getattr(work_lanes, name)()\n', 'F2'),
+        (sessions, originals[sessions] + '\ngetter = getattr\ndef b04(work_lanes, name): return getter(work_lanes, name)()\n', 'F2'),
+        (sessions, originals[sessions] + '\ndef b04(work_lanes, name, cond):\n view = work_lanes\n def inner():\n  nonlocal view\n  if cond: view = object()\n  return getattr(view, name)()\n return inner()\n', 'F2'),
+        (sessions, originals[sessions] + '\ndef b04(work_lanes, name):\n for view in [work_lanes]:\n  pass\n return getattr(view, name)()\n', 'F2'),
+        (sessions, originals[sessions] + '\ndef b04(work_lanes): return opaque({work_lanes: 1})\n', 'F2'),
+        (sessions, originals[sessions] + '\nimport sqlite3 as sql\ndef b04(): return opaque({sql: "connect"})\n', 'F1'),
+    ]
+    for path, subject, diagnostic in subjects:
+        path.write_text(subject)
+        rejected = run_gate(checkout)
+        assert rejected.returncode == 1 and diagnostic in rejected.stderr, (diagnostic, rejected.stderr)
+        for original_path, original in originals.items():
+            original_path.write_text(original)
+    sessions.write_text(originals[sessions] + '''
+import sqlite3 as safe_sqlite
+def b04_permitted(work_lanes, name):
+    return getattr(work_lanes, "status")()
+def b04_permitted_sqlite():
+    return safe_sqlite.complete_statement("select 1")
+''')
+    permitted = run_gate(checkout)
+    assert permitted.returncode == 0, permitted.stderr
 
 
 @pytest.mark.parametrize('subject', [
