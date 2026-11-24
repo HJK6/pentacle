@@ -135,6 +135,68 @@ def test_interruption_before_main_step_receipt_does_not_repeat_store_start(
     assert starts == 1
 
 
+def test_post_commit_archive_migration_resumes_without_restarting_store(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    database = tmp_path / "archive-migration-resume.db"
+    daemon_migrations.prepare(database)
+    with sqlite3.connect(database) as conn:
+        archive_path = conn.execute(
+            "SELECT archive_path FROM v2_send_receipt_sequence WHERE singleton=1"
+        ).fetchone()[0]
+        conn.execute(
+            f"DELETE FROM {daemon_migrations.REGISTRY} WHERE step_id=?",
+            (daemon_migrations.MAIN_STEP_ID,),
+        )
+        conn.execute('ALTER TABLE v2_reports DROP COLUMN usage_snapshot')
+    with sqlite3.connect(archive_path) as archive:
+        archive.execute(
+            'ALTER TABLE v2_assistant_composite_routes DROP COLUMN answered_by_event_id'
+        )
+        archive.execute(
+            'ALTER TABLE v2_assistant_composite_routes DROP COLUMN batched_into_dispatch_id'
+        )
+
+    original_store = daemon_migrations.Store
+    original_archive_migration = store_mod.migrate_route_batch_archive
+    starts = 0
+    migrations = 0
+
+    class CountingStore(original_store):
+        def start(self, *args, **kwargs) -> None:
+            nonlocal starts
+            starts += 1
+            return super().start(*args, **kwargs)
+
+    def interrupt_archive_migration(conn) -> None:
+        nonlocal migrations
+        migrations += 1
+        if migrations == 1:
+            raise RuntimeError("injected interruption after main schema commit")
+        return original_archive_migration(conn)
+
+    monkeypatch.setattr(daemon_migrations, "Store", CountingStore)
+    monkeypatch.setattr(store_mod, "migrate_route_batch_archive", interrupt_archive_migration)
+    try:
+        daemon_migrations.prepare(database)
+    except RuntimeError as exc:
+        assert "after main schema commit" in str(exc)
+    else:
+        raise AssertionError("post-commit archive interruption was not injected")
+    assert starts == 1
+    assert daemon_migrations.inspect(database)["prepared"] is False
+
+    monkeypatch.setattr(store_mod, "migrate_route_batch_archive", original_archive_migration)
+    result = daemon_migrations.prepare(database)
+    assert result["prepared"] is True
+    assert starts == 1
+    with sqlite3.connect(archive_path) as archive:
+        columns = {row[1] for row in archive.execute(
+            'PRAGMA table_info("v2_assistant_composite_routes")'
+        )}
+    assert {"answered_by_event_id", "batched_into_dispatch_id"} <= columns
+
+
 def test_interruption_between_main_and_archive_commits_resumes(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "between-commits.db"
 

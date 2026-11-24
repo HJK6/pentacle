@@ -14,7 +14,7 @@ from typing import Callable
 
 from retention import (
     HISTORY_SEQUENCE_DDL, HistoryConnection, _archive_schema, _open_archive, _sequence,
-    default_archive_path, initialize_history_pair,
+    default_archive_path, initialize_history_pair, migrate_route_batch_archive,
 )
 from store import SCHEMA_VERSION, Store
 
@@ -279,6 +279,11 @@ def prepare(database: str | Path, *, before_main_step_record: Callable[[], None]
         else default_archive_path(db)
     )
     try:
+        # Store.start performs this archive migration after committing its main
+        # schema transaction. If that post-commit step is interrupted, the
+        # schema sentinels let us skip Store.start on retry; repeat the
+        # idempotent archive step here so that interruption remains resumable.
+        migrate_route_batch_archive(conn)
         if row and row["archive_ready"]:
             pass
         else:
