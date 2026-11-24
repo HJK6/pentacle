@@ -339,6 +339,18 @@ jobs:
       run: |
         python3 tools/release_manifest.py verify --ref HEAD --base "$RELEASE_BASE"
         python3 -m unittest discover -s tools/pentacle/tests
+    - name: Daemon structure contract
+      env:
+        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: python3 services/chat-stream-v2/tools/daemon_contract_gate.py --base "$RELEASE_BASE"
+    - name: Daemon protected-core and projection selectors
+      env:
+        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: python3 services/chat-stream-v2/tools/daemon_b04_gate.py --base "$RELEASE_BASE"
+    - name: Daemon policy, observation, and delivery selectors
+      env:
+        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: python3 services/chat-stream-v2/tools/daemon_layer_gate.py --base "$RELEASE_BASE"
     - name: System packages
       timeout-minutes: 10
       run: |

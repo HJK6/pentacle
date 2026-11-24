@@ -22,6 +22,9 @@ def pytest_addoption(parser):
     group.addoption('--admission-root', required=True)
     group.addoption('--admission-suite', choices=tuple(SUITES), required=True)
     group.addoption('--admission-manifest', required=True)
+    group.addoption('--admission-separate-marker', action='append', default=[],
+                    choices=('repin_exhaustive',),
+                    help='record cases owned by this separate tier before admission')
 
 
 def pytest_configure(config):
@@ -54,6 +57,19 @@ def _write_manifest(config, payload):
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     held = []
+    separate_tiers = {}
+    markers = config.getoption('admission_separate_marker')
+    if markers:
+        kept, separate = [], []
+        for item in items:
+            marker = next((name for name in markers if item.get_closest_marker(name)), None)
+            if marker:
+                separate_tiers[item.nodeid] = marker
+                separate.append(item)
+            else:
+                kept.append(item)
+        config.hook.pytest_deselected(items=separate)
+        items[:] = kept
     if config._admission_inputs is not None:
         legacy, records, quarantine, platform = config._admission_inputs
         suite = config.getoption('admission_suite')
@@ -76,7 +92,7 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(pytest.mark.quarantined)
     try:
         _write_manifest(config, {'complete': config._admission_error is None, 'error': config._admission_error,
-                                 'held': held})
+                                 'held': held, 'separate_tiers': separate_tiers})
     except OSError:
         config._admission_error = 'manifest_write_failed'
 

@@ -1,0 +1,1209 @@
+{
+  "baseline": "f153ca8adce2a38e0c5092b2dc98ff5aec16e06e",
+  "composition_exempt": "main.py",
+  "module_evidence": {
+    "_shared.asset_schema": [
+      "services/_shared/asset_schema.py"
+    ],
+    "_shared.operator_auth": [
+      "services/_shared/operator_auth.py"
+    ],
+    "account_pool_control": [
+      "services/chat-stream-v2/account_pool_control.py",
+      "F3_policy.md:3"
+    ],
+    "account_store": [
+      "services/chat-stream-v2/account_store.py",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/account_store.py:218 AccountStore.readback",
+      "F5_observation.md:18"
+    ],
+    "advisor_sessions": [
+      "services/chat-stream-v2/advisor_sessions.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/advisor_sessions.py:67 AdvisorSessions.owns",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/advisor_sessions.py:77 AdvisorSessions.status",
+      "F1_protected_core.md:56"
+    ],
+    "agents_roster": [
+      "services/chat-stream-v2/agents_roster.py",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/agents_roster.py:5 project",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/agents_roster.py:50 _busy_reasons",
+      "F5_observation.md:54"
+    ],
+    "assistant_brief": [
+      "services/chat-stream-v2/assistant_brief.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_brief.py:53 Brief.rows",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_brief.py:64 Brief.priorities",
+      "F1_protected_core.md:46",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#assistant_brief.py:149 work_lane_rows_conn",
+      "F2_projections.md:52"
+    ],
+    "assistant_guidelines": [
+      "services/chat-stream-v2/assistant_guidelines.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_guidelines.py:71 AssistantGuidelines._read_record",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_guidelines.py:81 AssistantGuidelines._write_record",
+      "F1_protected_core.md:56"
+    ],
+    "assistant_lane_rulings": [
+      "services/chat-stream-v2/assistant_lane_rulings.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_lane_rulings.py:252 AssistantLaneRulings._audit",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_lane_rulings.py:255 AssistantLaneRulings.binding",
+      "F1_protected_core.md:56",
+      "services/chat-stream-v2/daemon_contract/active/F3_policy.txt#services/chat-stream-v2/assistant_lane_rulings.py:829 AssistantLaneRulings.request_spawn",
+      "services/chat-stream-v2/daemon_contract/active/F3_policy.txt#services/chat-stream-v2/assistant_lane_rulings.py:834 AssistantLaneRulings.request_spawn",
+      "F3_policy.md:3"
+    ],
+    "assistant_owed": [
+      "services/chat-stream-v2/assistant_owed.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_owed.py:214 OwedItems.request",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_owed.py:263 OwedItems.tick",
+      "F1_protected_core.md:52"
+    ],
+    "assistant_policy": [
+      "services/chat-stream-v2/assistant_policy.py"
+    ],
+    "assistant_priorities": [
+      "services/chat-stream-v2/assistant_priorities.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/assistant_priorities.py:79 Priorities.request",
+      "F1_protected_core.md:56"
+    ],
+    "attachment_locks": [
+      "services/chat-stream-v2/attachment_locks.py"
+    ],
+    "boot_ready": [
+      "services/chat-stream-v2/boot_ready.py"
+    ],
+    "chat_attachment_types": [
+      "services/chat-stream-v2/chat_attachment_types.py"
+    ],
+    "chat_recovery": [
+      "services/chat-stream-v2/chat_recovery.py",
+      "F1_protected_core.md:37"
+    ],
+    "claude_jsonl_norm": [
+      "services/chat-stream-v2/claude_jsonl_norm.py"
+    ],
+    "codex_rollout_norm": [
+      "services/chat-stream-v2/codex_rollout_norm.py"
+    ],
+    "comms": [
+      "services/chat-stream-v2/comms.py"
+    ],
+    "consent_push": [
+      "services/chat-stream-v2/consent_push.py"
+    ],
+    "context_adapters": [
+      "services/chat-stream-v2/context_adapters.py"
+    ],
+    "coordination_holds": [
+      "services/chat-stream-v2/coordination_holds.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/coordination_holds.py:128 Holds.request",
+      "F1_protected_core.md:56"
+    ],
+    "cursor_stream_norm": [
+      "services/chat-stream-v2/cursor_stream_norm.py"
+    ],
+    "daemon_identity": [
+      "services/chat-stream-v2/daemon_identity.py"
+    ],
+    "design_links": [
+      "services/chat-stream-v2/design_links.py"
+    ],
+    "desk_stamp": [
+      "services/chat-stream-v2/desk_stamp.py",
+      "F6_delivery.md:45"
+    ],
+    "error_adapters": [
+      "services/chat-stream-v2/error_adapters.py"
+    ],
+    "error_alerts": [
+      "services/chat-stream-v2/error_alerts.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/error_alerts.py:313 ErrorAlerts._current",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/error_alerts.py:680 ErrorAlerts.notice_rows",
+      "F1_protected_core.md:52",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#error_alerts.py:940 ErrorAlerts._suppress_unattempted.op",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#error_alerts.py:1106 ErrorAlerts._enqueue.op",
+      "F6_delivery.md:53"
+    ],
+    "gemini_jsonl_norm": [
+      "services/chat-stream-v2/gemini_jsonl_norm.py"
+    ],
+    "host_transfer": [
+      "services/chat-stream-v2/host_transfer.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/host_transfer.py:27 HostTransfer.read",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/host_transfer.py:31 HostTransfer.mutate",
+      "F1_protected_core.md:54"
+    ],
+    "household": [
+      "services/chat-stream-v2/household.py"
+    ],
+    "ingest": [
+      "services/chat-stream-v2/ingest.py"
+    ],
+    "ingest_checkpoint": [
+      "services/chat-stream-v2/ingest_checkpoint.py"
+    ],
+    "ledger": [
+      "services/chat-stream-v2/ledger.py",
+      "F1_protected_core.md:59",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/ledger.py:1694 NudgeJob._is_live",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/ledger.py:1718 NudgeJob._known_local_mirror",
+      "F5_observation.md:32"
+    ],
+    "local_admin": [
+      "services/chat-stream-v2/local_admin.py"
+    ],
+    "loop_watchdog": [
+      "services/chat-stream-v2/loop_watchdog.py"
+    ],
+    "machine_stats": [
+      "services/chat-stream-v2/machine_stats.py",
+      "F5_observation.md:31"
+    ],
+    "maintenance_delegation": [
+      "services/chat-stream-v2/maintenance_delegation.py"
+    ],
+    "managed_logs": [
+      "services/chat-stream-v2/managed_logs.py"
+    ],
+    "message_envelopes": [
+      "services/chat-stream-v2/message_envelopes.py"
+    ],
+    "mirror": [
+      "services/chat-stream-v2/mirror.py",
+      "F1_protected_core.md:51",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/mirror.py:348 Mirror.run_pass",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/mirror.py:386 Mirror._observe_liveness",
+      "F5_observation.md:25"
+    ],
+    "native_input_lookup": [
+      "services/chat-stream-v2/native_input_lookup.py"
+    ],
+    "outbound_finisher": [
+      "services/chat-stream-v2/outbound_finisher.py",
+      "F1_protected_core.md:52",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#outbound_finisher.py:306 OutboundFinisher._submit",
+      "F6_delivery.md:53"
+    ],
+    "outbound_notices": [
+      "services/chat-stream-v2/outbound_notices.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/outbound_notices.py:278 ErrorAlerts.reconcile",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/outbound_notices.py:282 FrontDeskDigest.tick",
+      "F1_protected_core.md:22",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#outbound_notices.py:188 OutboundNoticeQueue.__init__",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#outbound_notices.py:281 OutboundNoticeQueue.drain_once",
+      "F6_delivery.md:3"
+    ],
+    "prockill": [
+      "services/chat-stream-v2/prockill.py"
+    ],
+    "provider_accounts": [
+      "services/chat-stream-v2/provider_accounts.py"
+    ],
+    "provider_cli_maintenance": [
+      "services/chat-stream-v2/provider_cli_maintenance.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/provider_cli_maintenance.py:201 freeze",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/provider_cli_maintenance.py:205 freeze",
+      "F1_protected_core.md:60"
+    ],
+    "qa_dispatch": [
+      "services/chat-stream-v2/qa_dispatch.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/qa_dispatch.py:125 scope_warning",
+      "F1_protected_core.md:56",
+      "F3_policy.md:3"
+    ],
+    "qualification_admission": [
+      "services/chat-stream-v2/qualification_admission.py",
+      "F3_policy.md:19"
+    ],
+    "queued_send_now": [
+      "services/chat-stream-v2/queued_send_now.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/queued_send_now.py:265 QueuedSendNow._record",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/queued_send_now.py:276 QueuedSendNow._events",
+      "F1_protected_core.md:55"
+    ],
+    "receipt_proof": [
+      "services/chat-stream-v2/receipt_proof.py",
+      "F1_protected_core.md:20",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#receipt_proof.py:87 pending",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#receipt_proof.py:107 proved_pending_precedence",
+      "F6_delivery.md:47"
+    ],
+    "report_producer": [
+      "services/chat-stream-v2/report_producer.py"
+    ],
+    "retention": [
+      "services/chat-stream-v2/retention.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/retention.py:1238 RetentionJob.run_pass",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/retention.py:1253 RetentionJob.run_pass",
+      "F1_protected_core.md:48"
+    ],
+    "screen_acquisitions_principal": [
+      "services/chat-stream-v2/screen_acquisitions_principal.py"
+    ],
+    "screen_monitor_principal": [
+      "services/chat-stream-v2/screen_monitor_principal.py"
+    ],
+    "seat_token_telemetry": [
+      "services/chat-stream-v2/seat_token_telemetry.py"
+    ],
+    "send_metadata": [
+      "services/chat-stream-v2/send_metadata.py"
+    ],
+    "server": [
+      "services/chat-stream-v2/server.py"
+    ],
+    "session_summary": [
+      "services/chat-stream-v2/session_summary.py"
+    ],
+    "sessions": [
+      "services/chat-stream-v2/sessions.py"
+    ],
+    "spawn_creation": [
+      "services/chat-stream-v2/spawn_creation.py"
+    ],
+    "store": [
+      "services/chat-stream-v2/store.py"
+    ],
+    "store_assistant_binding": [
+      "services/chat-stream-v2/store_assistant_binding.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_assistant_binding.py:405 AssistantBindingStoreMixin.front_desk_aliases",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_assistant_binding.py:419 AssistantBindingStoreMixin.record_scoped_owner",
+      "F1_protected_core.md:57",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#store_assistant_binding.py:455 AssistantBindingStoreMixin.enqueue_composite_tell",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#store_assistant_binding.py:1099 AssistantBindingStoreMixin.fail_closed_assistant_routes",
+      "F6_delivery.md:46"
+    ],
+    "store_attachments": [
+      "services/chat-stream-v2/store_attachments.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_attachments.py:127 AttachmentStoreMixin._attachment_submit",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_attachments.py:149 AttachmentStoreMixin.commit_attachment_publication",
+      "F1_protected_core.md:49"
+    ],
+    "store_call_diag": [
+      "services/chat-stream-v2/store_call_diag.py"
+    ],
+    "store_capacity_retry": [
+      "services/chat-stream-v2/store_capacity_retry.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3513 store_capacity_retry.cancel",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:6195 store_capacity_retry.observe",
+      "F1_protected_core.md:41"
+    ],
+    "store_consent": [
+      "services/chat-stream-v2/store_consent.py"
+    ],
+    "store_consent_intents": [
+      "services/chat-stream-v2/store_consent_intents.py"
+    ],
+    "store_consent_offers": [
+      "services/chat-stream-v2/store_consent_offers.py"
+    ],
+    "store_consent_push": [
+      "services/chat-stream-v2/store_consent_push.py"
+    ],
+    "store_exchange": [
+      "services/chat-stream-v2/store_exchange.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3138 store_exchange.direct_pair",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:4517 store_exchange.append",
+      "F1_protected_core.md:57"
+    ],
+    "store_external_work": [
+      "services/chat-stream-v2/store_external_work.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_external_work.py:224 _ExternalWorkStoreMixin._external_work_txn",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_external_work.py:238 _ExternalWorkStoreMixin.external_work_tick",
+      "F1_protected_core.md:52",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_external_work.py:69 effective_membership_conn",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_external_work.py:79 effective_membership_conn",
+      "F2_projections.md:51",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#store_external_work.py:142 _retire_conn",
+      "F6_delivery.md:56"
+    ],
+    "store_host_transfer": [
+      "services/chat-stream-v2/store_host_transfer.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_host_transfer.py:600 operator_auth.file_lock",
+      "F1_protected_core.md:54"
+    ],
+    "store_ingest_checkpoint": [
+      "services/chat-stream-v2/store_ingest_checkpoint.py"
+    ],
+    "store_lifecycle_authority": [
+      "services/chat-stream-v2/store_lifecycle_authority.py"
+    ],
+    "store_qa": [
+      "services/chat-stream-v2/store_qa.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_qa.py:450 QaStoreMixin._submit_spec_commit",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_qa.py:477 QaStoreMixin._qa_spec_lookup",
+      "F1_protected_core.md:20",
+      "services/chat-stream-v2/daemon_contract/active/F3_policy.txt#services/chat-stream-v2/store_qa.py:627 QaStoreMixin.qa_admit.op",
+      "F3_policy.md:17"
+    ],
+    "store_routing": [
+      "services/chat-stream-v2/store_routing.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_routing.py:1063 _RoutingStoreMixin.preflight_assistant_composite_question_operation",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_routing.py:1087 _RoutingStoreMixin.fail_assistant_composite_question_bridge",
+      "F1_protected_core.md:21",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_routing.py:898 _activity_summary_candidates",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_routing.py:1735 _activity_summary_conn",
+      "F2_projections.md:19",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#store_routing.py:288 _retarget_front_desk_notice_conn",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#store_routing.py:293 _retarget_front_desk_notice_conn",
+      "F6_delivery.md:4"
+    ],
+    "store_screen_lease": [
+      "services/chat-stream-v2/store_screen_lease.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3512 store_screen_lease.release_holder_conn",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3609 store_screen_lease.release_holder_conn",
+      "F1_protected_core.md:62"
+    ],
+    "store_specs": [
+      "services/chat-stream-v2/store_specs.py",
+      "F1_protected_core.md:47",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_specs.py:65 store_usage.snapshot_conn",
+      "F2_projections.md:57"
+    ],
+    "store_usage": [
+      "services/chat-stream-v2/store_usage.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3109 store_usage.history_open_conn",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3113 store_usage.history_fill_conn",
+      "F1_protected_core.md:47",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#event_push.py:55 store_usage.is_store_contention",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_specs.py:65 store_usage.snapshot_conn",
+      "F2_projections.md:3"
+    ],
+    "store_voice_operations": [
+      "services/chat-stream-v2/store_voice_operations.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_voice_operations.py:144 VoiceOperationsStoreMixin.voice_register",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_voice_operations.py:147 VoiceOperationsStoreMixin.voice_get",
+      "F1_protected_core.md:58"
+    ],
+    "store_watch_wake": [
+      "services/chat-stream-v2/store_watch_wake.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3152 store_watch_wake.lifecycle_watch_conn",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3153 store_watch_wake.install_default_conn",
+      "F1_protected_core.md:3"
+    ],
+    "store_work_index": [
+      "services/chat-stream-v2/store_work_index.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_work_index.py:320 WorkIndexStoreMixin.work_owed",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_work_index.py:324 WorkIndexStoreMixin.lead_close_context",
+      "F1_protected_core.md:20",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_work_index.py:116 effective_membership_ids_conn",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_work_index.py:146 effective_membership_ids_conn",
+      "F2_projections.md:9"
+    ],
+    "store_work_lane_episodes": [
+      "services/chat-stream-v2/store_work_lane_episodes.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_work_lane_episodes.py:212 WorkLaneEpisodesStoreMixin.reconcile_work_lane_episodes",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_work_lane_episodes.py:233 WorkLaneEpisodesStoreMixin.reconcile_work_lane_episodes",
+      "F1_protected_core.md:43",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_work_lane_episodes.py:167 work_lane_rows_conn",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_work_lane_episodes.py:170 tracking.reconcile",
+      "F2_projections.md:4"
+    ],
+    "store_work_lanes": [
+      "services/chat-stream-v2/store_work_lanes.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:5501 store_work_lanes.record_latest_report_conn",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store_work_lanes.py:768 _WorkLanesStoreMixin.apply_work_lane_operation",
+      "F1_protected_core.md:43",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store.py:5500 store_work_lanes.record_latest_report_conn",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#store_work_lanes.py:217 effective_membership_ids_conn",
+      "F2_projections.md:4"
+    ],
+    "submission_events": [
+      "services/chat-stream-v2/submission_events.py"
+    ],
+    "tell_proof": [
+      "services/chat-stream-v2/tell_proof.py",
+      "F1_protected_core.md:38",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#tell_proof.py:97 <module>",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#tell_proof.py:183 ProjectionReuse.dispatch_contains",
+      "F6_delivery.md:49"
+    ],
+    "tmux_transport": [
+      "services/chat-stream-v2/tmux_transport.py"
+    ],
+    "transcribe": [
+      "services/chat-stream-v2/transcribe.py"
+    ],
+    "usage_accounting": [
+      "services/chat-stream-v2/usage_accounting.py",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#ingest.py:58 usage_accounting.native_provenance"
+    ],
+    "usage_provenance": [
+      "services/chat-stream-v2/usage_provenance.py"
+    ],
+    "v2_runtime": [
+      "services/chat-stream-v2/v2_runtime.py"
+    ],
+    "voice_answers": [
+      "services/chat-stream-v2/voice_answers.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/voice_answers.py:210 VoiceAnswersStoreMixin.get_voice_answer_binding",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/voice_answers.py:221 VoiceAnswersStoreMixin.get_voice_answer_binding_for_input",
+      "F1_protected_core.md:58"
+    ],
+    "watch_wake": [
+      "services/chat-stream-v2/watch_wake.py",
+      "F1_protected_core.md:3"
+    ],
+    "wmi_brief_producer": [
+      "services/chat-stream-v2/wmi_brief_producer.py"
+    ],
+    "work_attendance": [
+      "services/chat-stream-v2/work_attendance.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3214 work_attendance.departure_conn",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3602 work_attendance.assigned_owners_conn",
+      "F3_policy.md:17"
+    ],
+    "work_item_admission": [
+      "services/chat-stream-v2/work_item_admission.py",
+      "F3_policy.md:36"
+    ],
+    "work_item_tracking": [
+      "services/chat-stream-v2/work_item_tracking.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:4540 work_item_tracking.check_input",
+      "F1_protected_core.md:43",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#work_item_tracking.py:256 effective_membership_conn",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#work_item_tracking.py:261 conn.execute",
+      "F2_projections.md:41"
+    ],
+    "work_lane_members": [
+      "services/chat-stream-v2/work_lane_members.py",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#server.py:5223 work_lane_members.validate_members"
+    ],
+    "work_lane_progress": [
+      "services/chat-stream-v2/work_lane_progress.py",
+      "F2_projections.md:39"
+    ],
+    "work_lanes_projection": [
+      "services/chat-stream-v2/work_lanes_projection.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/work_lanes_projection.py:563 WorkLanesInventory.start.periodic",
+      "F1_protected_core.md:43",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#work_lanes_projection.py:489 reconcile_index",
+      "services/chat-stream-v2/daemon_contract/active/F2_projections.txt#work_lanes_projection.py:492 reconcile_lane_lifecycle",
+      "F2_projections.md:37"
+    ],
+    "work_owed": [
+      "services/chat-stream-v2/work_owed.py",
+      "services/chat-stream-v2/daemon_contract/active/F6_delivery.txt#work_owed.py:173 disposition_root_conn",
+      "F6_delivery.md:56"
+    ],
+    "work_report_freshness": [
+      "services/chat-stream-v2/work_report_freshness.py",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3151 work_report_freshness.assignment_changed_conn",
+      "services/chat-stream-v2/daemon_contract/active/F1_protected_core.txt#services/chat-stream-v2/store.py:3227 work_report_freshness.assignment_changed_conn",
+      "services/chat-stream-v2/daemon_contract/active/F5_observation.txt#services/chat-stream-v2/work_report_freshness.py:60 _helper_witness",
+      "F5_observation.md:59"
+    ]
+  },
+  "modules": {
+    "_shared.asset_schema": [
+      "F1"
+    ],
+    "_shared.operator_auth": [
+      "core"
+    ],
+    "account_pool_control": [
+      "F1",
+      "F3"
+    ],
+    "account_store": [
+      "F1",
+      "F5"
+    ],
+    "advisor_sessions": [
+      "F1"
+    ],
+    "agents_roster": [
+      "F1",
+      "F5"
+    ],
+    "assistant_brief": [
+      "F1",
+      "F2"
+    ],
+    "assistant_guidelines": [
+      "F1"
+    ],
+    "assistant_lane_rulings": [
+      "F1",
+      "F3"
+    ],
+    "assistant_owed": [
+      "F1"
+    ],
+    "assistant_policy": [
+      "F1",
+      "F3"
+    ],
+    "assistant_priorities": [
+      "F1"
+    ],
+    "attachment_locks": [
+      "core"
+    ],
+    "boot_ready": [
+      "core"
+    ],
+    "chat_attachment_types": [
+      "core"
+    ],
+    "chat_recovery": [
+      "F1"
+    ],
+    "claude_jsonl_norm": [
+      "core"
+    ],
+    "codex_rollout_norm": [
+      "core"
+    ],
+    "comms": [
+      "core"
+    ],
+    "consent_push": [
+      "F1"
+    ],
+    "context_adapters": [
+      "core"
+    ],
+    "coordination_holds": [
+      "F1",
+      "F3"
+    ],
+    "cursor_stream_norm": [
+      "core"
+    ],
+    "daemon_identity": [
+      "core"
+    ],
+    "design_links": [
+      "F1",
+      "F6"
+    ],
+    "desk_stamp": [
+      "F1",
+      "F6"
+    ],
+    "error_adapters": [
+      "core"
+    ],
+    "error_alerts": [
+      "F1",
+      "F6"
+    ],
+    "gemini_jsonl_norm": [
+      "core"
+    ],
+    "host_transfer": [
+      "F1"
+    ],
+    "household": [
+      "F1"
+    ],
+    "ingest": [
+      "core"
+    ],
+    "ingest_checkpoint": [
+      "core"
+    ],
+    "ledger": [
+      "F1",
+      "F5"
+    ],
+    "local_admin": [
+      "core"
+    ],
+    "loop_watchdog": [
+      "core"
+    ],
+    "machine_stats": [
+      "F1",
+      "F5"
+    ],
+    "maintenance_delegation": [
+      "F1"
+    ],
+    "managed_logs": [
+      "F1"
+    ],
+    "message_envelopes": [
+      "core"
+    ],
+    "mirror": [
+      "F1",
+      "F5"
+    ],
+    "native_input_lookup": [
+      "core"
+    ],
+    "outbound_finisher": [
+      "F1",
+      "F6"
+    ],
+    "outbound_notices": [
+      "F1",
+      "F6"
+    ],
+    "prockill": [
+      "core"
+    ],
+    "provider_accounts": [
+      "F1"
+    ],
+    "provider_cli_maintenance": [
+      "F1"
+    ],
+    "qa_dispatch": [
+      "F1",
+      "F3"
+    ],
+    "qualification_admission": [
+      "F1",
+      "F3"
+    ],
+    "queued_send_now": [
+      "F1"
+    ],
+    "receipt_proof": [
+      "F1",
+      "F6"
+    ],
+    "report_producer": [
+      "F1"
+    ],
+    "retention": [
+      "F1"
+    ],
+    "screen_acquisitions_principal": [
+      "F1"
+    ],
+    "screen_monitor_principal": [
+      "F1"
+    ],
+    "seat_token_telemetry": [
+      "F1"
+    ],
+    "send_metadata": [
+      "core"
+    ],
+    "server": [
+      "core"
+    ],
+    "session_summary": [
+      "core"
+    ],
+    "sessions": [
+      "core"
+    ],
+    "spawn_creation": [
+      "core"
+    ],
+    "store": [
+      "core"
+    ],
+    "store_assistant_binding": [
+      "F1",
+      "F6"
+    ],
+    "store_attachments": [
+      "F1"
+    ],
+    "store_call_diag": [
+      "core"
+    ],
+    "store_capacity_retry": [
+      "F1"
+    ],
+    "store_consent": [
+      "F1"
+    ],
+    "store_consent_intents": [
+      "F1"
+    ],
+    "store_consent_offers": [
+      "F1"
+    ],
+    "store_consent_push": [
+      "F1"
+    ],
+    "store_exchange": [
+      "F1"
+    ],
+    "store_external_work": [
+      "F1",
+      "F2",
+      "F6"
+    ],
+    "store_host_transfer": [
+      "F1"
+    ],
+    "store_ingest_checkpoint": [
+      "core"
+    ],
+    "store_lifecycle_authority": [
+      "core"
+    ],
+    "store_qa": [
+      "F1",
+      "F3"
+    ],
+    "store_routing": [
+      "F1",
+      "F2",
+      "F6"
+    ],
+    "store_screen_lease": [
+      "F1"
+    ],
+    "store_specs": [
+      "F1",
+      "F2"
+    ],
+    "store_usage": [
+      "F1",
+      "F2"
+    ],
+    "store_voice_operations": [
+      "F1"
+    ],
+    "store_watch_wake": [
+      "F1"
+    ],
+    "store_work_index": [
+      "F1",
+      "F2"
+    ],
+    "store_work_lane_episodes": [
+      "F1",
+      "F2"
+    ],
+    "store_work_lanes": [
+      "F1",
+      "F2"
+    ],
+    "submission_events": [
+      "core"
+    ],
+    "tell_proof": [
+      "F1",
+      "F6"
+    ],
+    "tmux_transport": [
+      "core"
+    ],
+    "transcribe": [
+      "F1",
+      "F6"
+    ],
+    "usage_accounting": [
+      "F1",
+      "F2"
+    ],
+    "usage_provenance": [
+      "F1",
+      "F2"
+    ],
+    "v2_runtime": [
+      "core"
+    ],
+    "voice_answers": [
+      "F1"
+    ],
+    "watch_wake": [
+      "F1"
+    ],
+    "wmi_brief_producer": [
+      "F1"
+    ],
+    "work_attendance": [
+      "F1",
+      "F3"
+    ],
+    "work_item_admission": [
+      "F1",
+      "F3"
+    ],
+    "work_item_tracking": [
+      "F1",
+      "F2"
+    ],
+    "work_lane_members": [
+      "F1",
+      "F2"
+    ],
+    "work_lane_progress": [
+      "F1",
+      "F2"
+    ],
+    "work_lanes_projection": [
+      "F1",
+      "F2"
+    ],
+    "work_owed": [
+      "F1",
+      "F6"
+    ],
+    "work_report_freshness": [
+      "F1",
+      "F5"
+    ]
+  },
+  "ownership_basis": {
+    "F1": "Protected-core boundary; see the F1 frozen inventory and migration rows M01-M26.",
+    "F2": "Projection and usage ownership; see F2 inventory and rows L1-L4, A1-A2, U1-U2.",
+    "F3": "Workflow policy; see F3 inventory and policy implementation.",
+    "F5": "Observation; see F5 inventory and observer implementation.",
+    "F6": "Durable delivery; see F6 inventory and delivery implementation.",
+    "core": "Core lifecycle, transport and protocol support; the source module identifies its role."
+  },
+  "sites": [
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "DELIVERY_PROOF_TARGET","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "DELIVERY_PROOF_VALID","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "DELIVERY_PROOF_WIRE","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "HistoryConnection","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "bind_history_archive","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "default_archive_path","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "history_query","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "migrate_route_batch_archive","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "next_receipt_rowid","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 42,"module": "retention","name": "prepare_history_schema","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 46,"module": "send_metadata","name": "normalize_send_meta","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 47,"module": "loop_watchdog","name": "StoreProgress","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 47,"module": "loop_watchdog","name": "request_timing","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 48,"module": "store_call_diag","name": null,"owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 49,"module": "prockill","name": "canonical_start","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 50,"module": "session_summary","name": "SUMMARY_TAIL_LIMIT","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 50,"module": "session_summary","name": "apply_message_summary","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 52,"module": "attachment_locks","name": null,"owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 53,"module": "store_exchange","name": null,"owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 54,"module": "store_attachments","name": null,"owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 55,"module": "store_usage","name": null,"owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 56,"module": "store_ingest_checkpoint","name": null,"owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 57,"module": "chat_recovery","name": null,"owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 58,"module": "store_capacity_retry","name": null,"owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 59,"module": "store_qa","name": null,"owners": ["F1","F3"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 60,"module": "spawn_creation","name": null,"owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": "lifecycle_authority","form": "import","line": 61,"module": "store_lifecycle_authority","name": null,"owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": "host_transfer","form": "import","line": 62,"module": "store_host_transfer","name": null,"owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_BINDING_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_COMPOSITE_TELL_QUEUE_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_HANDOFF_PROOF_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_REBIND_AUDIT_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_REBIND_AUDIT_INDEX_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_RESTORE_ACTIVE_INDEX_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_RESTORE_AUDIT_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "ASSISTANT_RESTORE_EPISODE_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "AssistantBindingStoreMixin","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "SCOPED_OWNERSHIP_DDL","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "_binding_conn","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "migrate_binding_to_named","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "store_assistant_binding","name": "migrate_restore_episode_grant_columns","owners": ["F1","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 72,"module": "assistant_lane_rulings","name": "ASSISTANT_LANE_OWNERSHIP_DDL","owners": ["F1","F3"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 72,"module": "assistant_lane_rulings","name": "RULING_AUDIT_DDL","owners": ["F1","F3"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 72,"module": "assistant_lane_rulings","name": "RULING_REQUESTS_DDL","owners": ["F1","F3"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 73,"module": "voice_answers","name": "VOICE_ANSWER_ACKS_DDL","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 73,"module": "voice_answers","name": "VOICE_ANSWER_BINDINGS_DDL","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 73,"module": "voice_answers","name": "VoiceAnswersStoreMixin","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": "consent","form": "import","line": 74,"module": "store_consent","name": null,"owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 75,"module": "store_qa","name": "QaStoreMixin","owners": ["F1","F3"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 75,"module": "store_qa","name": "SpecInputsUnavailable","owners": ["F1","F3"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 75,"module": "store_qa","name": "spec_binding_source","owners": ["F1","F3"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 76,"module": "store_exchange","name": "ExchangeStoreMixin","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 78,"module": "store_work_lanes","name": "_WorkLanesStoreMixin","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 78,"module": "store_work_lanes","name": "ensure_work_lane_schema","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 79,"module": "store_work_index","name": "WorkIndexStoreMixin","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 80,"module": "store_work_lane_episodes","name": "WorkLaneEpisodesStoreMixin","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 81,"module": "store_screen_lease","name": "SCREEN_LEASE_DDL","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 81,"module": "store_screen_lease","name": "ScreenLeaseStoreMixin","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 81,"module": "store_screen_lease","name": "release_holder_conn","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 82,"module": "store_external_work","name": "EXTERNAL_WORK_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 82,"module": "store_external_work","name": "_ExternalWorkStoreMixin","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ASSISTANT_COMPOSITE_LANES_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ASSISTANT_COMPOSITE_OPERATIONS_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ASSISTANT_COMPOSITE_PUBLICATIONS_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ASSISTANT_COMPOSITE_QUESTION_BRIDGES_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ASSISTANT_COMPOSITE_ROUTES_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "OUTBOUND_NOTICE_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "OUTBOUND_NOTICE_INDEX_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ROUTING_INTEGRITY_AUDIT_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ROUTING_INTEGRITY_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "ROUTING_INTEGRITY_NOTICE_DDL","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "_RoutingStoreMixin","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 83,"module": "store_routing","name": "_routing_iso_now","owners": ["F1","F2","F6"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "JSON_COLUMNS","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "SPEC_BINDING_PROVENANCE_KINDS","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "SPEC_JSON_COLUMNS","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "UNASSIGNED","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "_SpecPersistenceMixin","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "_enc","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "_normalize_session_fields","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "_row","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "_session_row","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "carried_assignment","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "effective_assignment","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "normalize_spec_binding_provenance","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 99,"module": "store_specs","name": "normalize_spec_ids","owners": ["F1","F2"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 114,"module": "claude_jsonl_norm","name": "strip_peer_delivery_envelope","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 115,"module": "submission_events","name": "COMMITTED_PENDING_PROOF_STATUSES","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 115,"module": "submission_events","name": "provider_text_digest","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 116,"module": "v2_runtime","name": "iso_now","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 116,"module": "v2_runtime","name": "primary_assistant_name","owners": ["core"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 546,"module": "receipt_proof","name": "epoch","owners": ["F1","F6"],"path": "store.py","scope": "_effective_send_receipt_row"},
+    {"alias": null,"form": "from","line": 546,"module": "receipt_proof","name": "proved_pending_precedence","owners": ["F1","F6"],"path": "store.py","scope": "_effective_send_receipt_row"},
+    {"alias": null,"form": "from","line": 673,"module": "tell_proof","name": "delivery_wire","owners": ["F1","F6"],"path": "store.py","scope": "_project_session_events_conn"},
+    {"alias": null,"form": "from","line": 673,"module": "tell_proof","name": "input_origin","owners": ["F1","F6"],"path": "store.py","scope": "_project_session_events_conn"},
+    {"alias": null,"form": "from","line": 1545,"module": "store_watch_wake","name": "WATCH_WAKE_DDL","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 1545,"module": "store_watch_wake","name": "_WatchWakeStoreMixin","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 1545,"module": "store_watch_wake","name": "install_default_conn","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 1545,"module": "store_watch_wake","name": "lifecycle_watch_conn","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 1545,"module": "store_watch_wake","name": "report_watch_conn","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": "VOICE_OPERATIONS_DDL","form": "from","line": 1563,"module": "store_voice_operations","name": "DDL","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 1563,"module": "store_voice_operations","name": "VoiceOperationsStoreMixin","owners": ["F1"],"path": "store.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 1770,"module": "tell_proof","name": "TellDeliveryParseCache","owners": ["F1","F6"],"path": "store.py","scope": "Store._run"},
+    {"alias": "MAINTENANCE_DELEGATIONS_DDL","form": "from","line": 1817,"module": "maintenance_delegation","name": "DDL","owners": ["F1"],"path": "store.py","scope": "Store._run"},
+    {"alias": "ADVISOR_SESSIONS_DDL","form": "from","line": 1884,"module": "advisor_sessions","name": "DDL","owners": ["F1"],"path": "store.py","scope": "Store._run"},
+    {"alias": "ensure_native_input_schema","form": "from","line": 2011,"module": "native_input_lookup","name": "ensure_schema","owners": ["core"],"path": "store.py","scope": "Store._run"},
+    {"alias": null,"form": "import","line": 2039,"module": "assistant_owed","name": null,"owners": ["F1"],"path": "store.py","scope": "Store._run"},
+    {"alias": null,"form": "import","line": 2041,"module": "assistant_priorities","name": null,"owners": ["F1"],"path": "store.py","scope": "Store._run"},
+    {"alias": null,"form": "import","line": 2043,"module": "coordination_holds","name": null,"owners": ["F1","F3"],"path": "store.py","scope": "Store._run"},
+    {"alias": null,"form": "import","line": 2065,"module": "account_store","name": null,"owners": ["F1","F5"],"path": "store.py","scope": "Store._run"},
+    {"alias": null,"form": "from","line": 2087,"module": "tell_proof","name": "DeliveryLookup","owners": ["F1","F6"],"path": "store.py","scope": "Store._run"},
+    {"alias": null,"form": "from","line": 2376,"module": "tell_proof","name": "delivery_wire","owners": ["F1","F6"],"path": "store.py","scope": "Store._assistant_mirror_trigger_conn"},
+    {"alias": null,"form": "from","line": 2376,"module": "tell_proof","name": "input_origin","owners": ["F1","F6"],"path": "store.py","scope": "Store._assistant_mirror_trigger_conn"},
+    {"alias": null,"form": "from","line": 2399,"module": "tell_proof","name": "delivery_wire","owners": ["F1","F6"],"path": "store.py","scope": "Store._project_dispatch_turn_final_conn"},
+    {"alias": null,"form": "from","line": 2399,"module": "tell_proof","name": "input_origin","owners": ["F1","F6"],"path": "store.py","scope": "Store._project_dispatch_turn_final_conn"},
+    {"alias": null,"form": "from","line": 2399,"module": "tell_proof","name": "operator_dispatch","owners": ["F1","F6"],"path": "store.py","scope": "Store._project_dispatch_turn_final_conn"},
+    {"alias": null,"form": "from","line": 2553,"module": "tell_proof","name": "delivery_wire","owners": ["F1","F6"],"path": "store.py","scope": "Store._notice_unanswered_turn_conn"},
+    {"alias": null,"form": "from","line": 2553,"module": "tell_proof","name": "input_origin","owners": ["F1","F6"],"path": "store.py","scope": "Store._notice_unanswered_turn_conn"},
+    {"alias": null,"form": "from","line": 2553,"module": "tell_proof","name": "operator_dispatch","owners": ["F1","F6"],"path": "store.py","scope": "Store._notice_unanswered_turn_conn"},
+    {"alias": null,"form": "from","line": 2583,"module": "outbound_notices","name": "ensure_notice_marker","owners": ["F1","F6"],"path": "store.py","scope": "Store._notice_unanswered_turn_conn"},
+    {"alias": null,"form": "from","line": 2584,"module": "store_routing","name": "_insert_outbound_notice_conn","owners": ["F1","F2","F6"],"path": "store.py","scope": "Store._notice_unanswered_turn_conn"},
+    {"alias": null,"form": "from","line": 3150,"module": "work_report_freshness","name": "assignment_changed_conn","owners": ["F1","F5"],"path": "store.py","scope": "Store.open_session._op"},
+    {"alias": null,"form": "from","line": 3193,"module": "sessions","name": "LEAD_CLOSE_REFRESH_TIMEOUT_S","owners": ["core"],"path": "store.py","scope": "Store.update_session"},
+    {"alias": null,"form": "from","line": 3211,"module": "work_attendance","name": "departure_conn","owners": ["F1","F3"],"path": "store.py","scope": "Store.update_session._op"},
+    {"alias": null,"form": "from","line": 3226,"module": "work_report_freshness","name": "assignment_changed_conn","owners": ["F1","F5"],"path": "store.py","scope": "Store.update_session._op"},
+    {"alias": null,"form": "from","line": 3252,"module": "store_watch_wake","name": "_session","owners": ["F1"],"path": "store.py","scope": "Store.update_session._op"},
+    {"alias": null,"form": "from","line": 3252,"module": "store_watch_wake","name": "move_watch_custody_conn","owners": ["F1"],"path": "store.py","scope": "Store.update_session._op"},
+    {"alias": null,"form": "from","line": 3574,"module": "work_attendance","name": "assigned_owners_conn","owners": ["F1","F3"],"path": "store.py","scope": "Store.mark_reconciled_dead._op"},
+    {"alias": null,"form": "from","line": 3574,"module": "work_attendance","name": "attendance_ids","owners": ["F1","F3"],"path": "store.py","scope": "Store.mark_reconciled_dead._op"},
+    {"alias": null,"form": "from","line": 3574,"module": "work_attendance","name": "record_attendance_cause","owners": ["F1","F3"],"path": "store.py","scope": "Store.mark_reconciled_dead._op"},
+    {"alias": null,"form": "from","line": 3575,"module": "store_lifecycle_authority","name": "configured","owners": ["core"],"path": "store.py","scope": "Store.mark_reconciled_dead._op"},
+    {"alias": null,"form": "from","line": 3575,"module": "store_lifecycle_authority","name": "front_desk_principal","owners": ["core"],"path": "store.py","scope": "Store.mark_reconciled_dead._op"},
+    {"alias": null,"form": "from","line": 4183,"module": "work_item_admission","name": "small_item_message","owners": ["F1","F3"],"path": "store.py","scope": "Store.record_spawn_intent._op"},
+    {"alias": null,"form": "from","line": 4183,"module": "work_item_admission","name": "small_item_occupied_conn","owners": ["F1","F3"],"path": "store.py","scope": "Store.record_spawn_intent._op"},
+    {"alias": null,"form": "from","line": 4186,"module": "sessions","name": "VerbError","owners": ["core"],"path": "store.py","scope": "Store.record_spawn_intent._op"},
+    {"alias": null,"form": "from","line": 4189,"module": "store_work_lanes","name": "_session_conn","owners": ["F1","F2"],"path": "store.py","scope": "Store.record_spawn_intent._op"},
+    {"alias": null,"form": "from","line": 4189,"module": "store_work_lanes","name": "fd_backend_conn","owners": ["F1","F2"],"path": "store.py","scope": "Store.record_spawn_intent._op"},
+    {"alias": null,"form": "from","line": 4190,"module": "work_lane_progress","name": "seat_live","owners": ["F1","F2"],"path": "store.py","scope": "Store.record_spawn_intent._op"},
+    {"alias": null,"form": "from","line": 4198,"module": "sessions","name": "VerbError","owners": ["core"],"path": "store.py","scope": "Store.record_spawn_intent._op"},
+    {"alias": null,"form": "from","line": 4537,"module": "work_item_tracking","name": "check_input","owners": ["F1","F2"],"path": "store.py","scope": "Store.put_tell_delivery.prepare_tracking"},
+    {"alias": null,"form": "from","line": 4585,"module": "tell_proof","name": "finalize_prepared","owners": ["F1","F6"],"path": "store.py","scope": "Store.promote_tell_delivery._op"},
+    {"alias": null,"form": "from","line": 4600,"module": "tell_proof","name": "retained_proof","owners": ["F1","F6"],"path": "store.py","scope": "Store.promote_tell_delivery._op"},
+    {"alias": null,"form": "from","line": 4622,"module": "tell_proof","name": "retained_proof","owners": ["F1","F6"],"path": "store.py","scope": "Store.promote_tell_delivery._op"},
+    {"alias": null,"form": "import","line": 4999,"module": "qualification_admission","name": null,"owners": ["F1","F3"],"path": "store.py","scope": "Store.atomic_claim_or_replay._op"},
+    {"alias": null,"form": "from","line": 5046,"module": "_shared.operator_auth","name": "operator_auth","owners": ["core"],"path": "store.py","scope": "Store.consent_notifications._op"},
+    {"alias": "offers","form": "import","line": 5047,"module": "store_consent_offers","name": null,"owners": ["F1"],"path": "store.py","scope": "Store.consent_notifications._op"},
+    {"alias": "intents","form": "import","line": 5048,"module": "store_consent_intents","name": null,"owners": ["F1"],"path": "store.py","scope": "Store.consent_notifications._op"},
+    {"alias": null,"form": "from","line": 5100,"module": "_shared.operator_auth","name": "operator_auth","owners": ["core"],"path": "store.py","scope": "Store.consent_expire._op"},
+    {"alias": "offers","form": "import","line": 5101,"module": "store_consent_offers","name": null,"owners": ["F1"],"path": "store.py","scope": "Store.consent_expire._op"},
+    {"alias": "intents","form": "import","line": 5102,"module": "store_consent_intents","name": null,"owners": ["F1"],"path": "store.py","scope": "Store.consent_expire._op"},
+    {"alias": null,"form": "from","line": 5138,"module": "_shared.operator_auth","name": "operator_auth","owners": ["core"],"path": "store.py","scope": "Store.consent_push_due._op"},
+    {"alias": "push","form": "import","line": 5139,"module": "store_consent_push","name": null,"owners": ["F1"],"path": "store.py","scope": "Store.consent_push_due._op"},
+    {"alias": "push","form": "import","line": 5149,"module": "store_consent_push","name": null,"owners": ["F1"],"path": "store.py","scope": "Store.consent_push_finish._op"},
+    {"alias": null,"form": "from","line": 5162,"module": "_shared.operator_auth","name": "operator_auth","owners": ["core"],"path": "store.py","scope": "Store.consent_operation._op"},
+    {"alias": null,"form": "from","line": 5459,"module": "work_report_freshness","name": "apply_report_gate","owners": ["F1","F5"],"path": "store.py","scope": "Store.put_report._put"},
+    {"alias": null,"form": "from","line": 5500,"module": "store_work_lanes","name": "record_latest_report_conn","owners": ["F1","F2"],"path": "store.py","scope": "Store.put_report._put"},
+    {"alias": null,"form": "from","line": 5964,"module": "tell_proof","name": "split_native_input","owners": ["F1","F6"],"path": "store.py","scope": "Store.prepare_native_input_events"},
+    {"alias": null,"form": "from","line": 5965,"module": "native_input_lookup","name": "PREPARE_SECONDS","owners": ["core"],"path": "store.py","scope": "Store.prepare_native_input_events"},
+    {"alias": null,"form": "from","line": 5979,"module": "ingest","name": "_identity_key","owners": ["core"],"path": "store.py","scope": "Store._insert_session_event_conn"},
+    {"alias": "proof","form": "import","line": 6321,"module": "receipt_proof","name": null,"owners": ["F1","F6"],"path": "store.py","scope": "Store.reconcile_send_receipt"},
+    {"alias": null,"form": "from","line": 6323,"module": "retention","name": "default_archive_path","owners": ["F1"],"path": "store.py","scope": "Store.reconcile_send_receipt"},
+    {"alias": null,"form": "from","line": 6515,"module": "account_pool_control","name": "POOL_ERRORS","owners": ["F1","F3"],"path": "store.py","scope": "Store.claim_or_coalesce_send._op"},
+    {"alias": null,"form": "from","line": 6932,"module": "tell_proof","name": "delivery_wire","owners": ["F1","F6"],"path": "store.py","scope": "Store._reconcile_ingested_tell"},
+    {"alias": null,"form": "from","line": 6932,"module": "tell_proof","name": "retained_proof","owners": ["F1","F6"],"path": "store.py","scope": "Store._reconcile_ingested_tell"},
+    {"alias": null,"form": "from","line": 6932,"module": "tell_proof","name": "send_proofs","owners": ["F1","F6"],"path": "store.py","scope": "Store._reconcile_ingested_tell"},
+    {"alias": null,"form": "from","line": 6960,"module": "message_envelopes","name": "parse_peer_delivery","owners": ["core"],"path": "store.py","scope": "Store._reconcile_ingested_tell"},
+    {"alias": null,"form": "from","line": 7386,"module": "sessions","name": "operator_user_epoch","owners": ["core"],"path": "store.py","scope": "Store.count_session_events._op"},
+    {"alias": "host_transfer","form": "import","line": 22,"module": "store_host_transfer","name": null,"owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 23,"module": "qa_dispatch","name": null,"owners": ["F1","F3"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 24,"module": "desk_stamp","name": null,"owners": ["F1","F6"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 25,"module": "wmi_brief_producer","name": null,"owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 28,"module": "screen_monitor_principal","name": null,"owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 29,"module": "screen_acquisitions_principal","name": null,"owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 58,"module": "_shared.operator_auth","name": "operator_auth","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 59,"module": "_shared.asset_schema","name": "hosted_dashboard_policy","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 60,"module": "comms","name": "ATTACHMENT_MAX_BYTES","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 60,"module": "comms","name": "AttachmentValidationError","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 60,"module": "comms","name": "validate_send_attachments","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 61,"module": "tmux_transport","name": "sanitize_injectable","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": "lifecycle_authority","form": "import","line": 62,"module": "store_lifecycle_authority","name": null,"owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "loop_watchdog","name": "RequestTiming","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 63,"module": "loop_watchdog","name": "request_timing","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": "consent","form": "import","line": 64,"module": "store_consent","name": null,"owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 65,"module": "local_admin","name": null,"owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 66,"module": "ledger","name": "StatusCardError","owners": ["F1","F5"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 66,"module": "ledger","name": "TERMINAL_REPORT_STATUSES","owners": ["F1","F5"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 66,"module": "ledger","name": "_claim_wire_fields","owners": ["F1","F5"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "seat_token_telemetry","name": "SeatTokenTelemetry","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "seat_token_telemetry","name": "TOKEN_REASON_ABSENT","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "seat_token_telemetry","name": "TOKEN_REASON_EXPIRED","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "seat_token_telemetry","name": "TOKEN_REASON_INTERNAL_ERROR","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "seat_token_telemetry","name": "TOKEN_REASON_MALFORMED","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "seat_token_telemetry","name": "TOKEN_REASON_VERIFIED","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "seat_token_telemetry","name": "TOKEN_REASON_WRONG_SEAT","owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 76,"module": "sessions","name": "VerbError","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 76,"module": "sessions","name": "_finish_despite_cancel","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 76,"module": "sessions","name": "with_bootstrap_state","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 77,"module": "design_links","name": "validate_design_link","owners": ["F1","F6"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 78,"module": "store","name": "STREAM_TOKEN_HASH_VERSION","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 78,"module": "store","name": "role_source_for","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 79,"module": "machine_stats","name": "validate_machine_stats","owners": ["F1","F5"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 80,"module": "submission_events","name": "COMMITTED_PENDING_PROOF_STATUSES","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 81,"module": "assistant_lane_rulings","name": "AssistantLaneRulings","owners": ["F1","F3"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 82,"module": "v2_runtime","name": "primary_assistant_name","owners": ["core"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "import","line": 226,"module": "report_producer","name": null,"owners": ["F1"],"path": "server.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 1076,"module": "host_transfer","name": "HostTransfer","owners": ["F1"],"path": "server.py","scope": "Server.__init__"},
+    {"alias": null,"form": "from","line": 1081,"module": "watch_wake","name": "WatchWake","owners": ["F1"],"path": "server.py","scope": "Server.__init__"},
+    {"alias": null,"form": "from","line": 1085,"module": "household","name": "Household","owners": ["F1"],"path": "server.py","scope": "Server.__init__"},
+    {"alias": null,"form": "from","line": 2570,"module": "maintenance_delegation","name": "eligible","owners": ["F1"],"path": "server.py","scope": "Server._dispatch_inner"},
+    {"alias": null,"form": "from","line": 3021,"module": "provider_accounts","name": "watcher_sources","owners": ["F1"],"path": "server.py","scope": "Server._file_token_sources"},
+    {"alias": null,"form": "from","line": 3431,"module": "queued_send_now","name": "route_for","owners": ["F1"],"path": "server.py","scope": "Server._project_assistant_composite_session"},
+    {"alias": null,"form": "from","line": 4191,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn"},
+    {"alias": null,"form": "from","line": 4191,"module": "provider_accounts","name": "reject_overrides","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn"},
+    {"alias": null,"form": "from","line": 4232,"module": "provider_cli_maintenance","name": "FIELDS","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_freeze"},
+    {"alias": null,"form": "from","line": 4232,"module": "provider_cli_maintenance","name": "freeze","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_freeze"},
+    {"alias": null,"form": "from","line": 4232,"module": "provider_cli_maintenance","name": "legacy","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_freeze"},
+    {"alias": null,"form": "from","line": 4237,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_freeze"},
+    {"alias": null,"form": "from","line": 4241,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_freeze"},
+    {"alias": null,"form": "from","line": 4255,"module": "provider_cli_maintenance","name": "legacy","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_unfreeze"},
+    {"alias": null,"form": "from","line": 4255,"module": "provider_cli_maintenance","name": "slot","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_unfreeze"},
+    {"alias": null,"form": "from","line": 4255,"module": "provider_cli_maintenance","name": "unfreeze","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_unfreeze"},
+    {"alias": null,"form": "from","line": 4256,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "server.py","scope": "Server._on_spawn_unfreeze"},
+    {"alias": null,"form": "from","line": 4682,"module": "ledger","name": "CONTEXT_COMPACT_COMMAND","owners": ["F1","F5"],"path": "server.py","scope": "Server._on_compact"},
+    {"alias": null,"form": "from","line": 4712,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "server.py","scope": "Server._on_send"},
+    {"alias": null,"form": "from","line": 4712,"module": "provider_accounts","name": "reject_overrides","owners": ["F1"],"path": "server.py","scope": "Server._on_send"},
+    {"alias": null,"form": "from","line": 4983,"module": "store_attachments","name": "publication_attachment","owners": ["F1"],"path": "server.py","scope": "Server._assistant_publication_attachments"},
+    {"alias": null,"form": "from","line": 4984,"module": "chat_attachment_types","name": "sanitized_filename","owners": ["core"],"path": "server.py","scope": "Server._assistant_publication_attachments"},
+    {"alias": null,"form": "from","line": 4984,"module": "chat_attachment_types","name": "validated_media_type","owners": ["core"],"path": "server.py","scope": "Server._assistant_publication_attachments"},
+    {"alias": null,"form": "from","line": 5009,"module": "transcribe","name": "Transcriber","owners": ["F1","F6"],"path": "server.py","scope": "Server._get_transcriber"},
+    {"alias": null,"form": "from","line": 5016,"module": "error_alerts","name": "ErrorAlerts","owners": ["F1","F6"],"path": "server.py","scope": "Server.configure_error_alerts"},
+    {"alias": null,"form": "from","line": 5016,"module": "error_alerts","name": "VALIDATORS","owners": ["F1","F6"],"path": "server.py","scope": "Server.configure_error_alerts"},
+    {"alias": null,"form": "from","line": 5034,"module": "outbound_finisher","name": "OutboundFinisher","owners": ["F1","F6"],"path": "server.py","scope": "Server.configure_error_alerts"},
+    {"alias": null,"form": "from","line": 5083,"module": "assistant_brief","name": "Brief","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_assistant_brief"},
+    {"alias": null,"form": "from","line": 5096,"module": "coordination_holds","name": "Holds","owners": ["F1","F3"],"path": "server.py","scope": "Server._on_coordination_hold"},
+    {"alias": null,"form": "from","line": 5210,"module": "store_work_lanes","name": "WorkLaneCloseBlocked","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_assistant_operation"},
+    {"alias": null,"form": "from","line": 5210,"module": "store_work_lanes","name": "WorkLaneGoalUnresolved","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_assistant_operation"},
+    {"alias": null,"form": "from","line": 5210,"module": "store_work_lanes","name": "WorkLaneMemberConflict","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_assistant_operation"},
+    {"alias": null,"form": "from","line": 5210,"module": "store_work_lanes","name": "WorkLaneMemberInUse","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_assistant_operation"},
+    {"alias": null,"form": "from","line": 5223,"module": "work_lane_members","name": "validate_members","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_assistant_operation"},
+    {"alias": null,"form": "from","line": 5339,"module": "work_lanes_projection","name": "_iso_now","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_work_lanes_show"},
+    {"alias": null,"form": "from","line": 5339,"module": "work_lanes_projection","name": "page_lane_detail","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_work_lanes_show"},
+    {"alias": null,"form": "from","line": 5339,"module": "work_lanes_projection","name": "presence_index","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_work_lanes_show"},
+    {"alias": null,"form": "from","line": 5339,"module": "work_lanes_projection","name": "project_lane","owners": ["F1","F2"],"path": "server.py","scope": "Server._on_work_lanes_show"},
+    {"alias": null,"form": "from","line": 5608,"module": "receipt_proof","name": "verified_original_generation","owners": ["F1","F6"],"path": "server.py","scope": "Server._on_send_receipt_get"},
+    {"alias": "managed_log_status","form": "from","line": 5858,"module": "managed_logs","name": "status","owners": ["F1"],"path": "server.py","scope": "Server._on_daemon_stats"},
+    {"alias": null,"form": "import","line": 6341,"module": "consent_push","name": null,"owners": ["F1"],"path": "server.py","scope": "Server.consent_expiry_loop"},
+    {"alias": null,"form": "import","line": 33,"module": "qa_dispatch","name": null,"owners": ["F1","F3"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 50,"module": "claude_jsonl_norm","name": "strip_peer_delivery_envelope","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 51,"module": "send_metadata","name": "normalize_send_meta","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 51,"module": "send_metadata","name": "voice_context_dispatch_block","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "CODEX_RESET_BLOCKED","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "DRAFT_PREDICATES","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "SUBMIT_PREDICATES","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "_last_claude_input_start","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "claude_command_exactly_in_active_draft","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "claude_composer_empty","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "claude_prompt_in_active_draft","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "claude_prompt_ready","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "codex_prompt_in_active_draft","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "codex_reset_interstitial_visible","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "codex_tui_session_visible","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "prompt_in_native_queue","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "boot_ready","name": "submission_proven_after","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 67,"module": "mirror","name": "_extract_live_state","owners": ["F1","F5"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 68,"module": "outbound_notices","name": "ensure_notice_marker","owners": ["F1","F6"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 68,"module": "outbound_notices","name": "notice_needle","owners": ["F1","F6"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 69,"module": "sessions","name": "VerbError","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 70,"module": "tmux_transport","name": "RECEIPT_TIMEOUT_S","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 70,"module": "tmux_transport","name": "assert_injectable","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 70,"module": "tmux_transport","name": "receipt_needle","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 70,"module": "tmux_transport","name": "sanitize_injectable","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 71,"module": "submission_events","name": "COMMITTED_PENDING_PROOF","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 71,"module": "submission_events","name": "DurableUserEventProof","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 71,"module": "submission_events","name": "EventProof","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 71,"module": "submission_events","name": "EventWatermark","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 71,"module": "submission_events","name": "PROOF_FAST_WAIT_S","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 71,"module": "submission_events","name": "submission_text_matches","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 71,"module": "submission_events","name": "system_submission_matches","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 80,"module": "v2_runtime","name": "iso_now","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 86,"module": "chat_attachment_types","name": "ATTACHMENT_MAX_BYTES","owners": ["core"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 87,"module": "design_links","name": "PNG_SIGNATURE","owners": ["F1","F6"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 87,"module": "design_links","name": "require_design_png","owners": ["F1","F6"],"path": "comms.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 177,"module": "message_envelopes","name": "build_message_envelope","owners": ["core"],"path": "comms.py","scope": "_peer_delivery_envelope"},
+    {"alias": null,"form": "from","line": 675,"module": "assistant_guidelines","name": "DELIVERY_TOKEN","owners": ["F1"],"path": "comms.py","scope": "Comms.tell"},
+    {"alias": null,"form": "from","line": 694,"module": "account_pool_control","name": "POOL_ERRORS","owners": ["F1","F3"],"path": "comms.py","scope": "Comms.tell"},
+    {"alias": null,"form": "from","line": 990,"module": "store_exchange","name": "source","owners": ["F1"],"path": "comms.py","scope": "Comms._deliver_tell"},
+    {"alias": null,"form": "from","line": 1138,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "comms.py","scope": "Comms._resolve_route"},
+    {"alias": null,"form": "from","line": 1421,"module": "assistant_guidelines","name": "DELIVERY_TOKEN","owners": ["F1"],"path": "comms.py","scope": "Comms._validate_assistant_request_target"},
+    {"alias": null,"form": "from","line": 1432,"module": "outbound_notices","name": "ASSISTANT_AUTHORITY_REQUEST_TOKEN","owners": ["F1","F6"],"path": "comms.py","scope": "Comms._validate_assistant_request_target"},
+    {"alias": null,"form": "from","line": 1446,"module": "store_host_transfer","name": "effective_ruling","owners": ["F1"],"path": "comms.py","scope": "Comms._validate_assistant_request_target.effective_pending"},
+    {"alias": null,"form": "from","line": 1514,"module": "outbound_notices","name": "TRACKING_INPUT_TOKEN","owners": ["F1","F6"],"path": "comms.py","scope": "Comms._prepare_answer_input"},
+    {"alias": null,"form": "from","line": 1739,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "comms.py","scope": "Comms._prepare_send_plan"},
+    {"alias": null,"form": "from","line": 1739,"module": "provider_accounts","name": "reject_overrides","owners": ["F1"],"path": "comms.py","scope": "Comms._prepare_send_plan"},
+    {"alias": null,"form": "from","line": 1848,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "comms.py","scope": "Comms._pool_ingress"},
+    {"alias": null,"form": "from","line": 1870,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "comms.py","scope": "Comms._account_input_guard"},
+    {"alias": null,"form": "from","line": 1995,"module": "account_pool_control","name": "operator","owners": ["F1","F3"],"path": "comms.py","scope": "Comms._append_send_receipt"},
+    {"alias": null,"form": "from","line": 2062,"module": "account_pool_control","name": "POOL_ERRORS","owners": ["F1","F3"],"path": "comms.py","scope": "Comms._send_result"},
+    {"alias": null,"form": "from","line": 2160,"module": "provider_accounts","name": "AccountError","owners": ["F1"],"path": "comms.py","scope": "Comms._submit_send_plan"},
+    {"alias": null,"form": "from","line": 2195,"module": "account_pool_control","name": "POOL_ERRORS","owners": ["F1","F3"],"path": "comms.py","scope": "Comms._submit_send_plan"},
+    {"alias": null,"form": "from","line": 2309,"module": "account_pool_control","name": "POOL_ERRORS","owners": ["F1","F3"],"path": "comms.py","scope": "Comms._coalesced_send_result"},
+    {"alias": null,"form": "from","line": 2411,"module": "account_pool_control","name": "POOL_ERRORS","owners": ["F1","F3"],"path": "comms.py","scope": "Comms.send"},
+    {"alias": null,"form": "import","line": 16,"module": "prockill","name": null,"owners": ["core"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 17,"module": "assistant_policy","name": "AssistantPolicy","owners": ["F1","F3"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 18,"module": "store_qa","name": "SpecInputsUnavailable","owners": ["F1","F3"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 18,"module": "store_qa","name": "spec_binding_source","owners": ["F1","F3"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 19,"module": "mirror","name": "_extract_live_state","owners": ["F1","F5"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 19,"module": "mirror","name": "_provider_from_session_name","owners": ["F1","F5"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 20,"module": "v2_runtime","name": "iso_now","owners": ["core"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 21,"module": "session_summary","name": "MESSAGE_SUMMARY_FIELDS","owners": ["core"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 21,"module": "session_summary","name": "apply_message_summary","owners": ["core"],"path": "sessions.py","scope": "<module>"},
+    {"alias": "_event_timestamp_epoch","form": "from","line": 21,"module": "session_summary","name": "event_timestamp_epoch","owners": ["core"],"path": "sessions.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 104,"module": "claude_jsonl_norm","name": "_classify_user_string","owners": ["core"],"path": "sessions.py","scope": "operator_user_epoch"},
+    {"alias": null,"form": "from","line": 104,"module": "claude_jsonl_norm","name": "_parse_peer_tell","owners": ["core"],"path": "sessions.py","scope": "operator_user_epoch"},
+    {"alias": null,"form": "from","line": 611,"module": "agents_roster","name": "project","owners": ["F1","F5"],"path": "sessions.py","scope": "Sessions.list_open"},
+    {"alias": null,"form": "from","line": 1007,"module": "store_host_transfer","name": "TransferError","owners": ["F1"],"path": "sessions.py","scope": "Sessions._reparent_locked"},
+    {"alias": null,"form": "from","line": 1236,"module": "ledger","name": "apply_status_card_update","owners": ["F1","F5"],"path": "sessions.py","scope": "Sessions._set_status_card_locked"},
+    {"alias": null,"form": "from","line": 1479,"module": "store_watch_wake","name": "_session","owners": ["F1"],"path": "sessions.py","scope": "Sessions._close_attendance_ids.read"},
+    {"alias": null,"form": "from","line": 1480,"module": "store_lifecycle_authority","name": "configured","owners": ["core"],"path": "sessions.py","scope": "Sessions._close_attendance_ids.read"},
+    {"alias": null,"form": "from","line": 1480,"module": "store_lifecycle_authority","name": "front_desk_principal","owners": ["core"],"path": "sessions.py","scope": "Sessions._close_attendance_ids.read"},
+    {"alias": null,"form": "from","line": 1481,"module": "work_attendance","name": "attendance_ids","owners": ["F1","F3"],"path": "sessions.py","scope": "Sessions._close_attendance_ids.read"},
+    {"alias": null,"form": "from","line": 1482,"module": "work_owed","name": "_close_obligations","owners": ["F1","F6"],"path": "sessions.py","scope": "Sessions._close_attendance_ids.read"},
+    {"alias": null,"form": "from","line": 1511,"module": "work_owed","name": "disposition_commands","owners": ["F1","F6"],"path": "sessions.py","scope": "Sessions._check_lead_disposition"},
+    {"alias": null,"form": "from","line": 1630,"module": "work_attendance","name": "departure_conn","owners": ["F1","F3"],"path": "sessions.py","scope": "Sessions.close.check_attendance"},
+    {"alias": null,"form": "from","line": 49,"module": "claude_jsonl_norm","name": "normalize_claude_jsonl_records","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 50,"module": "codex_rollout_norm","name": "codex_is_guardian_review","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 50,"module": "codex_rollout_norm","name": "codex_session_identity","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 50,"module": "codex_rollout_norm","name": "normalize_codex_rollout_record","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 51,"module": "context_adapters","name": "parse_codex_context_reading","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 52,"module": "message_envelopes","name": "annotate_message_envelope","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 53,"module": "prockill","name": "canonical_start","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 53,"module": "prockill","name": "pid_alive","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 53,"module": "prockill","name": "process_record","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 53,"module": "prockill","name": "process_tree","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 54,"module": "error_adapters","name": "ErrorFact","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 55,"module": "store","name": "ENTRY_DROPPED","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 56,"module": "tmux_transport","name": "TRANSCRIPT_DIRS","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 56,"module": "tmux_transport","name": "_exec","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 57,"module": "provider_accounts","name": "transcript_allowed","owners": ["F1"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 58,"module": "usage_accounting","name": "native_provenance","owners": ["F1","F2"],"path": "ingest.py","scope": "<module>"},
+    {"alias": "PROVENANCE_MAX_ITEMS","form": "from","line": 59,"module": "usage_provenance","name": "MAX_ITEMS","owners": ["F1","F2"],"path": "ingest.py","scope": "<module>"},
+    {"alias": "PROVENANCE_VERSION","form": "from","line": 59,"module": "usage_provenance","name": "PAYLOAD_VERSION","owners": ["F1","F2"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 60,"module": "v2_runtime","name": "env_number","owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": "checkpoint","form": "import","line": 61,"module": "ingest_checkpoint","name": null,"owners": ["core"],"path": "ingest.py","scope": "<module>"},
+    {"alias": null,"form": "from","line": 173,"module": "claude_jsonl_norm","name": "is_reserved_seat_injection","owners": ["core"],"path": "ingest.py","scope": "_jsonl_event_identity"},
+    {"alias": null,"form": "from","line": 1170,"module": "store_capacity_retry","name": "refresh_projection","owners": ["F1"],"path": "ingest.py","scope": "Ingest._ingest_stream_events"},
+    {"alias": null,"form": "from","line": 1200,"module": "cursor_stream_norm","name": "normalize_cursor_stream_records","owners": ["core"],"path": "ingest.py","scope": "Ingest._ingest_stream_events"},
+    {"alias": null,"form": "from","line": 1204,"module": "gemini_jsonl_norm","name": "normalize_gemini_jsonl_records","owners": ["core"],"path": "ingest.py","scope": "Ingest._ingest_stream_events"}
+  ]
+}

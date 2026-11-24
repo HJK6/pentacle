@@ -18,6 +18,9 @@ const { execFileSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const RENDERER = path.join(ROOT, 'renderer');
 const OUT = path.join(RENDERER, 'dist', 'web');
+const DAEMON_IDENTITY = JSON.parse(fs.readFileSync(
+  path.join(ROOT, 'services', 'chat-stream-v2', 'daemon_identity.json'), 'utf8',
+));
 
 function sourceCommit() {
   try {
@@ -258,7 +261,14 @@ async function build({ minify = false } = {}) {
   }
 
   const metadata = path.join(OUT, 'build-commit.json');
-  fs.writeFileSync(metadata + '.tmp', JSON.stringify({ schema_version: 1, build_commit: sourceCommit() }) + '\n');
+  fs.writeFileSync(metadata + '.tmp', JSON.stringify({
+    schema_version: 1,
+    build_commit: sourceCommit(),
+    daemon_schema_version: DAEMON_IDENTITY.schema_version,
+    protocol_version: DAEMON_IDENTITY.protocol_version,
+    min_protocol_version: DAEMON_IDENTITY.min_protocol_version,
+    max_protocol_version: DAEMON_IDENTITY.max_protocol_version,
+  }) + '\n');
   fs.renameSync(metadata + '.tmp', metadata);
 
   console.log(`[build:web] wrote ${path.relative(ROOT, OUT)}`);

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -13,7 +14,6 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,10 +22,12 @@ from typing import Any
 
 try:
     from tools.gate_owner_manifest import MANIFEST_ENV, ManifestError, initialize_manifest, mark_owner_stopping, reap_manifest
+    from tools.gate_temp import disposable_location
     from tools.gate_progress import summarize as summarize_progress
     from tools.source_integrity import status as source_integrity_status
 except ModuleNotFoundError:  # direct execution from the tools directory
     from gate_owner_manifest import MANIFEST_ENV, ManifestError, initialize_manifest, mark_owner_stopping, reap_manifest  # type: ignore[no-redef]
+    from gate_temp import disposable_location
     from gate_progress import summarize as summarize_progress  # type: ignore[no-redef]
     from source_integrity import status as source_integrity_status  # type: ignore[no-redef]
 
@@ -33,6 +35,7 @@ except ModuleNotFoundError:  # direct execution from the tools directory
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SERVICE_DIR.parents[1]
 PRE_FLIGHT = SERVICE_DIR / "tools" / "gate_preflight.sh"
+UNIT_SEPARATE_MARKERS = ("repin_exhaustive",)
 DEFAULT_TIMEOUTS = {"unit": 900.0, "smoke": 900.0, "soak": 3900.0}
 # Component bounds for the --deadline-seconds envelope. The reserve covers this
 # runner's own terminate (2x5s), reader drain (READER_JOIN_S), reap and evidence writes.
@@ -51,6 +54,10 @@ _TERMINATION_REQUESTED = False
 _TERMINATION_SIGNAL: str | None = None
 # Facts about the most recent _run_process call; read by _run_tier.
 _LAST_PROCESS: dict[str, Any] = {}
+
+
+class InvalidBaseTemp(ValueError):
+    pass
 
 
 def _int_attr(node: ET.Element, name: str) -> int:
@@ -74,27 +81,6 @@ def _junit_counts(path: Path) -> dict[str, Any] | None:
     return result
 
 
-def _advisory_observed(path: Path, expected: list[str]) -> bool:
-    root = ET.parse(path).getroot()
-    cases = list(root.iter('testcase'))
-    if any(case.find('skipped') is not None for case in cases):
-        return False
-    observed = [case.get('classname', '') + '::' + case.get('name', '') for case in cases]
-    keys = []
-    for node in expected:
-        head, bracket, parameter = node.partition('[')
-        file, *parts = head.split('::')
-        if not file.endswith('.py') or not parts:
-            return False
-        if bracket:
-            parts[-1] += bracket + parameter
-        module = file[:-3].replace('/', '.')
-        if len(parts) > 1:
-            module += '.' + '.'.join(parts[:-1])
-        keys.append(module + '::' + parts[-1])
-    return len(observed) == len(keys) and set(observed) == set(keys)
-
-
 def _sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
 def _git_status() -> str:
@@ -114,8 +100,9 @@ def _apply_strict_full_soak(env: dict[str, str]) -> None:
     if env.get("V2_SOAK_STRICT_FULL") == "1":
         env.update({"SOAK_TIER": "full", **SOAK_PRESETS["full"]})
 def _tier_command(tier: str, junit: Path, basetemp: Path) -> list[str]:
+    unit_marker = " and ".join(f"not {name}" for name in (*UNIT_SEPARATE_MARKERS, "quarantined", "admission_hold"))
     args = {
-        "unit": ["tests", "--ignore=tests/smoke", "--ignore=tests/soak", "-m", "not soak and not repin_exhaustive and not quarantined and not admission_hold", "-q", "-rs"],
+        "unit": ["tests", "--ignore=tests/smoke", "--ignore=tests/soak", "-m", unit_marker, "-q", "-rs"],
         "smoke": ["tests/smoke", "-m", "not quarantined and not admission_hold", "-q", "-rs", "--maxfail=1"],
         "soak": ["tests/soak", "-m", "soak", "-q", "-s", "-rs"],
     }.get(tier)
@@ -299,7 +286,8 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
         primary = "evidence_incomplete"
     return primary, reporting
 def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1,
-              shard_index: int | None = None, shard_count: int | None = None) -> dict[str, Any]:
+              shard_index: int | None = None, shard_count: int | None = None,
+              advisory_bound: float | None = None) -> dict[str, Any]:
     started = time.monotonic()
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
@@ -329,12 +317,15 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             return _result(tier, code=preflight, passed=False, reason="preflight_failed", timed_out=preflight_timeout, preflight=preflight, command=[str(PRE_FLIGHT)], junit=junit, log=log, soak=soak)
     command = _tier_command(tier, junit, basetemp)
     admission_manifest = evidence / f'{tier}.admission.json'
+    scope_args = [f'--admission-separate-marker={name}' for name in UNIT_SEPARATE_MARKERS] if tier == 'unit' else []
     if tier in {'unit', 'smoke'}:
         admission_manifest.unlink(missing_ok=True)
         command += ['-p', 'admission_plugin', f'--admission-root={REPO_ROOT}', '--admission-suite=daemon',
-                    f'--admission-manifest={admission_manifest}']
+                    f'--admission-manifest={admission_manifest}', *scope_args]
+    worker_args = []
     if tier == "unit" and unit_workers > 1:
-        command += ["-n", str(unit_workers), "--dist", "loadfile", "--max-worker-restart=0"]
+        worker_args = ["-n", str(unit_workers), "--max-worker-restart=0"]
+        command.extend([*worker_args, "--dist", "loadfile"])
     command += ["-p", "tools.gate_progress", f"--gate-progress-journal={journal}", f"--gate-progress-run-id={_ACTIVE_RUN_ID or ''}:{tier}"]
     if tier == "unit" and shard_index is not None:
         command += ["-p", "tools.gate_shard", f"--gate-shard-index={shard_index}",
@@ -372,7 +363,8 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             tests = [t for t in tests if (t.startswith('tests/smoke/') if tier == 'smoke'
                                            else not t.startswith(('tests/smoke/', 'tests/soak/')))]
             tests.extend(row['id'] for row in admission_state['held'])
-            tests = sorted(set(tests))
+            separate = admission_state['separate_tiers'] if scope_args else {}
+            tests = sorted(set(tests).difference(separate))
             files = sorted({t.split('::', 1)[0] for t in tests})
             if shard_index is not None:
                 files = [file for file in files if int(hashlib.sha256(file.encode()).hexdigest(), 16) % shard_count == shard_index]
@@ -380,33 +372,105 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
                 for test in tests:
                     if test.split('::', 1)[0] in files:
                         print('[v2-gate] advisory ' + test, flush=True)
-                remaining = timeout - (time.monotonic() - started)
+                remaining = advisory_bound if advisory_bound is not None else timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     raise ValueError('no time remaining for quarantine advisory')
                 advisory_junit = evidence / f'{tier}-advisory.junit.xml'
                 advisory_junit.unlink(missing_ok=True)
+                advisory_journal = evidence / f'{tier}-advisory.progress.jsonl'
+                advisory_journal.unlink(missing_ok=True)
                 advisory_command = [_python_bin(), '-m', 'pytest', *files, '-m', 'quarantined or admission_hold', '-q', '-rs',
                                     '-p', 'admission_plugin', f'--admission-root={REPO_ROOT}', '--admission-suite=daemon',
                                     f'--admission-manifest={evidence / (tier + "-advisory-admission.json")}',
-                                    f'--junitxml={advisory_junit}', '--basetemp', str(basetemp / (tier + '-advisory'))]
+                                    f'--junitxml={advisory_junit}', '--basetemp', str(basetemp / (tier + '-advisory')),
+                                    '-p', 'tools.gate_progress', f'--gate-progress-journal={advisory_journal}',
+                                    f'--gate-progress-run-id={_ACTIVE_RUN_ID or ""}:{tier}-advisory',
+                                    *scope_args, *worker_args]
+                advisory_log = evidence / f'{tier}-advisory.log'
                 advisory_code, advisory_timeout = _run_process(advisory_command, env=env,
-                    log_path=evidence / 'unit-advisory.log', timeout=remaining, advisory=True)
-                result['advisory'] = {'command': advisory_command, 'returncode': advisory_code,
-                                      'timed_out': advisory_timeout, 'junit': str(advisory_junit),
-                                      'counts': _junit_counts(advisory_junit)}
-                if advisory_code not in (0, 1) and not advisory_timeout:
-                    raise ValueError('quarantine advisory did not execute')
-                expected = [test for test in tests if test.split('::', 1)[0] in files]
-                if not advisory_timeout and not _advisory_observed(advisory_junit, expected):
-                    raise ValueError('quarantined identity missing from advisory execution')
+                    log_path=advisory_log, timeout=remaining, advisory=True)
+                advisory_progress = summarize_progress(advisory_journal)
+                result['advisory'] = {'command': advisory_command, 'progress': advisory_progress, 'returncode': advisory_code,
+                                      'timed_out': advisory_timeout, 'junit': str(advisory_junit), 'log': str(advisory_log),
+                                      'bound_s': remaining, 'counts': _junit_counts(advisory_junit)}
         except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as exc:
             result['advisory_error'] = type(exc).__name__
+            result['advisory_detail'] = str(exc)[:500]
             if result['passed']:
                 result.update(passed=False, reason='quarantine_advisory_incomplete',
                               primary_outcome='quarantine_advisory_incomplete')
             else:
                 result['secondary_outcomes'].append('quarantine_advisory_incomplete')
     return result
+
+
+def _run_daemon_contract(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
+    log = evidence / "daemon_contract.log"
+    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools/daemon_contract_gate.py"),
+               "--base", base]
+    try:
+        completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True,
+                                   check=False, timeout=timeout)
+        output = (completed.stdout or "") + (completed.stderr or "")
+        log.write_text(output[-200_000:], encoding="utf-8")
+        return _result("daemon_contract", code=completed.returncode, passed=completed.returncode == 0,
+                       reason=None if completed.returncode == 0 else "contract_rejected",
+                       command=command, log=log, contract_base=base)
+    except subprocess.TimeoutExpired as exc:
+        detail = (exc.stdout or b"") + (exc.stderr or b"")
+        log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
+        return _result("daemon_contract", code=124, passed=False, reason="timeout", timed_out=True,
+                       command=command, log=log, contract_base=base)
+
+
+def _run_daemon_layer_selectors(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
+    log = evidence / "daemon_layer_selectors.log"
+    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools/daemon_layer_gate.py"),
+               "--base", base]
+    try:
+        completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True,
+                                   check=False, timeout=timeout)
+        output = (completed.stdout or "") + (completed.stderr or "")
+        log.write_text(output[-200_000:], encoding="utf-8")
+        return _result("daemon_layer_selectors", code=completed.returncode,
+                       passed=completed.returncode == 0,
+                       reason=None if completed.returncode == 0 else "layer_selector_rejected",
+                       command=command, log=log, contract_base=base)
+    except subprocess.TimeoutExpired as exc:
+        detail = (exc.stdout or b"") + (exc.stderr or b"")
+        log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
+        return _result("daemon_layer_selectors", code=124, passed=False, reason="timeout", timed_out=True,
+                       command=command, log=log, contract_base=base)
+
+
+
+def _run_daemon_b04_selectors(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
+    log = evidence / "daemon_b04_selectors.log"
+    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools/daemon_b04_gate.py"),
+               "--base", base]
+    try:
+        completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True,
+                                   check=False, timeout=timeout)
+        log.write_text(((completed.stdout or "") + (completed.stderr or ""))[-200_000:], encoding="utf-8")
+        return _result("daemon_b04_selectors", code=completed.returncode,
+                       passed=completed.returncode == 0,
+                       reason=None if completed.returncode == 0 else "b04_selector_rejected",
+                       command=command, log=log, contract_base=base)
+    except subprocess.TimeoutExpired as exc:
+        detail = (exc.stdout or b"") + (exc.stderr or b"")
+        log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
+        return _result("daemon_b04_selectors", code=124, passed=False, reason="timeout", timed_out=True,
+                       command=command, log=log, contract_base=base)
+
+def _merge_contract_base(timeout: float) -> str:
+    result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=REPO_ROOT,
+                            text=True, capture_output=True, check=False, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError("cannot resolve origin/main merge base for daemon contract gate")
+    value = result.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise RuntimeError("daemon contract gate received an invalid merge base")
+    return value
 
 
 def _run_usage_manifest(manifest: Path, evidence: Path, deployment_contract: Path) -> dict[str, Any]:
@@ -479,12 +543,16 @@ def _envelope(remaining: list[tuple[str, float]], *, usage_pending: bool, reserv
     usage = USAGE_BOUND_S if usage_pending else 0.0
     return {"tier_bounds_s": tiers, "preflight_bounds_s": preflight, "usage_bound_s": usage, "reserve_s": reserve,
             "required_s": sum(tiers.values()) + sum(preflight.values()) + usage + reserve}
-def _deadline_check(deadline: dict[str, Any] | None, clock_start: float, stage: str, remaining: list[tuple[str, float]], *, usage_pending: bool) -> dict[str, Any] | None:
+def _deadline_check(deadline: dict[str, Any] | None, clock_start: float, stage: str, remaining: list[tuple[str, float]], *, usage_pending: bool,
+                    merge_bounds: dict[str, float] | None = None) -> dict[str, Any] | None:
     """Return a refusal result when the remaining deadline cannot cover the remaining bounds."""
     if deadline is None:
         return None
     left = deadline["deadline_s"] - (time.monotonic() - clock_start)
     envelope = _envelope(remaining, usage_pending=usage_pending, reserve=deadline["reserve_s"])
+    if merge_bounds:
+        envelope["merge_check_bounds_s"] = merge_bounds
+        envelope["required_s"] += sum(merge_bounds.values())
     check = {"stage": stage, "remaining_s": round(left, 3), **envelope, "ok": left >= envelope["required_s"]}
     deadline["checks"].append(check)
     if check["ok"]:
@@ -531,17 +599,27 @@ def main() -> int:
     sha = before = None
     results: list[dict[str, Any]] = []
     _TERMINATION_REQUESTED, _TERMINATION_SIGNAL = False, None
+    owned_basetemp = None
     old_handlers, ready = {}, False
     try:
         # Setup faults below land in the runner_error record rather than a bare traceback.
         sha, before = _sha(), _git_status()
         _write_evidence(args.gate, evidence, args.evidence_out, sha, before, None, None, [], finished=False, deadline=deadline)
-        basetemp = args.basetemp or evidence / f"pytest-{args.gate}-{os.getpid()}-{uuid.uuid4().hex[:10]}"
+        if args.basetemp is None:
+            owned_basetemp = Path(tempfile.mkdtemp(prefix=f"v2-{args.gate}-"))
+        basetemp = (owned_basetemp or args.basetemp).resolve()
+        if not disposable_location(basetemp, Path(tempfile.gettempdir())):
+            raise InvalidBaseTemp("place --basetemp inside the owned TMPDIR or an explicitly designated disposable root")
         basetemp.mkdir(parents=True, exist_ok=True)
         manifest = basetemp / ".owned.json"
         defaults = DEFAULT_TIMEOUTS
+        merge_bounds = {}
+        advisory_bounds = {}
         if args.gate == "merge":
             config = json.loads((REPO_ROOT / "scripts" / "gate-env.json").read_text(encoding="utf-8"))
+            merge_bounds = config["deadline"]["merge_check_bounds_s"]
+            if args.timeout_seconds is None:
+                advisory_bounds["unit"] = config["deadline"]["merge_unit_advisory_s"]
             defaults = {**DEFAULT_TIMEOUTS, **config["profiles"]["pentacle"]["targets"]["v2-merge"]["tier_timeouts"]}
         limits = [(tier, args.timeout_seconds if args.timeout_seconds is not None else float(os.environ.get(f"V2_{tier.upper()}_TIMEOUT_S", defaults[tier]))) for tier in tiers]
         reap_manifest(manifest)
@@ -555,24 +633,39 @@ def main() -> int:
             results.append(_result("source_integrity", code=125, passed=False, reason="dirty_worktree", command=["git", "status", "--porcelain", "--untracked-files=all"]))
         else:
             usage_pending = args.gate == "merge" and args.usage_manifest is not None
-            refusal = _deadline_check(deadline, clock_start, "deadline", limits, usage_pending=usage_pending)
+            pending = [(tier, limit + advisory_bounds.get(tier, 0)) for tier, limit in limits]
+            refusal = _deadline_check(deadline, clock_start, "deadline", pending, usage_pending=usage_pending,
+                                     merge_bounds=merge_bounds)
             if refusal:
                 results.append(refusal)
             else:
+                if args.gate == "merge":
+                    try:
+                        base = _merge_contract_base(merge_bounds["merge_base"])
+                        for name, check in (("daemon_contract", _run_daemon_contract),
+                                            ("daemon_layer_selectors", _run_daemon_layer_selectors),
+                                            ("daemon_b04_selectors", _run_daemon_b04_selectors)):
+                            results.append(check(evidence, base, merge_bounds[name]))
+                    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                        results.append(_result("daemon_contract", code=125, passed=False,
+                                               reason="contract_base_unavailable", error=type(exc).__name__))
                 if usage_pending:
                     results.append(_run_usage_manifest(args.usage_manifest, evidence, args.usage_deployment_contract))
                 for index, (tier, limit) in enumerate(limits):
                     if _TERMINATION_REQUESTED:
                         break
-                    if index and (refusal := _deadline_check(deadline, clock_start, "deadline", limits[index:], usage_pending=False)):
+                    if (index or merge_bounds) and (refusal := _deadline_check(deadline, clock_start, "deadline", pending[index:], usage_pending=False)):
                         results.append(refusal)
                         break
                     results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest, unit_workers=args.unit_workers,
+                                             **({"advisory_bound": advisory_bounds[tier]} if tier in advisory_bounds else {}),
                                              **({"shard_index": args.shard_index, "shard_count": args.shard_count}
                                                 if args.shard_index is not None else {})))
     except KeyboardInterrupt:
         _TERMINATION_REQUESTED = True
         results.append(_result("owner", code=143, passed=False, reason="terminated", termination={"kind": "external_signal", "signal": _TERMINATION_SIGNAL or "SIGINT"}))
+    except InvalidBaseTemp as exc:
+        results.append(_result("setup", code=2, passed=False, reason="invalid_basetemp", error=str(exc)))
     except ManifestError as exc:
         results.append(_result("owner", code=125, passed=False, reason=f"manifest_error:{exc}"))
     except Exception as exc:  # keep a terminal record for any setup/logging fault
@@ -597,6 +690,15 @@ def main() -> int:
                         cleanup_errors.append(f"basetemp_not_removed:{tier}")
             elif manifest.exists() and not cleanup_errors:
                 cleanup_errors.append("owner_manifest_unresolved")
+        if owned_basetemp is not None and not cleanup_errors:
+            try:
+                # The manifest lock survives a successful reap. Only the private
+                # root we allocated can be retired with its lock.
+                if not (owned_basetemp / ".owned.json").exists():
+                    (owned_basetemp / ".owned.json.lock").unlink(missing_ok=True)
+                owned_basetemp.rmdir()
+            except OSError as exc:
+                cleanup_errors.append(f"basetemp_cleanup:{exc}")
         for signum, previous in old_handlers.items():
             signal.signal(signum, previous)
         _ACTIVE_MANIFEST_PATH = _ACTIVE_RUN_ID = None

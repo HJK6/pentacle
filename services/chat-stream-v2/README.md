@@ -108,6 +108,12 @@ Without peer configuration, the daemon runs locally. To keep specs and QA record
 
 `python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The web gate explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
 
+Use `tools/daemon_identity_cli.py` to print the candidate release SHA,
+database schema version, and supported wire-protocol range. The daemon's first
+`welcome` frame carries the same schema and protocol identity with its runtime
+SHA. A legacy hello that omits `protocol_version` remains accepted; a peer that
+declares a version outside the advertised range is refused before hello state
+is recorded.
 ## Waiting for notification answers
 
 `notification.await` holds the host-transfer lock only while projecting committed
@@ -332,6 +338,14 @@ history. Restart recovery can drain that checkpoint independently of discovery;
 verify that the source returns to live capture after recovery completes.
 
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the web gate. Fixtures must use invented content and valid public wire identifiers.
+
+For a direct merge run, give the process a private writable HOME, a fresh OS
+temp directory in `TMPDIR`, and a separate evidence directory. Keep an explicit
+`--basetemp` inside that temp directory. The dedicated soak runner selects `tests/soak -m soak`. Soak-marked
+cases outside that directory go through normal unit admission. The unit manifest
+records `repin_exhaustive` cases under `separate_tiers` for their dedicated run. The merge deadline includes the selector checks and a separate bound for
+unit advisory execution. Each advisory tier writes its own log, progress journal
+and JUnit. Incomplete execution fails the gate.
 
 Public CI sets the existing unit-only budget `V2_UNIT_TIMEOUT_S=1200`; smoke and
 soak limits keep their defaults. Pytest scratch is separate from

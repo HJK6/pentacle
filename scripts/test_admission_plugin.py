@@ -116,3 +116,30 @@ def test_daemon_unreadable_quarantine_still_executes_blocking_test(tmp_path):
     assert proc.returncode != 0
     assert 'BLOCKING EXECUTED' in proc.stdout
     assert 'quarantine inventory unavailable' in proc.stderr
+
+
+def test_unit_separates_exhaustive_but_admits_soak_cases_outside_the_soak_directory(tmp_path):
+    suite = make_fixture(tmp_path)
+    tests = suite / "tests"
+    (tests / "test_matrix.py").write_text(
+        "import pytest\npytestmark = pytest.mark.repin_exhaustive\n"
+        "def test_matrix(): raise AssertionError('exhaustive ran in unit')\n")
+    with (tests / "test_cases.py").open("a") as stream:
+        stream.write("\nimport pytest\n@pytest.mark.soak\ndef test_slow(): pass\n")
+    manifest = tmp_path / "selection.json"
+    cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests", "-m",
+           "quarantined or admission_hold", "-p", "admission_plugin",
+           "--admission-root=" + str(tmp_path), "--admission-suite=daemon",
+           "--admission-manifest=" + str(manifest),
+           "--admission-separate-marker=repin_exhaustive"]
+    env = {**os.environ, "PYTHONPATH": str(SCRIPTS), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    proc = subprocess.run(cmd, env=env, cwd=suite, text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(manifest.read_text())
+    assert result["separate_tiers"] == {
+        "tests/test_matrix.py::test_matrix": "repin_exhaustive",
+    }
+    assert {row["id"] for row in result["held"]} == {"tests/test_cases.py::test_new", "tests/test_cases.py::test_slow"}
+    assert "tests/test_cases.py::test_slow" in proc.stdout.splitlines()
+    assert "tests/test_cases.py::test_new" in proc.stdout.splitlines()
+    assert "tests/test_matrix.py::test_matrix" not in proc.stdout.splitlines()

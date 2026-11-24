@@ -181,7 +181,8 @@ class Rehearsal:
                          "pentacle-chat-core/tests/fixtures/summary_prose_cases.json",
                          "services/_shared/spawn_defaults.json", "services/chat-stream-v2/requirements.txt", "services/agent-orch/pyproject.toml",
                          "services/agent-orch/deploy/runtime_python.py",
-                         "services/chat-stream-v2/deploy/com.pentacle.usage-state-collector.plist"):
+                         "services/chat-stream-v2/deploy/com.pentacle.usage-state-collector.plist",
+                         "services/chat-stream-v2/daemon_identity.json"):
             destination = self.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.controller / relative, destination)

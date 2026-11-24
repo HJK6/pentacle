@@ -89,7 +89,7 @@ node server --profile workstation \
 |---|---|
 | `/` | `renderer/dist/web/web.html` with the computed config injected as `window.__PENTACLE_CONFIG__` |
 | `/api/config` | the same computed config as JSON — byte-identical to what `window.cc.getConfig()` returns |
-| `/api/health` | `{ ok, connections }` |
+| `/api/health` | connection count plus the frozen served build SHA/id and daemon schema/protocol compatibility identity |
 | `/login` | GET the token form, POST the token to mint the auth cookie — present only in token auth; `404` under `--auth tailscale` |
 | `/dashboards/private/<catalog_version>/<path>` | a private dashboard file listed in `<dashboards.catalogRoot>/<catalog_version>/catalog.json`, served after auth only if beneath that version directory and matching its sha256; otherwise `404` (`server/private_dashboards.js`, [Dashboards view](../docs/dashboards_view.md#runtime-catalog)) |
 | everything else | a file under `renderer/dist/web/`; paths cannot escape it |

@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { freezeWebDist, isManifestFile } = require('../server/web_build_id');
+const { freezeWebDist, isManifestFile, webHealthIdentity } = require('../server/web_build_id');
 
 function makeDist(overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-dist-'));
@@ -80,6 +80,33 @@ test('source commit is frozen with the served files, independent of later disk c
   fs.writeFileSync(path.join(dir, 'build-commit.json'), JSON.stringify({ schema_version: 1, build_commit: later }));
   assert.equal(frozen.buildCommit, first);
   assert.equal(freezeWebDist(dir).buildCommit, later);
+});
+
+test('daemon schema and protocol identity is frozen with the served build', () => {
+  const metadata = {
+    schema_version: 1, build_commit: 'a'.repeat(40), daemon_schema_version: 2,
+    protocol_version: 2, min_protocol_version: 2, max_protocol_version: 3,
+  };
+  const dir = makeDist({ 'build-commit.json': JSON.stringify(metadata) });
+  const frozen = freezeWebDist(dir);
+  assert.equal(frozen.daemonSchemaVersion, 2);
+  assert.equal(frozen.protocolVersion, 2);
+  assert.equal(frozen.minProtocolVersion, 2);
+  assert.equal(frozen.maxProtocolVersion, 3);
+  assert.deepEqual(webHealthIdentity(frozen), {
+    build_id: frozen.buildId,
+    build_commit: 'a'.repeat(40),
+    release_sha: 'a'.repeat(40),
+    schema_version: 2,
+    protocol_version: 2,
+    min_protocol_version: 2,
+    max_protocol_version: 3,
+  });
+  fs.writeFileSync(path.join(dir, 'build-commit.json'), JSON.stringify({
+    ...metadata, protocol_version: 4,
+  }));
+  assert.equal(frozen.protocolVersion, 2, 'frozen identity does not follow later disk changes');
+  assert.equal(freezeWebDist(dir).protocolVersion, null, 'incompatible protocol range is not reported');
 });
 
 test('missing or invalid build metadata does not invent a commit', () => {

@@ -9,7 +9,6 @@ import sys
 import pytest
 
 from quarantine_scheduler import run_child
-from tools.run_gate import _advisory_observed
 from tools import run_gate
 
 
@@ -20,16 +19,6 @@ def test_worker_exit_and_timeout_are_bounded():
         with pytest.raises(asyncio.TimeoutError):
             await run_child([sys.executable, '-c', 'import time; time.sleep(30)'], dict(os.environ), timeout=0.1)
     asyncio.run(exercise())
-
-
-def test_advisory_receipt_requires_each_exact_case_to_execute(tmp_path):
-    receipt = tmp_path / 'junit.xml'
-    receipt.write_text('<testsuite><testcase classname="tests.test_a.TestGroup" name="test_one[x]"/></testsuite>')
-    expected = ['tests/test_a.py::TestGroup::test_one[x]']
-    assert _advisory_observed(receipt, expected)
-    assert not _advisory_observed(receipt, expected + ['tests/test_a.py::test_missing'])
-    receipt.write_text('<testsuite><testcase classname="tests.test_a.TestGroup" name="test_one[x]"><skipped/></testcase></testsuite>')
-    assert not _advisory_observed(receipt, expected)
 
 
 @pytest.mark.parametrize('tier', ['unit', 'smoke'])
@@ -73,7 +62,7 @@ def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, mo
             return 1, False
         Path(junit).write_text(f'<testsuite tests="1" failures="{int(blocking_failure)}" errors="0" skipped="0"/>')
         manifest = next(x.split('=', 1)[1] for x in command if x.startswith('--admission-manifest='))
-        Path(manifest).write_text(json.dumps({'complete': True, 'held': [{'id': held}]}))
+        Path(manifest).write_text(json.dumps({'complete': True, 'held': [{'id': held}], 'separate_tiers': {}}))
         return int(blocking_failure), False
 
     monkeypatch.setattr(run_gate, '_run_process', fake)
@@ -81,6 +70,7 @@ def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, mo
     assert result['passed'] is not blocking_failure
     assert result['reason'] == ('test_failures' if blocking_failure else None)
     advisory = result['advisory']
+    assert Path(advisory['log']).name == f'{tier}-advisory.log'
     assert advisory['command'][1:7] == [
         '-m', 'pytest', f'{prefix}/test_a.py', f'{prefix}/test_b.py', '-m', 'quarantined or admission_hold',
     ]
