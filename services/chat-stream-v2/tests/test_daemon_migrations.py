@@ -138,6 +138,18 @@ def test_interruption_before_main_step_receipt_does_not_repeat_store_start(
 def test_post_commit_archive_migration_resumes_without_restarting_store(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    """Admit the post-commit resume boundary as a blocking regression test.
+
+    Journey: paired disposable DB with old route columns -> Store commits its
+    main schema -> its archive migration is interrupted -> prepare retries.
+    Subject/boundary: daemon_migrations.prepare between main-schema commit and
+    pair sealing. Detected fault: retry leaves the old archive schema behind.
+    Positive control: the unbroken candidate restores both columns and calls
+    Store.start exactly once; fresh-pair and between-commit tests cover adjacent
+    successful paths. Runner: Python 3.13 with pytest, selecting this test in
+    test_daemon_migrations.py. Dependencies: standard-library SQLite and a
+    pytest temporary directory only; no network, live DB, daemon, or web host.
+    """
     database = tmp_path / "archive-migration-resume.db"
     daemon_migrations.prepare(database)
     with sqlite3.connect(database) as conn:
