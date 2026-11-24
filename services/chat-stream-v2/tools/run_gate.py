@@ -449,6 +449,25 @@ def _run_daemon_layer_selectors(evidence: Path, base: str) -> dict[str, Any]:
                        command=command, log=log, contract_base=base)
 
 
+
+def _run_daemon_b04_selectors(evidence: Path, base: str) -> dict[str, Any]:
+    log = evidence / "daemon_b04_selectors.log"
+    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools/daemon_b04_gate.py"),
+               "--base", base]
+    try:
+        completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True,
+                                   check=False, timeout=90)
+        log.write_text(((completed.stdout or "") + (completed.stderr or ""))[-200_000:], encoding="utf-8")
+        return _result("daemon_b04_selectors", code=completed.returncode,
+                       passed=completed.returncode == 0,
+                       reason=None if completed.returncode == 0 else "b04_selector_rejected",
+                       command=command, log=log, contract_base=base)
+    except subprocess.TimeoutExpired as exc:
+        detail = (exc.stdout or b"") + (exc.stderr or b"")
+        log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
+        return _result("daemon_b04_selectors", code=124, passed=False, reason="timeout", timed_out=True,
+                       command=command, log=log, contract_base=base)
+
 def _merge_contract_base() -> str:
     result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=REPO_ROOT,
                             text=True, capture_output=True, check=False, timeout=20)
@@ -610,6 +629,7 @@ def main() -> int:
                     contract_base = _merge_contract_base()
                     results.append(_run_daemon_contract(evidence, contract_base))
                     results.append(_run_daemon_layer_selectors(evidence, contract_base))
+                    results.append(_run_daemon_b04_selectors(evidence, contract_base))
                 except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                     results.append(_result("daemon_contract", code=125, passed=False,
                                            reason="contract_base_unavailable", error=type(exc).__name__))

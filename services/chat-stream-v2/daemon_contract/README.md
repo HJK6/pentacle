@@ -24,3 +24,13 @@ baselines and pinned by `inventory_manifest.json` against commit
 are the current rule inputs. Each rule may remove entries as the corresponding
 code moves behind its layer. Adding or moving an active exception is a gate
 failure. The manifests are data, not permissions to introduce new code.
+
+B04's protected-core and projection checks run with
+`python3 services/chat-stream-v2/tools/daemon_b04_gate.py --base <merge-base-sha>`.
+They verify the frozen core-import census and the F1/F2 exception selectors,
+then check candidate imports, writer and scheduler boundaries, and bulk-view
+references. `main.py` is the composition exemption for core imports. The F4
+SQLite connection exemption is limited to the accepted offline preparation
+sites in the B04 parent; new connections still require admission. The merge
+runner and predeploy workflow run this check alongside the existing contract
+and policy/observation/delivery checks.

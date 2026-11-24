@@ -343,6 +343,10 @@ jobs:
       env:
         RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       run: python3 services/chat-stream-v2/tools/daemon_contract_gate.py --base "$RELEASE_BASE"
+    - name: Daemon protected-core and projection selectors
+      env:
+        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: python3 services/chat-stream-v2/tools/daemon_b04_gate.py --base "$RELEASE_BASE"
     - name: Daemon policy, observation, and delivery selectors
       env:
         RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
