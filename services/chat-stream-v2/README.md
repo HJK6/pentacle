@@ -114,6 +114,17 @@ database schema version, and supported wire-protocol range. The daemon's first
 SHA. A legacy hello that omits `protocol_version` remains accepted; a peer that
 declares a version outside the advertised range is refused before hello state
 is recorded.
+
+### Disposable schema preparation
+
+Use `tools/daemon_schema.py inspect <database>` to read the versioned preparation
+registry and paired archive metadata without scanning application rows. Use
+`tools/daemon_schema.py prepare <database>` only on an explicitly chosen
+disposable copy. Preparation reuses the current Store schema and repair helpers,
+records the main step, commits the history archive independently, then writes the
+final pair marker only after archive verification. An interrupted preparation
+can resume from its last committed step. The serving startup path is unchanged;
+this command does not authorize preparation or deployment of a production DB.
 ## Waiting for notification answers
 
 `notification.await` holds the host-transfer lock only while projecting committed
