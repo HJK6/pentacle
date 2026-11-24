@@ -341,9 +341,9 @@ Run the final merge gate from a clean checkout; it produces a source-bound evide
 
 For a direct merge run, give the process a private writable HOME, a fresh OS
 temp directory in `TMPDIR`, and a separate evidence directory. Keep an explicit
-`--basetemp` inside that temp directory. The unit admission manifest records
-`soak` and `repin_exhaustive` case IDs under `separate_tiers` for their dedicated
-runs. The merge deadline includes the selector checks and a separate bound for
+`--basetemp` inside that temp directory. The dedicated soak runner selects `tests/soak -m soak`. Soak-marked
+cases outside that directory go through normal unit admission. The unit manifest
+records `repin_exhaustive` cases under `separate_tiers` for their dedicated run. The merge deadline includes the selector checks and a separate bound for
 unit advisory execution. Each advisory tier writes its own log, progress journal
 and JUnit. Incomplete execution fails the gate.
 

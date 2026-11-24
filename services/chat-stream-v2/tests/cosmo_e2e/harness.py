@@ -30,12 +30,10 @@ import socket as _socket
 import tempfile
 from contextlib import closing
 from pathlib import Path
-
 from typing import Any, Callable
 
 import websockets
 
-from tools.gate_temp import disposable_location
 from _shared import operator_auth
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from blobs import BlobStore, DEFAULT_BLOB_ROOT
@@ -87,13 +85,40 @@ def _protected_roots() -> list[Path]:
     return roots
 
 
+def _disposable_bases() -> list[Path]:
+    """Directories under which a disposable harness root is permitted: the OS
+    temp base, plus any EXPLICITLY-designated gate/test temp base from the
+    environment.  The v2 gate puts its pytest ``--basetemp`` under
+    ``V2_GATE_EVIDENCE_DIR`` when the caller sets it (``_run_tier`` copies the
+    full env into the pytest subprocess), and otherwise under the OS temp base
+    via ``mkdtemp`` — so both real invocation paths are covered WITHOUT trusting
+    an arbitrary ``pytest``-named path component (e.g. one crafted under $HOME)."""
+    bases = [_disposable_base()]
+    for env_key in ("V2_GATE_EVIDENCE_DIR", "COSMO_E2E_DISPOSABLE_BASE"):
+        val = os.environ.get(env_key)
+        if val:
+            bases.append(_resolve(val))
+    return bases
+
+
+def _is_disposable_location(root: Path) -> bool:
+    """A disposable root must live under the OS temp base or an explicitly
+    designated gate/test temp base (see ``_disposable_bases``).  A path is NOT
+    disposable merely because some component is named ``pytest`` — that earlier
+    rule accepted e.g. ``$HOME/pytest-x/...`` and is the F1 hole this closes."""
+    for base in _disposable_bases():
+        if root == base or base in root.parents:
+            return True
+    return False
+
+
 def assert_disposable_root(tmp_root: str | os.PathLike[str]) -> Path:
     """Validate the harness ROOT itself before anything is created under it.
 
     The root must be a disposable location (OS temp base or a pytest tmp dir) and
     must not be, or be inside, a protected live runtime/config/blob root."""
     root = _resolve(tmp_root)
-    if not disposable_location(root, _disposable_base(), test_base=os.environ.get("COSMO_E2E_DISPOSABLE_BASE")):
+    if not _is_disposable_location(root):
         raise IsolationError(f"refusing non-disposable harness root: {root}")
     for protected in _protected_roots():
         if root == protected or protected in root.parents:

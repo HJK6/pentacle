@@ -35,15 +35,21 @@ def run_gate(root, base=BASE):
                            '--base', base], cwd=root, capture_output=True, text=True)
 
 
-def test_projection_import_gate_cli(checkout):
+def test_projection_import_gate_baseline(checkout):
     baseline = run_gate(checkout)
     assert baseline.returncode == 0, baseline.stderr
+
+
+def test_projection_import_gate_cli(checkout):
     path = checkout / SERVICE / 'sessions.py'
-    original = path.read_text()
-    path.write_text(original + '\nimport work_lanes_projection as new_view\n')
+    path.write_text(path.read_text() + '\nimport work_lanes_projection as new_view\n')
     rejected = run_gate(checkout)
     assert rejected.returncode != 0 and 'new F2 import' in rejected.stderr
-    path.write_text(original + '\nimport json as harmless_library\n')
+
+
+def test_harmless_library_import_passes(checkout):
+    path = checkout / SERVICE / 'sessions.py'
+    path.write_text(path.read_text() + '\nimport json as harmless_library\n')
     control = run_gate(checkout)
     assert control.returncode == 0, control.stderr
 
@@ -67,18 +73,21 @@ def b04_wrapper():
     assert rejected.returncode != 0 and 'new F2 import' in rejected.stderr
 
 
-def test_new_f1_writer_alias_and_timer_fail(checkout):
+@pytest.mark.parametrize('candidate', [
+    '\ndef wrapper(store):\n    work = store.submit\n    return work\n',
+    '\ndef timer(loop, job):\n    return loop.call_later(1, job)\n',
+    '\ndef task(asyncio, job):\n    return asyncio.create_task(job())\n',
+], ids=['writer-alias', 'delayed-callback', 'task'])
+def test_new_f1_writer_alias_and_timer_fail(checkout, candidate):
     path = checkout / SERVICE / 'sessions.py'
-    original = path.read_text()
-    for candidate in (
-        '\ndef wrapper(store):\n    work = store.submit\n    return work\n',
-        '\ndef timer(loop, job):\n    return loop.call_later(1, job)\n',
-        '\ndef task(asyncio, job):\n    return asyncio.create_task(job())\n',
-    ):
-        path.write_text(original + candidate)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
-    path.write_text(original + '\ndef clean(value):\n    return value + 1\n')
+    path.write_text(path.read_text() + candidate)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
+
+
+def test_f1_clean_function_passes(checkout):
+    path = checkout / SERVICE / 'sessions.py'
+    path.write_text(path.read_text() + '\ndef clean(value):\n    return value + 1\n')
     control = run_gate(checkout)
     assert control.returncode == 0, control.stderr
 
@@ -114,35 +123,42 @@ def test_frozen_or_mergebase_site_passes_but_absent_site_fails():
         sys.path.pop(0)
 
 
-def test_new_bulk_call_alias_and_unbounded_activity_fail(checkout):
+@pytest.mark.parametrize('candidate', [
+    '\nasync def b04(store):\n    return await store.work_lane_rows()\n',
+    '\nasync def b04(store):\n    view = store.work_lane_rows\n    return await view()\n',
+    '\nasync def b04(store):\n    return await store.assistant_composite_activity(stream_id="x")\n',
+], ids=['direct', 'alias', 'unbounded-activity'])
+def test_new_bulk_call_alias_and_unbounded_activity_fail(checkout, candidate):
     path = checkout / SERVICE / 'sessions.py'
-    original = path.read_text()
-    cases = (
-        '\nasync def b04(store):\n    return await store.work_lane_rows()\n',
-        '\nasync def b04(store):\n    view = store.work_lane_rows\n    return await view()\n',
-        '\nasync def b04(store):\n    return await store.assistant_composite_activity(stream_id="x")\n',
-    )
-    for candidate in cases:
-        path.write_text(original + candidate)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and 'new F2 bulk reference' in rejected.stderr
-    path.write_text(original + '\nasync def b04(store):\n    return await store.assistant_composite_activity(stream_id="x", input_ids=["x"])\n')
+    path.write_text(path.read_text() + candidate)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and 'new F2 bulk reference' in rejected.stderr
+
+
+def test_bounded_activity_passes(checkout):
+    path = checkout / SERVICE / 'sessions.py'
+    path.write_text(path.read_text() + '\nasync def b04(store):\n    return await store.assistant_composite_activity(stream_id="x", input_ids=["x"])\n')
     assert run_gate(checkout).returncode == 0
 
 
-def test_exception_addition_move_and_stale_removal_fail(checkout):
+@pytest.mark.parametrize('change', ['addition', 'move', 'removal', 'unchanged'])
+def test_exception_addition_move_and_stale_removal_fail(checkout, change):
     path = checkout / SERVICE / 'daemon_contract/active/F2_projections.txt'
     original = path.read_text()
     entry = 'store.py:55 store_usage'
     assert entry in original
-    for mutated in (original + 'store.py:999 store_usage\n',
-                    original.replace(entry, 'store.py:56 store_usage'),
-                    original.replace(entry + '\n', '')):
-        path.write_text(mutated)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and ('exception' in rejected.stderr)
-    path.write_text(original)
-    assert run_gate(checkout).returncode == 0
+    mutations = {
+        'addition': original + 'store.py:999 store_usage\n',
+        'move': original.replace(entry, 'store.py:56 store_usage'),
+        'removal': original.replace(entry + '\n', ''),
+        'unchanged': original,
+    }
+    path.write_text(mutations[change])
+    result = run_gate(checkout)
+    if change == 'unchanged':
+        assert result.returncode == 0
+    else:
+        assert result.returncode != 0 and 'exception' in result.stderr
 
 
 def test_new_feature_alias_from_existing_core_import_fails(checkout):
@@ -214,32 +230,31 @@ def test_census_modification_fails(checkout):
     assert rejected.returncode != 0 and 'census digest mismatch' in rejected.stderr
 
 
-def test_relative_import_and_bulk_getattr_bypasses_fail(checkout):
+@pytest.mark.parametrize(('candidate', 'expected'), [
+    ('\nfrom . import store_usage as b04_alias\n', 'new F2 import'),
+    ('\ndef b04(work_lanes):\n    return getattr(work_lanes, "current")()\n', 'new F2 bulk reference'),
+    ('\ndef b04(store):\n    alias = store.assistant_composite_activity\n    return alias(stream_id="x")\n', 'new F2 bulk reference'),
+], ids=['relative-import', 'getattr', 'activity-alias'])
+def test_relative_import_and_bulk_getattr_bypasses_fail(checkout, candidate, expected):
     path = checkout / SERVICE / 'sessions.py'
     original = path.read_text()
-    for candidate, expected in (
-        ('\nfrom . import store_usage as b04_alias\n', 'new F2 import'),
-        ('\ndef b04(work_lanes):\n    return getattr(work_lanes, "current")()\n', 'new F2 bulk reference'),
-        ('\ndef b04(store):\n    alias = store.assistant_composite_activity\n    return alias(stream_id="x")\n', 'new F2 bulk reference'),
-    ):
-        path.write_text(original + candidate)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and expected in rejected.stderr
+    path.write_text(original + candidate)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and expected in rejected.stderr
 
 
-def test_aliases_of_scheduler_queue_and_sqlite_fail(checkout):
+@pytest.mark.parametrize('code', [
+    '\nfrom asyncio import create_task as launch\ndef b04(task):\n    return launch(task)\n',
+    '\ndef b04(store, job):\n    q = store._queue\n    return q.put(job)\n',
+    '\nimport sqlite3 as sql\nconnect = sql.connect\ndef b04():\n    return connect("x")\n',
+    '\nfrom threading import Thread as T\ndef b04(fn):\n    worker = T(target=fn)\n    worker.start()\n',
+], ids=['task', 'queue', 'sqlite', 'thread'])
+def test_aliases_of_scheduler_queue_and_sqlite_fail(checkout, code):
     path = checkout / SERVICE / 'sessions.py'
     original = path.read_text()
-    cases = (
-        '\nfrom asyncio import create_task as launch\ndef b04(task):\n    return launch(task)\n',
-        '\ndef b04(store, job):\n    q = store._queue\n    return q.put(job)\n',
-        '\nimport sqlite3 as sql\nconnect = sql.connect\ndef b04():\n    return connect("x")\n',
-        '\nfrom threading import Thread as T\ndef b04(fn):\n    worker = T(target=fn)\n    worker.start()\n',
-    )
-    for code in cases:
-        path.write_text(original + code)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
+    path.write_text(original + code)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
 
 
 def test_merge_runner_executes_b04_cli_and_workflow_requires_it(tmp_path):
@@ -414,34 +429,35 @@ def test_unrelated_local_bulk_alias_does_not_collide():
         sys.path.pop(0)
 
 
-def test_each_named_scheduler_reference_can_retire_and_new_references_fail(checkout):
+@pytest.mark.parametrize(('expression', 'row'), [
+    ('event_push.check_pin_drift, ', 'services/chat-stream-v2/main.py:846 EventPush.check_pin_drift'),
+    ('watch_wake.missed_wake_alarm,', 'services/chat-stream-v2/main.py:846 WatchWake.missed_wake_alarm'),
+    ('account_runtime.tick, ', 'services/chat-stream-v2/main.py:847 AccountRuntime.tick'),
+    ('capacity_retry.tick, ', 'services/chat-stream-v2/main.py:847 CapacityRetry.tick'),
+    ('queued_send_now.tick', 'services/chat-stream-v2/main.py:847 QueuedSendNow.tick'),
+    ('watch_wake.tick, ', 'services/chat-stream-v2/main.py:847 WatchWake.tick'),
+], ids=['event-push', 'missed-wake', 'account', 'capacity', 'queued-send', 'watch-wake'])
+def test_named_scheduler_reference_can_retire(checkout, expression, row):
     main = checkout / SERVICE / 'main.py'
     inventory = checkout / SERVICE / 'daemon_contract/active/F1_protected_core.txt'
     original_main, original_inventory = main.read_text(), inventory.read_text()
-    cases = (
-        ('event_push.check_pin_drift, ', 'services/chat-stream-v2/main.py:846 EventPush.check_pin_drift'),
-        ('watch_wake.missed_wake_alarm,', 'services/chat-stream-v2/main.py:846 WatchWake.missed_wake_alarm'),
-        ('account_runtime.tick, ', 'services/chat-stream-v2/main.py:847 AccountRuntime.tick'),
-        ('capacity_retry.tick, ', 'services/chat-stream-v2/main.py:847 CapacityRetry.tick'),
-        ('queued_send_now.tick', 'services/chat-stream-v2/main.py:847 QueuedSendNow.tick'),
-        ('watch_wake.tick, ', 'services/chat-stream-v2/main.py:847 WatchWake.tick'),
-    )
-    for expression, row in cases:
-        assert original_main.count(expression) == 1 and row in original_inventory
-        main.write_text(original_main.replace(expression, '', 1))
-        inventory.write_text(original_inventory.replace(row + '\n', '', 1))
-        control = run_gate(checkout)
-        assert control.returncode == 0, (row, control.stderr)
-    inventory.write_text(original_inventory)
-    main.write_text(original_main.replace('watch_wake.tick, ', 'watch_wake.tick, watch_wake.tick, ', 1))
-    duplicate = run_gate(checkout)
-    assert duplicate.returncode != 0 and ('duplicated frozen selector' in duplicate.stderr or 'recurring-reference' in duplicate.stderr)
-    main.write_text(original_main.replace('watch_wake.tick, ', 'watch_wake.tick, feature_job.tick, ', 1))
-    added = run_gate(checkout)
-    assert added.returncode != 0 and 'recurring-reference' in added.stderr
-    main.write_text(original_main.replace('queued_send_now.tick', '', 1))
-    stale = run_gate(checkout)
-    assert stale.returncode != 0 and 'stale exception' in stale.stderr
+    assert original_main.count(expression) == 1 and row in original_inventory
+    main.write_text(original_main.replace(expression, '', 1))
+    inventory.write_text(original_inventory.replace(row + '\n', '', 1))
+    control = run_gate(checkout)
+    assert control.returncode == 0, (row, control.stderr)
+
+
+@pytest.mark.parametrize(('old', 'new', 'diagnostics'), [
+    ('watch_wake.tick, ', 'watch_wake.tick, watch_wake.tick, ', ('duplicated frozen selector', 'recurring-reference')),
+    ('watch_wake.tick, ', 'watch_wake.tick, feature_job.tick, ', ('recurring-reference',)),
+    ('queued_send_now.tick', '', ('stale exception',)),
+], ids=['duplicate', 'added', 'stale'])
+def test_invalid_scheduler_reference_fails(checkout, old, new, diagnostics):
+    main = checkout / SERVICE / 'main.py'
+    main.write_text(main.read_text().replace(old, new, 1))
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and any(d in rejected.stderr for d in diagnostics)
 
 
 def test_one_of_two_identical_bulk_sites_can_retire(checkout):
@@ -483,14 +499,23 @@ def test_import_level_resolution_cli_and_fail_closed_gate(checkout, tmp_path):
                               '--path', 'pkg/core.py', '--source', str(fixture)],
                              cwd=checkout, capture_output=True, text=True)
     assert unknown.returncode == 0 and json.loads(unknown.stdout)[0]['form'] == 'unresolved'
+
+
+@pytest.mark.parametrize('code', [
+    "__import__('json', level=unknown)",
+    "__import__('json', level=1)",
+    "__import__('json', foreign_globals, level=1)",
+], ids=['unknown', 'relative', 'foreign-globals'])
+def test_unresolved_import_level_fails(checkout, code):
     core = checkout / SERVICE / 'sessions.py'
-    original = core.read_text()
-    for code in ("__import__('json', level=unknown)", "__import__('json', level=1)",
-                 "__import__('json', foreign_globals, level=1)"):
-        core.write_text(original + '\n' + code + '\n')
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and 'unresolved dynamic import' in rejected.stderr
-    core.write_text(original + "\n__import__('json', level=0)\n")
+    core.write_text(core.read_text() + '\n' + code + '\n')
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and 'unresolved dynamic import' in rejected.stderr
+
+
+def test_absolute_import_level_passes(checkout):
+    core = checkout / SERVICE / 'sessions.py'
+    core.write_text(core.read_text() + "\n__import__('json', level=0)\n")
     clean = run_gate(checkout)
     assert clean.returncode == 0, clean.stderr
 
@@ -742,28 +767,30 @@ def test_cycle2_cli_identity_clean(checkout, text):
     assert result.returncode == 0, result.stderr
 
 
-def test_cycle2_scheduler_restore_retirement_and_unrelated_scope_cli(checkout):
+@pytest.mark.parametrize(('retire_source', 'retire_row', 'add_unrelated', 'diagnostic'), [
+    (True, True, False, None),
+    (True, False, False, 'stale exception'),
+    (False, True, False, 'recurring'),
+    (False, False, True, None),
+], ids=['retirement', 'stale-row', 'missing-row', 'unrelated-scope'])
+def test_cycle2_scheduler_restore_retirement_and_unrelated_scope_cli(checkout, retire_source, retire_row, add_unrelated, diagnostic):
     main = checkout / SERVICE / 'main.py'
     inventory = checkout / SERVICE / 'daemon_contract/active/F1_protected_core.txt'
     original, rows = main.read_text(), inventory.read_text()
     block = '        if server.assistant_restore is not None:\n            callbacks.append(server.assistant_restore.tick)\n'
     row = 'services/chat-stream-v2/main.py:849 AssistantRestore.tick\n'
     assert original.count(block) == 1 and row in rows
-    main.write_text(original.replace(block, '        if server.assistant_restore is not None:\n            pass\n'))
-    inventory.write_text(rows.replace(row, ''))
+    if retire_source:
+        main.write_text(original.replace(block, '        if server.assistant_restore is not None:\n            pass\n'))
+    if retire_row:
+        inventory.write_text(rows.replace(row, ''))
+    if add_unrelated:
+        main.write_text(original + '\ndef reconcile_callbacks():\n    callbacks = []\n    callbacks.append(1)\n')
     result = run_gate(checkout)
-    assert result.returncode == 0, result.stderr
-    inventory.write_text(rows)
-    result = run_gate(checkout)
-    assert result.returncode == 1 and 'stale exception' in result.stderr, result.stderr
-    main.write_text(original)
-    inventory.write_text(rows.replace(row, ''))
-    result = run_gate(checkout)
-    assert result.returncode == 1 and 'recurring' in result.stderr, result.stderr
-    inventory.write_text(rows)
-    main.write_text(original + '\ndef reconcile_callbacks():\n    callbacks = []\n    callbacks.append(1)\n')
-    result = run_gate(checkout)
-    assert result.returncode == 0, result.stderr
+    if diagnostic:
+        assert result.returncode == 1 and diagnostic in result.stderr, result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
 
 
 SCHEDULER_START = '        if server.assistant_restore is not None:\n'

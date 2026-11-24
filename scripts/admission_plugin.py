@@ -23,7 +23,7 @@ def pytest_addoption(parser):
     group.addoption('--admission-suite', choices=tuple(SUITES), required=True)
     group.addoption('--admission-manifest', required=True)
     group.addoption('--admission-separate-marker', action='append', default=[],
-                    choices=('soak', 'repin_exhaustive'),
+                    choices=('repin_exhaustive',),
                     help='record cases owned by this separate tier before admission')
 
 

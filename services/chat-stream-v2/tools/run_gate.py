@@ -35,7 +35,7 @@ except ModuleNotFoundError:  # direct execution from the tools directory
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SERVICE_DIR.parents[1]
 PRE_FLIGHT = SERVICE_DIR / "tools" / "gate_preflight.sh"
-UNIT_SEPARATE_MARKERS = ("soak", "repin_exhaustive")
+UNIT_SEPARATE_MARKERS = ("repin_exhaustive",)
 DEFAULT_TIMEOUTS = {"unit": 900.0, "smoke": 900.0, "soak": 3900.0}
 # Component bounds for the --deadline-seconds envelope. The reserve covers this
 # runner's own terminate (2x5s), reader drain (READER_JOIN_S), reap and evidence writes.
