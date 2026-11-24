@@ -7,6 +7,7 @@ import ast
 import hashlib
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,14 @@ PINNED_INVENTORIES = {
     "exceptions/P0_release_versioning.txt": "f4d2ff67602e5ad1ab7940112b5421efb4ff9bdf3cbe08f6e60a9476e8ab6a56",
     "exceptions/F5_observation.txt": "b67c524bda55743601211cc7acec58d53fb7b2a9a6608518ef2f3be80f814193",
     "exceptions/F6_delivery.txt": "544e839a86178c0987c70ac31e676b17eefbba46ad5bb6242f6c62319b177285",
+}
+EXPECTED_INVENTORY_PATHS = {
+    "F1_protected_core": "exceptions/F1_protected_core.txt",
+    "F2_projections": "exceptions/F2_projections.txt",
+    "F3_policy": "exceptions/F3_policy.txt",
+    "F4_migrations_and_safe_switch": "exceptions/P0_release_versioning.txt",
+    "F5_observation": "exceptions/F5_observation.txt",
+    "F6_durable_delivery": "exceptions/F6_delivery.txt",
 }
 EXPECTED_LAYERS = [
     "F1_protected_chat_core", "F2_event_feed_and_projections",
@@ -82,12 +91,15 @@ def _validate_contract() -> list[str]:
     if manifest.get("frozen_at_commit") != BASELINE_COMMIT or not isinstance(inventories, dict) or set(inventories) != expected_names:
         errors.append("inventory manifest must retain the six frozen inventory identities")
         return errors
+    seen_paths: set[str] = set()
     for name, entry in inventories.items():
         relative = entry.get("file") if isinstance(entry, dict) else None
         digest = entry.get("sha256") if isinstance(entry, dict) else None
-        if relative not in PINNED_INVENTORIES or digest != PINNED_INVENTORIES.get(relative):
-            errors.append(f"{name}: inventory path or pinned digest changed")
+        expected_path = EXPECTED_INVENTORY_PATHS.get(name)
+        if relative != expected_path or digest != PINNED_INVENTORIES.get(expected_path):
+            errors.append(f"{name}: inventory path or pinned digest does not match its canonical layer")
             continue
+        seen_paths.add(relative)
         path = CONTRACT_ROOT / relative
         try:
             baseline_raw = path.read_bytes()
@@ -117,6 +129,8 @@ def _validate_contract() -> list[str]:
             added = _exception_additions(base_active.decode("utf-8"), active_raw.decode("utf-8"))
             if added:
                 errors.append(f"{name}: candidate adds or moves {len(added)} active exception entr{'y' if len(added) == 1 else 'ies'}")
+    if len(seen_paths) != len(EXPECTED_INVENTORY_PATHS):
+        errors.append("the six layers must reference six unique canonical inventory files")
     return errors
 
 
@@ -177,7 +191,22 @@ def _is_persistent_write(sql: str) -> bool:
     return bool(WRITE_WORDS.search(normalized))
 
 
-def _startup_writes(source: str) -> dict[tuple[str, int, str], str]:
+def _sql_statements(sql: str) -> list[str]:
+    """Split complete SQLite statements without splitting trigger bodies or quoted semicolons."""
+    statements: list[str] = []
+    current = ""
+    for char in sql:
+        current += char
+        if char == ";" and sqlite3.complete_statement(current):
+            if current.strip():
+                statements.append(" ".join(current.split()))
+            current = ""
+    if current.strip():
+        statements.append(" ".join(current.split()))
+    return statements
+
+
+def _startup_writes(source: str) -> dict[tuple[str, int, int, int, str], str]:
     """Find literal persistent SQL executed directly from Store startup.
 
     Indirect calls and dynamically supplied SQL remain a conservative follow-up
@@ -189,7 +218,7 @@ def _startup_writes(source: str) -> dict[tuple[str, int, str], str]:
     store = next((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Store"), None)
     if store is None:
         raise GateError("store.py has no Store class")
-    result: dict[tuple[str, int, str], str] = {}
+    result: dict[tuple[str, int, int, int, str], str] = {}
     for method_name in ("__init__", "_run"):
         method = next((node for node in store.body if isinstance(node, ast.FunctionDef) and node.name == method_name), None)
         if method is None:
@@ -205,10 +234,19 @@ def _startup_writes(source: str) -> dict[tuple[str, int, str], str]:
                 # escape the baseline comparison. Treat it as a capability marker.
                 sqls = (f"<unresolved SQL argument: {ast.dump(node.args[0], include_attributes=False)}>",)
             for sql in sqls:
-                if sql.startswith("<unresolved SQL argument:") or _is_persistent_write(sql):
-                    normalized = " ".join(sql.split())
-                    result[(method_name, node.lineno, normalized)] = normalized
+                statements = [sql] if sql.startswith("<unresolved SQL argument:") else _sql_statements(sql)
+                for statement_index, statement in enumerate(statements):
+                    if statement.startswith("<unresolved SQL argument:") or _is_persistent_write(statement):
+                        normalized = " ".join(statement.split())
+                        identity = (method_name, node.lineno, node.col_offset, statement_index, normalized)
+                        result[identity] = normalized
     return result
+
+
+def _startup_write_additions(base_source: str, candidate_source: str) -> list[tuple[str, int, int, int, str]]:
+    baseline = _startup_writes(base_source)
+    current = _startup_writes(candidate_source)
+    return sorted(set(current) - set(baseline))
 
 
 def _check_startup_drift(base: str) -> list[str]:
@@ -217,15 +255,13 @@ def _check_startup_drift(base: str) -> list[str]:
     if base_raw is None:
         raise GateError("trusted base lacks store.py")
     candidate = (REPO_ROOT / relative).read_text(encoding="utf-8")
-    baseline = _startup_writes(base_raw.decode("utf-8"))
-    current = _startup_writes(candidate)
-    # Exact SQL at the same source line is the stable identity for the first
-    # adoption. Moving an allowance changes the line and counts as an addition.
-    added = sorted(set(current) - set(baseline))
+    # Call column and statement occurrence preserve duplicate operations on
+    # one source line. Moving an allowance changes its identity and is refused.
+    added = _startup_write_additions(base_raw.decode("utf-8"), candidate)
     if not added:
         return []
     return [f"Store startup adds or moves {len(added)} persistent SQL statement(s): " +
-            ", ".join(f"{method} line {line}" for method, line, _ in added[:8])]
+            ", ".join(f"{method} line {line}" for method, line, _, _, _ in added[:8])]
 
 
 def check(base: str) -> list[str]:
