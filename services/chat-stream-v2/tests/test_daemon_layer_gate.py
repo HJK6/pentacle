@@ -32,8 +32,9 @@ class DaemonLayerGateTests(unittest.TestCase):
                 line: int = 3) -> list[str]:
         path = "services/chat-stream-v2/router.py"
         anchors = [gate.Anchor(path, line, symbol)]
+        frozen = _scopes(path, before, symbol)
         return gate._compare_anchors("F6_delivery", anchors,
-                                     _scopes(path, before, symbol),
+                                     frozen, frozen,
                                      _scopes(path, after, symbol))
 
     def test_line_only_drift_preserves_ast_identity(self) -> None:
@@ -87,6 +88,44 @@ class DaemonLayerGateTests(unittest.TestCase):
         self.assertTrue(any(item[1:] == ("is_online", "hosts.Hosts.is_online") for item in accesses))
         self.assertTrue(any(item[1:] == ("apply_live", "hosts.apply_live") for item in accesses))
 
+    def test_duplicate_observation_reader_fails_with_clean_control(self) -> None:
+        base = ("from hosts import Hosts\n"
+                "def inspect(host):\n    return Hosts.is_online(host)\n")
+        duplicate = ("from hosts import Hosts\n"
+                     "def inspect(host):\n"
+                     "    result = Hosts.is_online(host)\n"
+                     "    return result, Hosts.is_online(host)\n")
+        clean = ("from hosts import Hosts\n"
+                 "def inspect(host):\n    return Hosts.is_online(host)\n")
+        self.assertTrue(gate._added_observation_accesses(base, base, duplicate, "observers.py"))
+        self.assertEqual(gate._added_observation_accesses(base, base, clean, "observers.py"), [])
+        field_read = ("def inspect(host):\n"
+                      "    age = host.snapshot['pane_status']\n"
+                      "    return age\n")
+        self.assertTrue(gate._added_observation_accesses("", "", field_read, "observers.py"))
+
+    def test_unanchored_optional_policy_decision_fails_with_clean_control(self) -> None:
+        base = "def ordinary(value):\n    return value\n"
+        candidate = ("def ordinary(value):\n    return value\n\n"
+                     "def new_workflow(context):\n    return optional_policy.check(context)\n")
+        self.assertTrue(gate._added_policy_decisions(base, base, candidate, "workflow.py"))
+        aliased = ("def ordinary(value):\n    return value\n\n"
+                   "def new_workflow(context):\n"
+                   "    check = optional_policy.check\n    return check(context)\n")
+        self.assertTrue(gate._added_policy_decisions(base, base, aliased, "workflow.py"))
+        self.assertEqual(gate._added_policy_decisions(base, base, base, "workflow.py"), [])
+
+    def test_retired_selector_reintroduction_uses_merge_base(self) -> None:
+        before = ast.parse("def decide(self):\n    self.policy.check()\n").body[0]
+        removed = ast.parse("def decide(self):\n    return None\n").body[0]
+        reintroduced = ast.parse("def decide(self):\n    self.policy.check()\n").body[0]
+        selector = gate._fingerprint(gate._anchor_statement(before, 2))
+        self.assertIsNone(gate._retired_selector_status(selector, removed, removed))
+        self.assertEqual(gate._retired_selector_status(selector, removed, reintroduced),
+                         "reintroduced since merge base")
+        self.assertEqual(gate._retired_selector_status(selector, before, reintroduced),
+                         "remains after exception removal")
+
     def test_new_routing_branch_is_rejected(self) -> None:
         before = "class Router:\n    def send(self, value):\n        self.deliver(value)\n"
         after = ("class Router:\n    def send(self, value):\n"
@@ -99,13 +138,6 @@ class DaemonLayerGateTests(unittest.TestCase):
         after = ("def handle(value):\n    return value\n\n"
                  "def route(value):\n    if front_desk_requested:\n        deliver(value)\n")
         self.assertTrue(gate._added_routing_branches(before, after, "service.py"))
-
-    def test_new_routing_branch_in_new_symbol_is_rejected(self) -> None:
-        before = "def handle(value):\n    return value\n"
-        after = ("def handle(value):\n    return value\n\n"
-                 "def route(value):\n    if front_desk_requested:\n        deliver(value)\n")
-        self.assertTrue(gate._added_routing_branches(before, after, "service.py"))
-
 
 if __name__ == "__main__":
     unittest.main()
