@@ -63,11 +63,42 @@ function freezeWebDist(distDir) {
     .sort()
     .map((rel) => ({ path: rel, sha256: crypto.createHash('sha256').update(files.get(rel)).digest('hex') }));
   let buildCommit = null;
+  let daemonSchemaVersion = null;
+  let protocolVersion = null;
+  let minProtocolVersion = null;
+  let maxProtocolVersion = null;
   try {
     const metadata = JSON.parse(files.get('build-commit.json').toString());
     if (metadata.schema_version === 1 && /^[0-9a-f]{40}$/.test(metadata.build_commit)) buildCommit = metadata.build_commit;
+    if (metadata.schema_version === 1
+        && Number.isInteger(metadata.daemon_schema_version) && metadata.daemon_schema_version > 0
+        && Number.isInteger(metadata.protocol_version) && metadata.protocol_version > 0
+        && Number.isInteger(metadata.min_protocol_version) && metadata.min_protocol_version > 0
+        && Number.isInteger(metadata.max_protocol_version)
+        && metadata.min_protocol_version <= metadata.protocol_version
+        && metadata.protocol_version <= metadata.max_protocol_version) {
+      daemonSchemaVersion = metadata.daemon_schema_version;
+      protocolVersion = metadata.protocol_version;
+      minProtocolVersion = metadata.min_protocol_version;
+      maxProtocolVersion = metadata.max_protocol_version;
+    }
   } catch (_) { /* Old or unbuilt dist has no source commit. */ }
-  return { files, manifest, buildId: computeBuildId(manifest), buildCommit };
+  return {
+    files, manifest, buildId: computeBuildId(manifest), buildCommit,
+    daemonSchemaVersion, protocolVersion, minProtocolVersion, maxProtocolVersion,
+  };
 }
 
-module.exports = { freezeWebDist, computeBuildId, isManifestFile };
+function webHealthIdentity(frozen) {
+  return {
+    build_id: frozen.buildId,
+    build_commit: frozen.buildCommit,
+    release_sha: frozen.buildCommit,
+    schema_version: frozen.daemonSchemaVersion,
+    protocol_version: frozen.protocolVersion,
+    min_protocol_version: frozen.minProtocolVersion,
+    max_protocol_version: frozen.maxProtocolVersion,
+  };
+}
+
+module.exports = { freezeWebDist, computeBuildId, isManifestFile, webHealthIdentity };

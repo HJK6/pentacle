@@ -26,7 +26,7 @@ const { createMicStarter, micStartSameOrigin, isLoopbackPeer } = require('./mic_
 const { createMicRequest } = require('../main/mic_request');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
-const { freezeWebDist } = require('./web_build_id');
+const { freezeWebDist, webHealthIdentity } = require('./web_build_id');
 const { serveFeaturedScore } = require('./melody');
 const { createPrivateDashboardRoute } = require('./private_dashboards');
 const { createDesignRoutes } = require('./designs');
@@ -631,7 +631,7 @@ async function main(argv = process.argv.slice(2)) {
     if (urlPath === '/api/health') {
       res.writeHead(200, { 'content-type': CONTENT_TYPES['.json'] })
         .end(JSON.stringify({ ok: true, connections: bridge.connections.size,
-          build_id: frozen.buildId, build_commit: frozen.buildCommit }));
+          ...webHealthIdentity(frozen) }));
       return;
     }
     if (designs.handle(req, res, urlPath)) return;
