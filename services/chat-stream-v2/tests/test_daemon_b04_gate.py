@@ -491,3 +491,39 @@ def test_import_level_resolution_cli_and_fail_closed_gate(checkout, tmp_path):
     core.write_text(original + "\n__import__('json', level=0)\n")
     clean = run_gate(checkout)
     assert clean.returncode == 0, clean.stderr
+
+
+@pytest.mark.parametrize(('case', 'path', 'mutation', 'message'), [
+    ('scheduler_append', 'main.py', 'scheduler', 'recurring-reference'),
+    ('sqlite_module_alias', 'sessions.py', '\nimport sqlite3 as sql\ndef b04():\n    db = sql\n    return db.connect("invented.db")\n', 'new F1 primitive'),
+    ('computed_bulk_getattr', 'sessions.py', '\ndef b04(work_lanes, name):\n    return getattr(work_lanes, name)()\n', 'new F2 bulk reference'),
+])
+def test_reviewed_bypass_controls(checkout, case, path, mutation, message):
+    """CLI admission: each rejected bypass fails, with an unchanged clean baseline.
+
+    Subject: committed B04 selector CLI in a disposable Git clone. Faults are
+    the three cycle-1 QA reproductions; no runtime, network or database is used.
+    """
+    baseline = run_gate(checkout)
+    assert baseline.returncode == 0, baseline.stderr
+    target = checkout / SERVICE / path
+    source = target.read_text()
+    if mutation == 'scheduler':
+        marker = '        if server.assistant_restore is not None:\n'
+        assert source.count(marker) == 1
+        source = source.replace(marker, '        if enabled:\n            callbacks.append(feature_job.tick)\n' + marker, 1)
+    else:
+        source += mutation
+    target.write_text(source)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and message in rejected.stderr, (case, rejected.stdout, rejected.stderr)
+
+
+def test_reviewed_bypass_clean_reflection_controls(checkout):
+    path = checkout / SERVICE / 'sessions.py'
+    original = path.read_text()
+    for code in ('\ndef b04(other, name):\n    return getattr(other, name)()\n',
+                 '\ndef b04(work_lanes):\n    return getattr(work_lanes, "status")()\n'):
+        path.write_text(original + code)
+        control = run_gate(checkout)
+        assert control.returncode == 0, control.stderr

@@ -251,6 +251,7 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
         sqlite_connect = set(inherited['sqlite_connect'])
         queue_names = set(inherited['queue_names'])
         thread_names = set(inherited['thread_names'])
+        callback_names = {'callbacks'} if scope and scope[-1] == 'reconcile_callbacks' else set()
         for item in own:
             if isinstance(item, ast.Import):
                 sqlite_names.update(entry.asname or entry.name for entry in item.names if entry.name == 'sqlite3')
@@ -298,6 +299,10 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                         queue_names.add(name); changed = True
                 elif isinstance(value, ast.Name):
                     resolved.update(aliases.get(value.id, ()))
+                    if value.id in sqlite_names and name not in sqlite_names:
+                        sqlite_names.add(name); changed = True
+                    if value.id in callback_names and name not in callback_names:
+                        callback_names.add(name); changed = True
                     if value.id in sqlite_connect:
                         resolved.add('connect')
                     if value.id in queue_names and name not in queue_names:
@@ -321,6 +326,17 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                 break
         label = '.'.join(scope) or '<module>'
         for item in own:
+            if (isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+                    and isinstance(item.func.value, ast.Name) and item.func.value.id in callback_names
+                    and item.func.attr in {'append', 'extend', 'insert'}):
+                output[(label, 'recurring-reference-mutation', ast.dump(item, include_attributes=False))] += 1
+            elif (isinstance(item, ast.AugAssign) and isinstance(item.op, ast.Add)
+                  and isinstance(item.target, ast.Name) and item.target.id in callback_names):
+                output[(label, 'recurring-reference-mutation', ast.dump(item, include_attributes=False))] += 1
+            elif isinstance(item, ast.Assign) and any(
+                    isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                    and target.value.id in callback_names for target in item.targets):
+                output[(label, 'recurring-reference-mutation', ast.dump(item, include_attributes=False))] += 1
             if (scope and scope[-1] == 'reconcile_callbacks' and isinstance(item, ast.Assign)
                     and any(isinstance(target, ast.Name) and target.id == 'callbacks' for target in item.targets)
                     and isinstance(item.value, (ast.List, ast.Tuple))):
@@ -545,6 +561,10 @@ def _bulk_sites(source: str, path: str) -> Counter[tuple[str, str]]:
                 if isinstance(item.func, ast.Name) and item.func.id == 'getattr':
                     for resolved in target(item):
                         output[(label, resolved)] += 1
+                    if (len(item.args) >= 2 and 'work_lanes' in receiver_targets(item.args[0])
+                            and not (isinstance(item.args[1], ast.Constant)
+                                     and isinstance(item.args[1].value, str))):
+                        output[(label, 'unresolved work_lanes getattr')] += 1
                 if ((isinstance(item.func, ast.Attribute) and item.func.attr == 'assistant_composite_activity'
                      or isinstance(item.func, ast.Name) and item.func.id in activity_aliases)
                         and not any(k.arg == 'input_ids' and not (isinstance(k.value, ast.Constant) and k.value.value is None)
