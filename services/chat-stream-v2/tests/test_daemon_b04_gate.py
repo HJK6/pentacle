@@ -527,3 +527,250 @@ def test_reviewed_bypass_clean_reflection_controls(checkout):
         path.write_text(original + code)
         control = run_gate(checkout)
         assert control.returncode == 0, control.stderr
+
+
+@pytest.mark.parametrize(('case', 'path', 'mutation', 'diagnostic'), [
+    ('scheduler_append', 'main.py', 'append', 'recurring'),
+    ('sqlite_module_alias', 'sessions.py', '\nimport sqlite3 as sql\ndef b04():\n    db = sql\n    return db.connect("invented.db")\n', 'F1'),
+    ('computed_getattr', 'sessions.py', '\ndef b04(work_lanes, name):\n    return getattr(work_lanes, name)()\n', 'F2'),
+    ('scheduler_rebinding', 'main.py', 'rebind', 'recurring'),
+    ('aliased_getattr', 'sessions.py', '\ngetter = getattr\ndef b04(work_lanes, name):\n    return getter(work_lanes, name)()\n', 'F2'),
+])
+def test_cycle2_prior_qa_controls(checkout, case, path, mutation, diagnostic):
+    """Real CLI admission: five reviewed bypasses, clean baseline, no live data."""
+    baseline = run_gate(checkout)
+    assert baseline.returncode == 0, baseline.stderr
+    target = checkout / SERVICE / path
+    source = target.read_text()
+    if mutation in {'append', 'rebind'}:
+        marker = '        if server.assistant_restore is not None:\n'
+        assert source.count(marker) == 1
+        statement = ('callbacks.append(feature_job.tick)' if mutation == 'append'
+                     else 'callbacks = callbacks + [feature_job.tick]')
+        source = source.replace(marker, f'        if enabled:\n            {statement}\n' + marker, 1)
+    else:
+        source += mutation
+    target.write_text(source)
+    result = run_gate(checkout)
+    assert result.returncode == 1 and diagnostic in result.stderr and path in result.stderr, (case, result.stdout, result.stderr)
+    assert not any(marker in result.stderr for marker in ('Traceback', 'SyntaxError', 'timed out'))
+
+
+@pytest.fixture
+def cycle2_gate():
+    sys.path.insert(0, str(ROOT / SERVICE / 'tools'))
+    try:
+        import daemon_b04_gate as gate
+        yield gate
+    finally:
+        sys.path.pop(0)
+
+
+@pytest.mark.parametrize('subject,expected', [
+    ('from builtins import getattr as g\ndef f(work_lanes, n): return g(work_lanes, n)()', 'F2'),
+    ('import builtins as b\ndef f(work_lanes, n): return b.getattr(work_lanes, n)()', 'F2'),
+    ('g = getattr\nh: object = g\ndef f(work_lanes, n):\n def inner(): return h(work_lanes, n)()\n return inner()', 'F2'),
+    ('def f(work_lanes, n):\n view: object = work_lanes\n other = view\n return getattr(other, n)()', 'F2'),
+    ('def f(work_lanes): return getattr(work_lanes, "current")', 'F2'),
+    ('g = getattr\nf = lambda work_lanes, n: g(work_lanes, n)()', 'F2'),
+    ('def f(work_lanes): return getattr(work_lanes, "current")()', 'F2'),
+    ('def f(work_lanes, x, n):\n if x: view = work_lanes\n else: view = object()\n return getattr(view, n)()', 'F2'),
+    ('def f(work_lanes, n): return getattr(*(work_lanes, n))()', 'F2'),
+    ('def f(work_lanes, n): return work_lanes[n]()', 'F2'),
+    ('def f(work_lanes, n): return work_lanes.__dict__[n]()', 'F2'),
+    ('def f(work_lanes): return opaque(work_lanes)', 'F2'),
+    ('def f(work_lanes): yield work_lanes', 'F2'),
+    ('def f(work_lanes, n, xs):\n view = work_lanes\n for x in xs: view = object()\n return getattr(view, n)()', 'F2'),
+    ('def f(work_lanes, n):\n view = work_lanes\n try: view = object()\n except Exception: pass\n return getattr(view, n)()', 'F2'),
+    ('def f(work_lanes, n, x):\n view = work_lanes\n match x:\n  case 1: view = object()\n return getattr(view, n)()', 'F2'),
+    ('def f(work_lanes, n):\n match work_lanes:\n  case view: return getattr(view, n)()', 'F2'),
+    ('def f(work_lanes):\n global escaped\n escaped = work_lanes', 'F2'),
+    ('import sqlite3 as s\ndef f():\n db = s\n db2: object = db\n return db2.connect("x")', 'F1'),
+    ('import sqlite3 as s\ndef f():\n db = s\n connect: object = db.connect\n return connect("x")', 'F1'),
+    ('import sqlite3 as s\ng = getattr\ndef f():\n connect = g(s, "connect")\n return connect("x")', 'F1'),
+    ('import sqlite3 as s\ndef f(n): return getattr(s, n)("x")', 'F1'),
+    ('import sqlite3 as s\ndef f(): return opaque(s.connect)', 'F1'),
+    ('import sqlite3 as s\ndef f(): return s.connect', 'F1'),
+])
+def test_cycle2_identity_subjects(cycle2_gate, subject, expected):
+    errors = cycle2_gate.new_identity_sites('', '', subject, 'fixture.py')
+    assert any(expected in error for error in errors), errors
+
+
+@pytest.mark.parametrize('subject', [
+    'def f(getattr, work_lanes, n): return getattr(work_lanes, n)()',
+    'f = lambda getattr, work_lanes, n: getattr(work_lanes, n)()',
+    'def f(work_lanes, n):\n def getattr(*args): return lambda: 1\n return getattr(work_lanes, n)()',
+    'def f(other, n): return getattr(other, n)()',
+    'def f(work_lanes): return getattr(work_lanes, "status")()',
+    'def f(other): return other.connect("x")',
+    'import sqlite3 as s\ndef f():\n connect = s.connect\n return 1',
+    'def f(work_lanes, n):\n if False: view = work_lanes\n else: view = object()\n return getattr(view, n)()',
+])
+def test_cycle2_identity_clean(cycle2_gate, subject):
+    assert not cycle2_gate.new_identity_sites('', '', subject, 'fixture.py')
+
+
+def test_cycle2_scheduler_closed_grammar(cycle2_gate):
+    main = (ROOT / SERVICE / 'main.py').read_text()
+    active = (ROOT / SERVICE / 'daemon_contract/active/F1_protected_core.txt').read_text()
+    assert not cycle2_gate.scheduler_grammar(main, active)
+    start = '        if server.assistant_restore is not None:\n'
+    init = '        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,\n'
+    dispatch = '        await run_reconcile_callbacks(*callbacks)'
+    mutations = [
+        (start, '        callbacks = other\n' + start),
+        (init, init.replace('callbacks =', 'callbacks: list =')),
+        ('event_push.check_pin_drift,', '*[event_push.check_pin_drift],'),
+        (start, '        alias = callbacks\n        alias.append(feature.tick)\n' + start),
+        (start, '        add = callbacks.append\n        add(feature.tick)\n' + start),
+        (start, '        helper(callbacks)\n' + start),
+        (dispatch, dispatch.replace('*callbacks)', '*callbacks, feature.tick)')),
+        (start, start.replace(' is not None', ' is not None or feature')),
+        ('on_reconcile_tick=reconcile_callbacks', 'on_reconcile_tick=other'),
+        ('watch_wake.tick, ', 'watch_wake.tick, watch_wake.tick, '),
+        (dispatch, dispatch + '\n' + dispatch),
+    ]
+    for old, new in mutations:
+        assert main.count(old) == 1, old
+        assert cycle2_gate.scheduler_grammar(main.replace(old, new, 1), active), old
+    row = 'services/chat-stream-v2/main.py:849 AssistantRestore.tick\n'
+    block = start + '            callbacks.append(server.assistant_restore.tick)\n'
+    assert not cycle2_gate.scheduler_grammar(main.replace(block, ''), active.replace(row, ''))
+    assert not cycle2_gate.scheduler_grammar(main.replace(block, start + '            pass\n'), active.replace(row, ''))
+    assert cycle2_gate.scheduler_grammar(main.replace(block, ''), active)
+    assert cycle2_gate.scheduler_grammar(main, active.replace(row, ''))
+    assert not cycle2_gate.scheduler_grammar(main + '\ndef reconcile_callbacks():\n callbacks = []\n callbacks.append(1)\n', active)
+
+
+def test_cycle2_scheduler_each_row_and_source_retire_together(cycle2_gate):
+    main = (ROOT / SERVICE / 'main.py').read_text()
+    active = (ROOT / SERVICE / 'daemon_contract/active/F1_protected_core.txt').read_text()
+    cases = (
+        ('event_push.check_pin_drift, ', 'services/chat-stream-v2/main.py:846 EventPush.check_pin_drift'),
+        ('watch_wake.missed_wake_alarm,', 'services/chat-stream-v2/main.py:846 WatchWake.missed_wake_alarm'),
+        ('account_runtime.tick, ', 'services/chat-stream-v2/main.py:847 AccountRuntime.tick'),
+        ('capacity_retry.tick, ', 'services/chat-stream-v2/main.py:847 CapacityRetry.tick'),
+        ('queued_send_now.tick', 'services/chat-stream-v2/main.py:847 QueuedSendNow.tick'),
+        ('watch_wake.tick, ', 'services/chat-stream-v2/main.py:847 WatchWake.tick'),
+    )
+    for member, row in cases:
+        changed = main.replace(member, '', 1)
+        retired = active.replace(row + '\n', '', 1)
+        assert not cycle2_gate.scheduler_grammar(changed, retired), row
+        assert cycle2_gate.scheduler_grammar(changed, active), row
+        assert cycle2_gate.scheduler_grammar(main, retired), row
+
+
+def test_cycle2_cli_identity_clean_and_seams(checkout):
+    path = checkout / SERVICE / 'sessions.py'
+    original = path.read_text()
+    for text, diagnostic in (
+        ('from builtins import getattr as g\ndef b04(work_lanes, n): return g(work_lanes, n)()', 'F2 bulk'),
+        ('import builtins as b\ndef b04(work_lanes, n): return b.getattr(work_lanes, n)()', 'F2 bulk'),
+        ('g = getattr\nh: object = g\ndef b04(work_lanes, n): return h(work_lanes, n)()', 'F2 bulk'),
+        ('def b04(work_lanes): return getattr(work_lanes, "current")', 'F2 bulk'),
+        ('def b04(work_lanes): return getattr(work_lanes, "current")()', 'F2 bulk'),
+        ('def b04(work_lanes, x, n):\n if x: view = work_lanes\n else: view = object()\n return getattr(view, n)()', 'F2 bulk'),
+        ('def b04(work_lanes, n):\n view: object = work_lanes\n def inner(): return getattr(view, n)()\n return inner()', 'F2 bulk'),
+        ('import sqlite3 as s\ndef b04():\n db = s\n connect = db.connect\n return connect("x")', 'F1 SQLite'),
+        ('import sqlite3 as s\ndef b04():\n db = s\n second: object = db\n return second.connect("x")', 'F1 SQLite'),
+        ('import sqlite3 as s\ng = getattr\ndef b04(): return g(s, "connect")("x")', 'F1 SQLite'),
+    ):
+        path.write_text(original + '\n' + text + '\n')
+        result = run_gate(checkout)
+        assert result.returncode == 1 and 'sessions.py:b04' in result.stderr and diagnostic in result.stderr, result.stderr
+    for text in (
+        'def b04(getattr, work_lanes, n): return getattr(work_lanes, n)()',
+        'def b04(other, n): return getattr(other, n)()',
+        'def b04(work_lanes): return getattr(work_lanes, "status")()',
+        'import sqlite3 as s\ndef b04():\n connect = s.connect\n return 1',
+        'import sqlite3 as s\ndef b04():\n connect = getattr(s, "connect")\n return 1',
+    ):
+        path.write_text(original + '\n' + text + '\n')
+        result = run_gate(checkout)
+        assert result.returncode == 0, result.stderr
+
+
+def test_cycle2_scheduler_restore_retirement_and_unrelated_scope_cli(checkout):
+    main = checkout / SERVICE / 'main.py'
+    inventory = checkout / SERVICE / 'daemon_contract/active/F1_protected_core.txt'
+    original, rows = main.read_text(), inventory.read_text()
+    block = '        if server.assistant_restore is not None:\n            callbacks.append(server.assistant_restore.tick)\n'
+    row = 'services/chat-stream-v2/main.py:849 AssistantRestore.tick\n'
+    assert original.count(block) == 1 and row in rows
+    main.write_text(original.replace(block, '        if server.assistant_restore is not None:\n            pass\n'))
+    inventory.write_text(rows.replace(row, ''))
+    result = run_gate(checkout)
+    assert result.returncode == 0, result.stderr
+    inventory.write_text(rows)
+    result = run_gate(checkout)
+    assert result.returncode == 1 and 'stale exception' in result.stderr, result.stderr
+    main.write_text(original)
+    inventory.write_text(rows.replace(row, ''))
+    result = run_gate(checkout)
+    assert result.returncode == 1 and 'recurring' in result.stderr, result.stderr
+    inventory.write_text(rows)
+    main.write_text(original + '\ndef reconcile_callbacks():\n    callbacks = []\n    callbacks.append(1)\n')
+    result = run_gate(checkout)
+    assert result.returncode == 0, result.stderr
+
+
+def test_cycle2_scheduler_matrix_cli(checkout):
+    main = checkout / SERVICE / 'main.py'
+    original = main.read_text()
+    start = '        if server.assistant_restore is not None:\n'
+    init = '        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,\n'
+    dispatch = '        await run_reconcile_callbacks(*callbacks)'
+    for old, new in (
+        (start, '        callbacks = other\n' + start),
+        (init, init.replace('callbacks =', 'callbacks: list =')),
+        ('event_push.check_pin_drift,', '*[event_push.check_pin_drift],'),
+        (start, '        alias = callbacks\n        alias.append(feature.tick)\n' + start),
+        (start, '        add = callbacks.append\n        add(feature.tick)\n' + start),
+        (start, '        helper(callbacks)\n' + start),
+        (dispatch, dispatch.replace('*callbacks)', '*callbacks, feature.tick)')),
+        (start, start.replace(' is not None', ' is not None or feature')),
+        ('on_reconcile_tick=reconcile_callbacks', 'on_reconcile_tick=other'),
+        ('watch_wake.tick, ', 'watch_wake.tick, watch_wake.tick, '),
+        (dispatch, dispatch + '\n' + dispatch),
+    ):
+        main.write_text(original.replace(old, new, 1))
+        result = run_gate(checkout)
+        assert result.returncode == 1 and 'main.py:run.reconcile_callbacks' in result.stderr and 'F1 recurring' in result.stderr, (old, result.stderr)
+
+
+def test_cycle2_scheduler_six_one_sided_retirements_cli(checkout):
+    main = checkout / SERVICE / 'main.py'
+    inventory = checkout / SERVICE / 'daemon_contract/active/F1_protected_core.txt'
+    original, rows = main.read_text(), inventory.read_text()
+    cases = (
+        ('event_push.check_pin_drift, ', 'services/chat-stream-v2/main.py:846 EventPush.check_pin_drift'),
+        ('watch_wake.missed_wake_alarm,', 'services/chat-stream-v2/main.py:846 WatchWake.missed_wake_alarm'),
+        ('account_runtime.tick, ', 'services/chat-stream-v2/main.py:847 AccountRuntime.tick'),
+        ('capacity_retry.tick, ', 'services/chat-stream-v2/main.py:847 CapacityRetry.tick'),
+        ('queued_send_now.tick', 'services/chat-stream-v2/main.py:847 QueuedSendNow.tick'),
+        ('watch_wake.tick, ', 'services/chat-stream-v2/main.py:847 WatchWake.tick'),
+    )
+    for member, row in cases:
+        main.write_text(original.replace(member, '', 1))
+        inventory.write_text(rows)
+        result = run_gate(checkout)
+        assert result.returncode == 1 and 'stale exception' in result.stderr, (row, result.stderr)
+        main.write_text(original)
+        inventory.write_text(rows.replace(row + '\n', '', 1))
+        result = run_gate(checkout)
+        assert result.returncode == 1 and 'F1 recurring' in result.stderr, (row, result.stderr)
+
+
+def test_cycle2_identity_ratchet_uses_per_site_maximum_and_allows_retirement(cycle2_gate):
+    site = 'import sqlite3 as sql\ndef f():\n db = sql\n return db.connect("x")\n'
+    doubled = site.replace(' return db.connect("x")', ' db.connect("x")\n return db.connect("x")')
+    assert not cycle2_gate.new_identity_sites(site, '', site, 'fixture.py')
+    assert not cycle2_gate.new_identity_sites('', site, site, 'fixture.py')
+    assert not cycle2_gate.new_identity_sites(site, site, '', 'fixture.py')
+    assert cycle2_gate.new_identity_sites('', '', site, 'fixture.py')
+    assert cycle2_gate.new_identity_sites(site, '', doubled, 'fixture.py')
+    assert not cycle2_gate.new_identity_sites('', '', site, 'fixture.py', site)
+    other = site.replace('"x"', '"other"')
+    assert cycle2_gate.new_identity_sites('', '', other, 'fixture.py', site)

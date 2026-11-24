@@ -251,7 +251,7 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
         sqlite_connect = set(inherited['sqlite_connect'])
         queue_names = set(inherited['queue_names'])
         thread_names = set(inherited['thread_names'])
-        callback_names = {'callbacks'} if scope and scope[-1] == 'reconcile_callbacks' else set()
+        callback_names = {'callbacks'} if scope == ('run', 'reconcile_callbacks') and path.endswith('/main.py') else set()
         for item in own:
             if isinstance(item, ast.Import):
                 sqlite_names.update(entry.asname or entry.name for entry in item.names if entry.name == 'sqlite3')
@@ -337,7 +337,7 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                     isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
                     and target.value.id in callback_names for target in item.targets):
                 output[(label, 'recurring-reference-mutation', ast.dump(item, include_attributes=False))] += 1
-            if (scope and scope[-1] == 'reconcile_callbacks' and isinstance(item, ast.Assign)
+            if (scope == ('run', 'reconcile_callbacks') and path.endswith('/main.py') and isinstance(item, ast.Assign)
                     and any(isinstance(target, ast.Name) and target.id == 'callbacks' for target in item.targets)
                     and isinstance(item.value, (ast.List, ast.Tuple))):
                 for reference in item.value.elts:
@@ -354,7 +354,7 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                         output[(label, 'recurring-call', ast.dump(call, include_attributes=False))] += 1
             if isinstance(item, ast.Call):
                 dynamic = dynamic_primitive(item)
-                if dynamic:
+                if dynamic and dynamic != 'connect':
                     output[(label, 'getattr:' + dynamic, ast.dump(item, include_attributes=False))] += 1
                 target = item.func
                 primitive = target.attr if isinstance(target, ast.Attribute) else (target.id if isinstance(target, ast.Name) else '')
@@ -469,6 +469,13 @@ def _bulk_sites(source: str, path: str) -> Counter[tuple[str, str]]:
             bound.update(arg.arg for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs))
             if node.args.vararg: bound.add(node.args.vararg.arg)
             if node.args.kwarg: bound.add(node.args.kwarg.arg)
+        bound.update(child.name for child in nested if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+        for item in own:
+            if isinstance(item, (ast.Import, ast.ImportFrom)):
+                bound.update(a.asname or a.name.split('.')[0] for a in item.names
+                             if not (isinstance(item, ast.ImportFrom) and item.module == 'builtins'
+                                     and a.name == 'getattr' and (a.asname or a.name) == 'getattr'))
+        getter_builtin = inherited['getter_builtin'] and 'getattr' not in bound
         aliases = {name: set(values) for name, values in inherited['aliases'].items() if name not in bound}
         receivers = {name: set(values) for name, values in inherited['receivers'].items() if name not in bound}
         activity_aliases = set(inherited['activity']) - bound
@@ -497,7 +504,7 @@ def _bulk_sites(source: str, path: str) -> Counter[tuple[str, str]]:
                     result.update(receiver + '.' + expr.attr for receiver in receiver_targets(expr.value)
                                   if receiver in GENERIC_BULK[expr.attr])
                 return result
-            if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id == 'getattr'
+            if (getter_builtin and isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id == 'getattr'
                     and len(expr.args) >= 2 and isinstance(expr.args[1], ast.Constant)
                     and isinstance(expr.args[1].value, str)):
                 name = expr.args[1].value
@@ -558,7 +565,7 @@ def _bulk_sites(source: str, path: str) -> Counter[tuple[str, str]]:
             if isinstance(item, ast.Call):
                 for resolved in target(item.func):
                     output[(label, resolved + ':call')] += 1
-                if isinstance(item.func, ast.Name) and item.func.id == 'getattr':
+                if getter_builtin and isinstance(item.func, ast.Name) and item.func.id == 'getattr':
                     for resolved in target(item):
                         output[(label, resolved)] += 1
                     if (len(item.args) >= 2 and 'work_lanes' in receiver_targets(item.args[0])
@@ -576,11 +583,12 @@ def _bulk_sites(source: str, path: str) -> Counter[tuple[str, str]]:
                             and 'select' in arg.value.lower() and 'v2_assistant_composite_lanes' in arg.value.lower()
                             and 'where' not in arg.value.lower()):
                         output[(label, 'unbounded lane SQL')] += 1
-        context = {'aliases': aliases, 'receivers': receivers, 'activity': activity_aliases}
+        context = {'aliases': aliases, 'receivers': receivers, 'activity': activity_aliases,
+                   'getter_builtin': getter_builtin}
         for child in nested:
             name = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else '<lambda>'
             scan_scope(child, (*scope, name), context)
-    scan_scope(tree, (), {'aliases': {}, 'receivers': {}, 'activity': set()})
+    scan_scope(tree, (), {'aliases': {}, 'receivers': {}, 'activity': set(), 'getter_builtin': True})
     return output
 
 def new_bulk_sites(frozen: str, base: str, candidate: str, path: str) -> list[str]:
@@ -589,6 +597,279 @@ def new_bulk_sites(frozen: str, base: str, candidate: str, path: str) -> list[st
             for (scope, kind), count in sorted(current.items())
             if count > max(old[(scope, kind)], merged[(scope, kind)])]
 
+
+# The registered scheduler is an intentionally closed assembly language.  Its
+# individual members remain governed by the active exception rows.
+def scheduler_grammar(source: str, active: str) -> list[str]:
+    path = 'services/chat-stream-v2/main.py'
+    error = f'{path}:run.reconcile_callbacks: F1 recurring callback grammar violation'
+    tree = ast.parse(source, filename=path)
+    runs = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'run']
+    if len(runs) != 1:
+        return [error]
+    run = runs[0]
+    callbacks = [n for n in run.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'reconcile_callbacks']
+    registrations = [k.value for n in ast.walk(run) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Name) and n.func.id == 'SessionReconciler'
+                     for k in n.keywords if k.arg == 'on_reconcile_tick']
+    uses = [n for n in ast.walk(run) if isinstance(n, ast.Name) and n.id == 'reconcile_callbacks']
+    if (len(callbacks) != 1 or len(registrations) != 1 or len(uses) != 1
+            or registrations[0] is not uses[0] or not isinstance(registrations[0].ctx, ast.Load)):
+        return [error]
+    fn = callbacks[0]
+    if (fn.decorator_list or fn.args.posonlyargs or fn.args.args or fn.args.kwonlyargs
+            or fn.args.vararg or fn.args.kwarg or fn.returns or fn.type_comment):
+        return [error]
+    rows = set(active.splitlines())
+    members = [
+        ('event_push.check_pin_drift', 'EventPush.check_pin_drift', 846),
+        ('watch_wake.missed_wake_alarm', 'WatchWake.missed_wake_alarm', 846),
+        ('watch_wake.tick', 'WatchWake.tick', 847),
+        ('capacity_retry.tick', 'CapacityRetry.tick', 847),
+        ('account_runtime.tick', 'AccountRuntime.tick', 847),
+        ('queued_send_now.tick', 'QueuedSendNow.tick', 847),
+    ]
+    expected = [expr for expr, symbol, line in members if f'{path}:{line} {symbol}' in rows]
+    restore = f'{path}:849 AssistantRestore.tick' in rows
+    body = fn.body
+    if len(body) not in (2, 3) or not isinstance(body[0], ast.Assign):
+        return [error]
+    init = body[0]
+    if (len(init.targets) != 1 or not isinstance(init.targets[0], ast.Name)
+            or init.targets[0].id != 'callbacks' or not isinstance(init.value, ast.List)
+            or [ast.unparse(e) for e in init.value.elts] != expected
+            or any(not isinstance(e, ast.Attribute) or not isinstance(e.value, ast.Name) for e in init.value.elts)):
+        return [error]
+    if len(body) == 3:
+        optional = body[1]
+        guard = ast.parse('server.assistant_restore is not None', mode='eval').body
+        append = ast.parse('callbacks.append(server.assistant_restore.tick)').body[0]
+        if (not isinstance(optional, ast.If) or optional.orelse
+                or ast.dump(optional.test, include_attributes=False) != ast.dump(guard, include_attributes=False)
+                or len(optional.body) != 1
+                or (ast.dump(optional.body[0], include_attributes=False) != ast.dump(append, include_attributes=False)
+                    if restore else not isinstance(optional.body[0], ast.Pass))):
+            return [error]
+    elif restore:
+        return [error]
+    dispatch = ast.parse('await run_reconcile_callbacks(*callbacks)').body[0]
+    if ast.dump(body[-1], include_attributes=False) != ast.dump(dispatch, include_attributes=False):
+        return [error]
+    return []
+
+
+# Identity sets describe values that can reach either protected boundary.  The
+# environment follows lexical scopes and joins both feasible branch outcomes.
+def identity_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
+    tree = ast.parse(source, filename=path)
+    sites: Counter[tuple[str, str, str]] = Counter()
+    G, B, S, C, W, P, O = 'getter', 'builtins', 'sqlite', 'connect', 'work_lanes', 'bulk', 'other'
+    protected = {S, C, W, P}
+
+    def record(scope, kind, node):
+        sites[('.'.join(scope) or '<module>', kind, ast.dump(node, include_attributes=False))] += 1
+
+    def local_names(node):
+        found = set()
+        class Bindings(ast.NodeVisitor):
+            def visit_Name(self, n):
+                if isinstance(n.ctx, (ast.Store, ast.Del)): found.add(n.id)
+            def visit_Import(self, n):
+                found.update(a.asname or a.name.split('.')[0] for a in n.names)
+            def visit_ImportFrom(self, n):
+                found.update(a.asname or a.name for a in n.names)
+            def visit_FunctionDef(self, n): found.add(n.name)
+            visit_AsyncFunctionDef = visit_FunctionDef
+            def visit_ClassDef(self, n): found.add(n.name)
+            def visit_Lambda(self, n): pass
+        visitor = Bindings()
+        for stmt in node.body if isinstance(node.body, list) else []: visitor.visit(stmt)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            found.update(a.arg for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs))
+            if node.args.vararg: found.add(node.args.vararg.arg)
+            if node.args.kwarg: found.add(node.args.kwarg.arg)
+        return found
+
+    def scan(node, scope, inherited):
+        env = {name: set(value) for name, value in inherited.items()}
+        if scope:
+            for name in local_names(node): env[name] = {O}
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                    if a.arg == 'work_lanes': env[a.arg] = {W}
+        nested = []
+        escaping_names = set()
+        class Declarations(ast.NodeVisitor):
+            def visit_Global(self, n): escaping_names.update(n.names)
+            def visit_Nonlocal(self, n): escaping_names.update(n.names)
+            def visit_FunctionDef(self, n): pass
+            visit_AsyncFunctionDef = visit_FunctionDef
+            def visit_ClassDef(self, n): pass
+            def visit_Lambda(self, n): pass
+        if isinstance(node.body, list):
+            for stmt in node.body: Declarations().visit(stmt)
+
+        def value(expr, current, emit=True):
+            if isinstance(expr, ast.Lambda):
+                if emit: scan(expr, (*scope, '<lambda>'), current)
+                return {O}
+            if isinstance(expr, (ast.Yield, ast.YieldFrom)):
+                v = value(expr.value, current, emit) if expr.value else {O}
+                if v & {S, C} and emit: record(scope, 'F1 SQLite opaque escape', expr)
+                if v & {W, P} and emit: record(scope, 'F2 bulk opaque escape', expr)
+                return {O}
+            if isinstance(expr, ast.Name):
+                return current.get(expr.id, {G} if expr.id == 'getattr' else ({W} if expr.id == 'work_lanes' else {O}))
+            if isinstance(expr, ast.Attribute):
+                base = value(expr.value, current, emit)
+                if expr.attr == 'work_lanes': return {W}
+                out = set()
+                if B in base and expr.attr == 'getattr': out.add(G)
+                if S in base and expr.attr == 'connect': out.add(C)
+                if expr.attr in {'__dict__', '__getattr__', '__getattribute__'}:
+                    if W in base and emit: record(scope, 'F2 bulk unresolved reflection', expr)
+                    if S in base and emit: record(scope, 'F1 SQLite unresolved reflection', expr)
+                if W in base and expr.attr in {'current', 'list'}:
+                    out.add(P)
+                    if emit: record(scope, 'F2 bulk reference', expr)
+                return out or {O}
+            if isinstance(expr, ast.Subscript):
+                base = value(expr.value, current, emit)
+                value(expr.slice, current, emit)
+                if W in base and emit: record(scope, 'F2 bulk unresolved member', expr)
+                if S in base and emit: record(scope, 'F1 SQLite unresolved member', expr)
+                return {O}
+            if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+                return set().union(*(value(e, current, emit) for e in expr.elts)) if expr.elts else {O}
+            if isinstance(expr, ast.Starred): return value(expr.value, current, emit)
+            if isinstance(expr, ast.IfExp):
+                return value(expr.body, current, emit) | value(expr.orelse, current, emit)
+            if isinstance(expr, ast.Call):
+                function = value(expr.func, current, emit)
+                args = [value(arg, current, emit) for arg in expr.args]
+                kwargs = [value(k.value, current, emit) for k in expr.keywords]
+                if G in function:
+                    receivers = args[0] if args and not isinstance(expr.args[0], ast.Starred) else set().union(*args) if args else set()
+                    packed = any(isinstance(a, ast.Starred) for a in expr.args) or any(k.arg is None for k in expr.keywords)
+                    if packed and (receivers & protected or any(a & protected for a in args + kwargs)):
+                        if emit: record(scope, 'F2 bulk or F1 SQLite unsupported reflection packing', expr)
+                        return {P, C}
+                    if receivers & {W, S}:
+                        member = expr.args[1] if len(expr.args) > 1 else None
+                        name = member.value if isinstance(member, ast.Constant) and isinstance(member.value, str) else None
+                        result = set()
+                        if W in receivers and (name is None or name in {'current', 'list', '__dict__', '__getattr__', '__getattribute__'}):
+                            result.add(P)
+                            if emit: record(scope, 'F2 bulk reference reflection', expr)
+                        if S in receivers and (name is None or name in {'connect', '__dict__', '__getattr__', '__getattribute__'}):
+                            result.add(C)
+                            if name != 'connect' and emit: record(scope, 'F1 SQLite unresolved reflection', expr)
+                        return result or {O}
+                if C in function and emit: record(scope, 'F1 SQLite connect call', expr)
+                if P in function and emit: record(scope, 'F2 bulk reference call', expr)
+                shadowed_getattr = (isinstance(expr.func, ast.Name) and expr.func.id == 'getattr'
+                                    and function == {O})
+                if G not in function and not shadowed_getattr:
+                    for arg in args + kwargs:
+                        if arg & {S, C} and emit: record(scope, 'F1 SQLite opaque escape', expr)
+                        if arg & {W, P} and emit: record(scope, 'F2 bulk opaque escape', expr)
+                return {O}
+            if isinstance(expr, ast.Dict):
+                return set().union(*(value(v, current, emit) for v in expr.values)) if expr.values else {O}
+            # Inspect nested expressions even when their resulting value is opaque.
+            for child in ast.iter_child_nodes(expr):
+                if isinstance(child, ast.expr): value(child, current, emit)
+            return {O}
+
+        def block(statements, current):
+            for stmt in statements:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    nested.append((stmt, {k: set(v) for k, v in current.items()}))
+                    current[stmt.name] = {O}
+                elif isinstance(stmt, ast.Import):
+                    for a in stmt.names:
+                        current[a.asname or a.name.split('.')[0]] = {S if a.name == 'sqlite3' else B if a.name == 'builtins' else O}
+                elif isinstance(stmt, ast.ImportFrom):
+                    for a in stmt.names:
+                        current[a.asname or a.name] = {G if stmt.module == 'builtins' and a.name == 'getattr' else C if stmt.module == 'sqlite3' and a.name == 'connect' else O}
+                elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                    v = value(stmt.value, current) if stmt.value else {O}
+                    for target in stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]:
+                        if isinstance(target, ast.Name):
+                            current[target.id] = set(v)
+                            if target.id in escaping_names and v & protected:
+                                record(scope, 'F1/F2 protected identity escape', stmt)
+                        elif v & protected: record(scope, 'F1/F2 protected identity escape', stmt)
+                elif isinstance(stmt, (ast.Return, ast.Yield, ast.YieldFrom)) and stmt.value:
+                    v = value(stmt.value, current)
+                    if v & {S, C}: record(scope, 'F1 SQLite opaque escape', stmt)
+                    if v & {W, P}: record(scope, 'F2 bulk opaque escape', stmt)
+                elif isinstance(stmt, (ast.Try, ast.TryStar)):
+                    initial = {k: set(v) for k, v in current.items()}
+                    body = block(stmt.body, {k: set(v) for k, v in initial.items()})
+                    normal = block(stmt.orelse, {k: set(v) for k, v in body.items()})
+                    exceptional = {key: initial.get(key, {O}) | body.get(key, {O})
+                                   for key in initial.keys() | body.keys()}
+                    branches = [normal]
+                    for handler in stmt.handlers:
+                        state = {k: set(v) for k, v in exceptional.items()}
+                        if handler.type: value(handler.type, state)
+                        if handler.name: state[handler.name] = {O}
+                        branches.append(block(handler.body, state))
+                    for key in set().union(*(branch.keys() for branch in branches)):
+                        current[key] = set().union(*(branch.get(key, {O}) for branch in branches))
+                    current = block(stmt.finalbody, current)
+                elif isinstance(stmt, ast.Match):
+                    subject = value(stmt.subject, current)
+                    branches = [{k: set(v) for k, v in current.items()}]
+                    for case in stmt.cases:
+                        state = {k: set(v) for k, v in current.items()}
+                        for pattern in ast.walk(case.pattern):
+                            name = (pattern.name if isinstance(pattern, (ast.MatchAs, ast.MatchStar))
+                                    else pattern.rest if isinstance(pattern, ast.MatchMapping) else None)
+                            if name: state[name] = set(subject)
+                        if case.guard: value(case.guard, state)
+                        branches.append(block(case.body, state))
+                    for key in set().union(*(branch.keys() for branch in branches)):
+                        current[key] = set().union(*(branch.get(key, {O}) for branch in branches))
+                elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+                    value(stmt.test if isinstance(stmt, ast.While) else stmt.iter, current)
+                    loop = {k: set(v) for k, v in current.items()}
+                    if not isinstance(stmt, ast.While) and isinstance(stmt.target, ast.Name):
+                        loop[stmt.target.id] = {O}
+                    if not (isinstance(stmt, ast.While) and isinstance(stmt.test, ast.Constant)
+                            and not stmt.test.value):
+                        loop = block(stmt.body, loop)
+                        for key in current.keys() | loop.keys():
+                            current[key] = current.get(key, {O}) | loop.get(key, {O})
+                    current = block(stmt.orelse, current)
+                elif isinstance(stmt, ast.If):
+                    value(stmt.test, current)
+                    feasible = [stmt.body, stmt.orelse]
+                    if isinstance(stmt.test, ast.Constant): feasible = [stmt.body if stmt.test.value else stmt.orelse]
+                    branches = [block(part, {k: set(v) for k, v in current.items()}) for part in feasible]
+                    for key in set().union(*(b.keys() for b in branches)):
+                        current[key] = set().union(*(b.get(key, {O}) for b in branches))
+                else:
+                    for child in ast.iter_child_nodes(stmt):
+                        if isinstance(child, ast.expr): value(child, current)
+                        elif isinstance(child, ast.stmt): block([child], current)
+            return current
+        if isinstance(node.body, list): block(node.body, env)
+        else: value(node.body, env)
+        # Closure cells may be assigned after the nested definition.
+        for child, captured in nested:
+            for key, val in env.items(): captured.setdefault(key, set()).update(val)
+            scan(child, (*scope, child.name), captured)
+    scan(tree, (), {})
+    return sites
+
+
+def new_identity_sites(frozen: str, base: str, candidate: str, path: str, adopted: str = '') -> list[str]:
+    old, merged, current, f4 = (identity_sites(text, path) for text in (frozen, base, candidate, adopted))
+    return [f'{path}:{scope}: new {kind}' for (scope, kind, fingerprint), count in sorted(current.items())
+            if count > max(old[(scope, kind, fingerprint)], merged[(scope, kind, fingerprint)],
+                           f4[(scope, kind, fingerprint)] if kind == 'F1 SQLite connect call' else 0)]
 
 def _optional_git_source(revision: str, path: str) -> str:
     result = subprocess.run(['git', 'show', f'{revision}:{path}'], cwd=ROOT,
@@ -611,6 +892,8 @@ def _changed_production(base: str) -> set[str]:
 def check(base: str) -> list[str]:
     errors = validate_census()
     errors.extend(check_anchors(base))
+    errors.extend(scheduler_grammar((SERVICE / "main.py").read_text(),
+                  (SERVICE / "daemon_contract/active/F1_protected_core.txt").read_text()))
     for path in CORE:
         frozen = _git_source(FROZEN, path)
         merged = _git_source(base, path)
@@ -629,6 +912,7 @@ def check(base: str) -> list[str]:
                           if path.endswith('/daemon_migrations.py') else '')
             errors.extend(new_primitives(frozen, merged, candidate, path, adopted_f4))
             errors.extend(new_bulk_sites(frozen, merged, candidate, path))
+            errors.extend(new_identity_sites(frozen, merged, candidate, path, adopted_f4))
     return errors
 
 
