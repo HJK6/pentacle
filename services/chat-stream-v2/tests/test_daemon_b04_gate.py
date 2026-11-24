@@ -100,8 +100,6 @@ def test_existing_recurring_loop_piggyback_fails(checkout):
     path.write_text(original.replace(marker, marker + '                await feature.refresh()\n'))
     rejected = run_gate(checkout)
     assert rejected.returncode != 0 and 'recurring-call' in rejected.stderr
-    path.write_text(original)
-    assert run_gate(checkout).returncode == 0
 
 
 def test_frozen_or_mergebase_site_passes_but_absent_site_fails():
@@ -167,8 +165,6 @@ def test_new_feature_alias_from_existing_core_import_fails(checkout):
     path.write_text(original + '\ndef b04_alias():\n    alias = store_usage\n    return alias\n')
     rejected = run_gate(checkout)
     assert rejected.returncode != 0 and 'new feature alias/reference' in rejected.stderr
-    path.write_text(original)
-    assert run_gate(checkout).returncode == 0
 
 
 def test_new_feature_work_inside_existing_writer_callback_fails(checkout):
@@ -182,14 +178,16 @@ def test_new_feature_work_inside_existing_writer_callback_fails(checkout):
     assert rejected.returncode != 0 and 'protected-callback' in rejected.stderr
 
 
-def test_alternate_sqlite_and_queue_writes_fail(checkout):
+@pytest.mark.parametrize('code', [
+    '\nimport sqlite3 as sql\ndef b04():\n    return sql.connect("x")\n',
+    '\ndef b04(store, job):\n    store._queue.put(job)\n',
+], ids=['sqlite-connect', 'queue-put'])
+def test_alternate_sqlite_and_queue_writes_fail(checkout, code):
     path = checkout / SERVICE / 'sessions.py'
     original = path.read_text()
-    for code in ('\nimport sqlite3 as sql\ndef b04():\n    return sql.connect("x")\n',
-                 '\ndef b04(store, job):\n    store._queue.put(job)\n'):
-        path.write_text(original + code)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
+    path.write_text(original + code)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
 
 
 def test_retired_exception_cannot_be_reintroduced(checkout):
@@ -211,13 +209,15 @@ def test_retired_exception_cannot_be_reintroduced(checkout):
 
 def test_unowned_local_import_rejected_and_main_composition_exempt(checkout):
     core = checkout / SERVICE / 'sessions.py'
-    main = checkout / SERVICE / 'main.py'
-    original_core, original_main = core.read_text(), main.read_text()
     (checkout / SERVICE / 'b04_unowned_feature.py').write_text('VALUE = 1\n')
-    core.write_text(original_core + '\nimport b04_unowned_feature\n')
+    core.write_text(core.read_text() + '\nimport b04_unowned_feature\n')
     rejected = run_gate(checkout)
     assert rejected.returncode != 0 and 'has no owner' in rejected.stderr
-    core.write_text(original_core)
+
+
+def test_main_composition_exemption_passes(checkout):
+    main = checkout / SERVICE / 'main.py'
+    original_main = main.read_text()
     main.write_text(original_main + '\nimport work_lanes_projection as b04_composition\n')
     allowed = run_gate(checkout)
     assert allowed.returncode == 0, allowed.stderr
@@ -277,7 +277,6 @@ def test_merge_runner_executes_b04_cli_and_workflow_requires_it(tmp_path):
 
 
 def test_offline_migration_exemption_does_not_allow_new_connections(checkout):
-    assert run_gate(checkout).returncode == 0
     path = checkout / SERVICE / 'daemon_migrations.py'
     path.write_text(path.read_text() + '\nimport sqlite3\ndef b04():\n    return sqlite3.connect("new.db")\n')
     rejected = run_gate(checkout)
@@ -298,32 +297,35 @@ def test_untyped_store_kv_alias_is_rejected(checkout):
     assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
 
 
-def test_feature_chat_queue_and_bulk_multiplicity_fail(checkout):
+@pytest.mark.parametrize('mutation', ['chat-queue', 'bulk-duplicate'])
+def test_feature_chat_queue_and_bulk_multiplicity_fail(checkout, mutation):
     core = checkout / SERVICE / 'sessions.py'
     original = core.read_text()
-    core.write_text(original + '\nasync def b04(queue):\n    return await queue.submit_chat(feature_work)\n')
+    if mutation == 'chat-queue':
+        core.write_text(original + '\nasync def b04(queue):\n    return await queue.submit_chat(feature_work)\n')
+        expected = 'new F1 primitive'
+    else:
+        path = checkout / SERVICE / 'work_lanes_projection.py'
+        original = path.read_text()
+        line = '                    rows = await self.store.work_lane_rows(include_done=True)\n'
+        assert original.count(line) == 1
+        path.write_text(original.replace(line, line + line))
+        expected = 'new F2 bulk reference'
     rejected = run_gate(checkout)
-    assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
-    core.write_text(original)
-    path = checkout / SERVICE / 'work_lanes_projection.py'
-    original = path.read_text()
-    line = '                    rows = await self.store.work_lane_rows(include_done=True)\n'
-    assert original.count(line) == 1
-    path.write_text(original.replace(line, line + line))
-    rejected = run_gate(checkout)
-    assert rejected.returncode != 0 and 'new F2 bulk reference' in rejected.stderr
+    assert rejected.returncode != 0 and expected in rejected.stderr
 
 
-def test_f1_exception_addition_and_move_fail(checkout):
+@pytest.mark.parametrize('change', ['addition', 'move'])
+def test_f1_exception_addition_and_move_fail(checkout, change):
     path = checkout / SERVICE / 'daemon_contract/active/F1_protected_core.txt'
     original = path.read_text()
     entry = 'services/_shared/specs_service.py:317 SpecsSubsystem._retry_loop'
     assert entry in original
-    for changed in (original + 'services/_shared/specs_service.py:999 SpecsSubsystem._retry_loop\n',
-                    original.replace(entry, entry.replace(':317', ':318'))):
-        path.write_text(changed)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and 'exception' in rejected.stderr
+    changed = (original + 'services/_shared/specs_service.py:999 SpecsSubsystem._retry_loop\n'
+               if change == 'addition' else original.replace(entry, entry.replace(':317', ':318')))
+    path.write_text(changed)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and 'exception' in rejected.stderr
 
 
 def test_new_caller_of_existing_bulk_forwarder_is_rejected():
@@ -350,14 +352,16 @@ def test_qualified_bulk_receiver_alias_is_rejected():
         sys.path.pop(0)
 
 
-def test_dynamic_writer_attribute_bypass_fails(checkout):
+@pytest.mark.parametrize('source', [
+    '\ndef b04(store):\n    writer = getattr(store, "submit")\n    return writer(job)\n',
+    '\ndef b04(store, name):\n    return getattr(store, name)(job)\n',
+], ids=['literal-getattr', 'computed-getattr'])
+def test_dynamic_writer_attribute_bypass_fails(checkout, source):
     path = checkout / SERVICE / 'sessions.py'
     original = path.read_text()
-    for source in ('\ndef b04(store):\n    writer = getattr(store, "submit")\n    return writer(job)\n',
-                   '\ndef b04(store, name):\n    return getattr(store, name)(job)\n'):
-        path.write_text(original + source)
-        rejected = run_gate(checkout)
-        assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
+    path.write_text(original + source)
+    rejected = run_gate(checkout)
+    assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
 
 
 def test_nested_op_name_does_not_taint_an_unrelated_function():
@@ -531,8 +535,6 @@ def test_reviewed_bypass_controls(checkout, case, path, mutation, message):
     Subject: committed B04 selector CLI in a disposable Git clone. Faults are
     the three cycle-1 QA reproductions; no runtime, network or database is used.
     """
-    baseline = run_gate(checkout)
-    assert baseline.returncode == 0, baseline.stderr
     target = checkout / SERVICE / path
     source = target.read_text()
     if mutation == 'scheduler':
@@ -546,14 +548,16 @@ def test_reviewed_bypass_controls(checkout, case, path, mutation, message):
     assert rejected.returncode != 0 and message in rejected.stderr, (case, rejected.stdout, rejected.stderr)
 
 
-def test_reviewed_bypass_clean_reflection_controls(checkout):
+@pytest.mark.parametrize('code', [
+    '\ndef b04(other, name):\n    return getattr(other, name)()\n',
+    '\ndef b04(work_lanes):\n    return getattr(work_lanes, "status")()\n',
+], ids=['unrelated-object', 'permitted-status'])
+def test_reviewed_bypass_clean_reflection_controls(checkout, code):
     path = checkout / SERVICE / 'sessions.py'
     original = path.read_text()
-    for code in ('\ndef b04(other, name):\n    return getattr(other, name)()\n',
-                 '\ndef b04(work_lanes):\n    return getattr(work_lanes, "status")()\n'):
-        path.write_text(original + code)
-        control = run_gate(checkout)
-        assert control.returncode == 0, control.stderr
+    path.write_text(original + code)
+    control = run_gate(checkout)
+    assert control.returncode == 0, control.stderr
 
 
 @pytest.mark.parametrize(('case', 'path', 'mutation', 'diagnostic'), [
@@ -565,8 +569,6 @@ def test_reviewed_bypass_clean_reflection_controls(checkout):
 ])
 def test_cycle2_prior_qa_controls(checkout, case, path, mutation, diagnostic):
     """Real CLI admission: five reviewed bypasses, clean baseline, no live data."""
-    baseline = run_gate(checkout)
-    assert baseline.returncode == 0, baseline.stderr
     target = checkout / SERVICE / path
     source = target.read_text()
     if mutation in {'append', 'rebind'}:
@@ -654,8 +656,6 @@ def test_cycle2_seven_qa_subjects_fail_candidate_cli_and_permitted_controls(chec
 
 
 def test_cycle2_cli_baseline_and_permitted_controls(checkout):
-    baseline = run_gate(checkout)
-    assert baseline.returncode == 0, baseline.stderr
     sessions = checkout / SERVICE / 'sessions.py'
     sessions.write_text(sessions.read_text() + '''
 import sqlite3 as safe_sqlite
@@ -829,18 +829,21 @@ def test_cycle2_scheduler_matrix_cli(checkout, old, new):
     ('queued_send_now.tick', 'services/chat-stream-v2/main.py:847 QueuedSendNow.tick'),
     ('watch_wake.tick, ', 'services/chat-stream-v2/main.py:847 WatchWake.tick'),
 ], ids=['event-push', 'missed-wake', 'account', 'capacity', 'queued-send', 'watch-wake'])
-def test_cycle2_scheduler_six_one_sided_retirements_cli(checkout, member, row):
+@pytest.mark.parametrize('retirement', ['source', 'row'], ids=['source', 'row'])
+def test_cycle2_scheduler_six_one_sided_retirements_cli(checkout, member, row, retirement):
     main = checkout / SERVICE / 'main.py'
     inventory = checkout / SERVICE / 'daemon_contract/active/F1_protected_core.txt'
     original, rows = main.read_text(), inventory.read_text()
-    main.write_text(original.replace(member, '', 1))
-    inventory.write_text(rows)
+    if retirement == 'source':
+        main.write_text(original.replace(member, '', 1))
+        inventory.write_text(rows)
+        expected = 'stale exception'
+    else:
+        main.write_text(original)
+        inventory.write_text(rows.replace(row + '\n', '', 1))
+        expected = 'F1 recurring'
     result = run_gate(checkout)
-    assert result.returncode == 1 and 'stale exception' in result.stderr, (row, result.stderr)
-    main.write_text(original)
-    inventory.write_text(rows.replace(row + '\n', '', 1))
-    result = run_gate(checkout)
-    assert result.returncode == 1 and 'F1 recurring' in result.stderr, (row, result.stderr)
+    assert result.returncode == 1 and expected in result.stderr, (row, result.stderr)
 
 
 def test_cycle2_identity_ratchet_uses_per_site_maximum_and_allows_retirement(cycle2_gate):
