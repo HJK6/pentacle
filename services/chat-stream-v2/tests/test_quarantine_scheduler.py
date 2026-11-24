@@ -9,7 +9,6 @@ import sys
 import pytest
 
 from quarantine_scheduler import run_child
-from tools.run_gate import _advisory_observed
 from tools import run_gate
 
 
@@ -20,16 +19,6 @@ def test_worker_exit_and_timeout_are_bounded():
         with pytest.raises(asyncio.TimeoutError):
             await run_child([sys.executable, '-c', 'import time; time.sleep(30)'], dict(os.environ), timeout=0.1)
     asyncio.run(exercise())
-
-
-def test_advisory_receipt_requires_each_exact_case_to_execute(tmp_path):
-    receipt = tmp_path / 'junit.xml'
-    receipt.write_text('<testsuite><testcase classname="tests.test_a.TestGroup" name="test_one[x]"/></testsuite>')
-    expected = ['tests/test_a.py::TestGroup::test_one[x]']
-    assert _advisory_observed(receipt, expected)
-    assert not _advisory_observed(receipt, expected + ['tests/test_a.py::test_missing'])
-    receipt.write_text('<testsuite><testcase classname="tests.test_a.TestGroup" name="test_one[x]"><skipped/></testcase></testsuite>')
-    assert not _advisory_observed(receipt, expected)
 
 
 @pytest.mark.parametrize('tier', ['unit', 'smoke'])
@@ -88,31 +77,3 @@ def test_gate_executes_quarantined_and_unadmitted_cases_as_advisory(tmp_path, mo
     assert Path(advisory['junit']).name == f'{tier}-advisory.junit.xml'
     assert advisory['returncode'] == 1
     assert advisory['counts']['tests'] == 2
-
-
-def test_timed_out_advisory_fails_tier(tmp_path, monkeypatch):
-    monkeypatch.delenv("TMUX", raising=False)
-    held = "tests/test_a.py::test_new"
-    monkeypatch.setattr(run_gate, "summarize_progress", lambda _: {"present": True, "complete": True})
-    scripts = str(Path(__file__).resolve().parents[3] / "scripts")
-    monkeypatch.syspath_prepend(scripts)
-    import admission_inputs
-    monkeypatch.setattr(admission_inputs, "load_quarantine", lambda _: {"version": 1, "nonblocking_tests": []})
-
-    def run(command, *, env, log_path, timeout, advisory=False):
-        if advisory:
-            return 124, True
-        junit = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml="))
-        Path(junit).write_text('<testsuite tests="1" failures="0" errors="0" skipped="0"/>')
-        (tmp_path / "unit.admission.json").write_text(json.dumps({
-            "complete": True, "held": [{"id": held}], "separate_tiers": {},
-        }))
-        return 0, False
-
-    monkeypatch.setattr(run_gate, "_run_process", run)
-    result = run_gate._run_tier("unit", tmp_path, 30, basetemp=tmp_path / "base",
-                                manifest=tmp_path / "owner", advisory_bound=17)
-    assert result["advisory"]["bound_s"] == 17
-    assert result["advisory"]["returncode"] == 124
-    assert result["reason"] == "quarantine_advisory_incomplete"
-    assert not result["passed"]

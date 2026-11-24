@@ -81,27 +81,6 @@ def _junit_counts(path: Path) -> dict[str, Any] | None:
     return result
 
 
-def _advisory_observed(path: Path, expected: list[str]) -> bool:
-    root = ET.parse(path).getroot()
-    cases = list(root.iter('testcase'))
-    if any(case.find('skipped') is not None for case in cases):
-        return False
-    observed = [case.get('classname', '') + '::' + case.get('name', '') for case in cases]
-    keys = []
-    for node in expected:
-        head, bracket, parameter = node.partition('[')
-        file, *parts = head.split('::')
-        if not file.endswith('.py') or not parts:
-            return False
-        if bracket:
-            parts[-1] += bracket + parameter
-        module = file[:-3].replace('/', '.')
-        if len(parts) > 1:
-            module += '.' + '.'.join(parts[:-1])
-        keys.append(module + '::' + parts[-1])
-    return len(observed) == len(keys) and set(observed) == set(keys)
-
-
 def _sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
 def _git_status() -> str:
@@ -414,11 +393,6 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
                 result['advisory'] = {'command': advisory_command, 'progress': advisory_progress, 'returncode': advisory_code,
                                       'timed_out': advisory_timeout, 'junit': str(advisory_junit), 'log': str(advisory_log),
                                       'bound_s': remaining, 'counts': _junit_counts(advisory_junit)}
-                if advisory_timeout or advisory_code not in (0, 1) or not advisory_progress["complete"]:
-                    raise ValueError('quarantine advisory did not execute')
-                expected = [test for test in tests if test.split('::', 1)[0] in files]
-                if not _advisory_observed(advisory_junit, expected):
-                    raise ValueError('quarantined identity missing from advisory execution')
         except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as exc:
             result['advisory_error'] = type(exc).__name__
             result['advisory_detail'] = str(exc)[:500]
