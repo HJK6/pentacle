@@ -58,6 +58,7 @@ def real_candidate(tmp_path_factory):
     target.mkdir(parents=True)
     for source in SERVICE.glob("*.py"):
         shutil.copy2(source, target / source.name)
+    shutil.copy2(SERVICE / "daemon_identity.json", target / "daemon_identity.json")
     shutil.copytree(SERVICE.parent / "_shared", root / "services/_shared",
                     ignore=shutil.ignore_patterns("__pycache__", "tests"))
     # Contract files that shared modules read at import.
