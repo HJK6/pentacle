@@ -64,6 +64,29 @@ class Store:
         self.assertEqual(daemon_gate._startup_writes(base), {})
         self.assertEqual(len(daemon_gate._startup_writes(candidate)), 1)
 
+    def test_startup_write_uses_its_own_sql_binding(self) -> None:
+        template = ("class Store:\n"
+                    "    def __init__(self): pass\n"
+                    "    def _run(self):\n"
+                    "        sql = {target!r}\n"
+                    "        conn.execute(sql)\n")
+        sibling = "    def other(self):\n        sql = {other!r}\n"
+        write, read = "CREATE TABLE demo(id INTEGER)", "SELECT 1"
+        for target, other, expected in [(write, read, [write]), (read, write, [])]:
+            source = template.format(target=target)
+            for suffix in ("", sibling.format(other=other)):
+                with self.subTest(target=target, suffix=suffix):
+                    self.assertEqual(list(daemon_gate._startup_writes(source + suffix).values()), expected)
+
+    def test_startup_method_resolves_global_sql_past_class_binding(self) -> None:
+        source = ("class Store:\n"
+                  "    sql = 'SELECT 1'\n"
+                  "    def __init__(self): pass\n"
+                  "    def _run(self): conn.execute(sql)\n"
+                  "sql = 'CREATE TABLE demo(id INTEGER)'\n")
+        self.assertEqual(list(daemon_gate._startup_writes(source).values()),
+                         ["CREATE TABLE demo(id INTEGER)"])
+
     def test_moved_startup_write_changes_its_identity(self) -> None:
         before = '''\
 class Store:

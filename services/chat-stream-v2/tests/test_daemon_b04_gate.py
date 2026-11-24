@@ -215,6 +215,21 @@ def test_unowned_local_import_rejected_and_main_composition_exempt(checkout):
     assert rejected.returncode != 0 and 'has no owner' in rejected.stderr
 
 
+@pytest.mark.parametrize("importer", ["sessions.py", "main.py"])
+@pytest.mark.parametrize("feature_path", ["b04_feature.py", "b04_feature/__init__.py"])
+def test_new_local_feature_ownership(checkout, importer, feature_path):
+    feature = checkout / SERVICE / feature_path
+    feature.parent.mkdir(exist_ok=True)
+    feature.write_text("VALUE = 1\n")
+    path = checkout / SERVICE / importer
+    path.write_text(path.read_text() + "\nimport b04_feature\n")
+    result = run_gate(checkout)
+    if importer == "sessions.py":
+        assert result.returncode == 1 and "local import b04_feature has no owner" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
 def test_main_composition_exemption_passes(checkout):
     main = checkout / SERVICE / 'main.py'
     original_main = main.read_text()
@@ -276,8 +291,8 @@ def test_merge_runner_executes_b04_cli_and_workflow_requires_it(tmp_path):
     assert 'daemon_b04_gate.py' in matches[0]['run'] and '--base "$RELEASE_BASE"' in matches[0]['run']
 
 
-def test_offline_migration_exemption_does_not_allow_new_connections(checkout):
-    path = checkout / SERVICE / 'daemon_migrations.py'
+def test_existing_sqlite_user_cannot_add_a_connection(checkout):
+    path = checkout / SERVICE / 'store.py'
     path.write_text(path.read_text() + '\nimport sqlite3\ndef b04():\n    return sqlite3.connect("new.db")\n')
     rejected = run_gate(checkout)
     assert rejected.returncode != 0 and 'new F1 primitive call:connect' in rejected.stderr
@@ -854,6 +869,5 @@ def test_cycle2_identity_ratchet_uses_per_site_maximum_and_allows_retirement(cyc
     assert not cycle2_gate.new_identity_sites(site, site, '', 'fixture.py')
     assert cycle2_gate.new_identity_sites('', '', site, 'fixture.py')
     assert cycle2_gate.new_identity_sites(site, '', doubled, 'fixture.py')
-    assert not cycle2_gate.new_identity_sites('', '', site, 'fixture.py', site)
     other = site.replace('"x"', '"other"')
-    assert cycle2_gate.new_identity_sites('', '', other, 'fixture.py', site)
+    assert cycle2_gate.new_identity_sites(site, site, other, 'fixture.py')

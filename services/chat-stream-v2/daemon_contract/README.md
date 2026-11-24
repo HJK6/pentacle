@@ -13,8 +13,7 @@ new exceptions are refused, while removing an existing exception is allowed.
 | F5 Observation | External facts include source, observation time and freshness; consumers read the value with its age. Observers register with the F1 scheduler. | Structure owner |
 | F6 Durable delivery | Delivery records intent, attempt and landed, failed or uncertain outcome, with one recovery rule after restart. Routing clients use this layer instead of owning independent delivery state machines. | Structure owner |
 
-One configured structure-owner identity signs daemon structure decisions. The
-identity is intentionally pending until the operator returns the owner card.
+The structure owner configured in `contract.json` signs daemon structure decisions.
 The configured maximum is two active daemon lanes. FD enforces lane admission;
 the repository checker validates the shared configured cap and owner setting.
 
@@ -29,8 +28,7 @@ B04's protected-core and projection checks run with
 `python3 services/chat-stream-v2/tools/daemon_b04_gate.py --base <merge-base-sha>`.
 They verify the frozen core-import census and the F1/F2 exception selectors,
 then check candidate imports, writer and scheduler boundaries, and bulk-view
-references. `main.py` is the composition exemption for core imports. The F4
-SQLite connection exemption is limited to the accepted offline preparation
-sites in the B04 parent; new connections still require admission. The merge
+references. `main.py` is the composition exemption for core imports. SQLite
+connection sites are checked against the frozen and merge-base sources. The merge
 runner and predeploy workflow run this check alongside the existing contract
 and policy/observation/delivery checks.

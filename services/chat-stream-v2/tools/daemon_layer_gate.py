@@ -16,6 +16,11 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+if __package__:
+    from .daemon_contract_gate import sql_call_bindings
+else:
+    from daemon_contract_gate import sql_call_bindings
+
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = SERVICE_ROOT.parents[1]
 BASELINE_COMMIT = "f153ca8adce2a38e0c5092b2dc98ff5aec16e06e"
@@ -176,28 +181,9 @@ def _routing_branch(node: ast.AST) -> bool:
     return any(token in text for token in ROUTING_TOKENS for text in tokens)
 
 
-def _sql_constants(tree: ast.AST) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            value = node.value
-            found = value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
-            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
-                left = value.left.value if isinstance(value.left, ast.Constant) and isinstance(value.left.value, str) else None
-                right = value.right.value if isinstance(value.right, ast.Constant) and isinstance(value.right.value, str) else None
-                if left is not None and right is not None:
-                    found = left + right
-            if found is not None:
-                for target in targets:
-                    if isinstance(target, ast.Name):
-                        values[target.id] = found
-    return values
-
-
 def _delivery_sql_mutations(source: str, path: str = "<fixture>") -> list[tuple[str, str]]:
     tree = ast.parse(source, filename=path)
-    constants = _sql_constants(tree)
+    bindings = sql_call_bindings(tree)
     parents: dict[int, str] = {}
 
     def record(node: ast.AST, prefix: tuple[str, ...] = ()) -> None:
@@ -209,14 +195,14 @@ def _delivery_sql_mutations(source: str, path: str = "<fixture>") -> list[tuple[
 
     record(tree)
     output = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr not in {"execute", "executemany", "executescript"} or not node.args:
-            continue
+    for node, constants in bindings.items():
         argument = node.args[0]
-        sql = argument.value if isinstance(argument, ast.Constant) and isinstance(argument.value, str) else (
-            constants.get(argument.id) if isinstance(argument, ast.Name) else None)
+        value = constants.get(argument.id) if isinstance(argument, ast.Name) else argument
+        sql = value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
+        if isinstance(argument, ast.Name) and isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            if all(isinstance(part, ast.Constant) and isinstance(part.value, str)
+                   for part in (value.left, value.right)):
+                sql = value.left.value + value.right.value
         if sql is None and isinstance(argument, ast.JoinedStr):
             pieces = [part.value for part in argument.values if isinstance(part, ast.Constant) and isinstance(part.value, str)]
             sql = "".join(pieces) if pieces else None

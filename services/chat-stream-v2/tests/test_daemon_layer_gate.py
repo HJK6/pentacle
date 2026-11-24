@@ -8,17 +8,16 @@ branch. Fixtures are synthetic and use only the standard library.
 from __future__ import annotations
 
 import ast
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "daemon_layer_gate.py"
-SPEC = importlib.util.spec_from_file_location("daemon_layer_gate", MODULE_PATH)
-assert SPEC and SPEC.loader
-gate = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = gate
-SPEC.loader.exec_module(gate)
+sys.path.insert(0, str(MODULE_PATH.parent))
+try:
+    import daemon_layer_gate as gate
+finally:
+    sys.path.pop(0)
 
 
 def _scopes(path: str, source: str, symbol: str) -> dict[tuple[str, str], ast.AST]:
@@ -77,6 +76,24 @@ class DaemonLayerGateTests(unittest.TestCase):
         additions = gate._added_delivery_sql(before, after, "services/chat-stream-v2/example.py")
         self.assertEqual(len(additions), 1)
         self.assertEqual(additions[0][0], "send")
+
+    def test_delivery_write_uses_its_own_sql_binding(self) -> None:
+        template = "def send(conn):\n    sql = {target!r}\n    conn.execute(sql)\n"
+        sibling = "def other():\n    sql = {other!r}\n"
+        write, read = "UPDATE v2_tell_deliveries SET state=?", "SELECT 1"
+        for target, other, expected in [(write, read, [("send", write.lower())]), (read, write, [])]:
+            source = template.format(target=target)
+            for suffix in ("", sibling.format(other=other)):
+                with self.subTest(target=target, suffix=suffix):
+                    self.assertEqual(gate._delivery_sql_mutations(source + suffix), expected)
+
+    def test_delivery_sql_closure_and_parameter_shadowing(self) -> None:
+        source = ("def outer():\n"
+                  "    sql = 'UPDATE v2_tell_deliveries SET state=?'\n"
+                  "    def send(conn): conn.execute(sql)\n"
+                  "    def other(conn, sql): conn.execute(sql)\n")
+        self.assertEqual(gate._delivery_sql_mutations(source),
+                         [("outer.send", "update v2_tell_deliveries set state=?")])
 
     def test_aliased_observation_reader_and_publisher_are_detected(self) -> None:
         source = ("from hosts import Hosts as H\n"

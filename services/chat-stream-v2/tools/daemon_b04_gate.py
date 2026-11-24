@@ -119,9 +119,9 @@ def new_imports(frozen: str, base: str, candidate: str, path: str) -> list[str]:
         if not module or module in owners or site.form == 'unresolved':
             continue
         parts = module.split('.')
-        local = ((SERVICE / (parts[0] + '.py')).is_file() or
-                 (parts[0] == '_shared' and len(parts) > 1 and
-                  (ROOT / 'services/_shared' / (parts[1] + '.py')).is_file()))
+        root = ROOT / 'services' if parts[0] == '_shared' else SERVICE
+        target = root.joinpath(*parts)
+        local = target.with_suffix('.py').is_file() or (target / '__init__.py').is_file()
         if local:
             errors.append(f'{path}:{site.line}: local import {module} has no owner')
     return errors
@@ -416,14 +416,11 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                 output[('.'.join(key), 'protected-callback-condition', ast.dump(item.test, include_attributes=False))] += 1
     return output
 
-def new_primitives(frozen: str, base: str, candidate: str, path: str,
-                   adopted_f4: str = '') -> list[str]:
+def new_primitives(frozen: str, base: str, candidate: str, path: str) -> list[str]:
     old, merged, current = (_primitive_sites(text, path) for text in (frozen, base, candidate))
-    adopted = _primitive_sites(adopted_f4, path) if adopted_f4 else Counter()
     return [f'{path}:{scope}: new F1 primitive {kind}'
             for (scope, kind, signature), count in sorted(current.items())
-            if count > max(old[(scope, kind, signature)], merged[(scope, kind, signature)],
-                           adopted[(scope, kind, signature)] if kind == 'call:connect' else 0)]
+            if count > max(old[(scope, kind, signature)], merged[(scope, kind, signature)])]
 
 
 # Named F2 bulk views and traced callers in the frozen F2 sidecar. Generic
@@ -882,11 +879,10 @@ def identity_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
     return sites
 
 
-def new_identity_sites(frozen: str, base: str, candidate: str, path: str, adopted: str = '') -> list[str]:
-    old, merged, current, f4 = (identity_sites(text, path) for text in (frozen, base, candidate, adopted))
+def new_identity_sites(frozen: str, base: str, candidate: str, path: str) -> list[str]:
+    old, merged, current = (identity_sites(text, path) for text in (frozen, base, candidate))
     return [f'{path}:{scope}: new {kind}' for (scope, kind, fingerprint), count in sorted(current.items())
-            if count > max(old[(scope, kind, fingerprint)], merged[(scope, kind, fingerprint)],
-                           f4[(scope, kind, fingerprint)] if kind == 'F1 SQLite connect call' else 0)]
+            if count > max(old[(scope, kind, fingerprint)], merged[(scope, kind, fingerprint)])]
 
 def _optional_git_source(revision: str, path: str) -> str:
     result = subprocess.run(['git', 'show', f'{revision}:{path}'], cwd=ROOT,
@@ -923,13 +919,9 @@ def check(base: str) -> list[str]:
             frozen = _optional_git_source(FROZEN, path)
             merged = _optional_git_source(base, path)
             candidate = target.read_text()
-            # B02's already accepted offline preparation is an F4 exemption,
-            # limited to the exact connections in its commissioned parent.
-            adopted_f4 = (_optional_git_source('7f8b8d3e59665c16572ff55a1a1c16bcbd834df8', path)
-                          if path.endswith('/daemon_migrations.py') else '')
-            errors.extend(new_primitives(frozen, merged, candidate, path, adopted_f4))
+            errors.extend(new_primitives(frozen, merged, candidate, path))
             errors.extend(new_bulk_sites(frozen, merged, candidate, path))
-            errors.extend(new_identity_sites(frozen, merged, candidate, path, adopted_f4))
+            errors.extend(new_identity_sites(frozen, merged, candidate, path))
     return errors
 
 

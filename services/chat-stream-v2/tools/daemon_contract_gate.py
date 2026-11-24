@@ -134,22 +134,78 @@ def _validate_contract() -> list[str]:
     return errors
 
 
-def _constant_strings(tree: ast.AST) -> dict[str, tuple[str, ...]]:
-    values: dict[str, tuple[str, ...]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+def sql_call_bindings(tree: ast.Module) -> dict[ast.Call, dict[str, ast.expr]]:
+    """Index simple assignments visible to each execute call in B01 and B05."""
+    calls: dict[ast.Call, dict[str, ast.expr]] = {}
+    module: dict[str, ast.expr] = {}
+    functions = []
+
+    def visit(node: ast.AST, values: dict[str, ast.expr], closure: dict[str, ast.expr]) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            # Defaults, bases, annotations and decorators run in the defining scope.
+            body = [node.body] if isinstance(node, ast.Lambda) else node.body
+            body_nodes = set(body)
+            for child in ast.iter_child_nodes(node):
+                if child not in body_nodes:
+                    visit(child, values, closure)
+            if isinstance(node, ast.ClassDef):
+                namespace = closure.copy()
+                for statement in body:
+                    visit(statement, namespace, closure)
+            else:
+                # Delay the body so it can see later outer definitions. A method
+                # closes over its enclosing function/module, skipping class locals.
+                functions.append((body, node.args, closure))
+            if not isinstance(node, ast.Lambda):
+                values.pop(node.name, None)
+            return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            local = closure.copy()
+            for index, generator in enumerate(node.generators):
+                visit(generator.iter, values if index == 0 else local, closure if index == 0 else local)
+                visit(generator.target, local, local)
+                for condition in generator.ifs:
+                    visit(condition, local, local)
+            outputs = (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
+            for output in outputs:
+                visit(output, local, local)
+            return
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"execute", "executemany", "executescript"} and node.args):
+            calls[node] = values.copy()
+        if isinstance(node, ast.Global):
+            for name in node.names:
+                if name in module:
+                    values[name] = module[name]
+                else:
+                    values.pop(name, None)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            visit(node.value, values, closure)
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            value = node.value
-            strings: tuple[str, ...] = ()
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                strings = (value.value,)
-            elif isinstance(value, (ast.Tuple, ast.List)) and all(
-                    isinstance(item, ast.Constant) and isinstance(item.value, str) for item in value.elts):
-                strings = tuple(item.value for item in value.elts)
             for target in targets:
-                if isinstance(target, ast.Name) and strings:
-                    values[target.id] = strings
-    return values
+                visit(target, values, closure)
+                if isinstance(target, ast.Name):
+                    values[target.id] = node.value
+            if isinstance(node, ast.AnnAssign):
+                visit(node.annotation, values, closure)
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            values.pop(node.id, None)
+        if isinstance(node, ast.alias):
+            values.pop(node.asname or node.name.split(".")[0], None)
+        for child in ast.iter_child_nodes(node):
+            visit(child, values, closure)
+
+    visit(tree, module, module)
+    while functions:
+        body, arguments, outer = functions.pop()
+        local = outer.copy()
+        for arg in ast.iter_child_nodes(arguments):
+            if isinstance(arg, ast.arg):
+                local.pop(arg.arg, None)
+        for statement in body:
+            visit(statement, local, local)
+    return calls
 
 
 def _exception_additions(base_text: str, candidate_text: str) -> list[str]:
@@ -158,11 +214,17 @@ def _exception_additions(base_text: str, candidate_text: str) -> list[str]:
     return sorted(candidate_entries - base_entries)
 
 
-def _sql_argument(node: ast.expr, constants: dict[str, tuple[str, ...]]) -> tuple[str, ...] | None:
+def _sql_argument(node: ast.expr, constants: dict[str, ast.expr]) -> tuple[str, ...] | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return (node.value,)
     if isinstance(node, ast.Name):
-        return constants.get(node.id)
+        value = constants.get(node.id)
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return (value.value,)
+        if isinstance(value, (ast.Tuple, ast.List)) and all(
+                isinstance(item, ast.Constant) and isinstance(item.value, str) for item in value.elts):
+            return tuple(item.value for item in value.elts)
+        return None
     if isinstance(node, (ast.Tuple, ast.List)):
         values: list[str] = []
         for item in node.elts:
@@ -214,7 +276,7 @@ def _startup_writes(source: str) -> dict[tuple[str, int, int, int, str], str]:
     changed literals in the open path.
     """
     tree = ast.parse(source)
-    constants = _constant_strings(tree)
+    bindings = sql_call_bindings(tree)
     store = next((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Store"), None)
     if store is None:
         raise GateError("store.py has no Store class")
@@ -224,11 +286,9 @@ def _startup_writes(source: str) -> dict[tuple[str, int, int, int, str], str]:
         if method is None:
             raise GateError(f"Store.{method_name} is missing")
         for node in ast.walk(method):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            if node not in bindings:
                 continue
-            if node.func.attr not in {"execute", "executemany", "executescript"} or not node.args:
-                continue
-            sqls = _sql_argument(node.args[0], constants)
+            sqls = _sql_argument(node.args[0], bindings[node])
             if sqls is None:
                 # An unresolved SQL argument on the open path must not silently
                 # escape the baseline comparison. Treat it as a capability marker.
