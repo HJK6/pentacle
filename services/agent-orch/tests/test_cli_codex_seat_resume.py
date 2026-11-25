@@ -4,7 +4,7 @@ from test_cli_spawn_resume import RESUME_ID, _install_capture, _resume_args
 
 def test_parent_can_request_native_codex_resume(monkeypatch, tmp_path):
     captured = _install_capture(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda config: "hostb:review-parent")
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda config: "fixture:review-parent")
     args = _resume_args(tmp_path, provider="codex", top_level=True)
     args.account = "primary"
 
