@@ -1001,8 +1001,9 @@ def _move_copies(conn, archive_path, binding, table, keys, columns, candidates, 
     is absent. The second checks the configured archive binding, re-reads the
     rows, and deletes only those still eligible, equal to their archived copy
     in every column and free of `conflicts`, checking the binding again just
-    before the delete. Eligible rows that are not equal go to `unequal`, which
-    classifies them in this pass. A crash at any point leaves each row in the
+    before the delete. Every eligible row is checked for `conflicts`, and those
+    that are not equal also go to `unequal`, so a refusal that is a collision
+    is classified in this pass. A crash at any point leaves each row in the
     hot file, the archive or both.
     """
     if not candidates:
@@ -1025,9 +1026,8 @@ def _move_copies(conn, archive_path, binding, table, keys, columns, candidates, 
         rows = current([key(row) for row in copied])
         same = _identical(conn, table, keys, columns, rows)
         unequal([row for row in rows if key(row) not in same])
-        rows = [row for row in rows if key(row) in same]
         bad = conflicts(rows)
-        gone = [row for row in rows if key(row) not in bad]
+        gone = [row for row in rows if key(row) in same and key(row) not in bad]
         history_checkpoint("verified", table, gone)
         _check_binding(conn, archive_path, binding)
         if gone:

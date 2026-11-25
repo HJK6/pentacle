@@ -416,3 +416,44 @@ def test_an_archived_copy_missing_at_the_delete_is_copied_by_the_next_pass(termi
     monkeypatch.setattr(r, "history_checkpoint", lambda *_: None)
     assert run_pass(terminal, cfg()).events_moved == 2
     assert rows(archive_of(terminal), r.EVENT_TABLE, "1 ORDER BY event_id") == events
+
+
+@pytest.mark.parametrize("holder", ["none", "event_key", "identity"])
+def test_a_missing_archived_copy_with_another_archived_holder_is_retained_in_this_pass(
+        tmp_path, monkeypatch, caplog, holder):
+    db = tmp_path / "sessions.db"
+    seed(db, open_names=[], terminal_names=["closed-1"], events_per_session=1)
+    if holder == "identity":
+        write(db, "UPDATE session_event_tail SET identity='shared'")
+    original = rows(db, r.EVENT_TABLE)[0]
+    other = dict(original, event_id=original["event_id"] + 99, event_json="different")
+    if holder == "identity":
+        other["event_key"] = "different-key"
+
+    def replace_copy():
+        assert rows(db, r.EVENT_TABLE) == rows(archive_of(db), r.EVENT_TABLE) == [original]
+        write(archive_of(db), "DELETE FROM session_event_tail")
+        if holder != "none":
+            preseed_archive(db, other)
+    monkeypatch.setattr(r, "history_checkpoint", at("archive_committed", r.EVENT_TABLE, replace_copy))
+    with caplog.at_level("WARNING", logger=r.log.name):
+        result = run_pass(db, cfg())
+    warned = [m for m in caplog.messages if COLLIDES in m]
+    assert rows(db, r.EVENT_TABLE) == [original]
+    if holder == "none":
+        assert (result.events_moved, result.events_retained, warned) == (0, 0, [])
+        return
+    assert (result.events_moved, result.events_retained) == (0, 1), "an archived holder was not counted in this pass"
+    assert len(warned) == 1
+    assert rows(archive_of(db), r.EVENT_TABLE) == [other]
+
+
+def test_a_session_whose_archived_copy_is_missing_at_the_delete_is_copied_by_the_next_pass(terminal, monkeypatch):
+    session = rows(terminal, "sessions")
+    monkeypatch.setattr(r, "history_checkpoint", at("archive_committed", "sessions",
+                                                    lambda: write(archive_of(terminal), "DELETE FROM sessions")))
+    assert run_pass(terminal, cfg()).sessions_moved == 0
+    assert rows(terminal, "sessions") == session
+    monkeypatch.setattr(r, "history_checkpoint", lambda *_: None)
+    assert run_pass(terminal, cfg()).sessions_moved == 1
+    assert rows(archive_of(terminal), "sessions") == session
