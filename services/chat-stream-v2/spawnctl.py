@@ -958,29 +958,34 @@ class SpawnCtl:
     async def _codex_resume_target(
         self, msg: dict[str, Any], host: str, tmux: "tmux_transport.Tmux", session_id: str,
     ) -> tuple[str, str, str, dict[str, Any]]:
-        from store_specs import _session_row
+        def bound_transcript(row):
+            binding = (row or {}).get("observer_binding")
+            transcript = binding.get("transcript") if isinstance(binding, dict) else None
+            return transcript if isinstance(transcript, dict) else {}
 
-        def matching_rows(conn):
-            rows = conn.execute(
-                "SELECT * FROM sessions WHERE provider='codex' "
-                "AND json_extract(observer_binding, '$.transcript.session_id')=? LIMIT 2",
-                (session_id,),
-            )
-            return [_session_row(conn, row) for row in rows]
-
-        matches = await self.store.submit(matching_rows)
+        matches = []
+        for row in await self.store.list_sessions(status=None):
+            if row.get("provider") != "codex":
+                continue
+            if bound_transcript(row).get("session_id") == session_id:
+                matches.append((row["host"], row["session_name"]))
+                if len(matches) == 2:
+                    break
         if not matches:
             raise VerbError("resume_transcript_not_found", "no retained Codex seat for this session")
         if len(matches) != 1:
             raise VerbError("resume_foreign_target", "multiple seats claim the Codex session")
-        prior = matches[0]
-        if prior["host"] != host:
+        matched_host, name = matches[0]
+        if matched_host != host:
             raise VerbError("resume_target_host_mismatch", "retained Codex seat belongs to another host")
+        prior = await self.store.fetch_session(host, name)
+        transcript = bound_transcript(prior)
+        if not prior or prior.get("provider") != "codex" or transcript.get("session_id") != session_id:
+            raise VerbError("resume_foreign_target", "retained Codex session identity changed")
         account = prior.get("account_binding") or {}
         if (not account.get("alias") or account.get("provider") != "codex" or account.get("host") != host
                 or msg.get("account", account["alias"]) != account["alias"]):
             raise VerbError("account_resume_cross_home_forbidden", "resume requires the retained Codex account")
-        name = prior["session_name"]
         if prior.get("status") != "closed":
             raise VerbError("resume_session_already_live", "Codex seat must be closed before resume")
         state = await tmux.session_state(name)
@@ -989,10 +994,8 @@ class SpawnCtl:
         if state != "gone":
             raise VerbError("resume_target_probe_failed", "could not confirm Codex pane absence")
 
-        binding = prior["observer_binding"]
-        transcript = binding["transcript"]
         file_id = transcript.get("file_id")
-        if (binding.get("generation") != prior["session_generation"] or transcript.get("provider") != "codex"
+        if (prior["observer_binding"].get("generation") != prior["session_generation"] or transcript.get("provider") != "codex"
                 or not isinstance(file_id, list) or len(file_id) != 2):
             raise VerbError("resume_foreign_target", "Codex transcript has no matching observer proof")
         path = transcript.get("path")

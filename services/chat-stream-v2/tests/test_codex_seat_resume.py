@@ -48,6 +48,29 @@ def fixture_paths(tmp_path):
                    executable=str(executable)), path
 
 
+def test_codex_resume_refuses_changed_identity_after_lookup(tmp_path, monkeypatch):
+    async def run():
+        store, runtime = await setup(str(tmp_path / "retained seats.db"))
+        try:
+            account, path = fixture_paths(tmp_path)
+            prior = await retained(store, account, path)
+
+            async def changed(host, name):
+                assert (host, name) == (HOST, NAME)
+                return {**prior, "observer_binding": {}}
+
+            monkeypatch.setattr(store, "fetch_session", changed)
+            tmux = ResumeTmux()
+            ctl = SpawnCtl(store, runtime.sessions, tmux=tmux)
+            with pytest.raises(VerbError) as exc:
+                await ctl._codex_resume_target({}, HOST, tmux, RESUME_ID)
+            assert exc.value.code == "resume_foreign_target"
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("explicit", [False, True])
 def test_closed_codex_resume_reopens_same_row_and_launches_native_session(tmp_path, explicit):
     async def run():
