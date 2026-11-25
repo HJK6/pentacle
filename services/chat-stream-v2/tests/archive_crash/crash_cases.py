@@ -221,9 +221,11 @@ def test_storage_stop_between_file_commits(chat, tmp_path, table, archive_mode, 
     assert placement(pair, tmp_path / "control", table) == (0, 1), "uninterrupted control"
     # No move commit writes both files: the archive copy commits alone, and the
     # hot delete's commit (which holds the archive reservation) writes no archive page.
-    tables = {commit["table"] for commit in body["commits"]}
-    assert tables == {EVENTS, SESSIONS}, body["commits"]
-    assert all(len(commit["files"]) == 1 for commit in body["commits"]), body["commits"]
+    assert all(len(commit["files"]) <= 1 for commit in body["commits"]), body["commits"]
+    for name in (EVENTS, SESSIONS):
+        written = [next(iter(commit["files"])) for commit in body["commits"]
+                   if commit["table"] == name and commit["files"]]
+        assert written and written == ["archive", "hot"] * (len(written) // 2), (name, body["commits"])
     assert sum(stopped) >= 1, f"{table} row is in neither file after the stop: {stopped}"
     assert stopped == STORAGE[file]
     public_readback(chat, pair, hot_count=1)

@@ -218,3 +218,141 @@ def test_hot_triggers_fire_with_the_hot_delete(terminal, monkeypatch):
     run_pass(terminal, cfg())
     assert seen[("archive_committed", "sessions")] == seen[("verified", "sessions")] == before
     assert seen[("hot_deleted", "sessions")] == version() > before
+
+
+# --------------------------------------------------------------------------- #
+# nothing read before a transaction is trusted inside it
+# --------------------------------------------------------------------------- #
+
+
+SESSION_SELECTION = ("SELECT rowid,", "FROM sessions WHERE")
+EVENT_SELECTION = ('FROM main."session_event_tail" WHERE', "temp.hot_streams")
+
+
+def run_pass_between(db: Path, selection: tuple, action) -> r.PassResult:
+    """A real pass; `action` runs once, after the first `selection` statement
+    completes and before the next BEGIN takes any lock."""
+    import asyncio
+    from store import Store
+    state, errors = {}, []
+
+    def trace(statement):
+        try:
+            if "done" not in state and all(part in statement for part in selection):
+                state["selected"] = True
+            elif statement.startswith("BEGIN") and state.pop("selected", False):
+                state["done"] = True
+                action()
+        except BaseException as error:  # a trace callback cannot raise into SQLite
+            errors.append(error)
+
+    async def go():
+        store = Store(str(db))
+        store.start()
+        try:
+            await store.submit(lambda conn: conn.set_trace_callback(trace))
+            return await r.RetentionJob(store, cfg()).run_pass()
+        finally:
+            store.stop()
+    result = asyncio.run(go())
+    assert state.get("done") and not errors, (state, errors)
+    return result
+
+
+def test_a_session_another_pass_moved_after_selection_keeps_its_archive_copy(terminal):
+    session = rows(terminal, "sessions")
+    events = rows(terminal, r.EVENT_TABLE)
+    run_pass_between(terminal, SESSION_SELECTION, lambda: run_pass(terminal, cfg()))
+    assert rows(terminal, "sessions") == rows(terminal, r.EVENT_TABLE) == []
+    assert rows(archive_of(terminal), "sessions") == session, "the archived session was deleted"
+    assert rows(archive_of(terminal), r.EVENT_TABLE, "1 ORDER BY event_id") == events
+
+
+def test_a_session_reopened_after_selection_is_not_archived(terminal):
+    reopen = "UPDATE sessions SET status='open' WHERE session_name='closed-1'"
+    result = run_pass_between(terminal, SESSION_SELECTION, lambda: write(terminal, reopen))
+    assert result.sessions_moved == 0
+    assert [row["status"] for row in rows(terminal, "sessions")] == ["open"]
+    assert rows(archive_of(terminal), "sessions") == []
+
+
+def test_an_exact_copy_whose_identity_another_archived_event_holds_stays_hot(terminal):
+    write(terminal, "UPDATE session_event_tail SET identity='same' WHERE event_id=1")
+    first, second = rows(terminal, r.EVENT_TABLE, "1 ORDER BY event_id")
+    other = dict(first, event_id=99, event_key="other-key", event_json="different")
+    preseed_archive(terminal, first)
+    preseed_archive(terminal, other)
+    result = run_pass(terminal, cfg())
+    assert (result.events_moved, result.events_retained) == (1, 1)
+    assert rows(terminal, r.EVENT_TABLE) == [first]
+    assert rows(archive_of(terminal), r.EVENT_TABLE, "1 ORDER BY event_id") == [first, second, other]
+
+
+def test_an_identity_changed_after_selection_is_checked_on_the_current_row(terminal):
+    first, second = rows(terminal, r.EVENT_TABLE, "1 ORDER BY event_id")
+    other = dict(first, event_id=99, event_key="other-key", identity="archived", event_json="different")
+    preseed_archive(terminal, other)
+    change = "UPDATE session_event_tail SET identity='archived' WHERE event_id=1"
+    result = run_pass_between(terminal, EVENT_SELECTION, lambda: write(terminal, change))
+    assert (result.events_moved, result.events_retained) == (1, 1)
+    assert rows(terminal, r.EVENT_TABLE) == [dict(first, identity="archived")]
+    assert rows(archive_of(terminal), r.EVENT_TABLE, "1 ORDER BY event_id") == [second, other]
+
+
+def test_a_collision_archived_after_the_copy_keeps_the_event_hot(terminal, monkeypatch):
+    write(terminal, "UPDATE session_event_tail SET identity='same' WHERE event_id=1")
+    first, second = rows(terminal, r.EVENT_TABLE, "1 ORDER BY event_id")
+    other = dict(first, event_id=99, event_key="other-key", event_json="different")
+    monkeypatch.setattr(r, "history_checkpoint", at("archive_committed", r.EVENT_TABLE,
+                                                    lambda: preseed_archive(terminal, other)))
+    result = run_pass(terminal, cfg())
+    assert rows(terminal, r.EVENT_TABLE) == [first], "an event whose identity another archived event holds was deleted"
+    assert (result.events_moved, result.events_retained) == (1, 1)
+
+
+def snapshot_then(db: Path, event_stage: str, action):
+    """Save a same-pair archive with the session but no events, then run
+    `action(snapshot)` at the event batch's `event_stage`."""
+    snapshot = db.parent / "same-pair.db"
+
+    def checkpoint(stage, table, _rows):
+        if (stage, table) == ("archive_committed", "sessions"):
+            with closing(sqlite3.connect(archive_of(db))) as src, closing(sqlite3.connect(snapshot)) as dst:
+                src.backup(dst)
+        elif (stage, table) == (event_stage, r.EVENT_TABLE):
+            action(snapshot)
+    return checkpoint
+
+
+def refused(db: Path) -> str:
+    try:
+        run_pass(db, cfg())
+    except r.RetentionError as error:
+        return str(error)
+    return ""
+
+
+def test_an_archive_replaced_after_verification_keeps_the_hot_rows(terminal, monkeypatch):
+    events = rows(terminal, r.EVENT_TABLE)
+    monkeypatch.setattr(r, "history_checkpoint", snapshot_then(
+        terminal, "verified", lambda snapshot: snapshot.replace(archive_of(terminal))))
+    refusal = refused(terminal)
+    assert rows(terminal, r.EVENT_TABLE) == events, "hot events deleted against a replaced archive"
+    assert rows(archive_of(terminal), r.EVENT_TABLE) == []
+    assert "replaced" in refusal
+
+
+def test_an_archive_rebound_before_the_hot_delete_keeps_the_hot_rows(terminal, monkeypatch):
+    events = rows(terminal, r.EVENT_TABLE)
+
+    def rebind(snapshot):
+        with closing(sqlite3.connect(terminal, factory=r.HistoryConnection)) as other:
+            other.row_factory = sqlite3.Row
+            r.bind_history_archive(other, snapshot)
+    monkeypatch.setattr(r, "history_checkpoint", snapshot_then(terminal, "archive_committed", rebind))
+    refusal = refused(terminal)
+    assert rows(terminal, r.EVENT_TABLE) == events, "hot events deleted against an obsolete binding"
+    configured = Path(rows(terminal, "v2_send_receipt_sequence")[0]["archive_path"])
+    assert configured == terminal.parent / "same-pair.db"
+    assert rows(configured, r.EVENT_TABLE) == []
+    assert "rebound" in refusal

@@ -113,26 +113,46 @@ and never treats retention ownership as fetch authorization.
 ## Session and event rows
 
 Terminal session rows and archivable `session_event_tail` rows move in the same
-order, one batch at a time, on the Store connection with the archive attached:
+order, one batch at a time, on the Store connection with the archive attached.
+Selection only chooses candidate keys; nothing it read is trusted later. Both
+transactions below hold the hot write lock and re-read the current hot rows:
 
-1. A transaction that writes only the archive copies absent rows. Its commit is
-   the archive file's alone.
-2. One `BEGIN IMMEDIATE` transaction holds the archive reservation and the hot
-   write lock. It rechecks the archive path, inode and pair, joins each hot row to
-   its archived copy on every column, recomputes eligibility, and deletes only
-   rows that are still identical and eligible. Its commit writes the hot file only.
+1. A `BEGIN IMMEDIATE` transaction copies the candidates that are present and
+   eligible now into the archive. It changes only the archive, so its commit is
+   the archive file's alone. It never deletes or replaces an archived row whose
+   hot source is absent.
+2. A second `BEGIN IMMEDIATE` transaction also holds the archive reservation.
+   It checks that the configured archive (the hot sequence row's path) is the
+   attached one, with the same device, inode and pair. It re-reads each hot row
+   and keeps only rows that are still eligible, equal to their archived copy in
+   every column and, for events, free of an alternate-key collision. It checks
+   the binding again, then deletes those rows. Its commit writes the hot file
+   only.
 
-A crash at any instant leaves each row hot, archived or both. The next pass
-converges. Hot-side triggers fire with the delete, never with the copy.
+Eligibility is decided from the current row in each transaction. A session must
+still be terminal, outside the caller's keep-set and outside the lineage
+keep-set. An event's stream must still be closed, or the event must still be
+below its open stream's tail cutoff, and not an assistant composite's. A crash
+at any instant leaves each row hot, archived or both, including when a second
+mover or a reopen races the pass. The next pass converges. Hot-side triggers
+fire with the delete, never with the copy.
+
+`bind_history_archive` relocates a pair in a hot write transaction, so it is
+serialized with the delete. The path, device and inode checks detect an archive
+file replaced between the attach and either check. A rename of the archive path
+by a process that does not take the hot lock is not serialized beyond those
+checks: do not move or replace a live archive file outside
+`bind_history_archive` and the offline procedures below.
 
 Events keep their original `event_id`, `event_key`, identity and bytes. An
-identical archived event is already copied. A hot event that collides with a
-different archived event stays hot and is logged. The collision can be on
-`event_id`, or on `event_key` or non-null identity within the same stream and
-birth. The pass result counts it in `events_retained`. Selection advances past
-retained rows. A reused session name keeps today's behavior: the newer terminal
-row replaces the archived incarnation, through the same order. The archive still
-holds one row per `(host, session_name)`.
+identical archived event is already copied. A hot event whose current row
+collides with a different archived event stays hot, is logged once and is counted
+in `events_retained`. The collision can be the same `event_id` with other bytes,
+or another archived `event_id` with the same `event_key` or non-null identity
+within the same stream and birth, including for an exact copy. Selection advances
+past retained rows. A reused session name keeps today's behavior: the newer
+terminal row replaces the archived incarnation, through the same order. The
+archive still holds one row per `(host, session_name)`.
 
 Late receipt reconciliation treats one empty-identity event that is found in both
 files with the same id and bytes as a single match.
