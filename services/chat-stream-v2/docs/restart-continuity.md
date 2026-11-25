@@ -31,9 +31,10 @@ outcome stays `indeterminate`.
 Post-paste adoption polls until the 20 s adoption deadline (`ADOPTION_BOOT_DEADLINE_S`). When the receipt supports Store proof:
 
 - **Lookups in the window:** a Store lookup is offered only when at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) of the window remains. The transcript probe runs right up to the deadline.
-- **At the deadline:** if the spawn is still unresolved, adoption takes one transcript observation with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance, then one decisive Store sample with its own 0.25 s grant.
-- **The outcome:** `failed agent_never_started` requires a `pending` answer from that decisive sample. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained.
-- **Cost:** a settlement can end up to 3.25 s after the deadline. Startup settles intents one at a time, so N unresolved intents can add up to N × 3.25 s.
+- **At the deadline:** if the spawn is still unresolved, adoption takes one transcript observation with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance and checks the pane. Then it takes one decisive Store sample with its own 0.25 s grant.
+- **Any failed outcome:** `transcript_absent`, `pane_died_during_boot` and `agent_never_started`, in the window or at the deadline, each need a `pending` answer from a Store sample taken after that pass's last transcript and pane observation. That sample has its own 0.25 s grant. A proven answer means delivered. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained.
+- **A found transcript:** is enough on its own to mean delivered; no Store sample is needed.
+- **Cost:** a settlement can end up to 3.25 s after the deadline. A failure inside the window adds at most one 0.25 s sample. Startup settles intents one at a time, so N unresolved intents can add up to N × 3.25 s.
 
 Receipts without Store proof use the transcript alone, as before.
 

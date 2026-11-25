@@ -607,10 +607,6 @@ def test_transcript_absent_with_unreachable_store_never_repastes(
 ) -> None:
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.2)
     brief = "[example-service-notice:absent-unavailable]\nnot safe to resend"
-    # Scaled to this test's short window: the production floor and expiry
-    # transcript allowance would not fit inside it.
-    monkeypatch.setattr(spawnctl_mod, "ADOPTION_MIN_EVENT_LOOKUP_S", 0.05)
-    monkeypatch.setattr(spawnctl_mod, "ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S", 0.2)
 
     class UnavailableProof:
         async def lookup(self, stream_id: str, *, expected_text: str,
@@ -1283,10 +1279,13 @@ class CostedProof:
     ``hold_from_s`` on wait on ``gate`` (released at teardown) instead."""
 
     def __init__(self, clock: SettleClock, *, cost_s: float = 0.010,
-                 user_from_s: float | None = None) -> None:
+                 user_from_s: float | None = None, unreachable_from_s: float | None = None,
+                 events: list | None = None) -> None:
         self.clock = clock
         self.cost_s = cost_s
         self.user_from_s = user_from_s
+        self.unreachable_from_s = unreachable_from_s
+        self.events = events if events is not None else []
         self.calls: list[dict] = []
         self.hold_from_s: float | None = None
         self.gate = asyncio.Event()
@@ -1295,6 +1294,7 @@ class CostedProof:
                      watermark: object, timeout_s: float) -> EventProof:
         call = {"at": self.clock.rel(), "timeout_s": timeout_s, "result": None}
         self.calls.append(call)
+        self.events.append(("store", call))
         if self.hold_from_s is not None and call["at"] >= self.hold_from_s:
             call["result"] = "held"
             try:
@@ -1306,6 +1306,9 @@ class CostedProof:
             call["result"] = "timeout"
             raise asyncio.TimeoutError
         self.clock.now += self.cost_s
+        if self.unreachable_from_s is not None and call["at"] >= self.unreachable_from_s:
+            call["result"] = "unreachable"
+            return EventProof("unreachable", stream_id, 0, reason="event_store_unreachable")
         if self.user_from_s is not None and call["at"] >= self.user_from_s:
             call["result"] = "user"
             return EventProof("proven", stream_id, 0, event_id=11)
@@ -1317,23 +1320,49 @@ class SteppedTranscript:
     """Underlying transcript source that steps the virtual clock to fixed instants."""
 
     def __init__(self, clock: SettleClock, stops: list[float], *,
-                 found_from_s: float | None = None, after_stops_step_s: float = 0.05) -> None:
+                 found_from_s: float | None = None, absent_from_s: float | None = None,
+                 pane_dies_at_s: float | None = None, after_stops_step_s: float = 0.05,
+                 events: list | None = None) -> None:
         self.clock = clock
         self.stops = list(stops)
         self.found_from_s = found_from_s
+        self.absent_from_s = absent_from_s
+        self.pane_dies_at_s = pane_dies_at_s
         self.after_stops_step_s = after_stops_step_s
+        self.events = events if events is not None else []
         self.calls: list[dict] = []
 
-    async def __call__(self, *_args: object, absolute_deadline: float | None = None, **_kw: object) -> str:
+    async def __call__(self, *_args: object, absolute_deadline: float | None = None,
+                       tmux: AdoptTmux | None = None, **_kw: object) -> str:
         at = self.clock.rel()
-        self.calls.append({"at": at, "allowance_s": None if absolute_deadline is None
-                           else round(absolute_deadline - self.clock.now, 6)})
+        call = {"at": at, "allowance_s": None if absolute_deadline is None
+                else round(absolute_deadline - self.clock.now, 6)}
+        self.calls.append(call)
+        self.events.append(("transcript", call))
         found = self.found_from_s is not None and at >= self.found_from_s
         if self.stops:
             self.clock.now = self.clock.start + self.stops.pop(0)
         else:
             self.clock.now += self.after_stops_step_s
-        return "found" if found else "no_transcript"
+        ended = self.clock.rel()
+        if tmux is not None and self.pane_dies_at_s is not None and ended >= self.pane_dies_at_s:
+            tmux.alive = False
+        if found:
+            return "found"
+        if self.absent_from_s is not None and ended >= self.absent_from_s:
+            return "absent"
+        return "no_transcript"
+
+
+class LoggingTmux(AdoptTmux):
+    def __init__(self, events: list, clock: SettleClock) -> None:
+        super().__init__(alive=True, pane_pid=DEAD_PID, screen="model loading")
+        self.events = events
+        self.clock = clock
+
+    async def has_session(self, name: str) -> bool:
+        self.events.append(("pane", {"at": self.clock.rel(), "alive": self.alive}))
+        return self.alive
 
 
 # Transcript observations end 20 ms before expiry; the next one lands on it.
@@ -1341,7 +1370,8 @@ SETTLE_STOPS = [5.0, 10.0, 15.0, 19.98, SETTLE_EXPIRY_S]
 
 
 def _settle_at_expiry(monkeypatch: pytest.MonkeyPatch, proof: CostedProof, transcript: SteppedTranscript,
-                      clock: SettleClock, *, receipt: dict | None = None) -> tuple[str, str, str]:
+                      clock: SettleClock, *, receipt: dict | None = None,
+                      events: list | None = None) -> tuple[str, str, str]:
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", SETTLE_EXPIRY_S)
     monkeypatch.setattr(spawnctl_mod, "time", clock)
     brief = "[example-service-notice:expiry]\nsettle at the boot line"
@@ -1350,7 +1380,8 @@ def _settle_at_expiry(monkeypatch: pytest.MonkeyPatch, proof: CostedProof, trans
         db = Store(":memory:")
         db.start()
         try:
-            tmux = AdoptTmux(alive=True, pane_pid=DEAD_PID, screen="model loading")
+            tmux = (LoggingTmux(events, clock) if events is not None
+                    else AdoptTmux(alive=True, pane_pid=DEAD_PID, screen="model loading"))
             sessions = Sessions(db, tmux=tmux, local_host="hosta")
             ctl = SpawnCtl(db, sessions, tmux=tmux, submission_proof=proof)
             ctl._transcript_status = transcript  # type: ignore[method-assign]
@@ -1472,3 +1503,65 @@ def test_saved_staged_watermark_with_pending_store_stays_unknown(monkeypatch: py
                                receipt={**LEGACY_RECEIPT, "transport": "staged"})
     assert result == ("indeterminate", "live_pane_unproven",
                       "spawn_delivery_unknown: saved pre-paste watermark; no affirmative prompt delivery proof")
+
+
+# -- One negative gate: no failure without a pending Store sample taken after
+# the iteration's last evidence observation (transcript probe and pane check).
+
+DELIVERED_EVENT = ("delivered", "event_store",
+                   "adopted_after_restart: exact post-watermark USER event present in generation-fenced Store")
+
+
+def test_user_landing_during_the_probe_wins_over_an_absent_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, user_from_s=0.5)
+    transcript = SteppedTranscript(clock, [1.0], absent_from_s=1.0)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert proof.calls[0]["result"] == "pending", proof.calls
+    assert result == DELIVERED_EVENT, (result, proof.calls)
+
+
+def test_absent_transcript_below_the_floor_defers_to_an_unreachable_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    # The 19.98 s iteration is below the floor, so it issues no lookup before
+    # its probe; the probe then reports the transcript absent.
+    proof = CostedProof(clock, unreachable_from_s=19.98)
+    transcript = SteppedTranscript(clock, SETTLE_STOPS, absent_from_s=19.99)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert result == ("indeterminate", "live_pane_unproven",
+                      "event_store_unreachable: adoption reconciliation deferred"), (result, proof.calls)
+
+
+def test_user_landing_before_the_pane_dies_is_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, user_from_s=0.5)
+    transcript = SteppedTranscript(clock, [1.0], pane_dies_at_s=1.0)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert result == DELIVERED_EVENT, (result, proof.calls)
+
+
+NEGATIVE_EXITS = {
+    "transcript-absent": (dict(stops=[1.0], absent_from_s=1.0), "transcript_absent"),
+    "pane-died": (dict(stops=[1.0], pane_dies_at_s=1.0), "pane_died_during_boot"),
+    "expiry": (dict(stops=SETTLE_STOPS), "agent_never_started"),
+}
+
+
+@pytest.mark.parametrize("exit_name", sorted(NEGATIVE_EXITS))
+def test_every_negative_exit_rests_on_a_pending_sample_after_the_last_observation(
+    monkeypatch: pytest.MonkeyPatch, exit_name: str,
+) -> None:
+    kwargs, reason = NEGATIVE_EXITS[exit_name]
+    clock = SettleClock()
+    events: list = []
+    proof = CostedProof(clock, events=events)
+    stops = kwargs.pop("stops")
+    transcript = SteppedTranscript(clock, stops, events=events, **kwargs)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock, events=events)
+    assert result[:2] == ("failed", reason), (result, events)
+    kinds = [kind for kind, _ in events]
+    last_store = len(kinds) - 1 - kinds[::-1].index("store")
+    last_observation = max(i for i, kind in enumerate(kinds) if kind in {"transcript", "pane"})
+    assert last_store > last_observation, events
+    sample = events[last_store][1]
+    assert sample["result"] == "pending" and sample["timeout_s"] >= SETTLE_STORE_FLOOR_S, events
