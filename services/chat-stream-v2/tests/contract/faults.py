@@ -175,11 +175,16 @@ def main():
         parser.error("each --case must be unique")
     output.mkdir(parents=True)
     commit = _git(REPO, "rev-parse", "HEAD").decode().strip()
-    identity = {"base_commit": commit, "runner": platform.platform(), "python": platform.python_version()}
+    main_ref = "refs/remotes/origin/main"
+    main_commit = _git(REPO, "rev-parse", main_ref).decode().strip()
+    public_base = _git(REPO, "merge-base", commit, main_commit).decode().strip()
+    identity = {"base_commit": commit, "public_base": public_base,
+                "runner": platform.platform(), "python": platform.python_version()}
     lines = output / "detections.jsonl"
     with tempfile.TemporaryDirectory(prefix="chat-contract-faults-") as temporary, lines.open("w") as receipt:
         checkout = Path(temporary) / "checkout"
         _git(REPO, "clone", "--quiet", "--local", "--no-checkout", str(REPO), str(checkout))
+        _git(checkout, "update-ref", main_ref, main_commit)
         _git(checkout, "checkout", "--quiet", "--detach", commit)
         service = checkout / SERVICE.relative_to(REPO)
         nodes = [f"tests/contract/{FAULTS[case].node}" for case in selected]

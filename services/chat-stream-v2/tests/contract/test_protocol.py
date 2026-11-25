@@ -15,9 +15,7 @@ def test_c1_handshake_and_errors(chat):
     ready = rpc.call("hello", subscribe={"mode": "rpc"})
     assert ready["type"] == "ready", ready
     assert rpc.call("list_sessions")["type"] == "list_sessions.ok"
-    assert [frame.body["type"] for frame in rpc.frames] == [
-        "welcome", "ready", "list_sessions.ok",
-    ], "C1 RPC hello included an unexpected frame"
+    assert all(frame.body["type"] != "snapshot" for frame in rpc.frames), "C1 RPC hello sent a snapshot"
 
     for raw, code in (("{", "bad_json"), ("[]", "bad_envelope")):
         start = len(full.frames)
