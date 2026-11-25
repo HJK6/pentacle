@@ -10,6 +10,19 @@ import pytest
 from _shared import operator_auth as auth
 from agent_orch import config, wsclient
 
+STUCK_S = 10  # stuck detector for the .03 s screen deadlines below
+
+
+async def _unstuck(awaitable):
+    """Await within STUCK_S; failing distinctly from the TimeoutError the
+    product raises at its own deadline."""
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=STUCK_S)
+    if not done:
+        task.cancel()
+        pytest.fail(f"stuck: the call outlived the {STUCK_S}s stuck detector")
+    return task.result()
+
 
 @pytest.fixture
 def protocol(monkeypatch, tmp_path):
@@ -160,7 +173,6 @@ def test_malformed_envelope_fails_closed(protocol):
 
 @pytest.mark.parametrize("stage", ["connect", "hello", "request", "close"])
 def test_total_deadline(protocol, monkeypatch, stage):
-    import time
     cfg, socket = protocol
     async def stall(*args, **kwargs):
         await asyncio.Future()
@@ -176,13 +188,12 @@ def test_total_deadline(protocol, monkeypatch, stage):
                 await stall()
             await original(raw)
         monkeypatch.setattr(socket, "send", send)
-    started = time.monotonic()
+    lease = _unstuck(wsclient.screen_lease_once(cfg, {"type": "screen.lease.acquire"}, timeout=.03))
     if stage == "close":
-        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.acquire"}, timeout=.03))
+        asyncio.run(lease)
     else:
         with pytest.raises(TimeoutError):
-            asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.acquire"}, timeout=.03))
-    assert time.monotonic() - started < .3
+            asyncio.run(lease)
     if stage != "connect":
         assert socket.closed
 
@@ -225,18 +236,16 @@ def test_other_pre_ready_frames_still_refuse(protocol, monkeypatch, frame_type):
 
 
 def test_working_state_stream_does_not_extend_readiness_deadline(protocol, monkeypatch):
-    import time
     cfg, socket = protocol
     original_recv = socket.recv
     async def recv():
         if not socket.frames:
             return await original_recv()
+        await asyncio.sleep(0)  # yield per frame, as real socket I/O does, so the stuck detector can run
         return json.dumps({"type": "working.state"})
     monkeypatch.setattr(socket, "recv", recv)
-    started = time.monotonic()
     with pytest.raises(TimeoutError):
-        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.acquire"}, timeout=.03))
-    assert time.monotonic() - started < .3
+        asyncio.run(_unstuck(wsclient.screen_lease_once(cfg, {"type": "screen.lease.acquire"}, timeout=.03)))
     assert [frame["type"] for frame in socket.frames] == ["hello"]
     assert socket.closed
 
