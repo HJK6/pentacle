@@ -323,13 +323,6 @@ def _new_restart_activation(
 GATE_REQUIRED_TIER = "merge"
 GATE_REQUIRED_EXECUTABLES = ("git", "tmux")
 GATE_SYSTEM_PATHS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
-# Forward the qualified v2-merge bounds through the inline gate's `env -i`.
-# A caller's own V2_<TIER>_TIMEOUT_S still wins.
-DEPLOY_GATE_TIER_TIMEOUTS = {
-    "V2_CONTRACT_TIMEOUT_S": "180",
-    "V2_UNIT_TIMEOUT_S": "699",
-    "V2_SMOKE_TIMEOUT_S": "900",
-}
 
 
 def _effective_home() -> Path:
@@ -342,8 +335,14 @@ def _gate_path(repo: Path, service: ServiceConfig | None = None) -> str:
     return os.pathsep.join(dict.fromkeys(paths))
 
 
+def _default_gate_tier_timeouts() -> dict[str, str]:
+    profile = json.loads((REPO_ROOT / "scripts/gate-env.json").read_text(encoding="utf-8"))
+    timeouts = profile["profiles"]["pentacle"]["targets"]["v2-merge"]["tier_timeouts"]
+    return {f"V2_{tier.upper()}_TIMEOUT_S": str(bound) for tier, bound in timeouts.items()}
+
+
 def _gate_tier_timeouts() -> dict[str, str]:
-    bounds = {name: os.environ.get(name, default) for name, default in DEPLOY_GATE_TIER_TIMEOUTS.items()}
+    bounds = {name: os.environ.get(name, default) for name, default in _default_gate_tier_timeouts().items()}
     for name, value in bounds.items():
         try:
             seconds = float(value)

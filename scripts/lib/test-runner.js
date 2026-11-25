@@ -11,26 +11,6 @@ const DEFAULTS = Object.freeze({ fileTimeoutMs: 60000, runTimeoutMs: 900000, ter
 const TAIL_BYTES = 65536;
 const FORWARD_BYTES = 1048576;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function quarantineByFile(repoRoot, accepted) {
-  const data = accepted || JSON.parse(fs.readFileSync(path.join(repoRoot, 'scripts/quarantine.json'), 'utf8'));
-  const tests = data && data.nonblocking_tests;
-  if (data?.version !== 1 || !Array.isArray(tests) || tests.some(t => typeof t !== 'string' || !t || !t.includes('::')) || new Set(tests).size !== tests.length) {
-    throw new Error('invalid quarantine inventory');
-  }
-  const result = new Map();
-  for (const id of tests) {
-    const index = id.indexOf('::'), file = id.slice(0, index), name = id.slice(index + 2);
-    if (!file.startsWith('test/') || !/\.(js|ts)$/.test(file)) continue;
-    if (!name) throw new Error('invalid quarantined test identity');
-    const history = data.history?.[crypto.createHash('sha256').update(id).digest('hex')];
-    if (!history || typeof history.activation !== 'string' || !history.activation ||
-        !Array.isArray(history.parents) || history.parents.some(parent => typeof parent !== 'string' || !parent) ||
-        (history.parents.length && !name.startsWith(history.parents.join(' ') + ' '))) throw new Error('invalid quarantined test ancestry');
-    result.set(file, [...(result.get(file) || []), {name, parents: history.parents, activation: history.activation}]);
-  }
-  return result;
-}
-
 function socketHasNoListener(socket) {
   return new Promise(resolve => {
     const connection = net.createConnection({path: socket});
@@ -65,72 +45,6 @@ async function stopOwnedTmux(home, env) {
       if (current && (current.ino !== entry.ino || current.dev !== entry.dev)) throw error;
     }
   }
-}
-
-function admissionQuery(repoRoot, files, timeoutMs = 60000) {
-  try {
-    const output = execFileSync(process.env.PENTACLE_PYTHON || 'python3', [path.join(repoRoot, 'scripts/admission_query.py')], {
-      input: JSON.stringify({root: repoRoot, files, platform: process.platform}), encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    const value = JSON.parse(output);
-    return value.complete === true && value.files && typeof value.files === 'object' && value.quarantine && typeof value.quarantine === 'object' ? value : {complete: false};
-  } catch { return {complete: false}; }
-}
-
-function verifyAdvisory(repoRoot, junit, expected, timeoutMs) {
-  try {
-    const output = execFileSync(process.env.PENTACLE_PYTHON || 'python3', [path.join(repoRoot, 'scripts/admission_query.py')], {
-      input: JSON.stringify({operation: 'verify_junit', path: junit, expected}), encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
-    });
-    const result = JSON.parse(output);
-    return result.complete === true && result.executed === true;
-  } catch { return false; }
-}
-
-function verifyBlocking(repoRoot, junit, expected, timeoutMs, emptyWrapper) {
-  try {
-    const output = execFileSync(process.env.PENTACLE_PYTHON || 'python3', [path.join(repoRoot, 'scripts/admission_query.py')], {
-      input: JSON.stringify({operation: 'reconcile_junit', path: junit, expected, empty_wrapper: emptyWrapper}),
-      encoding: 'utf8', timeout: Math.max(1, Math.floor(timeoutMs)),
-    });
-    const result = JSON.parse(output);
-    return result.complete === true && result.matches === true;
-  } catch { return false; }
-}
-
-function quarantineAlert(id, activation, timeoutMs) {
-  const key = crypto.createHash('sha256').update(JSON.stringify([id, activation])).digest('hex');
-  const env = {...process.env};
-  for (const name of ['AGENT_ORCH_STREAM_TOKEN', 'AGENT_ORCH_STREAM_TOKEN_FILE', 'AGENT_ORCH_STREAM_ID',
-    'AGENT_ORCH_INTERNAL_LEADER_STREAM_ID', 'PENTACLE_STREAM_ID', 'TMUX', 'TMUX_PANE',
-    'PENTACLE_WORK_REPORT_READER_TOKEN']) delete env[name];
-  try {
-    execFileSync('agent-orch', ['notify', '--producer', 'flaky-test-quarantine', '--severity', 'warning',
-      '--title', 'JavaScript quarantine selector is ambiguous',
-      '--message', id + ' stays blocking. Discovery could not establish a unique skip for activation ' + activation + '.',
-      '--dedup-key', 'flaky-test-quarantine-selector:' + key],
-    {env, stdio: 'ignore', timeout: Math.max(1, Math.min(30000, timeoutMs))});
-    return true;
-  } catch { return false; }
-}
-
-function discoveredCases(receipt, execution) {
-  if (execution.cleanup.status !== 'clean' || execution.aborted || execution.timedOut ||
-      ![0, 1].includes(execution.exitCode)) return [];
-  try {
-    const cases = JSON.parse(fs.readFileSync(receipt, 'utf8'));
-    if (!cases.every(item => item.names.length && !item.skipped &&
-        [null, 'testCodeFailure', 'subtestsFailed'].includes(item.failure))) return [];
-    return cases;
-  } catch { return []; }
-}
-
-// Node 22 matches the own name and each ancestor, and also the full name of
-// each node in that chain. The invisible root is named '<root>'.
-function selectorMatches(pattern, names) {
-  return pattern.test('<root>') ||
-    names.some((part, index) => pattern.test(part) || pattern.test(names.slice(0, index + 1).join(' ').trim()));
 }
 
 function sourceIdentity(repoRoot, timeoutMs) {
@@ -324,30 +238,19 @@ async function operation(command, args, { repoRoot, env, deadline, fileDeadline,
 }
 
 async function run(repoRoot, options, injected = {}) {
-  const deps = { spawn, groupMembers, admissionQuery, verifyAdvisory, verifyBlocking, quarantineAlert, sourceIdentity, makeTemporaryDirectory: prefix => fs.mkdtempSync(prefix), removeOwnedDirectory: directory => fs.rmSync(directory, { recursive: true, force: true }), signalGroup: (pgid, signal) => process.kill(-pgid, signal), now: () => performance.now(), sleep, stdout: process.stdout, stderr: process.stderr, ...injected };
+  repoRoot = path.resolve(repoRoot);
+  const deps = { spawn, groupMembers, sourceIdentity, makeTemporaryDirectory: prefix => fs.mkdtempSync(prefix), removeOwnedDirectory: directory => fs.rmSync(directory, { recursive: true, force: true }), signalGroup: (pgid, signal) => process.kill(-pgid, signal), now: () => performance.now(), sleep, stdout: process.stdout, stderr: process.stderr, ...injected };
   const controller = new AbortController();
-  deps.abortSignal = deps.abortSignal || controller.signal;
+  deps.abortSignal = deps.abortSignal ? AbortSignal.any([deps.abortSignal, controller.signal]) : controller.signal;
   const interrupt = signal => controller.abort(signal);
   const onINT = () => interrupt('SIGINT'), onTERM = () => interrupt('SIGTERM');
   const limits = { ...DEFAULTS, ...options };
   const start = deps.now(), deadline = start + limits.runTimeoutMs;
   const entries = discover(repoRoot, options.patterns);
-  const fixtureOnly = process.env.PENTACLE_RUNNER_FIXTURES === '1' && entries.length > 0 &&
-    entries.every(file => file.startsWith('test/fixtures/') && !file.includes('..'));
-  let admission = fixtureOnly ? {complete: true, files: Object.fromEntries(entries.map(file => [file, {state: 'blocking'}])), quarantine: {version: 1, nonblocking_tests: [], history: {}}} : deps.admissionQuery(repoRoot, entries, Math.min(60000, Math.max(1, deadline - deps.now())));
-  let quarantinedTests = new Map(), quarantineError = !admission.complete;
-  if (admission.complete) {
-    try { quarantinedTests = quarantineByFile(repoRoot, admission.quarantine || {version: 1, nonblocking_tests: [], history: {}}); }
-    catch { admission = {complete: false}; quarantineError = true; }
-  }
   if (!entries.length) throw new Error('no tests matched');
   const summary = { version: 1, repo_root: path.resolve(repoRoot), source_before: deps.sourceIdentity(repoRoot, Math.min(1000, Math.max(1, deadline - deps.now()))), files: [], discovered: entries, file_timeout_ms: limits.fileTimeoutMs, run_timeout_ms: limits.runTimeoutMs, cleanup_allowance_ms: limits.termGraceMs + limits.killGraceMs, duration_ms: 0, exit_code: 1, runner_errors: [], directory_cleanup_errors: [] };
-  if (!admission.complete) summary.runner_errors.push('admission_inventory_unavailable');
-  if (quarantineError) summary.runner_errors.push('quarantine_inventory_unavailable');
-  if (admission.complete && Array.isArray(admission.quarantine?.pending)) {
-    for (const test of admission.quarantine.pending) deps.stderr.write(`QUARANTINE PENDING, NOT ON BASE: ${test}\n`);
-  }
   const cacheRoot = path.join(repoRoot, 'node_modules', '.cache');
+  const priorFiles = new Set();
   let outDir, testHome, env;
   process.on('SIGINT', onINT); process.on('SIGTERM', onTERM);
   try {
@@ -360,6 +263,7 @@ async function run(repoRoot, options, injected = {}) {
     fs.mkdirSync(junitDir, {recursive: true});
     env = { ...process.env, HOME: testHome, USERPROFILE: testHome, PENTACLE_RUNTIME_DIR: path.join(testHome, '.pentacle'), TMUX_TMPDIR: testHome };
     delete env.TMUX;
+    delete env.NODE_TEST_CONTEXT;
     for (let index = 0; index < entries.length; index++) {
       const file = entries[index], fileStart = deps.now();
       const row = { file, status: 'not_run', duration_ms: 0, cleanup: { status: 'not_started', survivor_pids: [] }, reason: null };
@@ -380,87 +284,36 @@ async function run(repoRoot, options, injected = {}) {
         }
         target = output;
       }
-      const key = crypto.createHash('sha256').update(file).digest('hex');
-      const junit = path.join(junitDir, key + '.xml');
-      try { fs.unlinkSync(junit); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      const testArgs = ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout',
-                        '--test-reporter=junit', `--test-reporter-destination=${junit}`];
-      row.junit = junit;
-      const relativeFile = path.relative(repoRoot, path.resolve(repoRoot, file));
-      const requested = quarantinedTests.get(relativeFile);
-      const admissionRow = admission.complete ? admission.files[file] : null;
-      if (admission.complete && (!admissionRow || !['blocking', 'advisory'].includes(admissionRow.state))) {
-        row.status = 'fail'; row.reason = 'admission_result_missing'; continue;
+      const testArgs = ['--test', `--test-reporter=${path.join(__dirname, 'test-case-reporter.js')}`];
+      const receipt = path.join(outDir, `${index}-collection.json`);
+      if (options.collectCases) {
+        testArgs.push(`--test-reporter-destination=${receipt}`);
+      } else {
+        const key = crypto.createHash('sha256').update(file).digest('hex');
+        const junit = path.join(junitDir, priorFiles.has(file) ? `${key}-${index}.xml` : `${key}.xml`);
+        priorFiles.add(file);
+        try { fs.unlinkSync(junit); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        testArgs.push(`--test-reporter-destination=${junit}`,
+          '--test-reporter=tap', '--test-reporter-destination=stdout');
+        row.junit = junit;
       }
-      if (admissionRow?.state === 'advisory') {
-        deps.stderr.write(`ADMISSION ADVISORY ${file}: ${admissionRow.reason}\n`);
-        const result = await operation(process.execPath, testArgs.concat(target), context, deps, limits);
-        const complete = result.cleanup.status === 'clean' && !result.aborted && !result.timedOut &&
-          !result.spawnError && (result.exitCode === 0 || result.exitCode === 1);
-        Object.assign(row, {status: complete ? 'advisory' : 'fail', reason: complete ? 'unadmitted' : 'advisory_incomplete',
-                            execution: result, cleanup: result.cleanup, duration_ms: Math.round(deps.now() - fileStart)});
-        continue;
-      }
-      const escape = name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const remaining = () => Math.floor(Math.min(deadline, fileDeadline) - deps.now());
-      const quarantined = [];
-      let discovered = [], unfiltered;
-      if (requested) {
-        const receipt = path.join(outDir, `${index}-discovery.json`);
-        const reporter = path.join(__dirname, 'test-case-reporter.js');
-        unfiltered = await operation(process.execPath, [
-          ...testArgs, `--test-reporter=${reporter}`, `--test-reporter-destination=${receipt}`, target,
-        ], {...context, label: file + ' discovery'}, deps, limits);
-        row.discovery = {...unfiltered, junit};
-        discovered = discoveredCases(receipt, unfiltered);
-        if (discovered.length && (remaining() <= 0 ||
-            !deps.verifyBlocking(repoRoot, junit, discovered.map(item => item.names), remaining()))) discovered = [];
-        for (const item of requested) {
-          const pattern = new RegExp(`^(?:${escape(item.name)})$`);
-          const matches = discovered.filter(test => selectorMatches(pattern, test.names));
-          const ownName = item.name.slice(item.parents.length ? item.parents.join(' ').length + 1 : 0);
-          if (matches.length === 1 && JSON.stringify(matches[0].names) === JSON.stringify([...item.parents, ownName])) {
-            quarantined.push({...item, discovered: matches[0]});
-            continue;
-          }
-          const id = relativeFile + '::' + item.name;
-          deps.stderr.write(`QUARANTINE BLOCKING ${id}: skip uniqueness unproven\n`);
-          if (remaining() <= 0 || !deps.quarantineAlert(id, item.activation, remaining())) {
-            summary.runner_errors.push('quarantine_selector_alert_unavailable');
-          }
-        }
-        if (quarantined.length) {
-          row.discovery.junit = path.join(junitDir, key + '-discovery.xml');
-          fs.renameSync(junit, row.discovery.junit);
-        }
-      }
-      if (quarantined.length) testArgs.push(`--test-skip-pattern=^(?:${quarantined.map(item => escape(item.name)).join('|')})$`);
-      const result = unfiltered && !quarantined.length ? unfiltered :
-        await operation(process.execPath, [...testArgs, target], context, deps, limits);
+      const testEnv = {...env, PENTACLE_TEST_COMPLETION_PATH: options.collectCases ? undefined : receipt};
+      const result = await operation(process.execPath, [...testArgs, target], {...context, env: testEnv}, deps, limits);
       Object.assign(row, { status: result.timedOut ? 'timeout' : (!result.aborted && result.exitCode === 0 && result.cleanup.status === 'clean' ? 'pass' : 'fail'), execution: result, cleanup: result.cleanup, duration_ms: Math.round(deps.now() - fileStart) });
-      if (quarantined.length) {
-        const selected = new Set(quarantined.map(item => item.discovered));
-        const blocking = discovered.filter(item => !selected.has(item));
-        if (remaining() <= 0 || !deps.verifyBlocking(repoRoot, junit, blocking.map(item => item.names), remaining(), target)) {
-          row.status = 'fail'; row.reason = 'blocking_quarantine_incomplete';
-        } else if (blocking.some(item => item.failure === 'testCodeFailure')) {
-          row.status = 'fail'; row.reason = 'blocking_failure_during_discovery';
+      try {
+        const record = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+        const complete = Array.isArray(record);
+        if (!options.collectCases && (!complete || result.exitCode !== 0)) {
+          row.failures = (complete ? record : record.failures).filter(c => c.assertion_digest).map(c => ({
+            test: nodeTestId(file, c.names), assertion_digest: c.assertion_digest,
+          }));
         }
-        for (const item of quarantined) deps.stderr.write(`ADVISORY ${file}::${item.name}\n`);
-        const advisoryJunit = path.join(junitDir, key + '-advisory.xml');
-        try { fs.unlinkSync(advisoryJunit); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-        const advisoryNames = new Set(quarantined.flatMap(item => [item.name, ...item.parents.map((_, i) => item.parents.slice(0, i + 1).join(' '))]));
-        const advisoryPattern = [...advisoryNames].map(escape).join('|');
-        row.advisory = await operation(process.execPath, ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout',
-          '--test-reporter=junit', `--test-reporter-destination=${advisoryJunit}`,
-          `--test-name-pattern=^(?:${advisoryPattern})$`, target], context, deps, limits);
-        row.advisory.junit = advisoryJunit;
-        const verifyMs = Math.floor(Math.min(deadline, fileDeadline) - deps.now());
-        if (row.advisory.cleanup.status !== 'clean') {
-          row.status = 'fail'; row.reason = 'advisory_cleanup_incomplete';
-          row.cleanup = row.advisory.cleanup;
-        } else if (verifyMs <= 0 || !deps.verifyAdvisory(repoRoot, advisoryJunit, quarantined.map(item => item.name), verifyMs)) {
-          row.status = 'fail'; row.reason = 'advisory_incomplete';
+        if (!complete || (row.failures && !row.failures.length)) throw new Error('incomplete Node execution');
+        if (options.collectCases && !result.timedOut && !result.aborted) row.cases = record;
+      } catch {
+        if (!result.timedOut && !result.aborted) {
+          row.status = 'fail';
+          row.reason = options.collectCases ? 'node_collection_incomplete' : 'node_completion_incomplete';
         }
       }
     }
@@ -470,7 +323,6 @@ async function run(repoRoot, options, injected = {}) {
     if (current && current.status === 'not_run' && current.reason === null) { current.status = 'fail'; current.reason = 'runner_error'; }
     for (const file of entries.slice(summary.files.length)) summary.files.push({ file, status: 'not_run', duration_ms: 0, cleanup: { status: 'not_started', survivor_pids: [] }, reason: 'runner_error' });
   } finally {
-    process.removeListener('SIGINT', onINT); process.removeListener('SIGTERM', onTERM);
     let tmuxClean = true;
     if (testHome && env) {
       try { await stopOwnedTmux(testHome, env); }
@@ -482,11 +334,12 @@ async function run(repoRoot, options, injected = {}) {
       try { deps.removeOwnedDirectory(directory); }
       catch (error) { summary.directory_cleanup_errors.push({ kind, error: error.code || error.name }); }
     }
+    process.removeListener('SIGINT', onINT); process.removeListener('SIGTERM', onTERM);
   }
   summary.duration_ms = Math.round(deps.now() - start);
   summary.generated_at = new Date().toISOString();
   summary.source_after = deps.sourceIdentity(repoRoot, Math.min(1000, Math.max(1, deadline - deps.now())));
-  summary.exit_code = summary.files.every(row => ['pass', 'advisory'].includes(row.status)) && !summary.runner_errors.length && !summary.directory_cleanup_errors.length ? 0 : 1;
+  summary.exit_code = summary.files.every(row => row.status === 'pass') && !summary.runner_errors.length && !summary.directory_cleanup_errors.length ? 0 : 1;
   deps.stderr.write('\nFILE\tSTATUS\tDURATION_MS\tCLEANUP\n');
   for (const row of summary.files) deps.stderr.write(`${row.file}\t${row.status}\t${row.duration_ms}\t${row.cleanup.status}${row.reason ? ` (${row.reason})` : ''}\n`);
   if (summary.runner_errors.length || summary.directory_cleanup_errors.length) deps.stderr.write(`RUNNER_ERRORS ${JSON.stringify({ runner: summary.runner_errors, cleanup: summary.directory_cleanup_errors })}\n`);
@@ -500,4 +353,32 @@ async function run(repoRoot, options, injected = {}) {
   return summary;
 }
 
-module.exports = { DEFAULTS, parseArgs, discover, groupMembers, cleanupGroup, operation, run, quarantineByFile, admissionQuery };
+function nodeTestId(file, names) {
+  const [name] = names;
+  const simple = names.length === 1 && name === name.trim() && !name.startsWith('[') &&
+    !/[\x00-\x1f\x7f\u2028\u2029]/.test(name);
+  return file + '::' + (simple ? name : JSON.stringify(names));
+}
+
+async function collectNodeTests(repoRoot, patterns, {abortSignal, ...limits} = {}) {
+  const summary = await run(repoRoot, {...limits, patterns, collectCases: true}, {
+    abortSignal, stdout: {write() {}},
+  });
+  const {source_before: before, source_after: after} = summary;
+  if (!before || !after || before.dirty || after.dirty || before.sha !== after.sha) {
+    throw new Error('Node collection requires the same clean source tree before and after execution');
+  }
+  if (summary.runner_errors.length || summary.directory_cleanup_errors.length) {
+    throw new Error(`Node collection runner errors: ${JSON.stringify([summary.runner_errors, summary.directory_cleanup_errors])}`);
+  }
+  return summary.files.map(row => {
+    if (!row.cases?.length || row.cleanup.status !== 'clean') {
+      throw new Error(`incomplete Node collection for ${row.file} (${row.reason || row.status})`);
+    }
+    const file = path.relative(repoRoot, path.resolve(repoRoot, row.file));
+    if (file.includes('::') || /[\r\n]/.test(file)) throw new Error(`unsupported Node test identity: ${JSON.stringify(file)}`);
+    return {file, cases: row.cases.map(({names, skipped}) => ({id: nodeTestId(file, names), names, skipped}))};
+  });
+}
+
+module.exports = { DEFAULTS, parseArgs, discover, groupMembers, cleanupGroup, operation, run, collectNodeTests };

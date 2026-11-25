@@ -180,7 +180,7 @@ def test_lifecycle_and_effective_quarantine_reconcile_beyond_windows(sources):
     assert state["conditions"]["open_quarantines"]["status"] == state["conditions"]["open_failure_items"]["status"] == "fail"
     assert state["observations"]["work"]["rows"][0]["owner"] == "operator"
     change_json(w["selector"], nonblocking_tests=[])
-    assert report(sources, NOW)["conditions"]["open_quarantines"]["status"] == "incomplete"
+    assert report(sources, NOW)["conditions"]["open_quarantines"]["status"] == "pass"
     (root/"backlog/repo__case/summary.md").unlink()
     path = make_work(root, "repo__case", "completed")
     change_json(w["register"], records=[{**record, "disposition": "unreproduced, on watch",
@@ -193,18 +193,18 @@ def test_lifecycle_and_effective_quarantine_reconcile_beyond_windows(sources):
 
 def test_automatic_selection_requires_matching_open_decision(sources, tmp_path):
     w = sources["work"]
-    test_id = "tests/test_example.py::test_example"
-    inventory = tmp_path / "checkout/scripts/quarantine.json"
+    test_id = "daemon::tests/test_example.py::test_example"
+    inventory = tmp_path / "checkout/scripts/quarantine-v2.json"
     w["selector_checkout"] = str(inventory.parents[1])
     make_work(Path(w["work_root"]), "repo__case")
     record = dict(cause="fixture", item="repo__case", test=test_id,
                   first_seen="2025-01-01T00:00:00Z")
     change_json(w["register"], records=[record])
-    write(inventory, {"version": 1, "nonblocking_tests": [test_id]})
+    write(inventory, {"version": 2, "nonblocking_tests": [{"id": test_id, "owner": "owner", "reason": "flake", "expires": "2027-01-01"}]})
     condition = report(sources, NOW)["conditions"]["open_quarantines"]
     assert condition["status"] == "fail" and condition["numerator"] == 1
-    write(inventory, {"version": 1, "nonblocking_tests": []})
-    assert report(sources, NOW)["conditions"]["open_quarantines"]["status"] == "incomplete"
+    write(inventory, {"version": 2, "nonblocking_tests": []})
+    assert report(sources, NOW)["conditions"]["open_quarantines"]["status"] == "pass"
     change_json(w["register"], records=[])
     condition = report(sources, NOW)["conditions"]["open_quarantines"]
     assert condition["passed"] and condition["numerator"] == 0
@@ -371,3 +371,13 @@ def test_lifecycle_timestamp_compares_same_day_instants(sources):
     state = report(sources, NOW)["conditions"]["open_failure_items"]
     assert state["status"] == "incomplete"
     assert "current lifecycle is newer than as-of: " + name in state["missing"]
+
+
+def test_unreadable_decision_history_does_not_hide_current_membership(sources):
+    w = sources["work"]
+    change_json(w["selector"], nonblocking_tests=["case"])
+    Path(w["register"]).unlink()
+    state = report(sources, NOW)
+    assert state["conditions"]["open_failure_items"]["status"] == "incomplete"
+    current = state["conditions"]["open_quarantines"]
+    assert current["status"] == "fail" and current["numerator"] == 1 and not current["missing"]

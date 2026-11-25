@@ -15,7 +15,7 @@ import subprocess
 import time as clock
 
 RESERVE_S = 600
-ENVELOPES = {"journey": 1200, "nightly-soak": 2400}
+ENVELOPES = {"journey": 1200, "nightly-soak": 2400, "daily-main": 11400}
 
 
 def utc(value: str) -> datetime:
@@ -147,7 +147,8 @@ def bounded(command, envelope_s, receipt_path):
     deadline = started + envelope_s
     grace = min(30, envelope_s / 3)
     verify_reserve = min(5, envelope_s / 8)
-    child = subprocess.Popen(command, start_new_session=True)
+    child = subprocess.Popen(command, start_new_session=True,
+                             env={**os.environ, "PENTACLE_SCHEDULED_TERM_AT": str(deadline - grace)})
     def interrupted(signum, _frame):
         raise InterruptedError(f"bound supervisor received signal {signum}")
     prior = signal.signal(signal.SIGTERM, interrupted)

@@ -1,6 +1,8 @@
 """Prepare, but never push, a one-file quarantine relay bundle."""
 from __future__ import annotations
 
+from .reliability_selection import QUARANTINE_PATH, validate_quarantine
+
 import hashlib
 import json
 import os
@@ -28,7 +30,7 @@ def prepare_bundle(remote, checker, checker_sha256, output, selected, *, activat
     if _sha(checker) != checker_sha256:
         raise ValueError("fleet checker hash mismatch")
     if (not isinstance(selected, (list, set, tuple)) or any(
-            not isinstance(test, str) or not test or "::" not in test for test in selected)):
+            not isinstance(test, str) or not test.startswith(("daemon::", "cli::", "shared::")) or "::" not in test for test in selected)):
         raise ValueError("invalid effective quarantine list")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -40,47 +42,32 @@ def prepare_bundle(remote, checker, checker_sha256, output, selected, *, activat
         actual_remote = _git(root, "remote", "get-url", "origin")
         if actual_remote != remote:
             raise ValueError("unexpected repository remote")
-        inventory = root / "scripts/quarantine.json"
+        inventory = root / QUARANTINE_PATH
         data = json.loads(inventory.read_text())
-        if (not isinstance(data, dict) or data.get("version") != 1
-                or not isinstance(data.get("nonblocking_tests"), list)
-                or any(not isinstance(t, str) or not t or "::" not in t for t in data["nonblocking_tests"])):
-            raise ValueError("invalid published quarantine inventory")
-        history = data.get('history')
-        if not isinstance(history, dict) or any(not isinstance(k, str) or not isinstance(v, dict)
-                                                or not isinstance(v.get('activation'), str) or not v['activation']
-                                                or not isinstance(v.get('file'), str)
-                                                or not isinstance(v.get('parents'), list)
-                                                or any(not isinstance(parent, str) or not parent for parent in v['parents'])
-                                                for k, v in history.items()):
-            raise ValueError('quarantine history unavailable')
-        if any(hashlib.sha256(test.encode()).hexdigest() not in history for test in data['nonblocking_tests']):
-            raise ValueError('active quarantine is missing its history')
-        for test in set(selected) - set(data['nonblocking_tests']):
-            activation = activations.get(test)
-            if (not isinstance(activation, dict) or not isinstance(activation.get('activation'), str)
-                    or not activation['activation'] or not isinstance(activation.get('parents'), list)
-                    or any(not isinstance(parent, str) or not parent for parent in activation['parents'])):
-                raise ValueError('new quarantine activation identity unavailable')
-            raw = test.split('::', 1)[1] if test.startswith(('daemon::', 'cli::', 'shared::')) else test
-            history[hashlib.sha256(test.encode()).hexdigest()] = {
-                'activation': activation['activation'], 'parents': activation['parents'],
-                'file': hashlib.sha256(raw.split('::', 1)[0].encode()).hexdigest(),
-            }
-        # Concurrent accepted additions must never be silently removed.
-        data["nonblocking_tests"] = sorted(set(data["nonblocking_tests"]) | set(selected))
+        existing = validate_quarantine(data)
+        rows = data["nonblocking_tests"]
+        additions = sorted(set(selected) - existing)
+        for test in additions:
+            row = activations.get(test)
+            if not isinstance(row, dict) or row.get('id') != test:
+                raise ValueError('new quarantine row unavailable')
+            rows.append(row)
+        validate_quarantine(data)
+        # Retain every row on the freshly cloned main, including concurrent ones.
+        data["nonblocking_tests"] = sorted(rows, key=lambda row: row['id'])
         inventory.write_text(json.dumps(data, indent=2) + "\n")
-        if not _git(root, "status", "--porcelain", "--", "scripts/quarantine.json"):
+        if not _git(root, "status", "--porcelain", "--", QUARANTINE_PATH):
             return {"state": "already_present", "base_sha": base}
         _git(root, "switch", "-c", "quarantine-relay")
-        _git(root, "add", "scripts/quarantine.json")
+        _git(root, "add", QUARANTINE_PATH)
         base_date = _git(root, "show", "-s", "--format=%cI", base)
         env = {**os.environ, "GIT_AUTHOR_NAME": "Pentacle Agent", "GIT_COMMITTER_NAME": "Pentacle Agent",
                "GIT_AUTHOR_EMAIL": "agent@users.noreply.github.com", "GIT_COMMITTER_EMAIL": "agent@users.noreply.github.com",
                "GIT_AUTHOR_DATE": base_date, "GIT_COMMITTER_DATE": base_date}
-        _git(root, "-c", "commit.gpgsign=false", "commit", "-m", "Update effective quarantine list", env=env)
+        _git(root, "-c", "commit.gpgsign=false", "commit", "-m", "Update effective quarantine list",
+             "-m", "\n".join("Coverage-Drop: " + test for test in additions), env=env)
         tip = _git(root, "rev-parse", "HEAD")
-        if _git(root, "diff", "--name-only", base, tip) != "scripts/quarantine.json":
+        if _git(root, "diff", "--name-only", base, tip) != QUARANTINE_PATH:
             raise ValueError("relay bundle is not a one-file change")
         proof = subprocess.check_output([python, str(checker), "--root", str(root), "--fleet-base", base,
                                          "--fleet-tip", tip], timeout=120)

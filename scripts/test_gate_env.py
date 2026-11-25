@@ -529,15 +529,6 @@ class PreparedCache(Tmp):
 
 
 class Classification(Tmp):
-    def test_incomplete_admission_preserves_product_failure(self):
-        summary = self.tmp / 'npm.json'
-        summary.write_text(json.dumps({'runner_errors': ['admission_inventory_unavailable'],
-            'directory_cleanup_errors': [], 'files': [{'file': 'test/a.test.js', 'status': 'fail',
-                                                       'execution': {'exitCode': 1}, 'cleanup': {'status': 'clean'}}]}))
-        outcome, _, secondary = ge.classify_npm(summary, 1, False, False)
-        self.assertEqual(outcome, 'product_failure')
-        self.assertEqual(secondary['admission'], 'incomplete')
-
     def evidence(self, tier):
         path = self.tmp / "e.json"
         path.write_text(json.dumps({"tiers": [tier]}))
@@ -579,6 +570,37 @@ class Classification(Tmp):
         self.assertEqual(fold({"finished": True, "tiers": [{"tier": "unit", "passed": True, "primary_outcome": None, "secondary_outcomes": ["output_truncated"]}]}, rc=0)[::2],
                          ("pass", {"reporting": ["output_truncated"], "tiers": ["unit"]}))
 
+    def test_advisory_timeout_uses_verified_blocking_witness(self):
+        junit, final = self.tmp / 'j.xml', self.tmp / 'j.final'
+        junit.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0"/>')
+        source = {'sha': 'abc', 'dirty': False}
+        witness = {'complete': True, 'repo_root': str(self.tmp), 'source_before': source,
+                   'source_after': source, 'blocking_returncode': 0, 'junit': str(junit.resolve()),
+                   'junit_sha256': hashlib.sha256(junit.read_bytes()).hexdigest()}
+        final.write_text(json.dumps(witness))
+        with mock.patch.object(ge.subprocess, 'check_output', side_effect=['abc\n', ''] * 3):
+            outcome, _, facts = ge.classify_quarantine_pytest(junit, final, 124, True, False)
+            self.assertEqual((outcome, facts['advisory']), ('pass', 'timed_out'))
+            junit.write_text('<testsuite tests="1" failures="1"/>')
+            self.assertEqual(ge.classify_quarantine_pytest(junit, final, 124, True, False)[0], 'timeout_unclassified')
+            self.assertEqual(ge.classify_quarantine_pytest(junit, final, 0, False, False)[0], 'product_failure')
+
+    def test_native_worker_completion_failure_has_no_product_assertion(self):
+        summary = self.tmp / 's.json'
+        incomplete = {'file': 'worker', 'status': 'fail', 'reason': 'node_completion_incomplete',
+                      'cleanup': {'status': 'clean'}, 'execution': {'exitCode': 0}}
+        assertion = {'file': 'sibling', 'status': 'fail', 'cleanup': {'status': 'clean'}, 'execution': {'exitCode': 1}}
+        for rows, expected in (([incomplete], 'harness_failure'), ([assertion, incomplete], 'product_failure')):
+            summary.write_text(json.dumps({'exit_code': 1, 'files': rows}))
+            outcome, _, secondary = ge.classify_npm(summary, 1, False, False)
+            self.assertEqual(outcome, expected)
+            self.assertEqual(secondary['incomplete_files'], ['worker'])
+        incomplete['failures'] = [{'test': 'worker::early assertion', 'assertion_digest': '1' * 64}]
+        summary.write_text(json.dumps({'exit_code': 1, 'files': [incomplete]}))
+        outcome, _, secondary = ge.classify_npm(summary, 1, False, False)
+        self.assertEqual(outcome, 'harness_failure')
+        self.assertEqual(secondary['observed_assertions'], incomplete['failures'])
+
     def test_pytest_and_npm_outcomes(self):
         junit = self.tmp / "j.xml"
         junit.write_text('<testsuite tests="3" failures="1" errors="0" skipped="0"/>')
@@ -613,10 +635,10 @@ class DeadlineEnvelope(Tmp):
         command, results = self.command("merge", "parser.add_argument('--deadline-seconds')")
         self.assertEqual(command[command.index("--timeout-seconds") + 1], "600")
         check_s = sum(REAL_CONFIG["deadline"]["merge_check_bounds_s"].values())
-        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(1800 + 60 + 60 + 30 + check_s))
-        self.assertEqual(results["wall_s"], 1800 + 60 + 60 + 30 + 30 + check_s)
+        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(600 * 3 + 45 + 60 + 30 + check_s))
+        self.assertEqual(results["wall_s"], 600 * 3 + 45 + 60 + 30 + 30 + check_s)
         unit, results = self.command("unit", "--deadline-seconds")
-        self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
+        self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 45 + 60 + 30))
         service = self.tmp / "svc"
         for gate in ("unit", "merge"):
             target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], unit_workers=2)
@@ -632,7 +654,7 @@ class DeadlineEnvelope(Tmp):
                                            shard_index=0, shard_count=6)
         self.assertEqual(sharded[-4:], ['--shard-index', '0', '--shard-count', '6'])
         self.assertEqual(sharded[:-4], unsharded)
-        self.assertEqual(sharded[sharded.index('--deadline-seconds') + 1], str(target['timeout_s'] + 90))
+        self.assertEqual(sharded[sharded.index('--deadline-seconds') + 1], str(target['timeout_s'] + 135))
 
     def test_older_runner_without_the_flag_keeps_the_wall_bound(self):
         command, results = self.command("unit", "parser.add_argument('--timeout-seconds')")
@@ -668,16 +690,13 @@ class ProcessStartIdentity(unittest.TestCase):
 class EntrypointReceipts(Tmp):
     def test_advisory_files_follow_effective_inventory(self):
         target = REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-quarantined"]
-        inventory = self.tmp / "scripts/quarantine.json"
+        inventory = self.tmp / "scripts/quarantine-v2.json"
         inventory.parent.mkdir()
         test_dir = self.tmp / "services/chat-stream-v2/tests"
         test_dir.mkdir(parents=True)
         (test_dir / "test_new.py").write_text("")
-        ids = ["tests/test_new.py::test_case", "test/web.test.js::case"]
-        history = {hashlib.sha256(test.encode()).hexdigest(): {
-            'activation': 'accepted', 'parents': [],
-            'file': hashlib.sha256(test.split('::', 1)[0].encode()).hexdigest()} for test in ids}
-        inventory.write_text(json.dumps({"version": 1, "nonblocking_tests": ids, 'history': history}))
+        inventory.write_text(json.dumps({"version": 2, "nonblocking_tests": [
+            {"id": "daemon::tests/test_new.py::test_case", "owner": "fixture", "reason": "fixture", "expires": "2099-01-01"}]}))
         def git(*args):
             subprocess.run(['git', '-C', str(self.tmp), *args], check=True, capture_output=True)
         git('init', '-q')
@@ -907,7 +926,7 @@ class EntrypointReceipts(Tmp):
                                  ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
                                  check_host_tools=lambda *a, **k: ({}, []),
                                  check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
-                                 build_command=lambda *a, **k: (argv, {"cwd": self.tmp, "wall_s": 120, "classify": lambda rc, to: ("pass", None, {})}),
+                                 build_command=lambda *a, **k: (argv, {"cwd": self.tmp, "wall_s": 120, "classify": lambda rc, to, cancelled=False: ("cancelled" if cancelled else "pass", None, {})}),
                                  source_identity=lambda *a, **k: {"sha": "x", "dirty": False}):
             code = ge.main(["run", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev"), "--checkout", str(self.tmp / "co"),
                             "--tmp-root", short, "--target", "v2-pytest", "--select", "tests/test_x.py", "--spec", "s", "--series", "x", "--purpose", "diagnostic"])
@@ -1033,7 +1052,7 @@ exit 0
         with mock.patch.multiple(ge, load_config=lambda *a: self.config,
                                  ensure_python_env=prepare, ensure_npm_env=lambda *a: ({}, []),
                                  check_capabilities=lambda *a: [], check_dependencies=lambda *a: [],
-                                 check_process_listing=lambda *a: [], run_preflight_script=lambda *a: [],
+                                 check_process_listing=lambda *a: [], run_preflight_script=lambda *a, **kw: [],
                                  build_command=subject_command), mock.patch.dict(os.environ, {"PATH": str(self.tools)}), \
                 mock.patch.object(ga, "new_attempt_id", return_value=attempt_id), \
                 mock.patch.object(ge.tempfile, "mkdtemp", return_value=str(relocated_evidence)):
@@ -1234,7 +1253,7 @@ class WebTerminalPreflight(Tmp):
                 prepared_key=lambda *a: "fixture", ensure_python_env=lambda *a: (None, {}, []),
                 build_env=lambda *a, **k: {}, check_scratch=lambda *a: [],
                 check_node_npm=lambda *a: [], check_process_listing=lambda *a: [],
-                run_preflight_script=lambda *a: [], group_alive=lambda *a: False,
+                run_preflight_script=lambda *a, **kw: [], group_alive=lambda *a: False,
                 discover_npm_files=lambda *a: ({selected} if web else set()),
                 build_command=lambda *a: (["synthetic-subject"], {"cwd": checkout,
                     "classify": lambda rc, to: ("pass", None, {})})), \
@@ -1321,6 +1340,118 @@ class PythonChromePolicy(unittest.TestCase):
 
 
 
+class WrapperInterruption(Tmp):
+    def test_blocking_verdict_survives_outer_signal(self):
+        checkout = self.tmp / "co"
+        service = checkout / "services/chat-stream-v2"
+        (service / "tests").mkdir(parents=True)
+        (service / "tests/test_fixture.py").touch()
+        (checkout / ".gitignore").write_text("__pycache__/\n")
+        (service / "tools").mkdir()
+        for name in ("run_gate.py", "gate_owner_manifest.py"):
+            shutil.copyfile(HERE.parent / "services/chat-stream-v2/tools" / name, service / "tools" / name)
+        for args in (("init", "-q"), ("add", "."), ("-c", "user.name=Fixture", "-c",
+                      "user.email=fixture@example.test", "commit", "-qm", "fixture")):
+            subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+        # The child uses the real witness writers. Only the test body and advisory
+        # wait are fixtures. Signal the outer wrapper, whose own handler stops the child.
+        driver = """
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+route, mode, root, evidence, basetemp, scripts, wrapper = sys.argv[1:]
+root, evidence, basetemp = map(Path, (root, evidence, basetemp))
+sys.path[:0] = [scripts, str(Path(scripts).parent / 'services/chat-stream-v2')]
+def interrupt():
+    assert os.getppid() == int(wrapper)
+    os.kill(int(wrapper), signal.SIGTERM)
+    time.sleep(30)
+if mode in ('early', 'late'):
+    interrupt()
+red = mode in ('red', 'normal_red', 'red_cleanup')
+if route == 'v2-unit':
+    from tools import run_gate as runner
+    runner.REPO_ROOT = root
+    sha, status = runner._sha(), runner._git_status()
+    row = runner._result('unit', code=int(red), passed=not red,
+                         reason='test_failures' if red else 'passed',
+                         counts={'tests': 1, 'failures': int(red)})
+    runner._write_evidence('unit', evidence, None, sha, status, sha, status, [row], blocking_frozen=True)
+else:
+    import quarantine_pytest
+    real_run = subprocess.run
+    def run(command, **kwargs):
+        if command[:3] != [sys.executable, '-m', 'pytest']:
+            return real_run(command, **kwargs)
+        if '--quarantine-manifest=' + str(evidence / 'quarantine.json') in command:
+            (evidence / 'quarantine.json').write_text(json.dumps({'complete': True, 'quarantined': ['tests/test_fixture.py::test_tail']}))
+            (evidence / 'pytest.junit.xml').write_text(f'<testsuite tests="1" failures="{int(red)}"/>')
+            return SimpleNamespace(returncode=int(red))
+        return SimpleNamespace(returncode=0)
+    subprocess.run = run
+    quarantine_pytest.main(['--root', str(root), '--suite', 'daemon', '--junit', str(evidence / 'pytest.junit.xml'),
+                            '--basetemp', str(basetemp), '--manifest', str(evidence / 'quarantine.json'),
+                            '--', 'tests/test_fixture.py'])
+if mode == 'drift':
+    (root / 'drift').touch()
+if mode == 'tamper':
+    (evidence / 'pytest.junit.xml').write_text('<testsuite tests="1" failures="1"/>')
+if mode.endswith('cleanup'):
+    (basetemp / ('unit-advisory' if route == 'v2-unit' else '.owned.json')).write_text('unresolved')
+if not mode.startswith('normal_'):
+    interrupt()
+raise SystemExit(int(red))
+"""
+        tool = {"path": sys.executable, "realpath": sys.executable, "version": "3.13.1", "sha256": "fixture"}
+        real_build = ge.build_command
+        cfg = json.loads(json.dumps(REAL_CONFIG))
+        cfg["profiles"]["pentacle"]["python_requirements"] = []
+        cfg["profiles"]["pentacle"]["targets"]["v2-pytest"]["required_select"] = []
+
+        def build(config, target, venv, root, service, evidence, basetemp, selection, timeout, env):
+            _, results = real_build(config, target, venv, root, service, evidence, basetemp, selection, timeout, env)
+            return [sys.executable, "-c", driver, route, mode, str(root), str(evidence / "gate"),
+                    str(basetemp), str(HERE), str(os.getpid())], dict(results, wall_s=10)
+
+        cases = {"early": "cancelled", "green": "pass", "red": "product_failure",
+                 "normal_green": "pass", "normal_red": "product_failure", "drift": "cancelled",
+                 "green_cleanup": "cleanup_failure", "red_cleanup": "product_failure"}
+        scratch_dir = tempfile.TemporaryDirectory(prefix="gew-", dir="/tmp")
+        self.addCleanup(scratch_dir.cleanup)
+        scratch = Path(scratch_dir.name).resolve()
+        with mock.patch.multiple(ge, load_config=lambda *a: cfg, build_command=build,
+                resolve_toolchain=lambda *a: (dict.fromkeys(("python", "node", "tmux"), tool), []),
+                pick_locale=lambda *a: ("C.UTF-8", None), check_host_tools=lambda *a, **k: ({}, []),
+                ensure_python_env=lambda *a: (Path(sys.prefix), {"reused": True}, []),
+                run_preflight_script=lambda *a, **k: [], check_scratch=lambda *a: [],
+                check_node_npm=lambda *a: [], check_dependencies=lambda *a: [], check_capabilities=lambda *a: []):
+            for route in ("v2-unit", "v2-pytest"):
+                route_cases = cases | ({"tamper": "cancelled"} if route == "v2-pytest" else {})
+                for mode, expected in route_cases.items():
+                    with self.subTest(target=route, mode=mode):
+                        ev = self.tmp / f"{route}-{mode}"
+                        argv = ["run", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"),
+                                "--evidence-dir", str(ev), "--checkout", str(checkout), "--tmp-root", str(scratch),
+                                "--target", route, "--spec", "fixture", "--series", "signal", "--purpose", "negative_control"]
+                        if route == "v2-pytest":
+                            argv += ["--select", "tests/test_fixture.py"]
+                        code = ge.main(argv)
+                        (checkout / "drift").unlink(missing_ok=True)
+                        terminal_path, = ev.glob("attempts/*/*-terminal.json")
+                        terminal = json.loads(terminal_path.read_text())
+                        self.assertEqual((terminal["outcome"], code),
+                                         (expected, ge.EXIT.get(expected, 1)), terminal)
+                        if expected == "product_failure":
+                            self.assertEqual(terminal["first_failure"]["code"], "test_failures")
+                        if mode.endswith("cleanup"):
+                            self.assertEqual(terminal["secondary"]["cleanup"], "failed")
+                            self.assertTrue(terminal["secondary"]["retained_scratch"]["unresolved_paths"])
+                        elif mode in ("green", "red"):
+                            self.assertEqual(terminal["secondary"]["advisory"], "interrupted")
+                            self.assertTrue(terminal["evidence"])
+
+
 class ScratchRetention(Tmp):
     """Drive the real main/finally with isolated process/preflight counterparts."""
     def run_case(self, mode, outcome="product_failure", target="v2-pytest", instruction=None):
@@ -1364,7 +1495,11 @@ class ScratchRetention(Tmp):
                 (basetemp / "unit").mkdir()
                 (basetemp / "unit/sentinel").write_text("unresolved tier evidence")
             ff = {"stage": "subject", "code": "original_assertion"} if outcome != "pass" else None
-            return ["synthetic-subject"], {"cwd": service, "classify": lambda rc, timed_out: (outcome, ff, {})}
+            def classify(rc, timed_out, cancelled=False):
+                if cancelled:
+                    return "cancelled", {"stage": "subject", "code": "cancelled"}, {}
+                return outcome, ff, {}
+            return ["synthetic-subject"], {"cwd": service, "classify": classify}
         patches = dict(resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []),
             pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
             ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []),
@@ -1491,8 +1626,8 @@ class MigratedTargets(Tmp):
         self.assertEqual(cmd[cmd.index("--unit-workers") + 1], str(target["unit_workers"]))
         self.assertIn("merge", cmd)
         budget = cfg["deadline"]
-        deadline = sum(target["tier_timeouts"].values()) + 2 * budget["preflight_s"] + budget["reserve_s"] + budget["slack_s"]
-        deadline += sum(budget["merge_check_bounds_s"].values()) + budget["merge_unit_advisory_s"]
+        deadline = sum(target["tier_timeouts"].values()) + budget["preflight_s"] + budget["reserve_s"] + budget["slack_s"]
+        deadline += sum(budget["merge_check_bounds_s"].values())
         self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), deadline)
         self.assertEqual(result["wall_s"], deadline + budget["slack_s"])
 

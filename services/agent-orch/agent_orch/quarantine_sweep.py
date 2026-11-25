@@ -42,9 +42,6 @@ def sweep(sources, *, ledger_path, state_path, adapter, now=None, restorations=N
     observed = candidates(rows, binding)
     retained = accumulate(ledger_path, observed)
     selected = effective_tests(work['selector_checkout'])
-    decisions = {record.get('test') for record in register.get('records', []) if record.get('test')}
-    for test in sorted(selected - decisions):
-        adapter.alert(_key('missing-decision', test), 'Effective quarantine has no decision: ' + test)
     merged = merge_seed_occurrences(register, retained, selected)
     if restorations:
         # Old observations cannot establish a new series after a repair.
@@ -57,7 +54,7 @@ def sweep(sources, *, ledger_path, state_path, adapter, now=None, restorations=N
                 else:
                     adapter.alert(_key('restoration', test), 'Restoration evidence incomplete for ' + test)
                     del merged[test]
-    return reconcile(state_path, merged, selected, adapter, restorations=restorations)
+    return reconcile(state_path, merged, selected, adapter, restorations=restorations, history=existing)
 
 
 

@@ -45,10 +45,16 @@ def _passed(raw, suite, test):
     matches = []
     if suite == 'javascript':
         _, name = test.split('::', 1)
+        try:
+            components = json.loads(name) if name.startswith('[') else [name]
+        except ValueError:
+            return False
+        if not isinstance(components, list) or not components or any(not isinstance(c, str) or not c for c in components):
+            return False
         def walk(node, parents):
             if node.tag == 'testsuite' and node.get('name'):
                 parents = [*parents, node.get('name')]
-            if node.tag == 'testcase' and ' '.join([*parents, node.get('name', '')]) == name:
+            if node.tag == 'testcase' and [*parents, node.get('name', '')] == components:
                 matches.append(node)
             for child in node:
                 if child.tag in ('testsuites', 'testsuite', 'testcase'):
@@ -140,7 +146,7 @@ def verify_restoration(test, descriptor, checkout, *, get_report=_report, api=re
                 return False
             tiers = [tier for tier in gate.get('tiers', []) if tier.get('passed') is True
                      and Path(tier.get('junit', '')).resolve() == junit_path]
-            if len(tiers) != 1 or not any('not quarantined' in str(arg) and 'not admission_hold' in str(arg)
+            if len(tiers) != 1 or not any('not quarantined' in str(arg)
                                           for arg in tiers[0].get('command', [])):
                 return False
         elif suite in ('cli', 'shared'):

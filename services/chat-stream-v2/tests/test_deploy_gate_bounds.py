@@ -79,14 +79,14 @@ def test_inline_gate_uses_capacity_bounds(tmp_path: Path, monkeypatch: pytest.Mo
     for name in BOUND_NAMES:
         monkeypatch.delenv(name, raising=False)
 
-    assert _captured_bounds(tmp_path) == deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS
+    assert _captured_bounds(tmp_path) == deploy_mod._default_gate_tier_timeouts()
 
 
 def test_inline_gate_forwards_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("V2_UNIT_TIMEOUT_S", "1500")
     monkeypatch.delenv("V2_SMOKE_TIMEOUT_S", raising=False)
 
-    assert _captured_bounds(tmp_path) == {**deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS, "V2_UNIT_TIMEOUT_S": "1500"}
+    assert _captured_bounds(tmp_path) == {**deploy_mod._default_gate_tier_timeouts(), "V2_UNIT_TIMEOUT_S": "1500"}
 
 
 @pytest.mark.parametrize("value", ["abc", "", "0", "-5", "inf", "nan"])
@@ -113,14 +113,14 @@ def test_inline_gate_bound_reaches_run_gate_process(tmp_path: Path, monkeypatch:
         repo, V2_SERVICE, ("merge",), tmp_path / "gate.json", SHA, deploy_mod._run
     )
 
-    assert evidence["observed_env"] == deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS
+    assert evidence["observed_env"] == deploy_mod._default_gate_tier_timeouts()
 
 
 def test_defaults_match_capacity_profile() -> None:
     profile = json.loads((REPO_ROOT / "scripts" / "gate-env.json").read_text(encoding="utf-8"))
     capacity = profile["profiles"]["pentacle"]["targets"]["v2-merge"]["tier_timeouts"]
 
-    assert deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS == {
+    assert deploy_mod._default_gate_tier_timeouts() == {
         f"V2_{tier.upper()}_TIMEOUT_S": str(bound) for tier, bound in capacity.items()
     }
 

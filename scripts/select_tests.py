@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Report advisory test selections; never execute tests or change gate verdicts."""
+"""Report advisory test selections and compare blocking merge coverage."""
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import fnmatch
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import tempfile
+import time
 
 
 BOUNDARIES = {"client_wire_render", "provider_startup", "satellite_transition", "deploy_invocation"}
@@ -21,8 +25,9 @@ class Invalid(ValueError):
     pass
 
 
-def git(*args):
-    result = subprocess.run(["git", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def git(*args, repo=None, timeout=None):
+    result = subprocess.run(["git", *args], cwd=repo, timeout=timeout,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
         raise Invalid("git %s: %s" % (args[0], result.stderr.decode(errors="replace").strip()))
     return result.stdout
@@ -68,10 +73,11 @@ def tree(revision):
     return result
 
 
-def changes(base, head):
+def changes(base, head, *, repo=None, timeout=None):
     # Consume NUL fields directly. Rename/copy records have TWO path fields.
     fields = git("diff", "--name-status", "-z", "--find-renames", "--no-ext-diff",
-                 "--no-textconv", "--ignore-submodules=none", base, head, "--").split(b"\0")
+                 "--no-textconv", "--ignore-submodules=none", base, head, "--",
+                 repo=repo, timeout=timeout).split(b"\0")
     require(fields.pop() == b"", "unterminated Git diff")
     result = []
     index = 0
@@ -85,6 +91,232 @@ def changes(base, head):
         result.append({"status": status, "paths": [p.decode("utf-8", "surrogateescape") for p in paths]})
         index += count + 1
     return result
+
+
+def _collect_coverage(repo, revision, root, python, remaining, *, historical, errors):
+    from gate_env import ensure_npm_env, group_alive, stop_group
+
+    def run(argv, *, timeout, cwd=root, env=None, capture_output=True, text=True):
+        # Leave room for TERM/KILL and the Node collector's own abort cleanup.
+        bound = min(timeout, remaining() - 10)
+        require(bound > 0, "coverage comparison timed out")
+        with subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True, text=text,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+            try:
+                out, err = proc.communicate(timeout=bound)
+            except subprocess.TimeoutExpired as exc:
+                raise Invalid(f"{argv[0]} timed out after {bound:.1f}s") from exc
+            finally:
+                if group_alive(proc.pid):
+                    stop_group(proc, grace=5)
+                    if group_alive(proc.pid):
+                        raise Invalid(f"{argv[0]} collection process group did not stop")
+            return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+    def checked(result):
+        if result.returncode:
+            detail = (result.stderr or result.stdout).strip().splitlines()[-4:]
+            raise Invalid(" | ".join(detail) or f"exit {result.returncode}")
+        return result.stdout
+
+    scratch = root.parent
+    home, temp = scratch / f"{root.name}-home", scratch / f"{root.name}-tmp"
+    home.mkdir()
+    temp.mkdir()
+    env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "npm_config_offline",
+                                           "V2_GATE_OWNER_MANIFEST") if key in os.environ}
+    env.update(HOME=str(home), TMPDIR=str(temp), TMP=str(temp), TEMP=str(temp),
+               PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1",
+               GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               NPM_CONFIG_CACHE=str(scratch / "npm-cache"), NPM_CONFIG_AUDIT="false", NPM_CONFIG_FUND="false",
+               PENTACLE_PYTHON=python, V2_PYTHON_BIN=python, PENTACLE_WEB_GATE_REPORT_ROOT=str(temp / "web"))
+    failures = (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError)
+    inventory = {}
+    try:
+        checked(run(["git", "clone", "-q", "--local", "--shared", "--no-checkout",
+                     "--", str(repo), str(root)], cwd=scratch, env=env, timeout=30))
+        checked(run(["git", "checkout", "-q", "--detach", revision], env=env, timeout=30))
+        profile = object_json((root / "scripts/gate-env.json").read_bytes())["profiles"]["pentacle"]
+        targets = profile["targets"]
+        for path in [profile["service_dir"], *profile["pythonpath"]]:
+            path_pattern(path)
+        env["PYTHONPATH"] = os.pathsep.join(str(root / path) for path in
+                                          ["scripts", profile["service_dir"], *profile["pythonpath"]])
+    except failures as exc:
+        errors.append(f"{revision} checkout: {exc}")
+        return inventory
+
+    for suite in ("daemon", "cli", "shared"):
+        try:
+            if suite == "daemon":
+                # One collection spans unit, smoke, soak and separately executed repin tests.
+                path, selection = profile["service_dir"], ["tests"]
+            else:
+                target = targets[suite + "-pytest"]
+                path, selection = target["select"]["root"], target["directory_select"]
+            path_pattern(path)
+            strings(selection, "full pytest selection")
+            for directory in selection:
+                path_pattern(directory)
+            manifest = scratch / f"{root.name}-{suite}.json"
+            result = run([python, "-m", "pytest", "--collect-only", "-q", "-o", "addopts=",
+                          f"--basetemp={temp / suite}",
+                          "-p", "quarantine_plugin", f"--quarantine-root={root}",
+                          f"--quarantine-suite={suite}", f"--quarantine-manifest={manifest}", "--", *selection],
+                         cwd=root / path, env=env, timeout=120)
+            if not manifest.is_file():
+                checked(result)
+                raise Invalid("missing pytest collection")
+            data = object_json(manifest.read_bytes())
+            require(isinstance(data, dict), "invalid pytest collection")
+            inventory_error = result.returncode == 1 and data.get("complete") is False
+            expired_base = historical and inventory_error and data.get("error_kind") == "expired"
+            if not expired_base:
+                if inventory_error:
+                    raise Invalid(data.get("error") or "incomplete pytest collection")
+                checked(result)
+                require(data.get("complete") is True, data.get("error") or "incomplete pytest collection")
+            for key in ("blocking", "quarantined"):
+                strings(data[key], "pytest collection", nonempty=False)
+            require(data["blocking"] or data["quarantined"], "empty pytest collection")
+            ids = (*data["blocking"], *data["quarantined"])
+            inventory[suite] = (
+                Counter(f"{suite}::{node}" for node in data["blocking"]),
+                Counter(f"{suite}::{node}" for node in data["quarantined"]),
+                {f"{suite}::{node}": str(PurePosixPath(path) / node.split("::", 1)[0]) for node in ids}, {},
+            )
+        except failures as exc:
+            errors.append(f"{revision} {suite}: {exc}")
+
+    try:
+        npm = targets["npm-test"]
+        patterns = npm["default_patterns"]
+        strings(patterns, "npm selection")
+        for pattern in patterns:
+            path_pattern(pattern)
+        _, setup_errors = ensure_npm_env(run, root, scratch / f"{root.name}-npm", env, profile, False,
+                                         lambda message: print(f"[coverage] {revision} {message}", flush=True))
+        require(not setup_errors, " | ".join(item["detail"] for item in setup_errors))
+        for build in npm.get("npm_build", []):
+            checked(run(["npm", "run", build], env=env, timeout=300))
+        script = """
+const {collectNodeTests} = require('./scripts/lib/test-runner');
+const controller = new AbortController();
+process.once('SIGTERM', () => controller.abort());
+const options = JSON.parse(process.argv[2]);
+collectNodeTests(process.cwd(), JSON.parse(process.argv[1]), {...options, abortSignal: controller.signal})
+  .then(rows => process.stdout.write(JSON.stringify(rows)))
+  .catch(error => { console.error(error.message); process.exitCode = 1; });
+"""
+        collection_bound = min(npm["timeout_s"], remaining() - 15)
+        require(collection_bound >= 0.001, "coverage comparison timed out before npm collection")
+        options = {"runTimeoutMs": int(collection_bound * 1000),
+                   "fileTimeoutMs": npm.get("test_file_timeout_ms", 60000)}
+        rows = json.loads(checked(run(["node", "-e", script, json.dumps(patterns), json.dumps(options)],
+                                      env=env, timeout=remaining())))
+        files, invocations = {}, Counter()
+        for row in rows:
+            file = row["file"]
+            path_pattern(file)
+            require(all(type(case["skipped"]) is bool and case["id"].startswith(file + "::")
+                        for case in row["cases"]), f"invalid npm collection for {file}")
+            all_cases = Counter((case["id"], case["skipped"]) for case in row["cases"])
+            require(files.setdefault(file, all_cases) == all_cases,
+                    f"npm collection varied across invocations of {file}")
+            invocations[file] += 1
+        blocking, skipped, paths = Counter(), Counter(), {}
+        for file, cases in files.items():
+            for (test, nonblocking), count in cases.items():
+                (skipped if nonblocking else blocking)[test] += count
+                paths[test] = file
+        require(blocking or skipped, "empty npm collection")
+        inventory["npm"] = blocking, skipped, paths, invocations
+    except failures as exc:
+        errors.append(f"{revision} npm: {exc}")
+    try:
+        require(not checked(run(["git", "status", "--porcelain", "--untracked-files=all"],
+                                env=env, timeout=30)), "collection changed the tracked source")
+        require(checked(run(["git", "rev-parse", "HEAD"], env=env, timeout=30)).strip() == revision,
+                "collection changed the pinned revision")
+    except failures as exc:
+        errors.append(f"{revision} source integrity: {exc}")
+        return {}
+    return inventory
+
+
+def check_coverage(repo: Path, base: str, head: str, *, python: str, timeout: float) -> None:
+    """Compare full blocking membership at pinned merge refs."""
+    repo = repo.resolve()
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise Invalid("coverage comparison timed out")
+        return budget
+
+    try:
+        base, head = (git("rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}",
+                          repo=repo, timeout=remaining()).decode().strip() for ref in (base, head))
+        from quarantine_list import QUARANTINE_PATH, validate_quarantine
+        candidate_list = object_json(git("show", f"{head}:{QUARANTINE_PATH}", repo=repo, timeout=remaining()))
+        markers = git("ls-tree", "--name-only", base, "--", QUARANTINE_PATH,
+                      "scripts/quarantine_list.py", "scripts/admission_inputs.py",
+                      repo=repo, timeout=remaining()).decode().splitlines()
+        base_list = QUARANTINE_PATH if QUARANTINE_PATH in markers else "scripts/quarantine.json"
+        version = object_json(git("show", f"{base}:{base_list}", repo=repo, timeout=remaining()))["version"]
+        if markers == ["scripts/admission_inputs.py"] and type(version) is int and version == 1:
+            # No collectors run in this branch, so validate the proposed list here.
+            validate_quarantine(candidate_list)
+            print("Coverage comparison unavailable: merge base predates gate cutover", flush=True)
+            return
+        # Pre-split simplified bases used v2 at the old path. Their own collector
+        # reads it. A retained v1 snapshot never substitutes for a missing v2 list.
+        require(type(version) is int and version == 2, "merge base lacks an active v2 quarantine list")
+        scopes = {path: " ".join([change["status"], " -> ".join(change["paths"])])
+                  for change in changes(base, head, repo=repo, timeout=remaining())
+                  for path in change["paths"]}
+        trailers = git("log", "-1", "--format=%(trailers:key=Coverage-Drop,valueonly,separator=%x00,unfold=true)",
+                       head, "--", repo=repo, timeout=remaining()).decode().removesuffix("\n")
+        declarations = Counter(trailers.split("\0")) if trailers else Counter()
+        errors = []
+        with tempfile.TemporaryDirectory(prefix="pc-cover-") as tmp:
+            scratch = Path(tmp)
+            before = _collect_coverage(repo, base, scratch / "base", python, remaining,
+                                       historical=base != head, errors=errors)
+            after = before if base == head else _collect_coverage(
+                repo, head, scratch / "head", python, remaining, historical=False, errors=errors)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"Coverage comparison inconclusive: {exc}") from exc
+
+    undeclared = 0
+    for suite in sorted(before.keys() & after.keys()):
+        prior, prior_advisory, paths, prior_invocations = before[suite]
+        current, advisory, _, invocations = after[suite]
+        for test, loss in sorted((prior - current).items()):
+            suppressed = min(loss, max(0, advisory[test] - prior_advisory[test]))
+            reason = "skipped/todo" if suite == "npm" else "quarantined"
+            causes = ([f"{suppressed} {reason}"] if suppressed else [])
+            if loss > suppressed:
+                causes.append(f"{loss - suppressed} missing")
+            declared = min(loss, declarations[test])
+            undeclared += loss - declared
+            declarations[test] -= declared
+            path = paths[test]
+            context = [scopes[path]] if path in scopes else []
+            if suite == "npm" and max(prior_invocations[path], invocations[path]) > 1:
+                context.append(f"{prior_invocations[path]} -> {invocations[path]} invocations")
+            print(f"Coverage loss {test}: {prior[test]} -> {current[test]}, lost {loss}"
+                  f" ({', '.join(causes)}), declared {declared}/{loss}"
+                  f"{' [' + '; '.join(context) + ']' if context else ''}", flush=True)
+    if errors:
+        for error in errors:
+            print(f"Coverage collection unavailable: {error}", flush=True)
+        raise RuntimeError(f"Coverage comparison inconclusive: {len(errors)} unavailable collections"
+                           f", {undeclared} undeclared lost occurrences")
+    if undeclared:
+        raise RuntimeError(f"Coverage loss undeclared: add a Coverage-Drop trailer for each of "
+                           f"the {undeclared} undeclared lost occurrences listed above")
 
 
 def validate_map(mapping, targets):

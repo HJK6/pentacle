@@ -98,3 +98,31 @@ def test_new_series_requires_verified_restoration_and_later_occurrences(tmp_path
     result = reconcile(state, {TEST: newer}, set(), adapter, restorations=restoration)
     assert len(adapter.relayed) == 1
     assert result['tests'][TEST]['previous']['phase'] == 'adopted'
+
+
+def test_verified_history_without_local_state_can_recur(tmp_path):
+    adapter = Adapter()
+    test = 'daemon::tests/test_example.py::test_case'
+    proof = {test: {'at': '2026-11-02T12:00:00Z', 'verified': True}}
+    newer = [dict(row, created='2026-11-03T00:00:00Z') for row in OCCURRENCES]
+    result = reconcile(tmp_path / 'state.json', {test: newer}, set(), adapter,
+                       restorations=proof, history={test})
+    assert result['tests'][test]['previous']['phase'] == 'adopted'
+    assert len(adapter.relayed) == 1 and not adapter.alerts
+
+
+def test_reviewed_row_creates_no_decision_and_removal_requires_restoration(tmp_path):
+    adapter = Adapter()
+    state = tmp_path / 'state.json'
+    reconcile(state, {TEST: OCCURRENCES}, {TEST}, adapter)
+    assert not adapter.items and not adapter.relayed and not adapter.alerts
+    reconcile(state, {TEST: OCCURRENCES}, set(), adapter)
+    assert not adapter.items and not adapter.relayed
+
+
+def test_node_recurrence_is_notice_only(tmp_path):
+    adapter = Adapter()
+    test = 'test/example.test.js::["a b","c"]'
+    reconcile(tmp_path / 'state.json', {test: OCCURRENCES}, set(), adapter)
+    assert not adapter.items and not adapter.relayed
+    assert list(adapter.alerts.values()) == ['Node test needs review: ' + test]

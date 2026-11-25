@@ -98,12 +98,11 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
     deadline = config.get("deadline")
     if not isinstance(deadline, dict) or any(not isinstance(deadline.get(k), int) or isinstance(deadline.get(k), bool) or deadline[k] < 0 for k in ("preflight_s", "reserve_s", "slack_s")):
         problems.append("deadline")
-    elif "merge_check_bounds_s" in deadline or "merge_unit_advisory_s" in deadline:
+    elif "merge_check_bounds_s" in deadline:
         bounds = deadline.get("merge_check_bounds_s")
-        advisory = deadline.get("merge_unit_advisory_s")
-        if (not isinstance(bounds, dict) or set(bounds) != {"merge_base", "daemon_contract", "daemon_layer_selectors", "daemon_b04_selectors"}
+        if (not isinstance(bounds, dict) or set(bounds) != {"merge_base", "daemon_contract", "daemon_layer_selectors", "daemon_b04_selectors", "coverage"}
                 or any(type(v) is not int or v <= 0 for v in bounds.values())
-                or type(advisory) is not int or advisory <= 0):
+                ):
             problems.append("merge deadline bounds")
     for key in ("reserve_s", "max_tmpdir_bytes", "min_free_mb"):
         if not isinstance(config.get(key), int) or isinstance(config.get(key), bool) or config[key] < 0:
@@ -568,9 +567,9 @@ def check_scratch(evidence: Path, home: Path, tmp: Path, min_free_mb: int, timeo
     return failures
 
 
-def run_preflight_script(run, script: Path, env: Dict[str, str]) -> List[Dict[str, str]]:
+def run_preflight_script(run, script: Path, env: Dict[str, str], *, loopback: bool = True) -> List[Dict[str, str]]:
     try:
-        out = run(["/bin/bash", str(script)], capture_output=True, text=True, timeout=60, env=env)
+        out = run(["/bin/bash", str(script), *([] if loopback else ["--host-only"])], capture_output=True, text=True, timeout=45, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return [fail("preflight", "%s could not run (%s)" % (script.name, type(exc).__name__))]
     if out.returncode:
@@ -586,15 +585,10 @@ def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path
     if not select:
         if target.get("quarantine_defaults"):
             try:
-                from admission_inputs import load_quarantine
+                from quarantine_list import load_quarantine
                 data = load_quarantine(checkout)
-                tests = data["nonblocking_tests"]
-                if (data["version"] != 1 or not isinstance(tests, list)
-                        or any(not isinstance(t, str) or not t or "::" not in t for t in tests)
-                        or len(set(tests)) != len(tests)):
-                    raise ValueError("invalid quarantine inventory")
-                select = sorted({t.removeprefix("daemon::").split("::", 1)[0]
-                                 for t in tests if t.startswith(("tests/", "daemon::tests/"))})
+                select = sorted({row['id'].removeprefix('daemon::').split('::', 1)[0]
+                                 for row in data['nonblocking_tests'] if row['id'].startswith('daemon::tests/')})
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 raise SetupFailure([fail("selection", "quarantine inventory unavailable: %s" % exc, "")]) from exc
             if not select:
@@ -651,16 +645,29 @@ def junit_counts(path: Path) -> Optional[Dict[str, int]]:
 def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, cancelled: bool) -> Tuple[str, Optional[Dict[str, str]], Dict[str, Any]]:
     """Fold run_gate evidence. Reads the runner's own `primary_outcome` (falling back to `reason` for
     older runners) and keeps its reporting/cleanup facts as secondaries instead of erasing them."""
-    if cancelled:
-        return "cancelled", {"stage": "subject", "code": "cancelled"}, {}
-    if timed_out:
-        return "timeout_unclassified", {"stage": "subject", "code": "wall_deadline"}, {}
+    interrupted = ("cancelled", {"stage": "subject", "code": "cancelled"}, {}) if cancelled else (
+        "timeout_unclassified", {"stage": "subject", "code": "wall_deadline"}, {})
     try:
         data = json.loads(evidence_json.read_text("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("invalid gate evidence")
     except (OSError, ValueError):
-        return "harness_failure", {"stage": "subject", "code": "no_gate_evidence"}, {}
+        return interrupted if timed_out or cancelled else ("harness_failure", {"stage": "subject", "code": "no_gate_evidence"}, {})
+    if timed_out or cancelled:
+        source = data.get("source") or {}
+        try:
+            root = Path(data["repo_root"])
+            sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True, timeout=10).strip()
+            status = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], cwd=root, text=True, timeout=10)
+            if (not data.get("blocking_frozen") or not data.get("finished") or not data.get("tiers")
+                    or sha != data.get("sha") or sha != source.get("sha_before") or sha != source.get("sha_after")
+                    or status or status != source.get("status_after") or status != source.get("status_before")):
+                raise ValueError("unverified frozen verdict")
+            returncode = 0 if data.get("passed") else 1
+        except (OSError, KeyError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+            return interrupted
     tiers = data.get("tiers", [])
-    secondary: Dict[str, Any] = {}
+    secondary: Dict[str, Any] = {"advisory": "interrupted" if cancelled else "timed_out"} if timed_out or cancelled else {}
     reporting = sorted({r for t in tiers for r in (t.get("secondary_outcomes") or [])})
     if reporting:
         secondary["reporting"] = reporting
@@ -679,7 +686,7 @@ def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, can
         return "cancelled", ff, secondary
     if reason == "deadline_envelope_exceeded":
         return "setup_failure", ff, secondary
-    if reason in ("ambient_tmux", "tmux_missing", "preflight_failed", "dirty_worktree", "invalid_soak_tier", "invalid_basetemp") or reason.startswith("manifest_error"):
+    if reason in ("ambient_tmux", "tmux_missing", "preflight_failed", "dirty_worktree", "invalid_soak_tier", "invalid_basetemp", "quarantine_invalid") or reason.startswith("manifest_error"):
         return "setup_failure", ff, secondary
     if reason == "timeout":
         return "timeout_unclassified", ff, secondary
@@ -687,10 +694,11 @@ def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, can
         return "harness_failure", ff, secondary  # killed by a signal the runner did not send
     if reason == "test_failures":
         return ("product_failure" if counts.get("failures") else "unknown"), ff, secondary
-    if reason == 'quarantine_advisory_incomplete':
-        return 'incomplete', ff, secondary
-    if reason in ("missing_junit", "invalid_junit", "no_tests_collected", "source_changed_during_gate", "contract_skipped",
-                  "soak_skipped", "evidence_incomplete", "usage_manifest_invalid", "usage_manifest_timeout"):
+    if reason == "coverage_loss":
+        return "product_failure", ff, secondary
+    if reason == "coverage_inconclusive":
+        return "harness_failure", ff, secondary
+    if reason in ("missing_junit", "invalid_junit", "no_tests_collected", "source_changed_during_gate", "contract_skipped", "soak_skipped", "evidence_incomplete", "usage_manifest_invalid", "usage_manifest_timeout"):
         return "harness_failure", ff, secondary
     return "unknown", ff, secondary
 
@@ -712,20 +720,26 @@ def classify_pytest(junit: Path, returncode: int, timed_out: bool, cancelled: bo
     return "unknown", {"stage": "subject", "code": "errors_without_assertions"}, {"counts": counts}
 
 
-def classify_admission_pytest(junit: Path, final: Path, returncode: int, timed_out: bool, cancelled: bool):
-    outcome, failure, secondary = classify_pytest(junit, returncode, timed_out, cancelled)
-    if timed_out or cancelled:
-        return outcome, failure, secondary
+def classify_quarantine_pytest(junit: Path, final: Path, returncode: int, timed_out: bool, cancelled: bool):
     try:
-        complete = json.loads(final.read_text()).get('complete') is True
-    except (OSError, ValueError, AttributeError):
-        complete = False
-    if not complete:
-        secondary['admission'] = 'incomplete'
-        if outcome == 'product_failure':
+        witness = json.loads(final.read_text())
+        root = Path(witness['repo_root'])
+        source = {'sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True, timeout=10).strip(),
+                  'dirty': bool(subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=root, text=True, timeout=10).strip())}
+        if (witness.get('complete') is not True or ((cancelled or timed_out) and source['dirty']) or source != witness['source_before'] or source != witness['source_after']
+                or str(junit.resolve()) != witness['junit'] or hashlib.sha256(junit.read_bytes()).hexdigest() != witness['junit_sha256']):
+            raise ValueError('unverified blocking witness')
+        outcome, failure, secondary = classify_pytest(junit, witness['blocking_returncode'], False, False)
+        if cancelled or timed_out:
+            secondary['advisory'] = 'interrupted' if cancelled else 'timed_out'
+        elif returncode != witness['blocking_returncode']:
+            return 'harness_failure', {'stage': 'subject', 'code': 'blocking_returncode_mismatch'}, secondary
+        return outcome, failure, secondary
+    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
+        outcome, failure, secondary = classify_pytest(junit, returncode, timed_out, cancelled)
+        if outcome == 'product_failure' or timed_out or cancelled:
             return outcome, failure, secondary
-        return 'incomplete', {'stage': 'subject', 'code': 'admission_incomplete'}, secondary
-    return outcome, failure, secondary
+        return 'harness_failure', {'stage': 'subject', 'code': 'blocking_witness_invalid'}, secondary
 
 
 def classify_npm(summary: Path, returncode: int, timed_out: bool, cancelled: bool) -> Tuple[str, Optional[Dict[str, str]], Dict[str, Any]]:
@@ -742,26 +756,18 @@ def classify_npm(summary: Path, returncode: int, timed_out: bool, cancelled: boo
     unclean = [r["file"] for r in rows if (r.get("cleanup") or {}).get("status") not in (None, "clean", "not_started")]
     if unclean:
         secondary["cleanup"] = "failed"
-    if any(r.get('reason') in ('advisory_incomplete', 'advisory_cleanup_incomplete') for r in rows):
-        secondary['advisory'] = 'incomplete'
-        if any(r.get('status') == 'fail' and (r.get('execution') or {}).get('exitCode') not in (None, 0) for r in rows):
-            return 'product_failure', {'stage': 'subject', 'code': 'test_failures'}, secondary
-        if unclean:
-            return 'cleanup_failure', {'stage': 'subject', 'code': 'advisory_cleanup_incomplete'}, secondary
-        return 'incomplete', {'stage': 'subject', 'code': 'advisory_incomplete'}, secondary
-    if 'admission_inventory_unavailable' in data.get('runner_errors', []):
-        secondary['admission'] = 'incomplete'
-        if any(r.get('status') == 'fail' and (r.get('execution') or {}).get('exitCode') not in (None, 0) for r in rows):
-            return 'product_failure', {'stage': 'subject', 'code': 'test_failures'}, secondary
-        if (any(error != 'admission_inventory_unavailable' for error in data.get('runner_errors', []))
-                or data.get('directory_cleanup_errors') or unclean):
-            return 'harness_failure', {'stage': 'subject', 'code': 'runner_errors'}, secondary
-        return 'incomplete', {'stage': 'subject', 'code': 'admission_incomplete'}, secondary
     if data.get("runner_errors") or data.get("directory_cleanup_errors"):
         return "harness_failure", {"stage": "subject", "code": "runner_errors"}, secondary
     if any(r.get("status") == "timeout" for r in rows):
         return "timeout_unclassified", {"stage": "subject", "code": "file_timeout"}, secondary
-    if any(r.get("status") == "fail" for r in rows):
+    failed_rows = [r for r in rows if r.get("status") == "fail"]
+    incomplete = [r["file"] for r in failed_rows if r.get("reason") == "node_completion_incomplete"]
+    if incomplete:
+        secondary["incomplete_files"] = incomplete
+        secondary["observed_assertions"] = [fact for row in failed_rows for fact in row.get("failures", [])]
+        if len(incomplete) == len(failed_rows):
+            return "harness_failure", {"stage": "subject", "code": "node_completion_incomplete"}, secondary
+    if failed_rows:
         return ("cleanup_failure" if unclean and all((r.get("execution") or {}).get("exitCode") == 0 for r in rows if r.get("status") == "fail") else "product_failure"), \
             {"stage": "subject", "code": "test_failures"}, secondary
     if data.get("exit_code") == 0 and returncode == 0:
@@ -1071,6 +1077,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=None, home=home, tmp=tmp, locale_name=locale_name,
                         evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
         system = "darwin" if sys.platform == "darwin" else "linux"
+        runner_preflight = target.get("kind") == "run_gate"
+        if runner_preflight:
+            env["V2_PYTHON_BIN"] = toolchain["python"]["path"]
+            failures += run_preflight_script(run_child, checkout / "services/chat-stream-v2/tools/gate_preflight.sh", env,
+                                             loopback=target.get("gate") in ("contract", "merge", "smoke", "soak"))
+            if failures:
+                raise SetupFailure(failures)
         _, failures = check_host_tools(run_child, config, target, env, system=system)
         if failures:
             raise SetupFailure(failures)
@@ -1096,6 +1109,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=venv, home=home, tmp=tmp, locale_name=locale_name,
                         evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
+        if runner_preflight:
+            env["PENTACLE_GATE_PREFLIGHT_DONE"] = str(os.getpid())
         service_dir = checkout / profile["service_dir"]
         # Preflight from the child's own context; every independent fault in one pass.
         failures += check_scratch(evidence, home, tmp, config["min_free_mb"], timeout_s, config["reserve_s"])
@@ -1112,6 +1127,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if venv is not None:
             failures += check_dependencies(run_child, venv / "bin" / "python", env, [checkout / r for r in profile["python_requirements"]])
             caps = config["capability_sets"].get(target.get("capabilities") or "", [])
+            if runner_preflight:
+                caps = [name for name in caps if name in ("lsof descriptor readable", "environment: isolated Python dependencies")]
             if caps and not failures:
                 unavailable = check_capabilities(run_child, venv / "bin" / "python", env, service_dir / "tests", caps)
                 if target.get("strict_capabilities", True):
@@ -1142,7 +1159,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 failures.append(fail("dependencies", terminal_failure))
         if web_selected and not (checkout / "renderer/dist/web/web.html").is_file():
             failures.append(fail("dependencies", "selected web integration needs the web build"))
-        if target.get("preflight_script") and not failures:
+        if target.get("preflight_script") and not runner_preflight and not failures:
             failures += run_preflight_script(run_child, checkout / target["preflight_script"], env)
         if failures:
             raise SetupFailure(failures)
@@ -1189,9 +1206,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         state.update(outcome="setup_failure", first_failure={"stage": "setup", "code": exc.failures[0]["code"]},
                      extra=dict(state["extra"], failures=exc.failures))
     except Cancelled:
-        if proc is not None and proc.poll() is None:
-            stop_group(proc)
         state.update(outcome="cancelled", first_failure={"stage": "subject" if proc else "setup", "code": "cancelled"})
+        if proc is not None:
+            if proc.poll() is None or group_alive(proc.pid):
+                stop_group(proc)
+            if group_alive(proc.pid):
+                state["secondary"]["cleanup"] = "failed"
+            if target["kind"] == "run_gate" or target.get("quarantine_suite"):
+                outcome, failure, more = results["classify"](proc.returncode, False, cancelled=True)
+                state.update(outcome=outcome, first_failure=failure)
+                state["secondary"].update(more)
+            state["evidence"] = evidence_refs(evidence / "gate")
     except BaseException as exc:  # a crash still leaves a terminal receipt when it can
         if proc is not None and proc.poll() is None:
             stop_group(proc)
@@ -1217,10 +1242,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 tiers = ("contract", "unit", "smoke") if target.get("gate") == "merge" else (target.get("gate"),)
                 for tier in tiers:
                     if tier in ("contract", "unit", "smoke", "soak"):
-                        tier_root = basetemp / tier
-                        if tier_root.is_symlink() or tier_root.exists():
-                            retention_reasons.append("tier_root_unresolved:" + tier)
-                            unresolved_paths.append(str(tier_root))
+                        for directory in (tier, tier + "-advisory"):
+                            tier_root = basetemp / directory
+                            if tier_root.is_symlink() or tier_root.exists():
+                                retention_reasons.append("tier_root_unresolved:" + directory)
+                                unresolved_paths.append(str(tier_root))
         except OSError as exc:
             retention_reasons.append("scratch_observation_failed:" + type(exc).__name__)
         if retention_reasons:
@@ -1297,29 +1323,27 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
         wall_s = timeout_s + config["reserve_s"]
         if "--deadline-seconds" in runner.read_text("utf-8"):  # runner owns the finite envelope when it supports one
             budget = config["deadline"]
-            preflights = {"contract": 1, "smoke": 1, "merge": 2}.get(target["gate"], 0)
+            preflights = 1
             # The runner measures the envelope from its own start, so launch/git-status time eats a bare sum: keep a start margin.
             deadline_s = (sum(limits.values()) if limits else tier_s * tiers) + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
             if target["gate"] == "merge":
                 deadline_s += sum(budget.get("merge_check_bounds_s", {}).values())
-                if limits:
-                    deadline_s += budget.get("merge_unit_advisory_s", 0)
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
         if shard_index is not None:
             command += ["--shard-index", str(shard_index), "--shard-count", str(shard_count)]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
-        return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
+        return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to, cancelled=False: classify_run_gate(out, rc, to, cancelled)}
     if kind == "pytest_files":
         junit = gate_dir / "pytest.junit.xml"
-        if target.get("admission_suite"):
-            command = [str(venv / "bin" / "python"), str(checkout / "scripts/admission_pytest.py"),
-                       "--root", str(checkout), "--suite", target["admission_suite"], "--junit", str(junit),
-                       "--basetemp", str(basetemp / "pytest"), "--manifest", str(gate_dir / "admission.json"),
+        if target.get("quarantine_suite"):
+            command = [str(venv / "bin" / "python"), str(checkout / "scripts/quarantine_pytest.py"),
+                       "--root", str(checkout), "--suite", target["quarantine_suite"], "--junit", str(junit),
+                       "--basetemp", str(basetemp / "pytest"), "--manifest", str(gate_dir / "quarantine.json"),
                        *(["--strict-capabilities"] if target.get("strict_capabilities", True) else []),
                        "--", *selection]
             return command, {"cwd": checkout / target.get("select", {}).get("root", profile_root(service_dir, checkout)),
-                             "classify": lambda rc, to: classify_admission_pytest(junit, gate_dir / "admission.json.final", rc, to, False)}
+                             "classify": lambda rc, to, cancelled=False: classify_quarantine_pytest(junit, gate_dir / "quarantine.json.final", rc, to, cancelled)}
         command = [str(venv / "bin" / "python"), "-m", "pytest", *selection, "-q", "-rs",
                    *(["--strict-capabilities"] if target.get("strict_capabilities", True) else []),
                    "--junitxml=%s" % junit, "--basetemp", str(basetemp / "pytest")]

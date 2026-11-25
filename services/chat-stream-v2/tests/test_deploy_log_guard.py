@@ -67,7 +67,7 @@ def isolated_release(tmp_path, monkeypatch, request):
     git("init", "-q")
     git("config", "user.name", "Deploy test")
     git("config", "user.email", "deploy-test@example.invalid")
-    (repo / ".gitignore").write_text(".pentacle-deploy/\nservices/chat-stream-v2/.venv/\n")
+    (repo / ".gitignore").write_text(".pentacle-deploy/\nservices/chat-stream-v2/.venv/\n__pycache__/\n")
     main = repo / "services/chat-stream-v2/main.py"
     main.parent.mkdir(parents=True)
     main.write_text("version = 1\n")

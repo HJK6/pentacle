@@ -20,7 +20,8 @@ def accumulate(path, observations):
         for test, occurrences in observations.items():
             if not isinstance(test, str) or '::' not in test:
                 raise ValueError('invalid collected test identity')
-            known = state['tests'].setdefault(test, {})
+            ledger = state.setdefault('native_tests', {}) if test.startswith('test/') else state['tests']
+            known = ledger.setdefault(test, {})
             for occurrence in occurrences:
                 oid = occurrence.get('id')
                 if not isinstance(oid, str) or not oid or not occurrence.get('source'):
@@ -54,4 +55,7 @@ def accumulate(path, observations):
                     changed = True
         if changed:
             _save(path, state)
-        return {test: [items[key] for key in sorted(items)] for test, items in state['tests'].items()}
+        # Historical Node entries in tests came from lossy XML. Keep the Python history.
+        eligible = {test: rows for test, rows in state['tests'].items() if not test.startswith('test/')}
+        eligible.update(state.get('native_tests', {}))
+        return {test: [items[key] for key in sorted(items)] for test, items in eligible.items()}

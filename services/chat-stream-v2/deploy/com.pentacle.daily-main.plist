@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.pentacle.daily-main</string>
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>__PENTACLE_USER_HOME__/.pentacle/daily-main/run-daily-main.sh</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>__DAILY_HOUR__</integer><key>Minute</key><integer>__DAILY_MINUTE__</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>__PENTACLE_USER_HOME__/.pentacle/daily-main.log</string>
+  <key>StandardErrorPath</key><string>__PENTACLE_USER_HOME__/.pentacle/daily-main.err</string>
+</dict>
+</plist>

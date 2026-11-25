@@ -89,7 +89,7 @@ def _check_serial_shards(root: Path) -> None:
     env = {**os.environ, "PYTHONPATH": str(SERVICE_DIR)}
     command = [sys.executable, "-m", "pytest", "-q", "-m", "not soak", "-p", "no:cacheprovider",
                "-p", "tools.gate_progress", "-p", "tools.gate_shard"]
-    for index, expected in enumerate((1, 2)):
+    for index, expected in enumerate((2, 1)):
         journal = root / f"{index}.jsonl"
         done = subprocess.run([*command, f"--gate-progress-journal={journal}", f"--gate-shard-index={index}",
                                "--gate-shard-count=2"],

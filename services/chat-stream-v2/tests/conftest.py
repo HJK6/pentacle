@@ -86,35 +86,21 @@ def ruling_spec_root(tmp_path, monkeypatch):
     return root
 
 
-def pytest_configure(config) -> None:
-    del config
-
-
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items) -> None:
-    """Apply the same exact-test inventory used by the release scorecard."""
+    """Apply the shared candidate list for direct pytest invocations."""
+    if config.pluginmanager.hasplugin('quarantine_plugin'):
+        return
     try:
         scripts = str(SERVICE_DIR.parents[1] / 'scripts')
         if scripts not in sys.path:
             sys.path.insert(0, scripts)
-        from admission_inputs import load_quarantine
-        data = load_quarantine(SERVICE_DIR.parents[1])
-        tests = data["nonblocking_tests"]
-        if (data["version"] != 1 or not isinstance(tests, list)
-                or any(not isinstance(t, str) or not t or "::" not in t for t in tests)
-                or len(set(tests)) != len(tests)):
-            raise ValueError("invalid quarantine inventory")
+        from quarantine_list import load_quarantine, mark_quarantined
+        selected = {row['id'] for row in load_quarantine(SERVICE_DIR.parents[1])['nonblocking_tests']}
+        mark_quarantined(items, 'daemon', selected)
     except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
-        config._quarantine_inventory_error = type(exc).__name__
-        print(f"quarantine inventory unavailable: {type(exc).__name__}", file=sys.stderr)
-        return
-    selected = set(tests)
-    for item in items:
-        # The historical decorators remain in source as legacy evidence, but
-        # no longer decide selection once the effective inventory exists.
-        item.own_markers[:] = [mark for mark in item.own_markers if mark.name != 'quarantined']
-        if item.nodeid in selected or 'daemon::' + item.nodeid in selected:
-            item.add_marker(pytest.mark.quarantined)
+        config._quarantine_inventory_error = str(exc)
+        print(f'quarantine inventory unavailable: {exc}', file=sys.stderr)
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:

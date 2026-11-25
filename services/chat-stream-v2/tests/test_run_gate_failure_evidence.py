@@ -1,7 +1,7 @@
 """run_gate keeps the original failure, its reporting/cleanup facts and the last node.
 
 Each case runs the real runner and progress plugin against a disposable tiny suite
-and its own accepted admission and quarantine metadata.
+and its own quarantine metadata.
 """
 
 from __future__ import annotations
@@ -22,16 +22,13 @@ from tools import run_gate
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 DRIVER = r'''
-import ast, json, os, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text())
 service_dir = Path(config["service_dir"])
 scripts = service_dir.parents[1] / "scripts"
 sys.path[:0] = [str(service_dir), str(scripts)]
 os.environ["PYTHONPATH"] = os.pathsep.join([str(service_dir), str(scripts)])
-from admission_fingerprint import python_fingerprint
-from admission_inputs import ROLLOUT_BASE
-from admission_policy import identity
 from tools import run_gate
 
 suite = Path(config["suite"])
@@ -39,20 +36,7 @@ repo = suite.parents[1]
 metadata = repo / "scripts"
 metadata.mkdir()
 (metadata / "gate-env.json").write_bytes((scripts / "gate-env.json").read_bytes())
-source = suite / "test_synthetic.py"
-fingerprints = {}
-for function in ast.parse(source.read_text()).body:
-    if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and function.name.startswith("test_"):
-        node = source.name + "::" + function.name
-        fingerprints[identity("daemon", node)] = python_fingerprint(suite, node)
-platform = "darwin" if sys.platform == "darwin" else "linux"
-for name, data in [
-    ("test-admission-inventory.json", {"version": 1, "base_sha": ROLLOUT_BASE,
-     "python": {"daemon": {platform: fingerprints}}, "javascript": {}}),
-    ("test-admission-records.json", {"version": 1, "records": {}}),
-    ("quarantine.json", {"version": 1, "history": {}, "nonblocking_tests": []}),
-]:
-    (metadata / name).write_text(json.dumps(data))
+(metadata / "quarantine-v2.json").write_text(json.dumps({"version": 2, "nonblocking_tests": []}))
 
 git = ["git", "-C", str(repo)]
 subprocess.run([*git, "init", "-q"], check=True)
@@ -67,7 +51,7 @@ run_gate._tier_command = lambda tier, junit, basetemp: [sys.executable, "-m", "p
                                                          f"--junitxml={junit}", "--basetemp", str(basetemp / tier)]
 run_gate._sha = lambda: "c" * 40
 os.environ.update(config.get("env", {}))
-statuses = iter(config.get("statuses", ["", ""]))
+statuses = iter(config.get("statuses", ["", "", ""]))
 def git_status():
     value = next(statuses)
     if value == "RAISE":
@@ -115,6 +99,7 @@ def _prepare(tmp_path: Path, source: str, *, argv: list[str], **config) -> tuple
             "argv": [*argv, "--evidence-dir", str(evidence), "--basetemp", str(tmp_path / "base")], **config}
     (tmp_path / "config.json").write_text(json.dumps(full), encoding="utf-8")
     env = {key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE", "V2_GATE_OWNER_MANIFEST"}}
+    env["PENTACLE_GATE_PREFLIGHT_DONE"] = str(os.getpid())  # this fixture exercises tier evidence; preflight has dedicated tests
     return [sys.executable, str(tmp_path / "driver.py"), str(tmp_path / "config.json")], evidence, env
 
 
@@ -154,7 +139,7 @@ def test_nested_argv_is_private(tmp_path):
                           capture_output=True, text=True, timeout=10)
     assert done.returncode == 0 and '2 tests collected' in done.stdout, done.stdout + done.stderr
 '''
-    code, data, out = _gate(shard, nested, argv=['unit', '--shard-index', '0', '--shard-count', '2'])
+    code, data, out = _gate(shard, nested, argv=['unit', '--shard-index', '1', '--shard-count', '2'])
     unit = data['tiers'][0]
     assert code == 0 and unit['progress']['complete'] and unit['progress']['collected'] == 2, out
     assert '-p' in unit['command'] and 'tools.gate_shard' in unit['command'] and '-n' not in unit['command']
@@ -316,7 +301,7 @@ def test_missing_junit_after_clean_exit_fails(tmp_path: Path) -> None:
 
 
 def test_source_change_is_recorded_beside_green_tier(tmp_path: Path) -> None:
-    code, data, _ = _gate(tmp_path, PASSING, statuses=["", " M changed.py"])
+    code, data, _ = _gate(tmp_path, PASSING, statuses=["", "", " M changed.py"])
     assert code == 1 and data["tiers"][0]["passed"] is True
     assert data["tiers"][-1]["reason"] == "source_changed_during_gate"
 
@@ -326,11 +311,10 @@ def test_deadline_refuses_before_launch(tmp_path: Path) -> None:
     refusal = data["tiers"][0]
     assert code == 1 and len(data["tiers"]) == 1 and refusal["reason"] == "deadline_envelope_exceeded"
     check = refusal["deadline_check"]
-    assert check["tier_bounds_s"] == {"contract": 20.0, "unit": 20.0, "smoke": 20.0}
-    assert check["preflight_bounds_s"] == {"contract": 30.0, "smoke": 30.0}
+    assert check["tier_bounds_s"] == {"contract": 20.0, "unit": 20.0, "smoke": 20.0} and check["preflight_bounds_s"] == {}
     assert check["merge_check_bounds_s"] == {"merge_base": 20, "daemon_contract": 60,
-                                            "daemon_layer_selectors": 90, "daemon_b04_selectors": 90}
-    assert check["required_s"] == 3 * 20 + 2 * 30 + run_gate.DEFAULT_RESERVE_S + sum(check["merge_check_bounds_s"].values())
+                                            "daemon_layer_selectors": 90, "daemon_b04_selectors": 90, "coverage": 2400}
+    assert check["required_s"] == 3 * 20 + run_gate.DEFAULT_RESERVE_S + sum(check["merge_check_bounds_s"].values())
     assert not (tmp_path / "evidence" / "unit.progress.jsonl").exists()
 
 
@@ -376,6 +360,9 @@ def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
         clock[0] += timeout
         return run_gate._result("selector", code=0, passed=True)
 
+    monkeypatch.setitem(sys.modules, 'quarantine_list', SimpleNamespace(load_quarantine=lambda root: {}))
+    monkeypatch.setitem(sys.modules, 'select_tests', SimpleNamespace(check_coverage=lambda *a, **kw: clock.__setitem__(0, clock[0] + kw['timeout'])))
+    monkeypatch.setattr(run_gate, '_preflight', lambda *a, **kw: (0, False))
     monkeypatch.setattr(run_gate, "_merge_contract_base", base)
     for name in ("_run_daemon_contract", "_run_daemon_layer_selectors", "_run_daemon_b04_selectors"):
         monkeypatch.setattr(run_gate, name, check)
@@ -385,7 +372,7 @@ def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(run_gate, "_git_status", lambda: "")
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(sys, "argv", ["run_gate.py", "merge", "--evidence-dir", str(tmp_path / "evidence"), "--basetemp",
-                                      str(tmp_path / "base"), "--timeout-seconds", "10", "--deadline-seconds", "358",
+                                      str(tmp_path / "base"), "--timeout-seconds", "10", "--deadline-seconds", "2700",
                                       "--deadline-reserve-seconds", "5"])
     assert run_gate.main() == 1
     data = json.loads((tmp_path / "evidence" / "v2-merge-evidence.json").read_text(encoding="utf-8"))
@@ -405,7 +392,7 @@ def test_setup_exception_keeps_terminal_record(tmp_path: Path) -> None:
 
 
 def test_source_readback_failure_is_recorded_beside_green_tier(tmp_path: Path) -> None:
-    code, data, _ = _gate(tmp_path, PASSING, statuses=["", "RAISE"])
+    code, data, _ = _gate(tmp_path, PASSING, statuses=["", "", "RAISE"])
     assert code == 1 and data["tiers"][0]["passed"] is True
     assert data["tiers"][-1]["reason"] == "source_readback_failed" and data["source"]["clean_after"] is None
 

@@ -101,8 +101,6 @@ def work_state(settings, now):
                     decisions.add(row["test"])
         except (ValueError, KeyError, OSError) as exc:
             gaps.append(str(exc))
-            if row.get("test"):
-                quarantine_gaps.append("unresolved decision: " + row["test"])
         rows.append(row)
     for occurrence in register.get("pending", []):
         if instant(occurrence["created"]) <= now:
@@ -117,14 +115,11 @@ def work_state(settings, now):
             selected = set(selector["nonblocking_tests"])
         if not all(isinstance(key, str) and key for key in selected):
             raise ValueError("invalid selector test IDs")
-        if selected != decisions:
-            quarantine_gaps.append("effective selection and open decisions disagree")
-        open_tests = sorted(selected | decisions)
+        open_tests = sorted(selected)
     except (OSError, ValueError, KeyError, TypeError, SyntaxError):
         selected = None
-        open_tests = sorted(decisions)
+        open_tests = None
         quarantine_gaps.append("effective nonblocking test selection unavailable")
-    quarantine_gaps.extend(covered(register, now, "quarantine decision"))
     return dict(rows=rows, open_items=sorted(open_items), open_tests=open_tests,
                 effective_tests=sorted(selected) if selected is not None else None, open_decisions=sorted(decisions),
                 pending=sorted(pending), cause_gaps=gaps, quarantine_gaps=quarantine_gaps,

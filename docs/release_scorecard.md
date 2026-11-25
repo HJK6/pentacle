@@ -27,7 +27,7 @@ The command never starts a release, workflow, test, provider or work publisher.
 | First-try releases | At least nine passes among the ten most recent distinct ordinary forward intents, including refused invocations. |
 | Hosted false reds | At most one among the latest hundred Public checks workflow IDs ordered by creation time and numeric ID. Every blocking failure in that workflow must have a confirmed non-code cause to count it as a false red. |
 | Scheduled nights | Seven passes among the latest seven due scheduled slots. Each slot requires the first scheduled receipt bound to the deployed SHA. |
-| Open quarantine | Zero distinct tests pending disposition, with the effective selector and open decision items in agreement. |
+| Open quarantine | Zero distinct tests in the effective quarantine list. Decision and repair-item history are reported separately. |
 | Open failure items | Zero open scorecard-originated causes across the entire work inventory, with every required occurrence accounted for. |
 
 The human view starts with the five results. Each condition includes its reason,

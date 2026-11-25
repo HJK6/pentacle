@@ -22,16 +22,16 @@
   "umask": "022",
   "reserve_s": 60,
   "deadline": {
-    "preflight_s": 30,
+    "preflight_s": 45,
     "reserve_s": 60,
     "slack_s": 30,
     "merge_check_bounds_s": {
       "merge_base": 20,
       "daemon_contract": 60,
       "daemon_layer_selectors": 90,
-      "daemon_b04_selectors": 90
-    },
-    "merge_unit_advisory_s": 1800
+      "daemon_b04_selectors": 90,
+      "coverage": 2400
+    }
   },
   "max_tmpdir_bytes": 48,
   "min_free_mb": 1024,
@@ -136,11 +136,11 @@
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
             "contract": 180,
-            "unit": 699,
+            "unit": 2400,
             "smoke": 900
           },
-          "timeout_s": 1779,
-          "max_timeout_s": 1779,
+          "timeout_s": 3480,
+          "max_timeout_s": 3480,
           "unit_workers": 4
         },
         "v2-merge-capacity": {
@@ -148,7 +148,7 @@
         },
         "v2-pytest": {
           "kind": "pytest_files",
-          "admission_suite": "daemon",
+          "quarantine_suite": "daemon",
           "needs": [
             "python",
             "node",
@@ -212,7 +212,7 @@
         },
         "cli-pytest": {
           "kind": "pytest_files",
-          "admission_suite": "cli",
+          "quarantine_suite": "cli",
           "pass_env": [
             "AGENT_ORCH_MEMORY_REPO"
           ],
@@ -234,7 +234,7 @@
         },
         "shared-pytest": {
           "kind": "pytest_files",
-          "admission_suite": "shared",
+          "quarantine_suite": "shared",
           "needs": [
             "python",
             "tmux"
@@ -283,8 +283,8 @@
             "tmux"
           ],
           "capabilities": "v2_host",
-          "timeout_s": 699,
-          "max_timeout_s": 699,
+          "timeout_s": 1465,
+          "max_timeout_s": 1465,
           "shardable": true
         }
       }

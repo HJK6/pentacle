@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tools import run_gate
+
+
+@pytest.fixture(autouse=True)
+def capable_host(monkeypatch):
+    monkeypatch.setattr(run_gate, "_preflight", lambda *args, **kwargs: (0, False))
 
 
 @pytest.fixture
@@ -16,6 +22,7 @@ def merge_checks(monkeypatch):
     # Cleanup tests inject tier outcomes. Supply the successful prerequisite
     # stages explicitly so the receipt still exercises the merge sequence.
     monkeypatch.setattr(run_gate, "_merge_contract_base", lambda timeout: "b" * 40)
+    monkeypatch.setitem(sys.modules, "select_tests", SimpleNamespace(check_coverage=lambda *args, **kwargs: None))
     for name in ("_run_daemon_contract", "_run_daemon_layer_selectors", "_run_daemon_b04_selectors"):
         monkeypatch.setattr(run_gate, name, lambda evidence, base, timeout, stage=name:
                             run_gate._result(stage.removeprefix("_run_"), code=0, passed=True))

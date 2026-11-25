@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from agent_orch.quarantine_ledger import accumulate
@@ -24,3 +26,15 @@ def test_conflicting_first_attempt_is_not_overwritten(tmp_path):
     changed = {**event(1), 'signature': 'call:different'}
     with pytest.raises(ValueError):
         accumulate(path, {TEST: [changed]})
+
+
+def test_native_node_history_starts_fresh_while_python_history_survives(tmp_path):
+    path = tmp_path / 'ledger.json'
+    node = 'test/name.test.js::splitline'
+    legacy = event(1)
+    path.write_text(json.dumps({'version': 1, 'tests': {
+        key: {legacy['id']: legacy} for key in (TEST, node)}}))
+    first = accumulate(path, {node: [event(2)]})
+    assert first[TEST] == [legacy] and first[node] == [event(2)]
+    assert accumulate(path, {node: [event(3)]})[node] == [event(2), event(3)]
+    assert accumulate(path, {})[node] == [event(2), event(3)]
