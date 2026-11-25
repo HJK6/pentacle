@@ -122,6 +122,42 @@ RESUME_PRESERVED_FIELDS = (
     "objective_source", "harness_run_id", "claude_session_lineage",
 )
 
+# The target host owns both the rollout and its device/inode namespace.
+_CODEX_RESUME_PROBE = r"""
+import json, os, stat, sys
+from pathlib import Path
+
+root, path = map(Path, sys.argv[1:3])
+expected, device, inode = sys.argv[3:]
+def probe():
+    if not (root.is_absolute() and root == root.resolve() and path.is_relative_to(root)
+            and path == path.resolve() and path.name.endswith("-" + expected + ".jsonl")):
+        return "foreign", ""
+    if not path.is_file():
+        return "missing", ""
+    candidates = root.glob("*/*/*/rollout-*-" + expected + ".jsonl")
+    if list(candidates) != [path]:
+        return "foreign", ""
+    with path.open("rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or (str(info.st_dev), str(info.st_ino)) != (device, inode):
+            return "foreign", ""
+        header = json.loads(handle.readline(1024 * 1024))
+    meta = header.get("payload", {})
+    if header.get("type") != "session_meta" or (meta.get("id") or meta.get("session_id")) != expected:
+        return "foreign", ""
+    cwd = meta.get("cwd")
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
+        return "invalid", ""
+    return "ok", cwd
+
+try:
+    print(json.dumps(probe()))
+except (OSError, ValueError, TypeError, AttributeError):
+    sys.exit(1)
+"""
+
+
 _REMOTE_RESUME_PROBE = r"""
 import glob, json, os, sys
 projects_root, expected = sys.argv[1:3]
@@ -919,16 +955,81 @@ class SpawnCtl:
             )
         return path, resume_cwd
 
+    async def _codex_resume_target(
+        self, msg: dict[str, Any], host: str, tmux: "tmux_transport.Tmux", session_id: str,
+    ) -> tuple[str, str, str, dict[str, Any]]:
+        from store_specs import _session_row
+
+        def matching_rows(conn):
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE provider='codex' "
+                "AND json_extract(observer_binding, '$.transcript.session_id')=? LIMIT 2",
+                (session_id,),
+            )
+            return [_session_row(conn, row) for row in rows]
+
+        matches = await self.store.submit(matching_rows)
+        if not matches:
+            raise VerbError("resume_transcript_not_found", "no retained Codex seat for this session")
+        if len(matches) != 1:
+            raise VerbError("resume_foreign_target", "multiple seats claim the Codex session")
+        prior = matches[0]
+        if prior["host"] != host:
+            raise VerbError("resume_target_host_mismatch", "retained Codex seat belongs to another host")
+        account = prior.get("account_binding") or {}
+        if (not account.get("alias") or account.get("provider") != "codex" or account.get("host") != host
+                or msg.get("account", account["alias"]) != account["alias"]):
+            raise VerbError("account_resume_cross_home_forbidden", "resume requires the retained Codex account")
+        name = prior["session_name"]
+        if prior.get("status") != "closed":
+            raise VerbError("resume_session_already_live", "Codex seat must be closed before resume")
+        state = await tmux.session_state(name)
+        if state == "alive":
+            raise VerbError("resume_session_already_live", "Codex seat still has a live pane")
+        if state != "gone":
+            raise VerbError("resume_target_probe_failed", "could not confirm Codex pane absence")
+
+        binding = prior["observer_binding"]
+        transcript = binding["transcript"]
+        file_id = transcript.get("file_id")
+        if (binding.get("generation") != prior["session_generation"] or transcript.get("provider") != "codex"
+                or not isinstance(file_id, list) or len(file_id) != 2):
+            raise VerbError("resume_foreign_target", "Codex transcript has no matching observer proof")
+        path = transcript.get("path")
+        root = account.get("transcript_root")
+        if (not isinstance(root, str) or not os.path.isabs(root) or not isinstance(path, str)
+                or not Path(path).is_relative_to(root)):
+            raise VerbError("account_resume_cross_home_forbidden", "rollout is outside the retained account")
+
+        args = ("-c", _CODEX_RESUME_PROBE, root, path, session_id, *map(str, file_id))
+        if self.hosts is None:
+            rc, output = await tmux_transport._exec(sys.executable, *args, timeout=15)
+        else:
+            rc, output = await self.hosts.run_command(host, "python3", *args, timeout=15)
+        if rc == 0:
+            try:
+                state, cwd = json.loads(output)
+            except (ValueError, TypeError):
+                state, cwd = "invalid", ""
+            if state == "ok" and isinstance(cwd, str) and os.path.isabs(cwd):
+                return name, path, cwd, prior
+            if state == "missing":
+                raise VerbError("resume_transcript_not_found", "retained Codex rollout is missing")
+            if state == "foreign":
+                raise VerbError("resume_foreign_target", "Codex rollout conflicts with retained identity")
+        raise VerbError("resume_target_probe_failed", "target-host Codex rollout could not be verified")
+
     async def _resolve_resume_target(
         self, msg: dict[str, Any], host: str, tmux: "tmux_transport.Tmux",
     ) -> tuple[str, str, str, dict[str, Any] | None]:
         session_id = self._canonical_resume_id(msg.get("resume_session_id"))
-        if str(msg.get("provider") or "").strip() != "claude":
-            raise VerbError("resume_unsupported_provider", "only Claude sessions can resume")
+        provider = str(msg.get("provider") or "").strip()
+        if provider not in {"claude", "codex"}:
+            raise VerbError("resume_unsupported_provider", "only Claude and Codex sessions can resume")
         if str(msg.get("command") or "").strip():
             raise VerbError(
                 "resume_requires_native_launch",
-                "resume cannot override the supported native Claude launcher",
+                "resume cannot override the supported native launcher",
             )
         if any(
             msg.get(field)
@@ -943,6 +1044,9 @@ class SpawnCtl:
                 "resume_conflicts_with_identity",
                 "resume resolves its lifecycle row; session_name cannot be supplied",
             )
+
+        if provider == "codex":
+            return await self._codex_resume_target(msg, host, tmux, session_id)
 
         matches = await self.store.sessions_for_claude_session_id(session_id)
         local_matches = [row for row in matches if str(row.get("host") or "") == host]
@@ -1882,7 +1986,7 @@ class SpawnCtl:
         *,
         admission: asyncio.Future[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Serialize one native Claude identity through complete admission.
+        """Serialize one native session identity through complete admission.
 
         The ordinary stream-name reservation cannot protect a purged-row resume:
         two requests could otherwise mint different v2 names for one transcript.
@@ -2175,6 +2279,23 @@ class SpawnCtl:
         resume_jsonl_path = ""
         resume_cwd = ""
         resume_prior_row: dict[str, Any] | None = None
+        request_id = str(msg.get("request_id") or f"spawn-{uuid.uuid4().hex}")
+        # Atomic claim below collapses concurrent same-key fires to one admission.
+        idempotency_key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
+        payload_hash = self._spawn_payload_hash(msg) if idempotency_key else ""
+        if resume_session_id is not None and msg.get("provider") == "codex" and idempotency_key:
+            # A lost response is a read of the already-delivered operation. It
+            # must not go through admission for a second pane on the live seat.
+            recorded = await self.store.spawn_record_for_key(host, idempotency_key)
+            if recorded and recorded["kind"] == "terminal" and recorded["row"].get("state") == "delivered":
+                prior = recorded["row"]
+                if prior.get("request_payload_hash") != payload_hash:
+                    raise VerbError("idempotency_key_conflict", "key belongs to a different spawn request")
+                generation = (prior.get("delivery_receipt") or {}).get("resume_generation")
+                replay = await self._reply_from_replay(host, request_id, "terminal", prior, idempotency_key)
+                if not generation or (replay.get("session") or {}).get("session_generation") != generation:
+                    raise VerbError("replayed_stream_dead", "the delivered Codex generation is no longer open")
+                return replay
         if resume_session_id is not None:
             name, resume_jsonl_path, resume_cwd, resume_prior_row = (
                 await self._resolve_resume_target(msg, host, tmux)
@@ -2202,10 +2323,6 @@ class SpawnCtl:
                     "invalid_cwd",
                     f"cwd is not an existing directory on target host {host}: {cwd}",
                 )
-        request_id = str(msg.get("request_id") or f"spawn-{uuid.uuid4().hex}")
-        # Atomic claim below collapses concurrent same-key fires to one admission.
-        idempotency_key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
-        payload_hash = self._spawn_payload_hash(msg) if idempotency_key else ""
         # Daemon-side admission freeze (deploy window): refuse only a NEW claim
         # with `spawn_frozen` while a TTL'd hold is set (BEFORE any reservation/
         # pane). A retry whose key ALREADY has an admitted seat must still replay
@@ -2477,6 +2594,8 @@ class SpawnCtl:
                 delivery_receipt=delivery_receipt,
                 native_initial_prompt=native_initial_prompt,
             )
+            if resume_session_id is not None and provider == "codex":
+                delivery_receipt["resume_generation"] = spawn_generation
             if native_initial_prompt and self.instance_id:
                 delivery_receipt["spawn_daemon_instance_id"] = self.instance_id
             # Graph admission ends before boot. A winning parent close makes
@@ -3687,7 +3806,7 @@ class SpawnCtl:
                 raise VerbError("cursor_named_accounts_unsupported", "Cursor uses the local sign-in")
         if provider == "gemini" and ("account" in msg or msg.get("_account_resume_binding")):
             raise VerbError("gemini_named_accounts_unsupported", "Gemini uses the local sign-in")
-        if "account" in msg and account_runtime is None:
+        if account_runtime is None and ("account" in msg or (provider == "codex" and msg.get("_account_resume_binding"))):
             raise VerbError("account_feature_off", "named accounts are unavailable")
         if account_runtime is not None and provider != "cursor":
             from provider_accounts import AccountError

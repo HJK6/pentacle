@@ -244,7 +244,7 @@ def test_remote_resume_probe_binds_unique_transcript_and_original_cwd(tmp_path: 
 @pytest.mark.parametrize(
     ("message", "code"),
     [
-        ({"provider": "codex", "resume_session_id": RESUME_ID}, "resume_unsupported_provider"),
+        ({"provider": "cursor", "resume_session_id": RESUME_ID}, "resume_unsupported_provider"),
         ({"provider": "claude", "resume_session_id": RESUME_ID, "parent_stream_id": "h:p"}, "resume_conflicts_with_lineage"),
         ({"provider": "claude", "resume_session_id": RESUME_ID, "handoff": True}, "resume_conflicts_with_lineage"),
         ({"provider": "claude", "resume_session_id": RESUME_ID, "session_name": "chosen"}, "resume_conflicts_with_identity"),

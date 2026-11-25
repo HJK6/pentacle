@@ -1103,6 +1103,9 @@ def _derive_default_idempotency_key(
         "lane_id": payload.get("lane_id"),
         "provision_only": payload.get("provision_only", False),
     }
+    if payload.get("provider") == "codex" and payload.get("resume_session_id"):
+        canonical["resume_session_id"] = payload["resume_session_id"]
+        canonical["account"] = payload.get("account")
     digest = hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
@@ -1191,10 +1194,9 @@ def spawn(args: argparse.Namespace) -> int:
     if resume_session_id is not None:
         # Resume reopens the original session's identity from the daemon's
         # fetched row; it cannot also re-lineage the stream, so --parent /
-        # --handoff are rejected client-side, and only claude supports
-        # `--resume`.
-        if args.provider != "claude":
-            print("agent-orch spawn: validation failed: --resume requires --provider claude", file=sys.stderr)
+        # --handoff are rejected client-side.
+        if args.provider not in {"claude", "codex"}:
+            print("agent-orch spawn: validation failed: --resume requires --provider claude or codex", file=sys.stderr)
             return 2
         if handoff or args.parent is not None:
             print("agent-orch spawn: validation failed: --resume is incompatible with --handoff/--parent", file=sys.stderr)
@@ -5724,10 +5726,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         metavar="SESSION_ID",
         help=(
-            "Relaunch a dead/closed claude session by its session_id via "
-            "`claude --resume`, reusing the original stream_id so the SAME "
-            "dashboard row reopens and the existing transcript is continued. "
-            "Requires --provider claude; mutually exclusive with --handoff/--parent."
+            "Reopen a closed Codex seat or a dead/closed Claude seat by native session UUID, "
+            "continuing its transcript on the original stream. Codex requires the retained "
+            "account binding. Use --top-level from a parent seat. Incompatible with --handoff/--parent."
         ),
     )
     spawn_parser.add_argument(
