@@ -759,6 +759,15 @@ source revision are computed from the uncapped same Store snapshot before
 filtering. An unknown goal or malformed cursor/limit fails explicitly. Show
 refuses an encoded response above the 4 MiB ceiling rather than truncating facts.
 
+The Store resolves effective membership once per detail transaction. The lane
+rows, post-hue readback and enabled external packets use those same identities.
+The packet reader looks up observations only for IDs the lane did not already
+look up, including when a prior lookup found no observation.
+
+When the worked-time cache is due, the inventory sends the ledger the union of
+effective spec IDs from active, paused, blocked and done lanes. This census reads
+membership only. Inventory rendering and close admission use enriched lane rows.
+
 Top-level and projected `detail_revision` agree. Accumulate only pages sharing
 one revision; changed revisions restart once from page one, and further churn
 requires Retry. There is no server snapshot session. CLI `show --members

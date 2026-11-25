@@ -60,15 +60,25 @@ def _packet_rows(conn, watch_id):
         "SELECT * FROM v2_external_work_packets WHERE watch_id=? ORDER BY tag", (watch_id,))]
 
 
-def current_packets_conn(conn, *, config):
-    """One read-only snapshot, reusable inside lane lifecycle transactions."""
+def current_packets_conn(conn, *, config, snapshot=None, observations_read=()):
+    """Read current packets, optionally sharing a lane detail transaction's observations."""
     if config is None or not config.enabled:
         return {"label": "", "packets": []}
     rows = [row for row in _packet_rows(conn, config.watch_id) if row["state"] in OPEN_PACKET_STATES]
     from store_work_index import effective_membership_conn
-    snapshot = effective_membership_conn(conn, spec_ids=[row["spec_id"] for row in rows])
+    if snapshot is None:
+        snapshot = effective_membership_conn(conn, spec_ids=[row["spec_id"] for row in rows])
+        members = snapshot["members"]
+    else:
+        # The lane read can have looked up IDs that have no observation row.
+        # Only IDs it did not look up need another observation query.
+        packet_only = {row["spec_id"] for row in rows if row["spec_id"] not in observations_read}
+        members = snapshot["members"]
+        if packet_only:
+            extra = effective_membership_conn(conn, spec_ids=packet_only, snapshot=snapshot)
+            members = members | extra["members"]
     if snapshot["state"]["available"]:
-        rows = [row for row in rows if snapshot["members"].get(row["spec_id"], {}).get("terminal")
+        rows = [row for row in rows if members.get(row["spec_id"], {}).get("terminal")
                 not in {"completed", "deprecated"}]
     return {"label": config.label, "packets": rows}
 
