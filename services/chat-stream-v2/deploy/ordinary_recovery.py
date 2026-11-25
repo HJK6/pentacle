@@ -43,16 +43,93 @@ PHASES = {'forward', 'serving_unqualified', 'recovering', 'restoring', 'starting
           'recovery_required', *TERMINAL}
 
 
+def _path_operation(path, operation, call, *, missing_ok=False):
+    """Run state-path I/O without treating access failures as absence."""
+    path = Path(path)
+    try:
+        return call()
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return None
+        raise c.Invalid(f'ordinary {operation} failed path={path} errno={exc.errno}') from exc
+    except OSError as exc:
+        raise c.Invalid(f'ordinary {operation} failed path={path} errno={exc.errno}') from exc
+
+
+def _path_lstat(path, *, missing_ok=False):
+    path = Path(path)
+    return _path_operation(path, 'lstat', path.lstat, missing_ok=missing_ok)
+
+
+def _path_stat(path, *, missing_ok=False):
+    path = Path(path)
+    return _path_operation(path, 'stat', path.stat, missing_ok=missing_ok)
+
+
+def _path_read_bytes(path):
+    path = Path(path)
+    return _path_operation(path, 'open', path.read_bytes)
+
+
+def _path_private_bytes(path):
+    path = Path(path)
+    resolved = _path_operation(path, 'stat', path.resolve)
+    if not path.is_absolute() or resolved != path:
+        raise c.Invalid(f'ordinary private path is not canonical path={path}')
+    info = _path_lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise c.Invalid(f'ordinary private input has unsafe type/owner/mode path={path}')
+    return _path_read_bytes(path)
+
+
+def _path_private_stat(path):
+    path = Path(path)
+    resolved = _path_operation(path, 'stat', path.resolve)
+    if not path.is_absolute() or resolved != path:
+        raise c.Invalid(f'ordinary private path is not canonical path={path}')
+    info = _path_lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise c.Invalid(f'ordinary private input has unsafe type/owner/mode path={path}')
+    return info
+
+
+def _path_json(path):
+    path = Path(path)
+    try:
+        value = c.strict_json(_path_private_bytes(path))
+        if not isinstance(value, dict):
+            raise ValueError('expected object')
+        return value
+    except (ValueError, TypeError) as exc:
+        raise c.Invalid(f'ordinary JSON input invalid path={path}') from exc
+
+
+def _path_digest(path, *, private=False):
+    data = _path_private_bytes(path) if private else _path_read_bytes(path)
+    return hashlib.sha256(data).hexdigest()
+
+
+def _path_scandir(path, *, missing_ok=False):
+    path = Path(path)
+    def names():
+        with os.scandir(path) as entries:
+            return [entry.name for entry in entries]
+    return _path_operation(path, 'scandir', names, missing_ok=missing_ok)
+
+
 def file_state(path):
     path = Path(path)
-    if path.is_symlink() or path.resolve() != path.absolute():
-        raise c.Invalid('recovery path symlink refused')
-    if not path.exists():
+    info = _path_lstat(path, missing_ok=True)
+    if info is None:
         return {'sha256': None, 'mode': None}
-    info = path.stat()
+    resolved = _path_operation(path, 'stat', path.resolve)
+    if stat.S_ISLNK(info.st_mode) or resolved != path.absolute():
+        raise c.Invalid('recovery path symlink refused')
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o7000:
         raise c.Invalid('recovery file type/owner/mode refused')
-    return {'sha256': c.file_digest(path), 'mode': stat.S_IMODE(info.st_mode)}
+    return {'sha256': _path_digest(path), 'mode': stat.S_IMODE(info.st_mode)}
 
 
 def _logs_postdate_boot(items, birth):
@@ -62,7 +139,7 @@ def _logs_postdate_boot(items, birth):
         return False
     # The process birth probe has whole-second precision.
     for item in items:
-        info = Path(item['path']).stat()
+        info = _path_stat(item['path'])
         if ((info.st_dev, info.st_ino) != (item['device'], item['inode'])
                 or getattr(info, 'st_birthtime', 0) < started + 1):
             return False
@@ -77,7 +154,7 @@ def sealed_write(path, value):
 
 
 def sealed_read(path):
-    value = c.read_json(path)
+    value = _path_json(path)
     body = dict(value); seal = body.pop('sha256', None)
     if seal != c.digest(body):
         raise c.Invalid('ordinary recovery integrity mismatch')
@@ -90,9 +167,9 @@ def _disposition_path(repo, folder):
 
 
 def _failed_snapshot(repo, folder):
-    pointer = c.private_file(c.state_root(repo) / 'ordinary-active.json').read_bytes()
-    bundle = c.private_file(folder / 'bundle.json').read_bytes()
-    journal = c.private_file(folder / 'journal.json').read_bytes()
+    pointer = _path_private_bytes(c.state_root(repo) / 'ordinary-active.json')
+    bundle = _path_private_bytes(folder / 'bundle.json')
+    journal = _path_private_bytes(folder / 'journal.json')
     b, j = c.strict_json(bundle), c.strict_json(journal)
     for value in (b, j):
         if value['sha256'] != c.digest({k: v for k, v in value.items() if k != 'sha256'}):
@@ -131,11 +208,11 @@ def _verify_superseded_payloads(folder, bundle):
             raise c.Invalid('supersession preimage name is invalid')
         saved = folder / (name + '.before')
         if row['sha256'] is None:
-            if os.path.lexists(saved):
+            if _path_lstat(saved, missing_ok=True) is not None:
                 raise c.Invalid('supersession preimage absence changed')
-        elif c.file_digest(c.private_file(saved)) != row['sha256']:
+        elif _path_digest(saved, private=True) != row['sha256']:
             raise c.Invalid('supersession preimage changed')
-    if c.file_digest(c.private_file(folder / 'source.bundle')) != bundle['source']['sha256']:
+    if _path_digest(folder / 'source.bundle', private=True) != bundle['source']['sha256']:
         raise c.Invalid('supersession source bundle changed')
 
 
@@ -153,7 +230,7 @@ def _check_supersession_freshness(proof, started):
 
 def _recorded_supersession(repo, folder):
     path = _disposition_path(repo, folder)
-    if not os.path.lexists(path):
+    if _path_lstat(path, missing_ok=True) is None:
         return None
     record = sealed_read(path)
     if record.get('state') == 'pending':
@@ -180,32 +257,24 @@ def _recorded_supersession(repo, folder):
 
 def _refuse_orphaned_supersession(repo):
     root = c.state_root(repo)
-    try:
-        info = root.lstat()
-    except FileNotFoundError:
+    info = _path_lstat(root, missing_ok=True)
+    if info is None:
         return
-    except OSError as exc:
-        raise c.Invalid('ordinary supersession state directory unavailable') from exc
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o700):
         raise c.Invalid('ordinary supersession state directory is insecure')
-    try:
-        with os.scandir(root) as entries:
-            if any(entry.name.startswith(('ordinary-superseded-', '.supersession-', '..supersession-'))
-                   for entry in entries):
-                raise c.Invalid('ordinary supersession state exists without its active pointer')
-    except c.Invalid:
-        raise
-    except OSError as exc:
-        raise c.Invalid('ordinary supersession state directory unreadable') from exc
+    entries = _path_scandir(root)
+    if any(name.startswith(('ordinary-superseded-', '.supersession-', '..supersession-'))
+           for name in entries):
+        raise c.Invalid('ordinary supersession state exists without its active pointer')
 
 
 def fence(repo, *, recovering=None):
     path = c.state_root(repo) / 'ordinary-active.json'
-    if not os.path.lexists(path):
+    if _path_lstat(path, missing_ok=True) is None:
         _refuse_orphaned_supersession(repo)
         return
-    pointer = c.read_json(path)
+    pointer = _path_json(path)
     folder = Path(pointer['bundle'])
     journal = sealed_read(folder / 'journal.json')
     if journal['operation'] != pointer['operation']:
@@ -282,7 +351,7 @@ class Bundle:
         self.bundle = self.journal = None
 
     def require_open_recovery(self):
-        if os.path.lexists(_disposition_path(self.a.repo, self.folder)):
+        if _path_lstat(_disposition_path(self.a.repo, self.folder), missing_ok=True) is not None:
             raise c.Invalid('superseded operation is terminal')
 
     def persist(self, **updates):
@@ -300,7 +369,8 @@ class Bundle:
     @classmethod
     def prepare(cls, adapter, folder, prior, target, ancestry, accounts):
         self = cls(adapter, folder)
-        if self.folder.exists() or self.folder.resolve() != self.folder:
+        if (_path_lstat(self.folder, missing_ok=True) is not None
+                or _path_operation(self.folder, 'stat', self.folder.resolve) != self.folder):
             raise c.Invalid('ordinary recovery requires a new canonical operation directory')
         fence(adapter.repo)
         metadata = adapter.capture(prior, target, ancestry, accounts)
@@ -346,8 +416,10 @@ class Bundle:
         return self
 
     def load(self):
-        if (not self.folder.is_dir() or self.folder.is_symlink() or self.folder.resolve() != self.folder
-                or self.folder.stat().st_uid != os.getuid() or stat.S_IMODE(self.folder.stat().st_mode) != 0o700):
+        info = _path_lstat(self.folder)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or _path_operation(self.folder, 'stat', self.folder.resolve) != self.folder
+                or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
             raise c.Invalid('missing or insecure ordinary bundle directory')
         self.bundle = sealed_read(self.folder/'bundle.json')
         self.journal = sealed_read(self.folder/'journal.json')
@@ -369,7 +441,8 @@ class Bundle:
                 saved = c.private_file(self.folder/(name+'.before'))
                 if c.file_digest(saved) != row['sha256']:
                     raise c.Invalid('ordinary recovery preimage corrupt')
-            elif (self.folder/(name+'.before')).exists() or row['mode'] is not None:
+            elif (_path_lstat(self.folder/(name+'.before'), missing_ok=True) is not None
+                    or row['mode'] is not None):
                 raise c.Invalid('ordinary recovery absence mismatch')
             if not isinstance(j['allowed_files'][name], list) or not j['allowed_files'][name]:
                 raise c.Invalid('ordinary recovery admitted images missing')
@@ -428,10 +501,10 @@ class Bundle:
         if self.bundle != b or self.journal != j:
             raise c.Invalid('supersession bundle changed during validation')
         path = _disposition_path(self.a.repo, self.folder)
-        auth_bytes = c.private_file(authorization).read_bytes()
-        switch_bytes = c.private_file(successor_receipt).read_bytes()
+        auth_bytes = _path_private_bytes(authorization)
+        switch_bytes = _path_private_bytes(successor_receipt)
         auth, switch = c.strict_json(auth_bytes), c.strict_json(switch_bytes)
-        inputs = [c.private_file(path).stat() for path in (authorization, successor_receipt, credential)]
+        inputs = [_path_private_stat(path) for path in (authorization, successor_receipt, credential)]
         if len({(entry.st_dev, entry.st_ino) for entry in inputs}) != len(inputs):
             raise c.Invalid('supersession requires distinct authority, successor receipt and credential')
 
@@ -467,8 +540,8 @@ class Bundle:
         def confirm_inputs():
             _verify_superseded_payloads(self.folder, b)
             after, _, _ = _failed_snapshot(self.a.repo, self.folder)
-            if (after != before or c.private_file(authorization).read_bytes() != auth_bytes
-                    or c.private_file(successor_receipt).read_bytes() != switch_bytes):
+            if (after != before or _path_private_bytes(authorization) != auth_bytes
+                    or _path_private_bytes(successor_receipt) != switch_bytes):
                 raise c.Invalid('supersession inputs changed before readback')
             return after
 
@@ -506,7 +579,7 @@ class Bundle:
         # verification leaves the ordinary-operation fence closed.
         staged = path.with_name('.supersession-' + uuid.uuid4().hex)
         final_stage = path.with_name('.supersession-final-' + uuid.uuid4().hex)
-        directory = os.open(path.parent, os.O_RDONLY)
+        directory = _path_operation(path.parent, 'open', lambda: os.open(path.parent, os.O_RDONLY))
         try:
             pending_sealed = sealed_write(staged, pending)
             confirm_serving()
@@ -750,8 +823,8 @@ class Bundle:
                 self.persist(allowed_files=allowed)
                 if row['sha256'] is None:
                     path.unlink(missing_ok=True)
-                    if path.parent.exists():
-                        fd=os.open(path.parent,os.O_RDONLY)
+                    if _path_lstat(path.parent, missing_ok=True) is not None:
+                        fd=_path_operation(path.parent, 'open', lambda: os.open(path.parent,os.O_RDONLY))
                         try: os.fsync(fd)
                         finally: os.close(fd)
                 else:
@@ -947,7 +1020,9 @@ class OrdinaryRuntime:
         groups = []
         for path in log_paths:
             candidates = list(reversed(managed.paths(path))) if managed else [path]
-            groups.append([freeze(item) for item in candidates if item.is_file()])
+            groups.append([freeze(item) for item in candidates
+                           if (lambda info: info is not None and stat.S_ISREG(info.st_mode))
+                           (_path_stat(item, missing_ok=True))])
         if sum(item['bytes_read'] for group in groups for item in group) > 128 * 1024 * 1024:
             raise c.Invalid('manual recovery boot evidence exceeds the read bound')
         rotated_stderr = (managed is not None and len(groups) == 2
@@ -1079,7 +1154,7 @@ class OrdinaryRuntime:
         if requirements != self.git('rev-parse',target+':'+self.service.requirements_path):
             raise c.Invalid('ordinary recovery cannot reverse dependency changes')
         stamp=self.d._read_stamp(self.repo,self.service)
-        if (not self.d._venv_python(self.repo,self.service).exists()
+        if (_path_lstat(self.d._venv_python(self.repo,self.service), missing_ok=True) is None
                 or stamp.get('requirements_hash') != self.d._sha256(self.repo/self.service.requirements_path)):
             raise c.Invalid('ordinary recovery requires the already provisioned unchanged interpreter')
         plist=self.d._launchd_plist(self.service.launchd_label); env=plist.get('EnvironmentVariables',{})
@@ -1131,11 +1206,17 @@ class OrdinaryRuntime:
             raise c.Invalid('durable ordinary recovery requires immutable managed helper releases')
         program = """
 import base64,hashlib,json,os,pathlib,stat,sys
+def _path_lstat(path):
+    try:return path.lstat()
+    except OSError as exc:raise OSError(f'lstat failed path={path} errno={exc.errno}') from exc
+def _path_read_bytes(path):
+    try:return path.read_bytes()
+    except OSError as exc:raise OSError(f'open failed path={path} errno={exc.errno}') from exc
 root=pathlib.Path(sys.argv[1]);result={}
 for name in ('manifest.json','pentacle.tar'):
-    path=root/name;info=path.lstat()
-    assert stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and not path.is_symlink()
-    data=path.read_bytes();result[name]={'bytes':base64.b64encode(data).decode(),'sha256':hashlib.sha256(data).hexdigest(),'mode':stat.S_IMODE(info.st_mode)}
+    path=root/name;info=_path_lstat(path)
+    assert stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid()
+    data=_path_read_bytes(path);result[name]={'bytes':base64.b64encode(data).decode(),'sha256':hashlib.sha256(data).hexdigest(),'mode':stat.S_IMODE(info.st_mode)}
 print(json.dumps(result))
 """
         files=self.runtime.remote_json(helper,[helper['python'],'-I','-c',program,str(release)])
@@ -1155,7 +1236,8 @@ print(json.dumps(result))
             checked(('git','--git-dir',str(staging),'update-ref','refs/heads/'+name,sha))
         checked(('git','--git-dir',str(staging),'bundle','create',str(archive),'refs/heads/prior','refs/heads/target'))
         archive.chmod(0o600)
-        with archive.open('rb') as stream: os.fsync(stream.fileno())
+        with _path_operation(archive, 'open', lambda: archive.open('rb')) as stream:
+            os.fsync(stream.fileno())
         shutil.rmtree(staging)
         return {'sha256':c.file_digest(archive),'heads':{'prior':prior,'target':target}}
 

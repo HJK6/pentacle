@@ -1,6 +1,7 @@
 """Actual recovery entry with real Git/files/child loss, synthetic OS/account probes."""
 import base64
 import copy
+import errno
 from datetime import datetime, timedelta, timezone
 import json
 import multiprocessing
@@ -223,7 +224,7 @@ def test_actual_forward_enrollment_then_actual_recovery_entry(isolated_release,t
     b=o.Bundle(a,tmp_path/'bundle').load();auth=authority(a,b)
     restored=original_deploy(service,release_checkout=repo,ref=target,recover_ordinary=b.folder,
         ordinary_recovery_authorization=auth,recovery_go_tell_id='synthetic-go',deployer_stream_id='synthetic-owner',runner=command)
-    assert restored['outcome']=='restored_unqualified'
+    assert restored['outcome']=='restored_unqualified', restored
     assert paths['stamp'].read_bytes()==before
     assert a.git('rev-parse','HEAD')==prior
 
@@ -1207,7 +1208,7 @@ def test_superseded_inconsistent_switch(supersession, capsys, damage, reason):
 
 
 @pytest.mark.parametrize('damage,reason', [
-    ('receipt_absent', 'No such file'), ('actual_source', 'release mismatch'), ('stamp_bytes', 'checkout'),
+    ('receipt_absent', 'errno=2'), ('actual_source', 'release mismatch'), ('stamp_bytes', 'checkout'),
     ('stamp_sha', 'stamp unavailable'), ('malformed_stamp', 'stamp unavailable'),
     ('pid', 'boot marker'), ('birth', 'boot marker'),
     ('stale_journal', 'authority'), ('original_bundle', 'authority'), ('original_pointer', 'authority'),
@@ -1466,4 +1467,136 @@ def test_superseded_refuses_recovery_and_stale_replay(supersession, capsys):
         o.fence(s.a.repo)
     assert s.call() == d.EXIT_REFUSED
     assert supersession_files(s) == stale
-    assert path.is_file()
+
+
+def test_ordinary_recovery_source_avoids_error_suppressing_path_predicates():
+    source = Path(o.__file__).read_text()
+    for forbidden in ('os.path.exists(', 'os.path.lexists(', 'os.path.isfile(', 'os.path.isdir(',
+                      '.exists(', '.is_file(', '.is_dir(', '.is_symlink('):
+        assert forbidden not in source, forbidden
+
+
+@pytest.mark.parametrize('error_number', [errno.EIO, errno.EACCES, errno.ELOOP, errno.ENOTDIR],
+                         ids=['EIO', 'EACCES', 'ELOOP', 'ENOTDIR'])
+def test_fence_refuses_active_pointer_lstat_errors(supersession, monkeypatch, error_number):
+    s = supersession
+    journal = o.sealed_read(s.journal)
+    assert journal['phase'] == 'recovery_required'
+    original = o._path_operation
+    seen = []
+
+    def fail_pointer_lstat(path, operation, call, *, missing_ok=False):
+        if Path(path) == Path(s.pointer) and operation == 'lstat':
+            seen.append(True)
+            def fail():
+                raise OSError(error_number, 'injected active-pointer lookup failure', os.fspath(path))
+            return original(path, operation, fail, missing_ok=missing_ok)
+        return original(path, operation, call, missing_ok=missing_ok)
+
+    monkeypatch.setattr(o, '_path_operation', fail_pointer_lstat)
+    with o.c.transaction_lock(s.a.repo):
+        with pytest.raises(o.c.Invalid, match=rf'{s.pointer}.*errno[=: ]+{error_number}'):
+            o.fence(s.a.repo)
+    assert seen == [True]
+    assert o.sealed_read(s.journal)['phase'] == 'recovery_required'
+
+
+_PATH_ERROR_NUMBERS = [errno.EIO, errno.EACCES, errno.ELOOP, errno.ENOTDIR]
+_PATH_ERROR_CASES = [
+    'active_lstat', 'active_resolve', 'active_open', 'journal_open', 'disposition_lstat',
+    'orphan_root_lstat', 'orphan_scandir', 'log_stat', 'disposition_open', 'bundle_open',
+    'source_bundle_open', 'saved_preimage_open', 'saved_absent_lstat', 'authority_resolve',
+    'authority_lstat', 'authority_open', 'switch_resolve', 'switch_lstat', 'switch_open',
+    'credential_resolve', 'credential_lstat', 'bundle_dir_lstat', 'bundle_dir_resolve',
+    'pending_dir_open',
+]
+
+
+@pytest.mark.parametrize('error_number', _PATH_ERROR_NUMBERS,
+                         ids=['EIO', 'EACCES', 'ELOOP', 'ENOTDIR'])
+@pytest.mark.parametrize('site', _PATH_ERROR_CASES)
+def test_disposition_and_fence_path_io_errors_refuse_with_path_errno(
+        supersession, monkeypatch, capsys, error_number, site):
+    s = supersession
+    assert o.sealed_read(s.journal)['phase'] == 'recovery_required'
+    root = o.c.state_root(s.a.repo)
+    record = o._disposition_path(s.a.repo, s.b.folder)
+    needs_record = site in {
+        'disposition_lstat', 'disposition_open', 'bundle_open', 'source_bundle_open', 'saved_preimage_open',
+        'saved_absent_lstat',
+    }
+    record_call = site in {
+        'authority_resolve', 'authority_lstat', 'authority_open', 'switch_resolve',
+        'switch_lstat', 'switch_open', 'credential_resolve', 'credential_lstat',
+        'bundle_dir_lstat', 'bundle_dir_resolve', 'pending_dir_open',
+    }
+    if needs_record:
+        assert s.call() == d.EXIT_OK
+        capsys.readouterr()
+
+    if site in ('orphan_root_lstat', 'orphan_scandir'):
+        s.pointer.unlink()
+
+    target = {
+        'active_lstat': (s.pointer, 'lstat'),
+        'active_resolve': (s.pointer, 'stat'),
+        'active_open': (s.pointer, 'open'),
+        'journal_open': (s.journal, 'open'),
+        'disposition_lstat': (record, 'lstat'),
+        'orphan_root_lstat': (root, 'lstat'),
+        'orphan_scandir': (root, 'scandir'),
+        'log_stat': (s.a.root/'stdout.log', 'stat'),
+        'disposition_open': (record, 'open'),
+        'bundle_open': (s.b.folder/'bundle.json', 'open'),
+        'source_bundle_open': (s.b.folder/'source.bundle', 'open'),
+        'saved_preimage_open': (s.b.folder/next(name + '.before' for name,row in s.b.bundle['preimages'].items()
+                                                if row['sha256'] is not None), 'open'),
+        'saved_absent_lstat': (s.b.folder/next(name + '.before' for name,row in s.b.bundle['preimages'].items()
+                                               if row['sha256'] is None), 'lstat'),
+        'authority_resolve': (Path(s.args[s.args.index('--authorization') + 1]), 'stat'),
+        'authority_lstat': (Path(s.args[s.args.index('--authorization') + 1]), 'lstat'),
+        'authority_open': (Path(s.args[s.args.index('--authorization') + 1]), 'open'),
+        'switch_resolve': (s.switch, 'stat'),
+        'switch_lstat': (s.switch, 'lstat'),
+        'switch_open': (s.switch, 'open'),
+        'credential_resolve': (Path(s.args[s.args.index('--operator-credential') + 1]), 'stat'),
+        'credential_lstat': (Path(s.args[s.args.index('--operator-credential') + 1]), 'lstat'),
+        'bundle_dir_lstat': (s.b.folder, 'lstat'),
+        'bundle_dir_resolve': (s.b.folder, 'stat'),
+        'pending_dir_open': (root, 'open'),
+    }[site]
+    path, operation = target
+    protected_before = supersession_files(s)
+    original = o._path_operation
+    seen = []
+
+    def inject(target_path, target_operation, call, *, missing_ok=False):
+        if Path(target_path) == Path(path) and target_operation == operation and not seen:
+            seen.append((Path(target_path), target_operation))
+            def fail():
+                raise OSError(error_number, 'injected filesystem refusal', os.fspath(target_path))
+            return original(target_path, target_operation, fail, missing_ok=missing_ok)
+        return original(target_path, target_operation, call, missing_ok=missing_ok)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(o, '_path_operation', inject)
+        if record_call:
+            assert s.call() == d.EXIT_REFUSED
+            message = capsys.readouterr().err
+        elif site == 'log_stat':
+            with o.c.transaction_lock(s.a.repo):
+                with pytest.raises(o.c.Invalid, match=rf'{path}.*errno={error_number}'):
+                    o._logs_postdate_boot([{'path': str(path), 'device': 1, 'inode': 1}],
+                                          'Tue Nov 10 01:02:03 2026')
+            message = str(path)
+        else:
+            with o.c.transaction_lock(s.a.repo):
+                with pytest.raises(o.c.Invalid, match=rf'{path}.*errno={error_number}'):
+                    o.fence(s.a.repo)
+            message = str(path)
+    assert seen == [(Path(path), operation)]
+    assert str(path) in message
+    if record_call:
+        assert f'errno={error_number}' in message
+    assert o.sealed_read(s.journal)['phase'] == 'recovery_required'
+    assert supersession_files(s) == protected_before
