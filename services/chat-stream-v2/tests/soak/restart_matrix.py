@@ -176,12 +176,22 @@ class RestartDaemon:
         return self.proc is not None and self.proc.poll() is None
 
     def kill_quiet(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
+        proc = self.proc
+        if proc is None:
+            return
+        # The owned Popen started a new session with its PID as PGID. Avoid
+        # polling before signaling, so even a dead leader remains unreaped and
+        # its identity cannot be reused. An already reaped leader permits only
+        # an absence check, never a signal to a potentially recycled group.
+        pgid = proc.pid
+        if proc.returncode is None:
             try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
-                self.proc.wait(timeout=10)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
                 pass
+        proc.wait(timeout=10)
+        if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
+            raise RuntimeError(f"restart daemon process group {pgid} cleanup unresolved")
         self.proc = None
 
 

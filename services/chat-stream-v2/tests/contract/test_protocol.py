@@ -7,7 +7,16 @@ def test_c1_handshake_and_errors(chat):
     """C1: docs/chat_protocol.md, server.py:3291-3300 (unknown verb)."""
     chat.start()
     full = chat.client()
-    snapshot = full.subscribe()
+    assert full.receive().body["type"] == "welcome"
+    request_id = unique("hello")
+    full.send({"type": "hello", "request_id": request_id,
+               "subscribe": {"include_subagents": True, "events_mode": "full"}})
+    reply = full.receive().body
+    assert (reply.get("type"), reply.get("request_id")) == ("hello", request_id), (
+        "C1 expected the correlated hello immediately after welcome", reply,
+    )
+    snapshot = full.receive().body
+    assert snapshot["type"] == "snapshot", ("C1 expected snapshot immediately after hello", snapshot)
     assert snapshot["sessions"] == [], snapshot
 
     rpc = chat.client()

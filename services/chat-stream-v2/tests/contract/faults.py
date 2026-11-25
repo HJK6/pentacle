@@ -30,15 +30,22 @@ class Fault:
 FAULTS = {
     "C1": Fault(
         "test_protocol.py::test_c1_handshake_and_errors", "server.py",
-        '\n            "error_code": "unsupported_in_v2",',
-        '\n            "error_code": "unsupported",',
-        "C1 unknown verb error",
+        '            frames[0].setdefault("request_id", request_id)\n',
+        '            frames[0].setdefault("request_id", request_id)\n'
+        '        if verb == "hello" and len(frames) > 1 and frames[1].get("type") == "snapshot":\n'
+        '            frames.insert(0, dict(frames[1]))\n',
+        "C1 expected the correlated hello immediately after welcome",
     ),
     "C2": Fault(
-        "test_lifecycle.py::test_c2_session_lifecycle", "sessions.py",
-        'code = "close_live_children" if children else "close_pending_spawn"',
-        'code = "close_pending_spawn"',
-        "C2 open child did not fence parent closure",
+        "test_lifecycle.py::test_c2_session_lifecycle", "spawnctl.py",
+        '                if session is not None:\n                    return {\n'
+        '                        "type": "spawn.ok", "ok": True,\n',
+        '                if session is not None:\n'
+        '                    await self._tmux_for(host).run(\n'
+        '                        "new-window", "-d", "-t", f"={recorded_name}:", "sleep", "30",\n'
+        '                    )\n'
+        '                    return {\n                        "type": "spawn.ok", "ok": True,\n',
+        "C2 spawn replay changed the whole-server pane census",
     ),
     "C3": Fault(
         "test_send.py::test_c3_send_lands_once", "comms.py",
@@ -59,16 +66,31 @@ FAULTS = {
         "C5 send was not honestly marked unconfirmed",
     ),
     "C6": Fault(
-        "test_events.py::test_c6_append_and_live_identity", "store.py",
-        "return int(cur.lastrowid) if cur.rowcount > 0 else None",
-        "return int(cur.lastrowid) if cur.lastrowid else None",
-        "C6 live event identity or provider record deduplication changed",
+        "test_events.py::test_c6_append_and_live_identity", "ingest.py",
+        '        await broadcast({"type": "chat.event", "event": projected[0]})\n',
+        '        await broadcast({"type": "chat.event", "event": projected[0]})\n'
+        '        if corrected.get("kind") == "ASSIST_TEXT":\n'
+        '            last_text = getattr(append_ingested_event, "_fault_last_text", {})\n'
+        '            if last_text.get(stream_id) == corrected.get("text"):\n'
+        '                await broadcast({"type": "chat.event", "event": projected[0]})\n'
+        '            last_text[stream_id] = corrected.get("text")\n'
+        '            append_ingested_event._fault_last_text = last_text\n',
+        "C6 live event prefix through the sentinel differs",
     ),
     "C7": Fault(
         "test_events.py::test_c7_history_and_reconnect", "server.py",
-        "remaining = limit\n        cursor = before_daemon_seq",
-        "remaining = limit + 1\n        cursor = before_daemon_seq",
-        "C7 history total exceeded the requested limit",
+        '        preview["text"] = prefix + suffix\n',
+        '        preview["text"] = ("x" + prefix[1:] if prefix else prefix) + suffix\n',
+        "C7 preview did not retain a nonempty prefix of the original text",
+    ),
+    "C7-cursor": Fault(
+        "test_events.py::test_c7_history_and_reconnect", "server.py",
+        "                _page_composite = self._composite_for(stream_id)\n",
+        "                if before_daemon_seq is not None:\n"
+        "                    page = [{key: value for key, value in row.items() if key != 'timestamp'}\n"
+        "                            for row in page]\n"
+        "                _page_composite = self._composite_for(stream_id)\n",
+        "C7 reconstructed history is not client consumable",
     ),
     "C8": Fault(
         "test_lifecycle.py::test_c8_restart_continuity", "server.py",
@@ -96,9 +118,14 @@ FAULTS = {
     ),
     "C12": Fault(
         "test_pressure.py::test_c12_slow_consumer_isolation", "server.py",
-        'self._close_ws(websocket, 1011, "slow_consumer")',
-        'self._close_ws(websocket, 1012, "service_restart")',
-        "C12 blocked subscriber did not receive the slow-consumer close",
+        '        verb = str(msg.get("type") or "")\n        request_id = msg.get("request_id")\n',
+        '        verb = str(msg.get("type") or "")\n        request_id = msg.get("request_id")\n'
+        '        if verb == "send":\n'
+        '            backlogged = [peer for peer, queue in self._client_send_queues.items()\n'
+        '                          if peer is not websocket and queue.qsize() >= 8]\n'
+        '            for peer in backlogged:\n'
+        '                self._drop_slow_consumer(peer)\n',
+        "C12 stalled subscriber was evicted before healthy completion",
     ),
 }
 
@@ -187,7 +214,7 @@ def main():
         _git(checkout, "update-ref", main_ref, main_commit)
         _git(checkout, "checkout", "--quiet", "--detach", commit)
         service = checkout / SERVICE.relative_to(REPO)
-        nodes = [f"tests/contract/{FAULTS[case].node}" for case in selected]
+        nodes = list(dict.fromkeys(f"tests/contract/{FAULTS[case].node}" for case in selected))
         _assert_baseline(_run(service, output, "unchanged", nodes, 2), selected)
         green = True
         for case in selected:

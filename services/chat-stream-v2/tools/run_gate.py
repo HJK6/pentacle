@@ -301,6 +301,8 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     junit.unlink(missing_ok=True)
     journal.unlink(missing_ok=True)
     env, soak = os.environ.copy(), None
+    if tier == "contract":
+        env = {key: value for key, value in env.items() if not key.startswith("PYTEST_")}
     env[MANIFEST_ENV] = str(manifest)
     env['PYTHONPATH'] = os.pathsep.join(filter(None, (str(REPO_ROOT / 'scripts'), env.get('PYTHONPATH', ''))))
     # The fleet gate is strict: a capability a managed test requires must be present, never a green skip.

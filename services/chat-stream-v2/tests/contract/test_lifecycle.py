@@ -88,23 +88,34 @@ def _wait_inventory(client, stream_id, *, start, present):
     )
 
 
+def _pane_census(namespace):
+    reply = namespace.run("list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}")
+    assert reply.returncode == 0, reply.stderr
+    return set(reply.stdout.splitlines())
+
+
 def test_c2_session_lifecycle(chat):
     """C2: docs/chat_protocol.md inventory; spawnctl.py:2062-2089; sessions.py:313-353."""
     chat.start()
     a, b = chat.client(), chat.client()
     for client in (a, b):
         assert client.subscribe()["sessions"] == []
+    baseline = _pane_census(chat.namespace)
+    assert {pane.split()[0] for pane in baseline} == {chat.namespace.keepalive}
+    assert len(baseline) == 1
     opened_starts = [len(client.frames) for client in (a, b)]
     name, key = unique("lifecycle"), unique("spawn-key")
     seat = chat.spawn(a, name, key=key)
     for client, start in zip((a, b), opened_starts):
         _wait_inventory(client, seat.stream_id, start=start, present=True)
         assert seat.stream_id in _list_ids(client)
-    panes = chat.panes(seat)
-    assert len(panes) == 1
+    spawned = _pane_census(chat.namespace)
+    new_panes = spawned - baseline
+    assert baseline <= spawned and len(new_panes) == 1 and next(iter(new_panes)).split()[0] == name
 
     replay = chat.spawn(a, name, key=key)
-    assert replay == seat and chat.panes(seat) == panes, "C2 spawn replay replaced the seat"
+    assert replay == seat
+    assert _pane_census(chat.namespace) == spawned, "C2 spawn replay changed the whole-server pane census"
 
     closed_starts = [len(client.frames) for client in (a, b)]
     assert chat.close_seat(a, seat)["type"] == "close.ok"
@@ -113,16 +124,19 @@ def test_c2_session_lifecycle(chat):
         assert seat.stream_id not in _list_ids(client)
     closed = chat.inspect(a, seat.stream_id, event_tail=0)["session"]
     assert (closed["status"], closed["session_generation"]) == ("closed", seat.generation)
-    assert seat.name not in chat.namespace.session_names()
+    assert _pane_census(chat.namespace) == baseline, "C2 close did not restore the keepalive pane census"
 
     parent = chat.spawn(a, unique("parent"))
     child = chat.spawn(a, unique("child"), parent_stream_id=parent.stream_id)
     assert chat.inspect(a, child.stream_id, event_tail=0)["session"]["parent_stream_id"] == parent.stream_id
-    before = [chat.panes(seat) for seat in (parent, child)]
+    before = _pane_census(chat.namespace)
+    child_panes = before - baseline
+    assert baseline <= before and len(child_panes) == 2
+    assert {pane.split()[0] for pane in child_panes} == {parent.name, child.name}
     refusal = chat.close_seat(a, parent)
     assert (refusal["type"], refusal.get("error_code")) == ("close.error", "close_live_children"), (
         "C2 open child did not fence parent closure", refusal,
     )
     for client in (a, b):
         assert {parent.stream_id, child.stream_id} <= _list_ids(client)
-    assert [chat.panes(seat) for seat in (parent, child)] == before
+    assert _pane_census(chat.namespace) == before
