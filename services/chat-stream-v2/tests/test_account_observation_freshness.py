@@ -164,9 +164,15 @@ def test_host_alarm_observe_180_others_unchanged(tmp_path,monkeypatch):
 
 def test_usage_timeout_reaps_owned_tmux_via_adapter_finally(tmp_path,monkeypatch):
     f=fixture_native(tmp_path,monkeypatch);socket='rotation-fake-'+uuid.uuid4().hex;done=tmp_path/'cleaned'
-    script=tmp_path/'fake_usage.py';script.write_text('import subprocess,time,pathlib\n'+
-        'subprocess.run(["tmux","-L",'+repr(socket)+',"new-session","-d","-s","probe","sleep 60"],check=True)\n'+
-        'try:time.sleep(30)\nfinally:\n subprocess.run(["tmux","-L",'+repr(socket)+',"kill-server"])\n pathlib.Path('+repr(str(done))+').write_text("cleaned")\n')
+    script=tmp_path/'fake_usage.py'
+    script.write_text(f"""import pathlib, subprocess, time
+try:
+    subprocess.run(["tmux", "-L", {socket!r}, "new-session", "-d", "-s", "probe", "sleep 60"], check=True)
+    time.sleep(30)
+finally:
+    subprocess.run(["tmux", "-L", {socket!r}, "kill-server"])
+    pathlib.Path({str(done)!r}).write_text("cleaned")
+""")
     f.host.config['claude_usage_command']=[sys.executable,str(script)]
     def timeout_run(argv,**kwargs):
         assert kwargs.pop('timeout')==70
