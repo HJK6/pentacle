@@ -153,48 +153,150 @@ test('an unbuilt bundle answers with a build hint instead of a stack trace', asy
 });
 
 test('two concurrent connections keep their local tmux sessions isolated', { skip: !TMUX && 'tmux is not installed' }, async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-test-'));
+  // Keep the path short for the Unix-domain socket limit on macOS.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pwt-'));
   const home = path.join(dir, 'home');
+  const tmuxRoot = path.join(dir, 't');
+  const socket = path.join(tmuxRoot, `tmux-${process.getuid()}`, 'default');
+  const savedEnv = new Map(['HOME', 'TMUX_TMPDIR', 'TMUX'].map((key) => [key, process.env[key]]));
+  const timeout = 10000;
+  let a, b, host;
+  let serverPid;
+  let closing = false;
+
+  async function bounded(promise, label) {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Timed out: ${label}`)), timeout);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function tmux(label, ...args) {
+    try {
+      return execFileSync('tmux', ['-f', '/dev/null', '-S', socket, ...args], {
+        encoding: 'utf8', timeout, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+    } catch (error) {
+      throw new Error(`${label} on the private tmux socket: ${error.message}`, { cause: error });
+    }
+  }
+
+  function readServerPid() {
+    const pid = Number(tmux('read fixture server PID', 'display-message', '-p', '#{pid}'));
+    assert.ok(Number.isSafeInteger(pid) && pid > 1, 'invalid private tmux server PID');
+    return pid;
+  }
+
+  function serverExited(pid) {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      if (error.code === 'ESRCH') return true;
+      throw error;
+    }
+  }
+
+  t.after(async () => {
+    closing = true;
+    try {
+      a?.ws.terminate();
+      b?.ws.terminate();
+      if (host) await bounded(host.close(), 'close the loopback web host');
+    } finally {
+      let stopped = false;
+      try {
+        if (serverPid === undefined && fs.existsSync(socket)) serverPid = readServerPid();
+        stopped = serverPid === undefined || serverExited(serverPid);
+        if (!stopped) {
+          tmux('stop fixture server', 'kill-server');
+          const deadline = Date.now() + timeout;
+          while (!stopped && Date.now() < deadline) {
+            stopped = serverExited(serverPid);
+            if (stopped) break;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          assert.ok(stopped, `private tmux server ${serverPid} still exists after kill-server`);
+        }
+      } finally {
+        for (const [key, value] of savedEnv) {
+          if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+        // tmux can leave its socket inode behind after the server exits.
+        // Keep the private directory if exit could not be confirmed.
+        if (stopped) fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   fs.mkdirSync(home);
-  const realHome = process.env.HOME;
+  fs.mkdirSync(tmuxRoot, { mode: 0o700 });
+  fs.mkdirSync(path.dirname(socket), { mode: 0o700 });
   process.env.HOME = home;
-  const host = await main(['--profile', writeProfile(dir), '--port', '0']);
-  const { port } = host;
+  process.env.TMUX_TMPDIR = tmuxRoot;
+  delete process.env.TMUX;
 
   const sessA = `ptest-web-a-${process.pid}`;
   const sessB = `ptest-web-b-${process.pid}`;
-  const a = connect(port);
-  const b = connect(port);
-  await Promise.all([a.ready, b.ready]);
+  for (const session of [sessA, sessB]) {
+    const ready = `${session}-ready`;
+    tmux(`start ${session}`, 'new-session', '-d', '-s', session,
+      'sh', '-c', 'stty raw -echo && tmux -S "$1" wait-for -S "$2" && exec cat', 'sh', socket, ready);
+    serverPid ??= readServerPid();
+    tmux(`wait for ${session} to configure its terminal`, 'wait-for', ready);
+    tmux(`check ${session} on the fixture server`, 'has-session', '-t', `=${session}`);
+  }
 
-  t.after(async () => {
-    a.close();
-    b.close();
-    for (const s of [sessA, sessB]) { try { execFileSync('tmux', ['kill-session', '-t', `=${s}`], { stdio: 'ignore' }); } catch {} }
-    await host.close();
-    if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
-  });
+  await bounded(main(['--profile', writeProfile(dir), '--port', '0']).then(async (started) => {
+    if (closing) await started.close();
+    else host = started;
+  }), 'start the loopback web host');
+  a = connect(host.port);
+  b = connect(host.port);
+  await bounded(Promise.all([a.ready, b.ready]), 'open both WebSocket connections');
+
+  async function call(client, label, method, ...args) {
+    return bounded(client.call(method, ...args), label);
+  }
+  async function bytes(client, marker, label) {
+    try {
+      return await client.waitForPush(
+        (p) => p.event === 'pty:data' && p.args[0] === 0 && String(p.args[1]).includes(marker),
+        timeout,
+      );
+    } catch (error) {
+      throw new Error(`Timed out waiting for ${marker} on connection ${label}`, { cause: error });
+    }
+  }
 
   // Two real local tmux sessions, each attached over its own connection.
-  execFileSync('tmux', ['new-session', '-d', '-s', sessA, 'sh', '-c', 'stty raw -echo; exec cat']);
-  execFileSync('tmux', ['new-session', '-d', '-s', sessB, 'sh', '-c', 'stty raw -echo; exec cat']);
-  assert.equal((await a.call('pty:create', 0, sessA, 'local', 80, 24)).ok, true);
-  assert.equal((await b.call('pty:create', 0, sessB, 'local', 80, 24)).ok, true);
+  const attachA = await call(a, 'attach A to its session', 'pty:create', 0, sessA, 'local', 80, 24);
+  assert.equal(attachA.ok, true, `A attach failed: ${JSON.stringify(attachA.error)}`);
+  const attachB = await call(b, 'attach B to its session', 'pty:create', 0, sessB, 'local', 80, 24);
+  assert.equal(attachB.ok, true, `B attach failed: ${JSON.stringify(attachB.error)}`);
 
   // Each connection sees only its own bytes, on the same slot index (0).
   a.fire('pty:write', 0, 'AAA-ONLY\r');
-  await a.waitForPush((p) => p.event === 'pty:data' && p.args[0] === 0 && String(p.args[1]).includes('AAA-ONLY'));
+  await bytes(a, 'AAA-ONLY', 'A');
   b.fire('pty:write', 0, 'BBB-ONLY\r');
-  await b.waitForPush((p) => p.event === 'pty:data' && p.args[0] === 0 && String(p.args[1]).includes('BBB-ONLY'));
-
-  assert.ok(!a.pushes.some((p) => p.event === 'pty:data' && String(p.args[1]).includes('BBB-ONLY')), 'A must never see B\'s bytes');
-  assert.ok(!b.pushes.some((p) => p.event === 'pty:data' && String(p.args[1]).includes('AAA-ONLY')), 'B must never see A\'s bytes');
+  await bytes(b, 'BBB-ONLY', 'B');
+  assert.ok(!a.pushes.some((p) => p.event === 'pty:data' && String(p.args[1]).includes('BBB-ONLY')), "A must never see B's bytes");
+  assert.ok(!b.pushes.some((p) => p.event === 'pty:data' && String(p.args[1]).includes('AAA-ONLY')), "B must never see A's bytes");
 
   // Closing A's terminal leaves B's live.
-  await a.call('pty:kill', 0);
+  const closedA = await call(a, "close A's terminal", 'pty:kill', 0);
+  assert.equal(closedA.ok, true, 'A terminal close failed');
   b.fire('pty:write', 0, 'BBB-AGAIN\r');
-  await b.waitForPush((p) => p.event === 'pty:data' && String(p.args[1]).includes('BBB-AGAIN'));
+  await bytes(b, 'BBB-AGAIN', 'B after A closes');
 });
+
 
 
 test('retired companion routes and assets return the unknown-route response', async (t) => {

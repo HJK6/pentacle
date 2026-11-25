@@ -114,8 +114,9 @@ Do not interpret either fact as proof that the fleet's reported full-suite hang
 is resolved. Three unchanged files were not run locally under the packet's
 no-live boundary:
 
-- test/web_server.test.js: real default-server tmux operations and an unowned
-  loopback daemon connection
+- test/web_server.test.js: real tmux operations (the isolation case uses a
+  private server; the headless-host case still uses the default server) and an
+  unowned loopback daemon connection
 - test/web_auth.test.js: unowned loopback daemon connection
 - test/pre_push_hook.test.js: real ps fallback in the test and executed hook
 
