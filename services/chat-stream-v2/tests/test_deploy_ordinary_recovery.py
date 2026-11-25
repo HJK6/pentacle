@@ -3,9 +3,11 @@ import base64
 import copy
 from datetime import datetime, timedelta, timezone
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import plistlib
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -1274,9 +1276,56 @@ def test_superseded_refuses_lock_and_late_journal_mutation(supersession, monkeyp
         monkeypatch.setattr(os, 'link', race)
     assert s.call() == d.EXIT_REFUSED
     before[0][s.journal] = damaged  # Only the competing writer's change survives.
+    if edge == 'after_link':
+        path = o._disposition_path(s.a.repo, s.b.folder)
+        before[0][path] = path.read_bytes()  # Durable PENDING remains fenced after interruption/drift.
     assert supersession_files(s) == before
-    with pytest.raises(o.c.Invalid, match='unfinished'):
+    with pytest.raises(o.c.Invalid, match='pending' if edge == 'after_link' else 'unfinished'):
         o.fence(s.a.repo)
+
+
+def _crash_after_durable_supersession_link(call, disposition_path):
+    original_fsync = os.fsync
+    def fsync_then_crash_on_directory(fd):
+        result = original_fsync(fd)
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and disposition_path.exists():
+            os._exit(73)
+        return result
+    os.fsync = fsync_then_crash_on_directory
+    call()
+
+
+def test_interrupted_after_durable_supersession_link_remains_fenced(supersession):
+    s = supersession
+    disposition_path = o._disposition_path(s.a.repo, s.b.folder)
+    child = multiprocessing.get_context('fork').Process(target=_crash_after_durable_supersession_link,
+                                                       args=(s.call, disposition_path))
+    child.start()
+    child.join(timeout=15)
+    if child.is_alive():
+        child.terminate()
+        child.join(timeout=5)
+        pytest.fail('synthetic supersession child did not reach the durable-link crash point')
+    assert child.exitcode == 73
+    assert disposition_path.is_file()
+    with pytest.raises(o.c.Invalid, match='pending'):
+        o.fence(s.a.repo)
+
+
+def test_superseded_refuses_disposition_name_collision(supersession, monkeypatch):
+    s = supersession
+    path = o._disposition_path(s.a.repo, s.b.folder)
+    original_link = os.link
+    foreign = b'foreign collision bytes\n'
+    def collide_once(source, destination):
+        Path(destination).write_bytes(foreign)
+        original_link(source, destination)
+    monkeypatch.setattr(os, 'link', collide_once)
+    before = supersession_files(s)
+    assert s.call() == d.EXIT_REFUSED
+    before[0][path] = foreign
+    assert supersession_files(s) == before
+    assert path.read_bytes() == foreign
 
 
 def test_superseded_refuses_generation_change_during_publication(supersession, monkeypatch, capsys):
@@ -1289,8 +1338,10 @@ def test_superseded_refuses_generation_change_during_publication(supersession, m
     files_before, process, _, probes, head, branch = supersession_files(s)
     assert s.call() == d.EXIT_REFUSED
     assert 'release mismatch' in capsys.readouterr().err
+    pending_path = o._disposition_path(s.a.repo, s.b.folder)
+    files_before[pending_path] = pending_path.read_bytes()
     assert supersession_files(s) == (files_before, process, s.serving['source'], probes, head, branch)
-    with pytest.raises(o.c.Invalid, match='unfinished'):
+    with pytest.raises(o.c.Invalid, match='pending'):
         o.fence(s.a.repo)
 
 

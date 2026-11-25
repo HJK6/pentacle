@@ -144,6 +144,10 @@ def _recorded_supersession(repo, folder):
     if not os.path.lexists(path):
         return None
     record = sealed_read(path)
+    if record.get('state') == 'pending':
+        raise c.Invalid('ordinary supersession disposition is pending verification')
+    if record.get('state') != 'complete':
+        raise c.Invalid('ordinary supersession disposition state is invalid')
     failed, bundle, journal = _failed_snapshot(repo, folder)
     _verify_superseded_payloads(folder, bundle)
     successor = _successor_generation(record['switch'], bundle, journal)
@@ -457,34 +461,44 @@ class Bundle:
         after = confirm_inputs()
         switch_identity = {key: switch[key] for key in ('outcome', 'prior', 'target', 'old_pid')}
         switch_identity['live'] = generation
-        record = {'schema': SUPERSEDED_SCHEMA, 'outcome': 'superseded',
+        record = {'schema': SUPERSEDED_SCHEMA, 'state': 'complete', 'outcome': 'superseded',
                   'before': {'failed': before, 'serving': serving}, 'after': {'failed': after, 'serving': after_serving},
                   'switch': switch_identity, 'authority': authority, 'authenticated_readback': proof}
-        # Stage and fsync before the last comparison. Link once so a retry or collision
-        # cannot replace a previous decision. The transaction lock spans the readback.
+        pending = {'schema': SUPERSEDED_SCHEMA, 'state': 'pending',
+                   'before': {'failed': before, 'serving': serving}, 'authority': authority,
+                   'authenticated_readback': proof}
+        # Publish a durable pending marker first. A crash from here through final
+        # verification leaves the ordinary-operation fence closed.
         staged = path.with_name('.supersession-' + uuid.uuid4().hex)
+        final_stage = path.with_name('.supersession-final-' + uuid.uuid4().hex)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
-            sealed = sealed_write(staged, record)
+            pending_sealed = sealed_write(staged, pending)
             confirm_serving()
             confirm_inputs()
             if time.monotonic() - started >= MANUAL_PROOF_SECONDS:
                 raise c.Invalid('supersession proof expired before recording')
             os.link(staged, path)
-            try:
-                os.fsync(directory)
-                confirm_serving()
-                confirm_inputs()
-                if _recorded_supersession(self.a.repo, self.folder) != sealed:
-                    raise c.Invalid('supersession commit readback mismatch')
-            except Exception:
-                if path.exists() and path.samefile(staged):
-                    path.unlink()
-                    os.fsync(directory)
-                raise
+            os.fsync(directory)
+            if sealed_read(path) != pending_sealed:
+                raise c.Invalid('pending supersession publication readback mismatch')
+            confirm_serving()
+            confirm_inputs()
+            if time.monotonic() - started >= MANUAL_PROOF_SECONDS:
+                raise c.Invalid('supersession proof expired before finalization')
+            sealed = sealed_write(final_stage, record)
+            confirm_serving()
+            confirm_inputs()
+            if sealed_read(path) != pending_sealed:
+                raise c.Invalid('pending supersession changed before finalization')
+            os.replace(final_stage, path)
+            os.fsync(directory)
+            if _recorded_supersession(self.a.repo, self.folder) != sealed:
+                raise c.Invalid('supersession commit readback mismatch')
         finally:
             try:
                 staged.unlink(missing_ok=True)
+                final_stage.unlink(missing_ok=True)
             finally:
                 os.close(directory)
         return result(sealed)

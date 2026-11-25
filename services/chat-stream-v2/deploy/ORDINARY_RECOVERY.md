@@ -185,7 +185,12 @@ in the deployment state directory. Its JSON result names the disposition path
 and seal, with outcome `superseded` and `full_fleet_acceptance: false`. The
 audit retains the validated successor identity, authenticated readback, GO,
 receipt hashes, and complete before/after observations of the serving state
-and failed pointer, bundle and journal byte hashes. Publication includes verification against the files on disk.
+and failed pointer, bundle and journal byte hashes. Publication first links and
+fsyncs a sealed `pending` record. It verifies serving and input bytes while that
+record is present, then atomically replaces it with a sealed `complete` record
+and fsyncs the directory. The ordinary-operation fence refuses a pending
+record. If the process is interrupted before completion, the record remains
+pending and the failure stays fenced until a separately authorized resolution.
 
 Repeat the same command for an idempotent readback while that operation is
 current. Replay requires the original authority, GO, receipt and matching
