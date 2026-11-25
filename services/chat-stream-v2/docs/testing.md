@@ -40,3 +40,11 @@ applied diff in a new evidence directory outside the repository.
 ```sh
 python services/chat-stream-v2/tests/contract/faults.py --evidence /path/to/new-evidence-directory
 ```
+
+## Timeouts
+
+Use watchdogs to stop stuck work. Allow at least three times the slowest healthy
+run observed under load. Assert the outcome and allow time for it to arrive.
+When a product deadline is part of the behavior, configure a short deadline in
+the fixture and leave a generous outer wait for the result. Release checks
+measure and report durations so regressions can be reviewed separately.
