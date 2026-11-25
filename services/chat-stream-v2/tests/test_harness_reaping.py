@@ -12,12 +12,44 @@ import sys
 import time
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 pytestmark = pytest.mark.timeout(60)
 
 from tools.run_gate import _process_group_exists
+
+
+@pytest.mark.parametrize("group_disappears", [True, False])
+def test_restart_stop_checks_group_after_denied_kill(tmp_path, monkeypatch, group_disappears):
+    from tests.soak import restart_matrix
+
+    pid = 42420
+    denied = PermissionError("process group cannot be signaled")
+    signaled = []
+
+    def kill_group(group, sig):
+        signaled.append((group, sig))
+        raise denied
+
+    monkeypatch.setattr(restart_matrix, "os", SimpleNamespace(
+        getpgid=lambda child: child, kill=lambda child, sig: None, killpg=kill_group,
+    ))
+    monkeypatch.setattr(restart_matrix, "_process_group_exists", lambda group: not group_disappears,
+                        raising=False)
+    monkeypatch.setattr(restart_matrix, "wait_for", lambda predicate, *, timeout: predicate())
+    daemon = restart_matrix.RestartDaemon(tmp_path, None, tmp_path / "tmux")
+    daemon.proc = SimpleNamespace(pid=pid, wait=lambda timeout: -signal.SIGKILL,
+                                  returncode=-signal.SIGKILL)
+    if group_disappears:
+        assert daemon.stop(signal.SIGKILL)["rc"] == -signal.SIGKILL
+        assert daemon.proc is None
+    else:
+        with pytest.raises(PermissionError) as error:
+            daemon.stop(signal.SIGKILL)
+        assert error.value is denied
+    assert signaled == [(pid, signal.SIGKILL)]
 
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]

@@ -31,7 +31,7 @@ from typing import Any, Callable, Iterator
 
 from websockets.sync.client import connect
 
-from tools.run_gate import _process_group_popen_kwargs
+from tools.run_gate import _process_group_exists, _process_group_popen_kwargs
 from tests.soak.harness import TmuxNamespace, LOCAL_HOST
 
 SERVICE_DIR = Path(__file__).resolve().parents[2]
@@ -164,6 +164,10 @@ class RestartDaemon:
             os.killpg(pgid, signal.SIGKILL)  # stragglers (blocked tmux wrappers)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # Darwin can report EPERM until terminal group members are reaped.
+            if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
+                raise
         self.proc = None
         return {"signal": sig.name, "rc": proc.returncode, "exit_s": round(time.monotonic() - started, 3),
                 "escalated_to_sigkill": escalated, "at_signal": at_signal}
