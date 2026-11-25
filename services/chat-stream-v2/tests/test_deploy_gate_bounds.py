@@ -21,7 +21,7 @@ from .test_deploy_script import deploy_mod
 V2_SERVICE = deploy_mod.SERVICES["chat-streamd-v2"]
 SHA = "d" * 40
 REPO_ROOT = Path(__file__).resolve().parents[3]
-BOUND_NAMES = ("V2_UNIT_TIMEOUT_S", "V2_SMOKE_TIMEOUT_S")
+BOUND_NAMES = ("V2_CONTRACT_TIMEOUT_S", "V2_UNIT_TIMEOUT_S", "V2_SMOKE_TIMEOUT_S")
 
 STUB_RUN_GATE = textwrap.dedent(
     """
@@ -32,7 +32,7 @@ STUB_RUN_GATE = textwrap.dedent(
                         "counts": {"tests": 1, "failures": 0, "errors": 0, "skipped": 0}}
     json.dump({"schema": "pentacle.v2.gate-evidence.v1", "gate": "merge", "sha": sha,
                "source": {"sha_before": sha, "sha_after": sha, "clean_before": True, "clean_after": True},
-               "tiers": [row("unit"), row("smoke")], "passed": True,
+               "tiers": [row("contract"), row("unit"), row("smoke")], "passed": True,
                "observed_env": {name: os.environ.get(name) for name in %r}},
               open(out, "w"))
     """
@@ -44,6 +44,7 @@ STUB_RUN_GATE = textwrap.dedent(
 def _no_host_executables(monkeypatch: pytest.MonkeyPatch) -> None:
     # The stub gate needs neither git nor tmux; keep these tests host-independent.
     monkeypatch.setattr(deploy_mod, "GATE_REQUIRED_EXECUTABLES", ())
+    monkeypatch.delenv("V2_CONTRACT_TIMEOUT_S", raising=False)
 
 
 def _fake_release(tmp_path: Path) -> Path:

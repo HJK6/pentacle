@@ -735,4 +735,5 @@ def main() -> int:
     print(f"[v2-gate] evidence={output}")
     return 0 if results and all(bool(item["passed"]) for item in results) else 1
 if __name__ == "__main__":
+    os.umask(0o022)
     raise SystemExit(main())
