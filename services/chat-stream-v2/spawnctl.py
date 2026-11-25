@@ -122,6 +122,14 @@ RESUME_PRESERVED_FIELDS = (
     "objective_source", "harness_run_id", "claude_session_lineage",
 )
 
+class _DeliveredCodexResume(Exception):
+    """Return a delivered operation from target resolution without starting admission."""
+
+    def __init__(self, reply: dict[str, Any]):
+        super().__init__()
+        self.reply = reply
+
+
 # The target host owns both the rollout and its device/inode namespace.
 _CODEX_RESUME_PROBE = r"""
 import json, os, stat, sys
@@ -400,6 +408,8 @@ class SpawnCtl:
         # identity. Different idempotency keys must not race into two v2 rows
         # that both run `claude --resume` against the same transcript.
         self._resume_locks: dict[str, asyncio.Lock] = {}
+        # Launch and the durable prompt receipt share the same server-owned generation.
+        self._codex_resume_generations: dict[asyncio.Task[Any], str] = {}
         #: The existing SpawnCtl is the sole intent owner. This lock serializes
         #: startup, recurring, and test-triggered passes inside one daemon; the
         #: reservation owner CAS below fences an overlapping process.
@@ -958,6 +968,22 @@ class SpawnCtl:
     async def _codex_resume_target(
         self, msg: dict[str, Any], host: str, tmux: "tmux_transport.Tmux", session_id: str,
     ) -> tuple[str, str, str, dict[str, Any]]:
+        # Host reachability and the public resume request shape were checked by
+        # the caller. An exact delivered retry can finish here before live-seat admission.
+        key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
+        if key:
+            recorded = await self.store.spawn_record_for_key(host, key)
+            if recorded and recorded["kind"] == "terminal" and recorded["row"].get("state") == "delivered":
+                row = recorded["row"]
+                if row.get("request_payload_hash") != self._spawn_payload_hash(msg):
+                    raise VerbError("idempotency_key_conflict", "key belongs to a different spawn request")
+                generation = (row.get("delivery_receipt") or {}).get("resume_generation")
+                request_id = str(row.get("request_id") or key)
+                replay = await self._reply_from_replay(host, request_id, "terminal", row, key)
+                if not generation or (replay.get("session") or {}).get("session_generation") != generation:
+                    raise VerbError("replayed_stream_dead", "the delivered Codex generation is no longer open")
+                raise _DeliveredCodexResume(replay)
+
         def bound_transcript(row):
             binding = (row or {}).get("observer_binding")
             transcript = binding.get("transcript") if isinstance(binding, dict) else None
@@ -1183,8 +1209,10 @@ class SpawnCtl:
         native_initial_prompt: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         """Stage a native Codex prompt or bound the legacy paste wire text."""
+        generation = self._codex_resume_generations.get(asyncio.current_task())
+        resume_fields = {"resume_generation": generation} if generation else {}
         if not text:
-            return "", {"state": "not_requested"}
+            return "", {"state": "not_requested", **resume_fields}
         from claude_jsonl_norm import strip_peer_delivery_envelope
         payload = strip_peer_delivery_envelope(text)
         header = text[:len(text) - len(payload)]
@@ -1193,6 +1221,7 @@ class SpawnCtl:
         if size < tmux_transport.INITIAL_PROMPT_STAGE_THRESHOLD_BYTES:
             if not native_initial_prompt:
                 receipt = {
+                    **resume_fields,
                     "transport": "direct",
                     "prompt_sha256": hashlib.sha256(data).hexdigest(),
                     "prompt_size_bytes": size,
@@ -1205,6 +1234,7 @@ class SpawnCtl:
         )
         receipt = delivery_receipt
         receipt.update({
+            **resume_fields,
             "transport": "native_argv" if native_initial_prompt else "staged",
             "stage_host": stage_host,
             "stage_path": str(path),
@@ -2004,7 +2034,17 @@ class SpawnCtl:
         host = str(msg.get("host") or local_host).strip()
         lock = self._resume_locks.setdefault(f"{host}:{session_id}", asyncio.Lock())
         async with lock:
-            return await self._spawn_impl(msg, local_host, admission=admission)
+            if str(msg.get("provider") or "").strip() != "codex":
+                return await self._spawn_impl(msg, local_host, admission=admission)
+            generation = assistant_restore.service_session_generation(msg) or uuid.uuid4().hex
+            task = asyncio.current_task()
+            self._codex_resume_generations[task] = generation
+            try:
+                return await self._spawn_impl(msg, local_host, admission=admission)
+            except _DeliveredCodexResume as delivered:
+                return delivered.reply
+            finally:
+                self._codex_resume_generations.pop(task)
 
     async def admit_schedule(
         self, msg: dict[str, Any], local_host: str, *, admission_name: str
@@ -2282,23 +2322,6 @@ class SpawnCtl:
         resume_jsonl_path = ""
         resume_cwd = ""
         resume_prior_row: dict[str, Any] | None = None
-        request_id = str(msg.get("request_id") or f"spawn-{uuid.uuid4().hex}")
-        # Atomic claim below collapses concurrent same-key fires to one admission.
-        idempotency_key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
-        payload_hash = self._spawn_payload_hash(msg) if idempotency_key else ""
-        if resume_session_id is not None and msg.get("provider") == "codex" and idempotency_key:
-            # A lost response is a read of the already-delivered operation. It
-            # must not go through admission for a second pane on the live seat.
-            recorded = await self.store.spawn_record_for_key(host, idempotency_key)
-            if recorded and recorded["kind"] == "terminal" and recorded["row"].get("state") == "delivered":
-                prior = recorded["row"]
-                if prior.get("request_payload_hash") != payload_hash:
-                    raise VerbError("idempotency_key_conflict", "key belongs to a different spawn request")
-                generation = (prior.get("delivery_receipt") or {}).get("resume_generation")
-                replay = await self._reply_from_replay(host, request_id, "terminal", prior, idempotency_key)
-                if not generation or (replay.get("session") or {}).get("session_generation") != generation:
-                    raise VerbError("replayed_stream_dead", "the delivered Codex generation is no longer open")
-                return replay
         if resume_session_id is not None:
             name, resume_jsonl_path, resume_cwd, resume_prior_row = (
                 await self._resolve_resume_target(msg, host, tmux)
@@ -2326,6 +2349,10 @@ class SpawnCtl:
                     "invalid_cwd",
                     f"cwd is not an existing directory on target host {host}: {cwd}",
                 )
+        request_id = str(msg.get("request_id") or f"spawn-{uuid.uuid4().hex}")
+        # Atomic claim below collapses concurrent same-key fires to one admission.
+        idempotency_key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
+        payload_hash = self._spawn_payload_hash(msg) if idempotency_key else ""
         # Daemon-side admission freeze (deploy window): refuse only a NEW claim
         # with `spawn_frozen` while a TTL'd hold is set (BEFORE any reservation/
         # pane). A retry whose key ALREADY has an admitted seat must still replay
@@ -2597,8 +2624,6 @@ class SpawnCtl:
                 delivery_receipt=delivery_receipt,
                 native_initial_prompt=native_initial_prompt,
             )
-            if resume_session_id is not None and provider == "codex":
-                delivery_receipt["resume_generation"] = spawn_generation
             if native_initial_prompt and self.instance_id:
                 delivery_receipt["spawn_daemon_instance_id"] = self.instance_id
             # Graph admission ends before boot. A winning parent close makes
@@ -3920,6 +3945,9 @@ class SpawnCtl:
             overrides["account_binding"] = account_binding.public()
             resolution["account_binding"] = account_binding.public()
             overrides["observer_binding"]["executable"] = account_binding.observer
+        resume_generation = self._codex_resume_generations.get(asyncio.current_task())
+        if resume_generation:
+            overrides["session_generation"] = resume_generation
         if session_id:
             overrides["claude_session_id"] = session_id
         if jsonl_path:

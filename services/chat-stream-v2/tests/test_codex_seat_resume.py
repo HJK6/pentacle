@@ -108,6 +108,44 @@ def test_closed_codex_resume_reopens_same_row_and_launches_native_session(tmp_pa
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("prompt", ["", "Use the earlier review."])
+def test_codex_resume_persists_generation_before_pane_creation(tmp_path, prompt):
+    async def run():
+        store, runtime = await setup()
+        try:
+            account, path = fixture_paths(tmp_path)
+            await runtime.run(lambda registry: registry.register(account))
+            prior = await retained(store, account, path)
+            tmux = ResumeTmux()
+            ctl = SpawnCtl(store, runtime.sessions, tmux=tmux,
+                           machine=launch.local_machine(HOST, cwd=str(tmp_path)))
+            ctl.account_runtime = runtime
+            _install_successful_spawn(ctl, runtime.sessions, tmux)
+            create_pane = ctl._spawn_fenced
+            persisted = []
+
+            async def inspect_intent(*args, **kwargs):
+                reservation, = await store.reservations()
+                intent = json.loads(reservation["payload"])
+                generation = intent["open_fields"]["session_generation"]
+                assert intent["delivery_receipt"]["resume_generation"] == generation
+                assert generation != prior["session_generation"]
+                persisted.append(generation)
+                return await create_pane(*args, **kwargs)
+
+            ctl._spawn_fenced = inspect_intent
+            msg = dict(provider="codex", model="gpt-6-luna", effort="low", resume_session_id=RESUME_ID,
+                       request_id="resume-intent", initial_prompt=prompt, _auth_context=AUTH)
+            reply = await ctl._spawn_guarded(msg, HOST)
+            assert persisted == [reply["session"]["session_generation"]]
+            # Unrelated work in the same task must receive an ordinary prompt receipt.
+            _, receipt = await ctl._prepare_brief("", tmux, stage_host=HOST, delivery_receipt={})
+            assert receipt == {"state": "not_requested"}
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_codex_resume_preserves_staged_prompt_as_one_argument(tmp_path):
     account, path = fixture_paths(tmp_path)
     prompt = tmp_path / "initial prompt"
