@@ -191,6 +191,10 @@ record is present, then atomically replaces it with a sealed `complete` record
 and fsyncs the directory. The ordinary-operation fence refuses a pending
 record. If the process is interrupted before completion, the record remains
 pending and the failure stays fenced until a separately authorized resolution.
+If the active pointer is absent, any surviving disposition or staging artifact
+also keeps the ordinary fence closed. The authenticated-readback deadline and FD
+GO freshness are checked after final input/serving verification immediately
+before both the durable pending link and the pending-to-complete replacement.
 
 Repeat the same command for an idempotent readback while that operation is
 current. Replay requires the original authority, GO, receipt and matching

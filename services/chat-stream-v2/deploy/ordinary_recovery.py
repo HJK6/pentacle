@@ -139,6 +139,18 @@ def _verify_superseded_payloads(folder, bundle):
         raise c.Invalid('supersession source bundle changed')
 
 
+def _check_supersession_freshness(proof, started):
+    try:
+        go_age = (datetime.now(timezone.utc)
+                  - datetime.fromisoformat(proof['go_delivered_at'])).total_seconds()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise c.Invalid('supersession FD GO freshness unavailable before commit') from exc
+    if not 0 <= go_age <= MANUAL_GO_SECONDS:
+        raise c.Invalid('supersession FD GO expired before commit')
+    if time.monotonic() - started >= MANUAL_PROOF_SECONDS:
+        raise c.Invalid('supersession proof expired before commit')
+
+
 def _recorded_supersession(repo, folder):
     path = _disposition_path(repo, folder)
     if not os.path.lexists(path):
@@ -166,9 +178,32 @@ def _recorded_supersession(repo, folder):
     return record
 
 
+def _refuse_orphaned_supersession(repo):
+    root = c.state_root(repo)
+    try:
+        info = root.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise c.Invalid('ordinary supersession state directory unavailable') from exc
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise c.Invalid('ordinary supersession state directory is insecure')
+    try:
+        with os.scandir(root) as entries:
+            if any(entry.name.startswith(('ordinary-superseded-', '.supersession-', '..supersession-'))
+                   for entry in entries):
+                raise c.Invalid('ordinary supersession state exists without its active pointer')
+    except c.Invalid:
+        raise
+    except OSError as exc:
+        raise c.Invalid('ordinary supersession state directory unreadable') from exc
+
+
 def fence(repo, *, recovering=None):
     path = c.state_root(repo) / 'ordinary-active.json'
-    if not path.exists():
+    if not os.path.lexists(path):
+        _refuse_orphaned_supersession(repo)
         return
     pointer = c.read_json(path)
     folder = Path(pointer['bundle'])
@@ -476,21 +511,20 @@ class Bundle:
             pending_sealed = sealed_write(staged, pending)
             confirm_serving()
             confirm_inputs()
-            if time.monotonic() - started >= MANUAL_PROOF_SECONDS:
-                raise c.Invalid('supersession proof expired before recording')
+            _check_supersession_freshness(proof, started)
             os.link(staged, path)
             os.fsync(directory)
             if sealed_read(path) != pending_sealed:
                 raise c.Invalid('pending supersession publication readback mismatch')
             confirm_serving()
             confirm_inputs()
-            if time.monotonic() - started >= MANUAL_PROOF_SECONDS:
-                raise c.Invalid('supersession proof expired before finalization')
+            _check_supersession_freshness(proof, started)
             sealed = sealed_write(final_stage, record)
             confirm_serving()
             confirm_inputs()
             if sealed_read(path) != pending_sealed:
                 raise c.Invalid('pending supersession changed before finalization')
+            _check_supersession_freshness(proof, started)
             os.replace(final_stage, path)
             os.fsync(directory)
             if _recorded_supersession(self.a.repo, self.folder) != sealed:

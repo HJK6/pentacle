@@ -1328,6 +1328,107 @@ def test_superseded_refuses_disposition_name_collision(supersession, monkeypatch
     assert path.read_bytes() == foreign
 
 
+@pytest.mark.parametrize('orphan', ['pending', 'unreadable', 'staged', 'atomic_stage'])
+def test_ordinary_fence_missing_pointer_refuses_supersession_artifact(supersession, orphan):
+    s = supersession
+    root = o.c.state_root(s.a.repo)
+    if orphan == 'pending':
+        o.sealed_write(o._disposition_path(s.a.repo, s.b.folder),
+                       {'schema': o.SUPERSEDED_SCHEMA, 'state': 'pending'})
+    elif orphan == 'unreadable':
+        o._disposition_path(s.a.repo, s.b.folder).write_bytes(b'{broken')
+    elif orphan == 'staged':
+        (root / '.supersession-interrupted').write_bytes(b'sealed pending stage')
+    else:
+        (root / '..supersession-interrupted.tmp').write_bytes(b'atomic write before rename')
+    s.pointer.unlink()
+    with pytest.raises(o.c.Invalid, match='supersession'):
+        o.fence(s.a.repo)
+
+
+@pytest.mark.parametrize('damage', [
+    'pointer_unreadable', 'journal_missing', 'journal_unreadable',
+    'record_missing', 'record_unreadable', 'record_pending',
+])
+def test_ordinary_fence_fails_closed_on_missing_or_unreadable_state(supersession, damage):
+    s = supersession
+    journal = s.b.folder / 'journal.json'
+    record = o._disposition_path(s.a.repo, s.b.folder)
+    if damage == 'pointer_unreadable':
+        s.pointer.write_bytes(b'{broken')
+    elif damage == 'journal_missing':
+        journal.unlink()
+    elif damage == 'journal_unreadable':
+        journal.write_bytes(b'{broken')
+    elif damage == 'record_unreadable':
+        record.write_bytes(b'{broken')
+    elif damage == 'record_pending':
+        o.sealed_write(record, {'schema': o.SUPERSEDED_SCHEMA, 'state': 'pending'})
+    with pytest.raises(o.c.Invalid):
+        o.fence(s.a.repo)
+
+
+def test_superseded_final_proof_deadline_is_rechecked_before_replace(supersession, monkeypatch, capsys):
+    s = supersession
+    clock = [0.0]
+    monkeypatch.setattr(o, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(o, 'MANUAL_PROOF_SECONDS', 30.0)
+    verify = o._verify_superseded_payloads
+    calls = [0]
+    def slow_final_verification(folder, bundle):
+        result = verify(folder, bundle)
+        calls[0] += 1
+        if calls[0] == 4:  # Final input verification, after the last existing deadline check.
+            clock[0] = 31.0
+        return result
+    monkeypatch.setattr(o, '_verify_superseded_payloads', slow_final_verification)
+    assert s.call() == d.EXIT_REFUSED
+    assert 'expired' in capsys.readouterr().err
+    path = o._disposition_path(s.a.repo, s.b.folder)
+    assert o.sealed_read(path)['state'] == 'pending'
+    with pytest.raises(o.c.Invalid, match='pending'):
+        o.fence(s.a.repo)
+
+
+@pytest.mark.parametrize('trigger,pending_expected', [
+    pytest.param(2, False, id='before-pending-link'),
+    pytest.param(4, True, id='before-complete-replace'),
+])
+def test_superseded_go_freshness_is_rechecked_before_commit(supersession, monkeypatch, capsys,
+                                                            trigger, pending_expected):
+    s = supersession
+    base_datetime = o.datetime
+    now = [base_datetime.now(timezone.utc)]
+    class AdvancingDateTime(base_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = now[0]
+            return value if tz is not None else value.replace(tzinfo=None)
+    tell = s.wire['ledger']['tell']
+    tell['delivered_at'] = (now[0] - timedelta(seconds=o.MANUAL_GO_SECONDS - 0.5)).isoformat()
+    monkeypatch.setattr(o, 'datetime', AdvancingDateTime)
+    verify = o._verify_superseded_payloads
+    calls = [0]
+    def expire_go_after_final_verification(folder, bundle):
+        result = verify(folder, bundle)
+        calls[0] += 1
+        if calls[0] == trigger:
+            now[0] += timedelta(seconds=1)
+        return result
+    monkeypatch.setattr(o, '_verify_superseded_payloads', expire_go_after_final_verification)
+    assert s.call() == d.EXIT_REFUSED
+    assert 'expired' in capsys.readouterr().err
+    path = o._disposition_path(s.a.repo, s.b.folder)
+    assert os.path.lexists(path) is pending_expected
+    if pending_expected:
+        assert o.sealed_read(path)['state'] == 'pending'
+        with pytest.raises(o.c.Invalid, match='pending'):
+            o.fence(s.a.repo)
+    else:
+        with pytest.raises(o.c.Invalid, match='unfinished'):
+            o.fence(s.a.repo)
+
+
 def test_superseded_refuses_generation_change_during_publication(supersession, monkeypatch, capsys):
     s = supersession
     publish = os.link
