@@ -292,8 +292,29 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
         # The subject looked green but its evidence is partial: never a green verdict.
         primary = "evidence_incomplete"
     return primary, reporting
+B04_TEST_FILE = "tests/test_daemon_b04_gate.py"
+
+
+def _run_b04_self_tests(base: str | None, head: str) -> bool:
+    """Keep full coverage for daily self-comparisons and unavailable diffs."""
+    reason = "full unit selection"
+    if base == head:
+        reason = "base and head are identical"
+    elif base and re.fullmatch(r"[0-9a-f]{40}", base):
+        paths = ["daemon_contract", B04_TEST_FILE, "tools/daemon_b04_gate.py",
+                 "tools/daemon_b04_anchors.py", "tools/daemon_import_census.py"]
+        diff = subprocess.run(["git", "diff", "--quiet", "--no-ext-diff", "--no-renames",
+                               base, head, "--", *paths], cwd=SERVICE_DIR, timeout=30)
+        if diff.returncode == 0:
+            print(f"[v2-gate] skipping {B04_TEST_FILE}: B04 subject unchanged", flush=True)
+            return False
+        reason = "B04 subject changed" if diff.returncode == 1 else "base diff unavailable"
+    print(f"[v2-gate] running {B04_TEST_FILE}: {reason}", flush=True)
+    return True
+
+
 def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1,
-              shard_index: int | None = None, shard_count: int | None = None) -> dict[str, Any]:
+              shard_index: int | None = None, shard_count: int | None = None, skip_b04_tests: bool = False) -> dict[str, Any]:
     started = time.monotonic()
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
@@ -302,6 +323,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     junit.unlink(missing_ok=True)
     journal.unlink(missing_ok=True)
     env, soak = os.environ.copy(), None
+    env.pop("PENTACLE_B04_BASE", None)
     if tier == "contract":
         env = {key: value for key, value in env.items() if not key.startswith("PYTEST_")}
     env[MANIFEST_ENV] = str(manifest)
@@ -318,6 +340,8 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
         except ValueError as exc:
             return _result(tier, code=2, passed=False, reason="invalid_soak_tier", junit=junit, log=log, soak={"error": str(exc)})
     command = _tier_command(tier, junit, basetemp)
+    if skip_b04_tests:
+        command.append(f"--ignore={B04_TEST_FILE}")
     if tier != "contract":
         quarantine_manifest = evidence / f'{tier}.quarantine.json'
         scope_args = [f'--quarantine-separate-marker={name}' for name in UNIT_SEPARATE_MARKERS] if tier == 'unit' else []
@@ -638,9 +662,11 @@ def main() -> int:
             if refusal:
                 results.append(refusal)
             if not results:
+                b04_base = os.environ.get("PENTACLE_B04_BASE") if args.shard_index is not None else None
                 if args.gate == "merge":
                     try:
                         base = _merge_contract_base(merge_bounds["merge_base"])
+                        b04_base = base
                         from select_tests import check_coverage
                         try:
                             check_coverage(REPO_ROOT, base, sha, python=_python_bin(), timeout=merge_bounds['coverage'])
@@ -661,9 +687,13 @@ def main() -> int:
                     if (index or merge_bounds) and (refusal := _deadline_check(deadline, clock_start, "deadline", pending[index:], usage_pending=False)):
                         results.append(refusal)
                         break
-                    results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest, unit_workers=args.unit_workers,
-                                             **({"shard_index": args.shard_index, "shard_count": args.shard_count}
-                                                if args.shard_index is not None else {})))
+                    options = {}
+                    if args.shard_index is not None:
+                        options.update(shard_index=args.shard_index, shard_count=args.shard_count)
+                    if tier == "unit" and not _run_b04_self_tests(b04_base, sha):
+                        options["skip_b04_tests"] = True
+                    results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest,
+                                             unit_workers=args.unit_workers, **options))
                     if tier == "contract" and not results[-1]["passed"]:
                         break
                 # Persist the blocking verdict before the optional tail. The final write
