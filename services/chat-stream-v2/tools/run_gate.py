@@ -104,7 +104,8 @@ def _apply_strict_full_soak(env: dict[str, str]) -> None:
 def _tier_command(tier: str, junit: Path, basetemp: Path) -> list[str]:
     unit_marker = " and ".join(f"not {name}" for name in (*UNIT_SEPARATE_MARKERS, "quarantined", "admission_hold"))
     args = {
-        "contract": ["tests/contract", "-m", "", "-q", "-rs", "--timeout-method=signal"],
+        "contract": ["tests/contract", "-m", "", "-q", "-rs", "--timeout-method=signal",
+                     "-p", "no:rerunfailures"],
         "unit": ["tests", "--ignore=tests/contract", "--ignore=tests/smoke", "--ignore=tests/soak",
                  "-m", unit_marker, "-q", "-rs"],
         "smoke": ["tests/smoke", "-m", "not quarantined and not admission_hold", "-q", "-rs", "--maxfail=1"],
