@@ -29,9 +29,7 @@ boundary; it does not make every excluded file confidential by definition.
 
 ## Landing on `main`
 
-Public writes go through the designated release relay. Keep the applicable local
-gates, independent review and public-content checks before publishing the exact
-candidate branch and opening its pull request. The required GitHub Actions
+Public writes go through the designated release relay. After changed gates pass on a clean candidate clone and the outgoing branch passes the identity and public-content checks, the relay may push the exact head and open or update a draft pull request to trigger hosted validation before final review. Keep auto-merge off. Return the hosted result and tested checkout identity to the reviewer. Promotion requires independent acceptance of the candidate, the applicable local release gate, and the required hosted checks. The required GitHub Actions
 context remains `checks` (app ID `15368`); branch protection must not be relaxed.
 Require branches to be up to date before merging (`strict: true`) and enforce
 the protection for administrators. Read back both classic protection and any

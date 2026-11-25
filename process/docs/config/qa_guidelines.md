@@ -30,9 +30,9 @@ Review configuration defaults, optional integrations, install/startup, error han
 
 ## Verdict contract
 
-Return ACCEPT or REJECT with scope, candidate identity, checks run, evidence locations and limitations. A blocking finding identifies the violated acceptance criterion, file and location, reproduction, expected behavior, observed behavior and practical consequence. Advisory wording preferences cannot make an otherwise accepted candidate fail.
+Return ACCEPT or REJECT with scope, candidate identity, checks run, evidence locations and limitations. State the blocking bar in the commission. Reject a false pass, data loss or changes outside the owned copy, undetected loss of blocking coverage, or an unmet acceptance criterion. An evidence error blocks if it defeats required proof or falsifies a decision. A blocking finding identifies the violated acceptance criterion, file and location, reproduction, expected behavior, observed behavior and practical consequence. Advisory wording preferences cannot make an otherwise accepted candidate fail.
 
-Separate accepted sub-surfaces from rejected ones so repair does not erase valid evidence. Do not claim unrun checks passed. After a valid rejection, re-review the repaired surface and relevant regression checks. Two valid rejections of the same surface require owner diagnosis and a recorded change in approach before another pass; changing a commit label does not reset this count.
+Separate accepted sub-surfaces from rejected ones so repair does not erase valid evidence. Do not claim unrun checks passed. Report all blocking findings on the first review. After a valid rejection, use the first reviewer’s context for the repair delta and regression spot-check. Use the same seat if open, then resume that reviewer where supported. Otherwise give an independent replacement the first report, its findings and the same bounded scope. Void a rejection based entirely on advisory findings. The lane owner applies the [advisory disposition rule](development_process.md#keeping-delivery-finite). Two valid rejections of the same surface require owner diagnosis and a recorded change in approach before another pass; changing a commit label does not reset this count.
 
 ## Documentation review
 
