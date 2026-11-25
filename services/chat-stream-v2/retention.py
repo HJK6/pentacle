@@ -1199,13 +1199,8 @@ def archive_events(
         nonlocal remaining
         total = 0
         cursor = None
-        while True:
-            if remaining is not None:
-                if remaining <= 0:
-                    return total
-                limit = min(batch_size, remaining)
-            else:
-                limit = batch_size
+        while remaining is None or remaining > 0:
+            limit = batch_size if remaining is None else min(batch_size, remaining)
             # Advance past rows left hot so a batch of them cannot loop.
             after = "" if cursor is None else f' AND "{key}" > ?'
             rows = [
@@ -1217,13 +1212,14 @@ def archive_events(
                 )
             ]
             if not rows:
-                return total
+                break
             cursor = rows[-1][key]
             moved = _move_copies(conn, archive_path, binding, ev.table, names, [key], rows,
                                  place=place, eligible=eligible)
             total += moved
             if remaining is not None:
                 remaining -= moved
+        return total
 
     try:
         terminal_moved = move(
