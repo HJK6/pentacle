@@ -13,7 +13,7 @@ retry; application-facing readback after a restart uses public frames only.
 from __future__ import annotations
 
 import json
-import shutil
+import platform
 import signal
 import sqlite3
 import subprocess
@@ -69,9 +69,16 @@ def _row(path, table, row):
                 db.execute(f'SELECT * FROM "{table}" WHERE {where}', [row[name] for name in key])]
 
 
-def _receipt_of(client, pair):
-    reply = client.call("send.receipt.get", request_id=pair.send["request_id"],
-                        to_stream_id=pair.seat.stream_id)
+@pytest.fixture(autouse=True)
+def _record_run():
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SERVICE_DIR, capture_output=True, text=True)
+    print("run", json.dumps({"node": platform.node(), "commit": head.stdout.strip() or "unknown",
+                             "python": platform.python_version(), "sqlite": sqlite3.sqlite_version,
+                             "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+
+
+def _receipt_of(client, seat, request_id):
+    reply = client.call("send.receipt.get", request_id=request_id, to_stream_id=seat.stream_id)
     assert reply["type"] == "send.receipt.get.ok" and reply["found"], reply
     return reply["receipts"][0]
 
@@ -106,7 +113,7 @@ def build_pair(chat, archive_mode) -> Pair:
                              match=lambda event, p=payload: (event["kind"], event["text"])
                              == ("USER", p["text"]))
         seqs.append(event["daemon_seq"])
-    receipt = _receipt_of(client, Pair(chat.daemon.root, seat, send, {}, {}, {}, 0))
+    receipt = _receipt_of(client, seat, send["request_id"])
     assert chat.close_seat(client, retired)["type"] == "close.ok"
     chat.daemon.stop(signal.SIGTERM)
     root = Path(chat.daemon.root)
@@ -127,11 +134,11 @@ def build_pair(chat, archive_mode) -> Pair:
     return Pair(root, seat, send, event[0], session[0], receipt, seqs[1])
 
 
-def run_writer(root: Path, *, boundary="none", table=None, stage=None):
+def run_writer(root: Path, *, boundary="none", table=None, stage=None, file="archive"):
     receipt = root / f"writer-{time.monotonic_ns()}.json"
     argv = [sys.executable, str(WRITER), "--db", str(root / "sessions.db"),
             "--archive", str(root / ARCHIVE), "--receipt", str(receipt),
-            "--boundary", boundary, "--tail-keep", str(TAIL_KEEP)]
+            "--boundary", boundary, "--tail-keep", str(TAIL_KEEP), "--file", file]
     if table:
         argv += ["--table", table]
     if stage:
@@ -178,7 +185,8 @@ def public_readback(chat, pair, hot_count):
     assert len(seen) == hot_count, f"public history returned the event {len(seen)} times"
     if seen:
         assert (seen[0]["kind"], seen[0]["text"]) == ("USER", pair.send["text"]), seen[0]
-    assert _receipt_of(client, pair) == pair.receipt, "original receipt changed"
+    assert _receipt_of(client, pair.seat, pair.send["request_id"]) == pair.receipt, (
+        "original receipt changed")
     inputs = len(chat.inputs(pair.seat))
     replay = client.call("send", **pair.send)
     expect_landed(replay, pair.seat.stream_id, pair.send["request_id"])
@@ -187,23 +195,37 @@ def public_readback(chat, pair, hot_count):
     chat.daemon.stop(signal.SIGTERM)
 
 
+# The first write inside a move's COMMIT to the named file. The archive copy
+# commits first and alone, so a death there leaves the row hot only; the hot
+# file is first written by the delete's commit, after the archive copy is
+# durable, so a death there leaves it in both.
+STORAGE = {"archive": (1, 0), "hot": (1, 1)}
+
+
+@pytest.mark.parametrize("file", list(STORAGE))
 @pytest.mark.parametrize("archive_mode", ["delete", "wal"])
 @pytest.mark.parametrize("table", [EVENTS, SESSIONS])
-def test_storage_stop_between_file_commits(chat, tmp_path, table, archive_mode):
-    """Real exit at the archive file's first write inside COMMIT keeps the row."""
+def test_storage_stop_between_file_commits(chat, tmp_path, table, archive_mode, file):
+    """Real exit at a file's first write inside COMMIT keeps the row."""
     pair = build_pair(chat, archive_mode)
     _snapshot(pair.root, tmp_path / "twin")
     _snapshot(pair.root, tmp_path / "control")
-    code, body, _ = run_writer(pair.root, boundary="storage", table=table)
+    code, body, _ = run_writer(pair.root, boundary="storage", table=table, file=file)
     assert code == STORAGE_EXIT and body["boundary"] == "storage" and body["table"] == table, body
+    assert Path(body["file"]).name.startswith(ARCHIVE if file == "archive" else "sessions.db"), body
     stopped = placement(pair, pair.root, table)
     print("stopped", table, archive_mode, "hot/archive", stopped)
     assert placement(pair, tmp_path / "twin", table) == (1, 0)
-    code, body, _ = run_writer(tmp_path / "control")
+    code, body, _ = run_writer(tmp_path / "control", boundary="trace")
     assert code == 0, body
     assert placement(pair, tmp_path / "control", table) == (0, 1), "uninterrupted control"
+    # No move commit writes both files: the archive copy commits alone, and the
+    # hot delete's commit (which holds the archive reservation) writes no archive page.
+    tables = {commit["table"] for commit in body["commits"]}
+    assert tables == {EVENTS, SESSIONS}, body["commits"]
+    assert all(len(commit["files"]) == 1 for commit in body["commits"]), body["commits"]
     assert sum(stopped) >= 1, f"{table} row is in neither file after the stop: {stopped}"
-    assert stopped == (1, 0)
+    assert stopped == STORAGE[file]
     public_readback(chat, pair, hot_count=1)
     converge(pair, pair.root)
 

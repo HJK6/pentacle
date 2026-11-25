@@ -110,6 +110,40 @@ Managed
 attachment GC retains archive-owned bytes, fails closed on unknown archive state,
 and never treats retention ownership as fetch authorization.
 
+## Session and event rows
+
+Terminal session rows and archivable `session_event_tail` rows move in the same
+order, one batch at a time, on the Store connection with the archive attached:
+
+1. A transaction that writes only the archive copies absent rows. Its commit is
+   the archive file's alone.
+2. One `BEGIN IMMEDIATE` transaction holds the archive reservation and the hot
+   write lock. It rechecks the archive path, inode and pair, joins each hot row to
+   its archived copy on every column, recomputes eligibility, and deletes only
+   rows that are still identical and eligible. Its commit writes the hot file only.
+
+A crash at any instant leaves each row hot, archived or both. The next pass
+converges. Hot-side triggers fire with the delete, never with the copy.
+
+Events keep their original `event_id`, `event_key`, identity and bytes. An
+identical archived event is already copied. A hot event that collides with a
+different archived event stays hot and is logged. The collision can be on
+`event_id`, or on `event_key` or non-null identity within the same stream and
+birth. The pass result counts it in `events_retained`. Selection advances past
+retained rows. A reused session name keeps today's behavior: the newer terminal
+row replaces the archived incarnation, through the same order. The archive still
+holds one row per `(host, session_name)`.
+
+Late receipt reconciliation treats one empty-identity event that is found in both
+files with the same id and bytes as a single match.
+
+`tests/archive_crash/crash_cases.py` checks these boundaries with the real writer
+and real process exit. Run it on a named host, not in the hosted workflow:
+
+```sh
+python -m pytest tests/archive_crash/crash_cases.py -v
+```
+
 ## Offline backup and compatible recovery
 
 Keep this version of `retention.py` and its matching source/interpreter with the

@@ -6,13 +6,15 @@ observers, both installed only in this child and neither touching daemon code:
 * ``storage``: a SQLite Unix VFS ``pwrite`` observer. It arms while the Store
   thread is inside ``Connection.commit`` called under ``archive_rows``
   (sessions) or ``archive_events`` (events) and exits at the first write to the
-  archive file family (database, ``-wal``, ``-journal``).
+  ``--file`` family (database, ``-wal``, ``-journal``): ``archive`` by default,
+  or ``hot`` for the main database.
 * ``stage``: an interpreter profile observer that recognizes a call to
   ``retention.history_checkpoint`` with the named stage and table on the Store
   thread.
 
 Either writes one bounded JSON receipt and calls ``os._exit``. Without a
-boundary the pass runs to completion and the receipt holds the pass result.
+boundary the pass runs to completion and the receipt holds the pass result;
+``trace`` also records which file families each move's COMMIT wrote.
 """
 
 from __future__ import annotations
@@ -108,7 +110,7 @@ class Observer:
         self.receipt = Path(args.receipt)
         self.archive = os.path.realpath(args.archive)
         self.armed: str | None = None
-        self.hits: list[dict] = []
+        self.commits: list[dict] = []
         self._keep = []
 
     def install_storage(self) -> None:
@@ -118,10 +120,18 @@ class Observer:
         if not original:
             raise SystemExit("unix VFS has no pwrite system call")
         forward = ctypes.cast(original, _PWRITE)
-        family = {self.archive, self.archive + "-wal", self.archive + "-journal"}
+        target = self.archive if self.args.file == "archive" else os.path.realpath(self.args.db)
+        family = {target, target + "-wal", target + "-journal"}
+        hot = os.path.realpath(self.args.db)
+        names = {**{path: "archive" for path in (self.archive, self.archive + "-wal", self.archive + "-journal")},
+                 **{path: "hot" for path in (hot, hot + "-wal", hot + "-journal")}}
 
         def observe(fd, data, count, offset):
-            if self.armed is not None and _fd_path(fd) in family:
+            if self.armed is not None and self.args.boundary == "trace":
+                written = names.get(_fd_path(fd))
+                if written:
+                    self.commits[-1]["files"][written] = self.commits[-1]["files"].get(written, 0) + 1
+            elif self.armed is not None and _fd_path(fd) in family:
                 _receipt(self.receipt, {
                     "boundary": "storage", "table": self.armed, "file": _fd_path(fd),
                     "offset": offset, "size": count, "pid": os.getpid(),
@@ -139,12 +149,17 @@ class Observer:
         if threading.current_thread().name != "store":
             return
         args = self.args
-        if args.boundary == "storage" and event in ("c_call", "c_return") \
+        if args.boundary in ("storage", "trace") and event in ("c_call", "c_return") \
                 and getattr(arg, "__name__", None) == "commit":
             import sqlite3
             if isinstance(getattr(arg, "__self__", None), sqlite3.Connection):
                 family = _family(frame) if event == "c_call" else None
-                self.armed = family if family == args.table else None
+                if args.boundary == "trace":
+                    self.armed = family
+                    if family:
+                        self.commits.append({"table": family, "files": {}})
+                else:
+                    self.armed = family if family == args.table else None
         elif args.boundary == "stage" and event == "call" \
                 and frame.f_code.co_name == "history_checkpoint" \
                 and frame.f_code.co_filename == str(SERVICE_DIR / "retention.py"):
@@ -170,17 +185,18 @@ def main(argv=None) -> int:
     parser.add_argument("--db", required=True)
     parser.add_argument("--archive", required=True)
     parser.add_argument("--receipt", required=True)
-    parser.add_argument("--boundary", choices=("none", "storage", "stage"), default="none")
+    parser.add_argument("--boundary", choices=("none", "storage", "stage", "trace"), default="none")
     parser.add_argument("--stage")
     parser.add_argument("--table", choices=sorted(FAMILIES.values()))
+    parser.add_argument("--file", choices=("archive", "hot"), default="archive")
     parser.add_argument("--tail-keep", type=int, required=True)
     parser.add_argument("--batch-size", type=int, default=500)
     args = parser.parse_args(argv)
-    if args.boundary != "none" and not args.table:
+    if args.boundary in ("storage", "stage") and not args.table:
         parser.error("a boundary needs --table")
     sys.path.insert(0, str(SERVICE_DIR))
     observer = Observer(args)
-    if args.boundary == "storage":
+    if args.boundary in ("storage", "trace"):
         observer.install_storage()
     if args.boundary != "none":
         threading.setprofile(observer.profile)
@@ -204,7 +220,8 @@ def main(argv=None) -> int:
     _receipt(Path(args.receipt), {"boundary": "none", "pid": os.getpid(),
                                   "sessions_moved": result.sessions_moved,
                                   "events_moved": result.events_moved,
-                                  "receipts_moved": result.receipts_moved})
+                                  "receipts_moved": result.receipts_moved,
+                                  "commits": [c for c in observer.commits if c["files"]]})
     return 0
 
 
