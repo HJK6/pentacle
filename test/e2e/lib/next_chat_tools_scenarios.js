@@ -74,7 +74,7 @@ async function saveFixtureBaseline(ctx) {
     })()`),
   };
 }
-async function restoreFixtureBaseline(ctx, baseline) {
+async function restoreFixtureBaseline(ctx, baseline, restoreNextAfterNavigation) {
   const {session:s} = ctx;
   const snapshot=JSON.stringify(baseline.storage);
   await s.eval(`(() => {
@@ -105,14 +105,33 @@ async function restoreFixtureBaseline(ctx, baseline) {
       ...baseline.viewport,deviceScaleFactor:baseline.dpr,mobile:false,
     });
   }
+  const nextStorage = JSON.stringify(Object.fromEntries(
+    Object.entries(baseline.storage).filter(([key]) => key.startsWith('pentacle.next.'))
+  ));
+  if (restoreNextAfterNavigation) {
+    // Next can write on page exit. Reapply only its keys once the old Web page has settled.
+    await s.eval(`(() => {
+      const expected = ${nextStorage};
+      for (const key of Object.keys(localStorage).filter(k => k.startsWith('pentacle.next.'))) {
+        if (!(key in expected)) localStorage.removeItem(key);
+      }
+      for (const [key, value] of Object.entries(expected)) localStorage.setItem(key, value);
+    })()`);
+  }
   const {width,height}=baseline.viewport;
-  await wait(ctx,`innerWidth===${width} && innerHeight===${height}
-    && devicePixelRatio===${baseline.dpr} && (${scheme}) && (${motion})
-    && JSON.stringify(Object.fromEntries(Object.keys(localStorage).filter(key=>key.startsWith('pentacle.next.'))
-      .sort().map(k=>[k,localStorage.getItem(k)])))===JSON.stringify(Object.fromEntries(
-        Object.entries(${snapshot}).filter(([k])=>k.startsWith('pentacle.next.'))))`,'viewport, media and Next storage restored');
+  await wait(ctx, `(() => {
+    const unmet = [];
+    if (innerWidth !== ${width} || innerHeight !== ${height} || devicePixelRatio !== ${baseline.dpr}) unmet.push('viewport');
+    if (!(${scheme}) || !(${motion})) unmet.push('media');
+    const expected = ${nextStorage};
+    const keys = new Set([...Object.keys(expected), ...Object.keys(localStorage).filter(k => k.startsWith('pentacle.next.'))]);
+    const different = [...keys].filter(key => localStorage.getItem(key) !== expected[key]).sort();
+    if (different.length) unmet.push('Next storage keys: ' + different.join(', '));
+    if (unmet.length) throw new Error(unmet.join('; '));
+    return true;
+  })()`, 'viewport, media and Next storage restored');
 }
-function isolated(run, width = 1440) {
+function isolated(run, { width = 1440, restoreNextAfterNavigation = false } = {}) {
   return async ctx => {
     const baseline = await saveFixtureBaseline(ctx);
     try {
@@ -124,7 +143,7 @@ function isolated(run, width = 1440) {
       await run(ctx);
     } finally {
       try { await command(ctx, { reset: true }); }
-      finally { await restoreFixtureBaseline(ctx, baseline); }
+      finally { await restoreFixtureBaseline(ctx, baseline, restoreNextAfterNavigation); }
     }
   };
 }
@@ -252,7 +271,7 @@ const unread = isolated(async ctx => {
   await wait(ctx, `${query('.brand')}.classList.contains('assistant-unread')`, 'assistant mark gets unread dot');
   await ctx.session.click('.brand');
   await wait(ctx, `!${query('.brand')}.classList.contains('assistant-unread')`, 'bringing Assistant out clears unread');
-});
+}, { restoreNextAfterNavigation: true });
 
 const work = isolated(async ctx => {
   await select(ctx, A);
@@ -341,6 +360,6 @@ const phone = isolated(async ctx => {
   await ctx.session.click(title('chat'));
   await send(ctx,'chat','Chat tools phone');
   await wait(ctx, shown('[data-pane=chat] .slot-chat-send-status .stream'), 'phone send status visible');
-}, 440);
+}, { width: 440 });
 
 module.exports = { switching, head, renaming, deleting, unread, work, sendStatus, phone };
