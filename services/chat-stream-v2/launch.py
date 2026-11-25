@@ -518,6 +518,7 @@ def _codex_command(
     operator_facing: bool = False,
     initial_prompt_file: str | None = None,
     launch_cwd: str | None = None,
+    resume_session_id: str | None = None,
 ) -> str:
     """The codex launch shell command (v1 codex_provider.py:_codex_launch_prefix).
 
@@ -578,6 +579,8 @@ def _codex_command(
     )
     merged = "\n\n".join(merged_parts)
     args.extend(["-c", f"developer_instructions={merged}"])
+    if resume_session_id is not None:
+        args.extend(["resume", resume_session_id])
     argv = " ".join(shlex.quote(part) for part in [executable, *args])
     env_prefix = f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
     if initial_prompt_file:
@@ -713,14 +716,13 @@ def build_launch(
             stream_token_file=stream_token_file,
         )
     if provider == "codex":
-        if resume_session_id is not None:
-            raise ValueError("resume_unsupported_provider: codex")
         command = _codex_command(
             machine, tmux_session, stream_token_file,
             launch_model=launch_model, launch_effort=launch_effort,
             operator_facing=operator_facing,
             initial_prompt_file=initial_prompt_file,
-            launch_cwd=cwd,
+            launch_cwd=resume_cwd or cwd,
+            resume_session_id=resume_session_id,
         )
         return LaunchPlan(
             command=command,
