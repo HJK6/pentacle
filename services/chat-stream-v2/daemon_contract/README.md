@@ -13,9 +13,14 @@ new exceptions are refused, while removing an existing exception is allowed.
 | F5 Observation | External facts include source, observation time and freshness; consumers read the value with its age. Observers register with the F1 scheduler. | Structure owner |
 | F6 Durable delivery | Delivery records intent, attempt and landed, failed or uncertain outcome, with one recovery rule after restart. Routing clients use this layer instead of owning independent delivery state machines. | Structure owner |
 
-The structure owner configured in `contract.json` signs daemon structure decisions.
-The configured maximum is two active daemon lanes. FD enforces lane admission;
-the repository checker validates the shared configured cap and owner setting.
+Each installation stores its structure owner in the local, untracked file
+`~/.config/pentacle/daemon-contract.json` as `{"structure_owner":"host:v2-seat"}`.
+Keep the actual identity local. The public `contract.json` keeps
+`structure_owner: null` and `structure_owner_status: "pending"`; the checker
+validates that public state and reports only whether local configuration is
+present. The configured maximum is two active daemon lanes. FD enforces lane
+admission; the repository checker validates the shared cap and pending owner
+state.
 
 The six supplied exception inventories are copied into immutable `exceptions/`
 baselines and pinned by `inventory_manifest.json` against commit

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "daemon_contract_gate.py"
@@ -44,6 +45,17 @@ class DaemonContractGateTests(unittest.TestCase):
 
     def test_frozen_contract_and_inventory_configuration_are_valid(self) -> None:
         self.assertEqual(daemon_gate._validate_contract(), [])
+
+    def test_local_structure_owner_config_is_optional_and_value_is_not_returned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "daemon-contract.json"
+            with mock.patch.object(daemon_gate, "LOCAL_OWNER_CONFIG_PATH", config_path):
+                self.assertFalse(daemon_gate._local_structure_owner_configured())
+                config_path.write_text(json.dumps({"structure_owner": "example:v2-seat"}), encoding="utf-8")
+                self.assertTrue(daemon_gate._local_structure_owner_configured())
+                config_path.write_text(json.dumps({"structure_owner": "invalid"}), encoding="utf-8")
+                with self.assertRaisesRegex(daemon_gate.GateError, "valid structure_owner"):
+                    daemon_gate._local_structure_owner_configured()
 
     def test_new_startup_write_is_detected(self) -> None:
         base = '''\
