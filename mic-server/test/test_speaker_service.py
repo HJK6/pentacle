@@ -30,6 +30,7 @@ def test_claim_opens_conversation_and_speak_journey(monkeypatch, service):
         case.tearDown()
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import threading
 import wave
@@ -249,20 +250,22 @@ def test_status_stays_responsive_during_inference(service):
     original = service.speaker.renderer.render
     def blocked(text, deadline):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(30)
         return original(text, deadline)
     cid = opened(service)
     service.speaker.renderer.render = blocked
     worker = threading.Thread(target=lambda: line(service,cid))
+    reader = ThreadPoolExecutor(max_workers=1)
     worker.start()
     try:
-        assert entered.wait(1)
-        started = time.monotonic()
-        assert service.status()['ready']
-        assert time.monotonic()-started < .1
+        assert entered.wait(30)
+        # Status answers while the render is provably still held.
+        assert reader.submit(service.status).result(timeout=10)['ready']
+        assert worker.is_alive() and not release.is_set()
     finally:
         release.set()
-        worker.join(2)
+        worker.join(30)
+        reader.shutdown(wait=True)
     assert not worker.is_alive()
 
 

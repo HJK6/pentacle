@@ -271,9 +271,10 @@ def test_bounded_run_kills_the_whole_process_group_on_timeout(tmp_path):
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
         bounded_run((sys.executable, "-c", script), capture_output=True, text=True, timeout=2)
-    assert time.monotonic() - started < 15
+    # Stuck detector at ten times the timeout: the TimeoutExpired and the reaped grandchild are the behavior.
+    assert time.monotonic() - started < 20
     pid = int(pidfile.read_text())
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)

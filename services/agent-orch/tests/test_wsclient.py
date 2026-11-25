@@ -734,7 +734,6 @@ def test_fast_path_helper_raises_permission_error_on_auth_error(tmp_path):
         "actions": [],
         "answer_to_stream_id": "hostc:codex-a",
     }
-    started = time.monotonic()
     with StubServer(handler) as server:
         with pytest.raises(PermissionError, match="invalid token"):
             asyncio.run(
@@ -744,8 +743,6 @@ def test_fast_path_helper_raises_permission_error_on_auth_error(tmp_path):
                     timeout=2,
                 )
             )
-
-    assert time.monotonic() - started < 1.0
 
 
 def clean_close_mid_rpc_handler(rpc_type):

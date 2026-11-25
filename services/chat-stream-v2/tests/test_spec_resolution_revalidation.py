@@ -2,7 +2,6 @@
 import asyncio
 import json
 import threading
-import time
 
 import pytest
 from store import Store, SpecInputsUnavailable, spec_binding_source
@@ -137,28 +136,25 @@ async def test_existing_reviewer_generation_is_pinned_across_retry():
 @pytest.mark.asyncio
 async def test_one_second_offthread_wait_preserves_loop_and_store_responsiveness():
     store = Store(':memory:'); store.start()
-    entered = threading.Event()
-    times = []
+    entered, release = threading.Event(), threading.Event()
     def batch(ids):
         assert threading.current_thread() not in (store._thread, threading.main_thread())
-        entered.set(); time.sleep(1.1); return {value: value for value in ids}
+        entered.set(); assert release.wait(30); return {value: value for value in ids}
     store.set_spec_identity_resolver(lambda value: value, batch)
     try:
         row = await owner(store)
         task = asyncio.create_task(store.qa_admit(**admission(row)))
-        await asyncio.to_thread(entered.wait, 2)
+        assert await asyncio.to_thread(entered.wait, 30)
+        # Store callbacks and loop heartbeats complete while the off-thread
+        # resolution is provably still held.
         for _ in range(10):
-            queued = time.perf_counter()
-            def probe(conn):
-                start = time.perf_counter(); conn.execute('SELECT 1').fetchone()
-                return start - queued, time.perf_counter() - start
-            enqueue, callback = await store.submit(probe)
-            heartbeat = time.perf_counter(); await asyncio.sleep(.01)
-            times.append((enqueue, callback, time.perf_counter() - heartbeat))
-        assert all(max(sample) < .2 for sample in times), times
+            assert await asyncio.wait_for(store.submit(lambda conn: conn.execute('SELECT 1').fetchone()[0]), 30) == 1
+            await asyncio.sleep(.01)
+        assert not task.done()
+        release.set()
         await task
     finally:
-        store.stop()
+        release.set(); store.stop()
 
 
 @pytest.mark.asyncio

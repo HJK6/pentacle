@@ -4,15 +4,16 @@ from __future__ import annotations
 from submission_store_stub import SubmissionReadStoreStub
 import asyncio
 import json
+import threading
 
 import pytest
 
+import server as server_module
 from server import Server
 
 
-# Fixed harness budget, deliberately stricter than the daemon keepalive
-# deadline so a synchronous stall is observable before it becomes a timeout.
-KEEPALIVE_PING_PONG_BUDGET_SECONDS = 0.05
+# Generous stuck detector for waits on expected state; never a speed budget.
+STUCK_SECONDS = 30
 STREAM_ID = "testhost:v2-loop"
 BACKFILL_REQUEST_ID = "loop-probe"
 EVENT_COUNT = 500
@@ -102,7 +103,7 @@ def test_history_page_wait_does_not_block_inventory_or_pong() -> None:
         })))
         ping = None
         try:
-            await asyncio.wait_for(page_waiting.wait(), 1)
+            await asyncio.wait_for(page_waiting.wait(), STUCK_SECONDS)
             await daemon.broadcast({'type': 'session.inventory', 'sessions': [{
                 'stream_id': 'testhost:v2-new', 'host': 'testhost',
                 'session_name': 'v2-new', 'bootstrap_state': 'ready',
@@ -110,10 +111,10 @@ def test_history_page_wait_does_not_block_inventory_or_pong() -> None:
             ping = asyncio.create_task(daemon._serve(socket, json.dumps({
                 'type': 'ping', 'request_id': 'control',
             })))
-            await asyncio.wait_for(asyncio.gather(ready_seen.wait(), pong_seen.wait()), 0.25)
+            await asyncio.wait_for(asyncio.gather(ready_seen.wait(), pong_seen.wait()), STUCK_SECONDS)
             assert not history.done(), 'control frames must precede history completion'
             release_page.set()
-            await asyncio.wait_for(history, 1)
+            await asyncio.wait_for(history, STUCK_SECONDS)
             await ping
             frames = [f for f in socket.frames if f.get('request_id') == 'history']
             assert [f['type'] for f in frames] == [
@@ -196,13 +197,13 @@ def test_blob_stream_stays_contiguous_when_broadcast_waits() -> None:
         writer = daemon._client_writer_tasks[socket]
         task = asyncio.create_task(daemon._serve(socket, json.dumps({'type': 'fetch_blob'})))
         try:
-            await asyncio.wait_for(paused.wait(), 1)
+            await asyncio.wait_for(paused.wait(), STUCK_SECONDS)
             await daemon.broadcast({'type': 'host.status', 'host': 'hosta'})
             for _ in range(5):
                 await asyncio.sleep(0)
             assert [f['type'] for f in socket.frames] == ['fetch_blob.chunk']
             resume.set()
-            await asyncio.wait_for(task, 1)
+            await asyncio.wait_for(task, STUCK_SECONDS)
             for _ in range(5):
                 await asyncio.sleep(0)
             assert [f['type'] for f in socket.frames] == [
@@ -239,7 +240,7 @@ def test_history_and_sustained_broadcasts_both_make_progress() -> None:
         writer = daemon._client_writer_tasks[socket]
         flood = asyncio.create_task(broadcast_until_done())
         try:
-            await asyncio.wait_for(daemon._serve(socket, json.dumps({'type': 'request_stream_events'})), 1)
+            await asyncio.wait_for(daemon._serve(socket, json.dumps({'type': 'request_stream_events'})), STUCK_SECONDS)
             history_frames = [f for f in socket.frames if f.get('request_id') == 'history']
             assert [f['index'] for f in history_frames[:-1]] == list(range(20))
             assert history_frames[-1]['type'] == 'request_stream_events.ok'
@@ -274,12 +275,12 @@ def test_cancelled_history_releases_writer_and_closes_producer() -> None:
         writer = daemon._client_writer_tasks[socket]
         task = asyncio.create_task(daemon._serve(socket, json.dumps({'type': 'request_stream_events'})))
         try:
-            await asyncio.wait_for(paused.wait(), 1)
+            await asyncio.wait_for(paused.wait(), STUCK_SECONDS)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             assert finalized.is_set()
             assert not daemon._client_send_locks[socket].locked()
-            await asyncio.wait_for(daemon._serve(socket, json.dumps({'type': 'ping', 'request_id': 'after-cancel'})), 1)
+            await asyncio.wait_for(daemon._serve(socket, json.dumps({'type': 'ping', 'request_id': 'after-cancel'})), STUCK_SECONDS)
             assert socket.frames[-1]['type'] == 'pong'
             assert not any(f['type'] == 'request_stream_events.ok' for f in socket.frames)
         finally:
@@ -330,20 +331,41 @@ def test_disconnected_history_stops_and_closes_producer(monkeypatch, disconnect)
     asyncio.run(run())
 
 
-def _run_backfill(store: _Store) -> tuple[list[dict], float]:
-    """Serve one whole-history request while probing ping/pong; return frames and worst latency."""
-    async def _go() -> tuple[list[dict], float]:
+def _run_backfill(store: _Store) -> tuple[list[dict], list[bool]]:
+    """Serve one whole-history request while probing ping/pong.
+
+    Return frames and, for each page assembly, whether a pong completed while
+    that assembly was still in flight.
+    """
+    assembling, answered = threading.Event(), threading.Event()
+    overlaps: list[bool] = []
+    real_assemble = server_module._assemble_event_frames
+
+    async def _go() -> tuple[list[dict], list[bool]]:
         daemon = _server(store)
-        loop = asyncio.get_running_loop()
+        loop_thread = threading.current_thread()
         stop = False
-        latencies: list[float] = []
+
+        def assemble(*args, **kwargs):
+            # On the loop thread no pong can run until this returns.
+            if threading.current_thread() is loop_thread:
+                overlaps.append(False)
+            else:
+                answered.clear(); assembling.set()
+                try:
+                    overlaps.append(answered.wait(STUCK_SECONDS))
+                finally:
+                    assembling.clear()
+            return real_assemble(*args, **kwargs)
+
+        server_module._assemble_event_frames = assemble
 
         async def ping_pong_probe() -> None:
             while not stop:
-                sent_at = loop.time()
                 await asyncio.sleep(0)
                 await daemon._on_ping({})
-                latencies.append(loop.time() - sent_at)
+                if assembling.is_set():
+                    answered.set()
 
         probe = asyncio.create_task(ping_pong_probe())
         # Let the probe establish its first pending ping before the backfill
@@ -367,21 +389,21 @@ def _run_backfill(store: _Store) -> tuple[list[dict], float]:
         await probe
         # Decode only after the probe stops so the harness's own JSON parsing
         # never counts against the daemon's loop budget.
-        return [_decode(frame) for frame in raw_frames], max(latencies, default=0.0)
+        return [_decode(frame) for frame in raw_frames], overlaps
 
-    return asyncio.run(_go())
+    try:
+        return asyncio.run(_go())
+    finally:
+        server_module._assemble_event_frames = real_assemble
 
 
 def test_large_backfill_keeps_ping_pong_inside_deadline() -> None:
     """A known ~18 MiB pane is delivered completely and leaves ping/pong runnable."""
     events = _events()
-    frames, max_latency = _run_backfill(_Store(events))
+    frames, overlaps = _run_backfill(_Store(events))
     # Payload first: a stream that failed early is fast for the wrong reason.
     _assert_complete_backfill(frames, events, request_id=BACKFILL_REQUEST_ID)
-    assert max_latency < KEEPALIVE_PING_PONG_BUDGET_SECONDS, (
-        f"backfill blocked ping/pong for {max_latency:.3f}s "
-        f"(budget {KEEPALIVE_PING_PONG_BUDGET_SECONDS:.3f}s)"
-    )
+    assert overlaps and all(overlaps), f"ping/pong did not run during page assembly: {overlaps}"
 
 
 def test_backfill_oracle_fails_on_handler_error() -> None:

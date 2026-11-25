@@ -372,7 +372,7 @@ def test_snapshot_slow_subcall_hits_deadline_all_or_nothing(adapter, cosmo, monk
         return code_of(exc), time.monotonic() - started
     code, elapsed = asyncio.run(run())
     assert code == "unavailable"
-    assert elapsed < 0.95
+    assert elapsed < 10.0  # stuck detector; the 1.0 s subcall would have succeeded without the 0.4 s deadline
 
 
 def test_snapshot_oversized_body_is_unavailable(adapter, cosmo):

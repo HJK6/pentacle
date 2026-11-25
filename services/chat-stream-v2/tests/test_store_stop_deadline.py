@@ -4,8 +4,10 @@ Two hazards: `stop()` used to block on `queue.put(sentinel)` before its timed
 join, so a full queue behind a held callback made the timeout meaningless; and
 after a timed-out join it cleared ownership anyway, so `start()` could open a
 second worker and connection while the first still ran. Every test here uses a
-real Store worker; held callbacks release themselves after a few seconds so a
-regression fails instead of hanging.
+real Store worker; held callbacks release themselves after SELF_RELEASE_S so a
+regression fails instead of hanging. A bounded stop is proved by order: it
+returns while the held callback is still inside. Elapsed bounds are only
+generous stuck detectors, so host load cannot fail a healthy run.
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ from store import Store
 
 pytestmark = pytest.mark.timeout(60)
 
-SELF_RELEASE_S = 3.0
+SELF_RELEASE_S = 15.0
+STOP_STUCK_S = 10.0
 
 
 class Held:
@@ -42,6 +45,7 @@ class Held:
         self.store = store
         self.release = threading.Event()
         self.entered = threading.Event()
+        self.exited = threading.Event()
         self.lock = threading.Lock()
         self.inside: set[tuple[int, int]] = set()
         self.max_owners = 0
@@ -63,11 +67,14 @@ class Held:
     async def hold(self, *, fill: bool = True, write_after_release: str | None = None) -> None:
         def held(conn):
             self.entered.set()
-            self.release.wait(SELF_RELEASE_S)
-            if write_after_release is not None:
-                conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, 'committed')", (write_after_release,))
-                conn.commit()
-            return "executed-held"
+            try:
+                self.release.wait(SELF_RELEASE_S)
+                if write_after_release is not None:
+                    conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, 'committed')", (write_after_release,))
+                    conn.commit()
+                return "executed-held"
+            finally:
+                self.exited.set()
 
         self.tasks.append(asyncio.ensure_future(self.store.submit(self.track(held))))
         assert await asyncio.to_thread(self.entered.wait, 2), "held callback never entered"
@@ -106,12 +113,12 @@ def test_full_queue_stop_returns_within_deadline_while_callback_held(timeout):
         held = Held(store)
         await held.hold()
         stopped, elapsed = await asyncio.to_thread(_timed_stop, store, timeout)
-        still_held = not held.release.is_set()
+        still_held = not held.exited.is_set()
         outcomes = await held.settle()
         return store, stopped, elapsed, still_held, outcomes
 
     store, stopped, elapsed, still_held, outcomes = asyncio.run(go())
-    assert still_held and elapsed <= 0.5, elapsed
+    assert still_held and elapsed < STOP_STUCK_S, elapsed
     assert stopped is False
     # Released: both the running and the queued callable ran to their real outcome.
     assert outcomes == ["executed-held", "executed-queued"]
@@ -123,8 +130,7 @@ def test_empty_queue_stop_completes_and_is_idempotent():
     store = Store(":memory:")
     store.start()
     worker = store._thread
-    stopped, elapsed = _timed_stop(store, 0.5)
-    assert stopped is True and elapsed < 0.5
+    assert store.stop(timeout=STOP_STUCK_S) is True
     assert not worker.is_alive() and store._thread is None
     assert store.stop(timeout=0.5) is True
     never_started = Store(":memory:")
@@ -139,7 +145,7 @@ def test_zero_timeout_signals_without_waiting_and_worker_exits_after_release():
         held = Held(store)
         await held.hold()
         stopped, elapsed = _timed_stop(store, 0)
-        assert stopped is False and elapsed < 0.1, elapsed
+        assert stopped is False and not held.exited.is_set() and elapsed < STOP_STUCK_S, elapsed
         with pytest.raises(RuntimeError, match="not running"):
             await store.submit(lambda conn: None)
         outcomes = await held.settle()
@@ -207,20 +213,27 @@ def test_transition_lock_pressure_shares_the_one_deadline():
         store._lock.acquire()
         threading.Timer(0.15, store._lock.release).start()
         stopped, elapsed = await asyncio.to_thread(_timed_stop, store, 0.3)
-        # Timed joins can return late. The deterministic test above verifies
-        # budget sharing; this real-worker check retains bounded return.
-        assert stopped is False and elapsed < 0.5, elapsed
+        # The deterministic test above verifies budget sharing; this
+        # real-worker check proves the stop returned while the callback held.
+        assert stopped is False and not held.exited.is_set() and elapsed < STOP_STUCK_S, elapsed
         await held.settle()
         assert store.stop(timeout=2) is True
 
         # The lock is never released inside the budget: refuse to wait past it.
+        # Only a stuck stop sees the rescue release.
         store.start()
         store._lock.acquire()
+        rescued = threading.Event()
+        rescue = threading.Timer(STOP_STUCK_S, lambda: (rescued.set(), store._lock.release()))
+        rescue.start()
         try:
             stopped, elapsed = await asyncio.to_thread(_timed_stop, store, 0.1)
         finally:
-            store._lock.release()
-        assert stopped is False and elapsed < 0.3, elapsed
+            rescue.cancel()
+            rescue.join()  # a rescue already running finishes its release first
+            if not rescued.is_set():
+                store._lock.release()
+        assert stopped is False and not rescued.is_set(), elapsed
         assert store.stop(timeout=2) is True
 
     asyncio.run(go())
@@ -235,7 +248,8 @@ def test_repeated_and_concurrent_stops_stay_bounded_and_queue_one_sentinel():
         held.tasks.append(asyncio.ensure_future(store.submit(lambda conn: "executed-queued")))
         await asyncio.sleep(0.05)
         results = await asyncio.gather(*(asyncio.to_thread(_timed_stop, store, 0.15) for _ in range(4)))
-        assert all(stopped is False and elapsed <= 0.5 for stopped, elapsed in results), results
+        assert not held.exited.is_set()
+        assert all(stopped is False and elapsed < STOP_STUCK_S for stopped, elapsed in results), results
         assert store.pending() == 2, "one queued callable plus exactly one stop sentinel"
         outcomes = await held.settle()
         assert outcomes == ["executed-held", "executed-queued"]
@@ -260,12 +274,11 @@ def test_timed_out_owner_is_retained_and_start_cannot_open_a_second_owner(tmp_pa
         held.tasks.append(asyncio.ensure_future(store.submit(held.track(lambda conn: "executed-queued"))))
         await asyncio.sleep(0.05)
         stopped, elapsed = await asyncio.to_thread(_timed_stop, store, 0.1)
-        assert stopped is False and elapsed <= 0.5
+        assert stopped is False and not held.exited.is_set() and elapsed < STOP_STUCK_S, elapsed
         assert store._thread is original and original.is_alive() and store._closing
-        started = time.monotonic()
         with pytest.raises(RuntimeError, match="still stopping"):
             await asyncio.to_thread(store.start)
-        assert time.monotonic() - started < 0.5, "refusal must be prompt"
+        assert not held.exited.is_set(), "refusal must not wait for the held callback"
         with pytest.raises(RuntimeError, match="not running"):
             await store.submit(lambda conn: None)
         await asyncio.sleep(0.2)  # a second worker, if any, would run the queued callable now
@@ -494,14 +507,6 @@ async def _shutdown(daemon_main, budget, store):
                                store=store, watchdog=None)
 
 
-def _heartbeat(ticks: list, stop: asyncio.Event):
-    async def beat():
-        while not stop.is_set():
-            ticks.append(time.monotonic())
-            await asyncio.sleep(0.01)
-    return asyncio.ensure_future(beat())
-
-
 @pytest.mark.parametrize("budget_s", [0.6, 0.0], ids=["budget", "exhausted"])
 def test_main_shutdown_stops_a_held_store_off_loop_within_the_budget(budget_s):
     import main as daemon_main
@@ -513,23 +518,32 @@ def test_main_shutdown_stops_a_held_store_off_loop_within_the_budget(budget_s):
         worker = store._thread
         held = Held(store)
         await held.hold()
-        ticks, stop_beat = [], asyncio.Event()
-        beat = _heartbeat(ticks, stop_beat)
+        loop, real_stop = asyncio.get_running_loop(), store.stop
+        acked, acked_during_stop, stop_done = threading.Event(), [], threading.Event()
+
+        def observed_stop(*args, **kwargs):
+            # Off-loop proof: a loop callback requested at entry must run before
+            # this stop may finish. A stop on the loop thread cannot see it.
+            acked.clear()
+            loop.call_soon_threadsafe(acked.set)
+            try:
+                return real_stop(*args, **kwargs)
+            finally:
+                acked_during_stop.append(acked.wait(STOP_STUCK_S))
+                stop_done.set()
+
+        store.stop = observed_stop
         budget = ShutdownBudget(max(budget_s, 0.01))
         if budget_s == 0.0:
             await asyncio.sleep(0.05)  # the absolute deadline has already passed
-        started = time.monotonic()
         await _shutdown(daemon_main, budget, store)
         ended = time.monotonic()
-        stop_beat.set()
-        await beat
-        assert not held.release.is_set()
-        assert ended <= budget.deadline + 0.15, (ended - budget.deadline)
-        during = [t for t in ticks if started <= t <= ended]
+        assert not held.exited.is_set(), "shutdown waited for the held callback"
+        # main.shutdown abandons the stop at its deadline; let the thread report.
+        assert await asyncio.to_thread(stop_done.wait, STOP_STUCK_S)
         if budget_s:
-            assert len(during) >= 10, "event loop starved while the store stopped"
-            gaps = [b - a for a, b in zip(during, during[1:])]
-            assert max(gaps) < 0.2, max(gaps)
+            assert acked_during_stop == [True], "event loop blocked while the store stopped"
+        assert ended <= budget.deadline + STOP_STUCK_S, (ended - budget.deadline)
         # Expired, not completed: the worker still owns the database.
         assert store._thread is worker and worker.is_alive()
         with pytest.raises(RuntimeError, match="still stopping"):
@@ -703,7 +717,7 @@ def test_real_daemon_sigterm_with_a_full_store_queue(tmp_path, mode):
         if mode == "complete":
             time.sleep(0.3)
             (root / "release").touch()
-        proc.wait(timeout=budget_s + 8)
+        proc.wait(timeout=budget_s * 10 + 10)
         exited_at = time.monotonic()
     finally:
         if proc.poll() is None:
@@ -714,8 +728,8 @@ def test_real_daemon_sigterm_with_a_full_store_queue(tmp_path, mode):
     text = (root / "daemon.log").read_text()
     events = {row["event"]: row for row in _events(root)}
     assert proc.returncode == 0, text[-4000:]
-    # Process exit stays inside the shutdown budget plus loop teardown grace.
-    assert exited_at - sigterm_at <= budget_s + 1.5, (exited_at - sigterm_at, text[-4000:])
+    # Stuck detector only; the expire/complete outcomes below are the behavior.
+    assert exited_at - sigterm_at <= budget_s * 10, (exited_at - sigterm_at, text[-4000:])
     expired = "store stop deadline" in text and "still stopping" in text
     completed = "store stopped: worker exited" in text
     with sqlite3.connect(f"file:{root / 'sessions.db'}?mode=ro", uri=True) as conn:

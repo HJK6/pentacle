@@ -352,6 +352,8 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", deadline_s)
     brief = "[example-service-notice:deadline]\nfinal read remains bounded"
 
+    order: list[str] = []
+
     class PendingProof:
         def __init__(self) -> None:
             self.calls: list[tuple[float, float]] = []
@@ -359,9 +361,10 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
         async def lookup(self, stream_id: str, *, expected_text: str,
                          watermark: object, timeout_s: float) -> EventProof:
             self.calls.append((time.monotonic(), timeout_s))
+            order.append("store_lookup")
             return EventProof("pending", stream_id, 0)
 
-    async def run() -> tuple[tuple[str, str, str], float, list[tuple[float, float]], float]:
+    async def run() -> tuple[tuple[str, str, str], list[tuple[float, float]], float]:
         db = Store(":memory:")
         db.start()
         try:
@@ -370,31 +373,40 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
             sessions = Sessions(db, tmux=tmux, local_host="hosta")
             ctl = SpawnCtl(db, sessions, tmux=tmux, submission_proof=proof)
             probe_started: list[float] = []
+            probe_release = asyncio.Event()
 
             async def slow_transcript(*_args: object, **_kwargs: object) -> str:
                 probe_started.append(time.monotonic())
-                await asyncio.sleep(1.0)
+                try:
+                    await probe_release.wait()  # released only after settlement returns
+                    order.append("probe_completed")
+                except asyncio.CancelledError:
+                    order.append("probe_cancelled")
+                    raise
                 return "no_transcript"
 
             ctl._transcript_status = slow_transcript  # type: ignore[method-assign]
-            started = time.monotonic()
-            result = await ctl._settle_adoption(
+            # Stuck detector only: the absolute deadline is proven by order below.
+            result = await asyncio.wait_for(ctl._settle_adoption(
                 "hostb", "deadline", brief, tmux,
                 delivery_receipt={
                     "proof_watermark": 0,
                     "proof_watermark_state": "reachable",
                 },
-            )
-            return result, time.monotonic() - started, proof.calls, probe_started[0]
+            ), timeout=10.0)
+            probe_release.set()
+            return result, proof.calls, probe_started[0]
         finally:
             db.stop()
 
-    result, elapsed, calls, probe_started = asyncio.run(run())
+    result, calls, probe_started = asyncio.run(run())
     assert result[:2] == ("failed", "agent_never_started")
+    # The deadline cancelled the slow probe before the final Store read; an
+    # abandoned or awaited probe cannot produce this order.
+    assert order == ["store_lookup", "probe_cancelled", "store_lookup"]
     assert len(calls) == 2
     assert calls[1][0] >= probe_started
     assert calls[1][1] > 0
-    assert elapsed < deadline_s + 0.25
 
 
 def test_final_store_slice_survives_advisory_probe_scheduler_overrun(

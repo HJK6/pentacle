@@ -539,29 +539,28 @@ def test_closed_reopened_generation_does_not_rearm_historical_error():
 def test_existing_reconciler_cadence_never_dispatches_before_deadline():
     from reconciler import SessionReconciler, ReconcileConfig
     async def run():
-        h=Harness(); task=None; pasted=[]
+        h=Harness(); task=None; pasted=[]; ticks=[]; dispatched=asyncio.Event()
         try:
             await h.open(); await h.error('one')
-            start=time.monotonic(); baseline=h.now
-            # Scale sixty model seconds to 60ms, retaining the real asyncio
-            # reconciler cadence/wait. Reconciliation work is independently
-            # covered by its own suite; no second scheduler is introduced.
-            h.controller.clock=lambda:baseline+(time.monotonic()-start)*1000
+            # The real asyncio reconciler cadence drives the controller; each
+            # stubbed reconcile pass advances the model clock by one modelled
+            # interval, so dispatch is checked against model ticks, not wall time.
+            step=7
             original=h.tmux.paste
             async def paste(name,text):
-                pasted.append(h.controller.clock()); await original(name,text)
+                pasted.append((h.now,len(ticks))); dispatched.set(); await original(name,text)
             h.tmux.paste=paste
             loop=SessionReconciler(h.sessions,h.hosts,comms=h.comms,
                 config=ReconcileConfig(interval_s=.02),on_reconcile_tick=h.controller.tick)
-            async def reconcile():pass
+            async def reconcile():
+                h.now+=step; ticks.append(h.now)
             loop.reconcile_once=reconcile
-            task=asyncio.create_task(loop.run_forever())
             deadline=(await h.state())['next_retry_at']
-            while not pasted:
-                await asyncio.sleep(.005)
-                assert time.monotonic()-start<2
-            assert pasted[0]>=deadline
-            assert pasted[0]-deadline<150 # one cadence plus bounded input work
+            task=asyncio.create_task(loop.run_forever())
+            await asyncio.wait_for(dispatched.wait(),10) # stuck detector only
+            assert pasted[0][0]>=deadline
+            first_due=next(i for i,at in enumerate(ticks,1) if at>=deadline)
+            assert pasted[0]==(ticks[first_due-1],first_due) # first eligible model tick
         finally:
             if task:task.cancel();await asyncio.gather(task,return_exceptions=True)
             h.close()

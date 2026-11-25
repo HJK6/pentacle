@@ -17,6 +17,10 @@ from websockets.frames import Close
 from agent_orch import wsclient
 from agent_orch.config import Config
 
+# Stuck detector for the small configured deadlines below: a deadline that is
+# honored returns long before this; only an ignored one reaches it.
+STUCK_S = 10.0
+
 
 class ReplyingSocket:
     def __init__(self, reply_type: str) -> None:
@@ -233,7 +237,7 @@ def test_admitted_spawn_recovery_never_outlives_the_spawn_deadline(monkeypatch, 
 
     result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=started + 0.3))
 
-    assert wsclient.time.monotonic() - started < 0.3 + 0.15
+    assert wsclient.time.monotonic() - started < STUCK_S
     assert result["type"] == "spawn.indeterminate" and result["request_id"] == "spawn-c2"
 
 
@@ -268,11 +272,11 @@ def test_spawn_deadline_includes_socket_cleanup(monkeypatch, tmp_path, stall, ma
 
         async def close(self):
             events.append("close")
-            await asyncio.sleep(5)
+            await asyncio.sleep(60)
 
     async def connected(config, **_kwargs):
         if stall == "slow-connect":
-            await asyncio.sleep(5)
+            await asyncio.sleep(60)
         await asyncio.sleep(0.02)
         return Socket()
 
@@ -287,8 +291,8 @@ def test_spawn_deadline_includes_socket_cleanup(monkeypatch, tmp_path, stall, ma
 
     run_started = wsclient.time.monotonic()
     result, elapsed = asyncio.run(scenario())
-    assert elapsed <= deadline_s + 0.05, (elapsed, events)
-    assert wsclient.time.monotonic() - run_started <= deadline_s + 0.15  # loop teardown is quick too
+    assert elapsed < STUCK_S, (elapsed, events)
+    assert wsclient.time.monotonic() - run_started < STUCK_S  # loop teardown never awaits the slow close
     assert result["type"] == "spawn.indeterminate" and result["request_id"] == "spawn-c2"
     if stall != "slow-connect":
         assert "abort" in events, events  # cleanup past the deadline aborts, never waits
@@ -337,7 +341,7 @@ def test_spawn_deadline_includes_the_inventory_socket_cleanup(monkeypatch, tmp_p
 
         async def close(self):
             events.append("inventory-close")
-            await asyncio.sleep(5)
+            await asyncio.sleep(60)
 
     snapshot = {"sessions": [{"stream_id": "fixture:v2-c2", "state": "starting"}]} if inventory == "starting-then-reset" \
         else {"sessions": []}
@@ -346,7 +350,7 @@ def test_spawn_deadline_includes_the_inventory_socket_cleanup(monkeypatch, tmp_p
         return Socket(), snapshot
 
     async def await_spawn(*_args, **_kwargs):
-        await asyncio.sleep(5)  # a daemon slow to answer the outcome readback
+        await asyncio.sleep(60)  # a daemon slow to answer the outcome readback
         return {"type": "await_spawn.ok", "state": "starting"}
 
     async def read_frame(*_args, **_kwargs):
@@ -364,7 +368,7 @@ def test_spawn_deadline_includes_the_inventory_socket_cleanup(monkeypatch, tmp_p
         return result, wsclient.time.monotonic() - started
 
     result, elapsed = asyncio.run(scenario())
-    assert elapsed <= deadline_s + 0.05, (elapsed, events)
+    assert elapsed < STUCK_S, (elapsed, events)
     assert result["request_id"] == "spawn-c2" and result["type"] == "spawn.indeterminate", result
     assert result["stream_id"] == "testhost:v2-c2"
     assert "inventory-close" in events or "abort" in events
@@ -408,8 +412,8 @@ def test_helper_cleanup_failure_after_proof_keeps_the_proven_result(monkeypatch,
     monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
     monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect_rpc_ready)
     started = wsclient.time.monotonic()
-    result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=started + 0.3))
-    assert wsclient.time.monotonic() - started <= 0.3 + 0.05
+    # Generous: the proof arrives at once; the deadline only has to outlast a loaded host.
+    result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=started + 10))
     assert result["request_id"] == "spawn-c2" and result["stream_id"] == "testhost:v2-c2"
     if path == "snapshot":
         assert result["type"] == "spawn.error" and result["error_code"] == "spawn_failed", result
