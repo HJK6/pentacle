@@ -459,3 +459,59 @@ def test_qa_precedence_checks_lifecycle_birth(tmp_path):
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def _copy_to_archive(tmp_path, row):
+    with sqlite3.connect(tmp_path / "sessions_archive.db") as c:
+        c.execute(SESSION_EVENT_TAIL_DDL)
+        c.execute("INSERT INTO session_event_tail (" + ",".join(row) + ") VALUES (" +
+                  ",".join("?" for _ in row) + ")", tuple(row.values()))
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_empty_identity_event_in_both_stores_is_one_match(copies, tmp_path):
+    """Retention copies before it deletes: one physical event may be in both files."""
+    async def run():
+        store, key, proof = await setup_receipt(tmp_path)
+        try:
+            event = {"kind": "USER", "provider": "claude", "stream_id": TARGET, "text": BODY,
+                     "timestamp": EVENT_TIME, "request_id": key, "receipt_id": "synthetic-receipt"}
+            await store.append_session_event(TARGET, event, identity=None, limit=100)
+            row = await store.submit(lambda c: dict(c.execute("SELECT * FROM session_event_tail").fetchone()))
+            assert row["identity"] is None
+            if copies == 2:
+                _copy_to_archive(tmp_path, row)
+            assert (await read_receipt(store, key, proof))["state"] == "landed"
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("difference", ["event_id", "payload"])
+def test_empty_identity_different_events_stay_ambiguous(difference, tmp_path):
+    async def run():
+        store, key, proof = await setup_receipt(tmp_path)
+        try:
+            event = {"kind": "USER", "provider": "claude", "stream_id": TARGET, "text": BODY,
+                     "timestamp": EVENT_TIME, "request_id": key, "receipt_id": "synthetic-receipt"}
+            await store.append_session_event(TARGET, event, identity=None, limit=100)
+            row = await store.submit(lambda c: dict(c.execute("SELECT * FROM session_event_tail").fetchone()))
+            other = dict(row)
+            if difference == "event_id":
+                other["event_id"] += 100
+                other["event_key"] += "-other"
+            else:
+                other["event_json"] = json.dumps({**event, "attachment_count": 0})
+            _copy_to_archive(tmp_path, other)
+            receipt = await read_receipt(store, key, proof)
+            assert receipt["state"] == "accepted"
+            rows = [{**row, "proof_store": "hot"}, {**other, "proof_store": "archive"}]
+            stored = await store.submit(lambda c: dict(c.execute(
+                "SELECT * FROM v2_send_receipts WHERE request_id=?", (key,)).fetchone()))
+            claim = receipt_proof.epoch(CLAIM)
+            digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
+            assert receipt_proof.decide(rows, stored, BIRTH, claim, digest) == (
+                False, "ambiguous_identities")
+        finally:
+            store.stop()
+    asyncio.run(run())
