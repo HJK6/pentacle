@@ -57,7 +57,9 @@ def test_codex_resume_refuses_changed_identity_after_lookup(tmp_path, monkeypatc
 
             async def changed(host, name):
                 assert (host, name) == (HOST, NAME)
-                return {**prior, "observer_binding": {}}
+                binding = prior["observer_binding"]
+                transcript = {**binding["transcript"], "session_id": "00000000-0000-4000-8000-000000000002"}
+                return {**prior, "observer_binding": {**binding, "transcript": transcript}}
 
             monkeypatch.setattr(store, "fetch_session", changed)
             tmux = ResumeTmux()
