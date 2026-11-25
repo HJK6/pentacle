@@ -62,7 +62,9 @@ from _shared.report_payload_v1 import (  # noqa: E402
     PLACEHOLDER_CODES,
     REPORT_PAYLOAD_FIELDS,
     SchemaError,
+    is_advisor_rule_report,
     unknown_report_message_violations,
+    validate_advisor_rule_envelope,
     validate as validate_report_payload,
 )
 from v2_runtime import env_number, iso_now
@@ -500,14 +502,16 @@ class Ledger:
         )
 
     async def report(self, msg: dict[str, Any], *,
-                     before_close: Callable[[dict[str, Any]], Awaitable[None]] | None = None) -> dict[str, Any]:
+                     before_close: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+                     advisor_binding_conn=None) -> dict[str, Any]:
         """`report`, with `--terminate` semantics.
 
         B9 atomicity: the row is durable BEFORE any close processing runs, so a
         `report --terminate` whose close fails (or whose daemon dies mid-close)
         still leaves the report retrievable. The close can be retried; a lost
         report cannot be reconstructed."""
-        row = await self.ingest(msg, announce=before_close is None)
+        kwargs = {"advisor_binding_conn": advisor_binding_conn} if advisor_binding_conn is not None else {}
+        row = await self.ingest(msg, announce=before_close is None, **kwargs)
         notice_delivery = row.pop("_notice_delivery", None)
         reply: dict[str, Any] = {
             "type": "report.ok",
@@ -685,9 +689,15 @@ class Ledger:
             "close_error": "operator_confirm_required_for_top_level_seat",
         }
 
-    async def ingest(self, msg: dict[str, Any], *, announce: bool = True) -> dict[str, Any]:
+    async def ingest(self, msg: dict[str, Any], *, announce: bool = True,
+                     advisor_binding_conn=None) -> dict[str, Any]:
         """Validate, persist, announce, settle awaiters. Returns the stored row."""
-        report_id = str(msg.get("report_id") or "").strip() or uuid.uuid4().hex
+        advisor_variant = is_advisor_rule_report(msg)
+        report_id = msg.get("report_id") if advisor_variant else str(msg.get("report_id") or "").strip() or uuid.uuid4().hex
+        try:
+            validate_advisor_rule_envelope(msg)
+        except SchemaError as exc:
+            raise self._error(exc.code, str(exc), report_id if isinstance(report_id, str) else "") from exc
         envelope_violations = unknown_report_message_violations(msg)
         if envelope_violations:
             # pop2: an unknown-envelope-field rejection of a TERMINAL report (the
@@ -766,16 +776,19 @@ class Ledger:
             # finished seat leaves a durable completion signal the backlog sweep
             # can reap. (Attribution is already validated above; the helper
             # re-checks it, which is harmless.)
-            await self._maybe_record_terminal_report_rejection(msg, str(exc))
+            if exc.code != "advisor_rule_invalid":
+                await self._maybe_record_terminal_report_rejection(msg, str(exc))
             raise self._error(exc.code, str(exc), report_id, schema_violations=exc.violations) from exc
 
         claim_verified, claim_mismatch = await self.verify_ac_claim(validated.ac_claim)
         auth = msg.get("_auth_context") or {}
         generation = auth.get("session_generation") if auth.get("token_verified") and auth.get("stream_id") == from_stream_id else None
+        if advisor_variant and (not generation or advisor_binding_conn is None):
+            raise self._error("advisor_rule_advisor_unverified", "verified retained advisor required", report_id)
         verdict = bool(validated.qa_verdict and qa_grade and generation)
         item_claim = validated.status == "done" and not verdict and validated.completion_kind != "seat_only"
         checkpoint = None
-        if validated.completion_kind != "seat_only":
+        if validated.completion_kind != "seat_only" and not advisor_variant:
             checkpoint = await self._owner_checkpoint(msg, report_id, from_stream_id, str(validated.status), item_claim=item_claim)
         execution_owner = checkpoint.pop("_execution_owner") if checkpoint else False
         if (validated.completion_kind == "implementation_ready" and execution_owner
@@ -855,6 +868,8 @@ class Ledger:
                 put_kwargs["announce"] = False
             if validated.completion_kind == "implementation_ready":
                 put_kwargs["qa_attestation_mode"] = self.qa_attestation_mode
+            if advisor_variant:
+                put_kwargs.update(advisor_actor=(from_stream_id, generation), advisor_binding_conn=advisor_binding_conn)
             row = await self.store.put_report(
                 report_fields,
                 routing_snapshot=routing_snapshot,
@@ -874,11 +889,16 @@ class Ledger:
             return row, inserted
 
         from work_report_freshness import ReportStatusRefusal
+        from store_host_transfer import TransferError
         try:
             # Disconnect may cancel the report request after the Store commits.
             # Finish its roster projection before propagating cancellation;
             # notices, pane delivery and report-triggered close stay outside.
             row, inserted = await _finish_despite_cancel(persist_and_project())
+        except TransferError as exc:
+            if advisor_variant and exc.code in {"authority_retired", "authority_prepared"}:
+                raise self._error("advisor_rule_advisor_unverified", "live retained advisor required", report_id) from exc
+            raise
         except ReportStatusRefusal as exc:
             command = f'agent-orch report --msg-id {raw_msg_id} --status done --result "$(cat report.json)"'
             raise self._error(exc.code, f"{exc} Use {command}", report_id,

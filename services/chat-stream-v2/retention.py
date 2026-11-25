@@ -65,7 +65,18 @@ class RetentionError(Exception):
 RECEIPT_TABLE = "v2_send_receipts"
 ROUTE_TABLE = "v2_assistant_composite_routes"
 HISTORY_TABLES = (RECEIPT_TABLE, ROUTE_TABLE)
-_ROUTE_BATCH_COLUMNS = (("batched_into_dispatch_id", "TEXT"), ("answered_by_event_id", "INTEGER"))
+ROUTE_ADDITIVE_COLUMNS = (
+    ("batched_into_dispatch_id", "TEXT"),
+    ("answered_by_event_id", "INTEGER"),
+    ("operator_origin", "TEXT"),
+)
+
+
+def _missing_route_columns(actual, expected):
+    names = {column[0] for column in actual}
+    missing = [(name, ddl) for name, ddl in ROUTE_ADDITIVE_COLUMNS if name not in names]
+    # ALTER TABLE appends. The migration must produce the exact column order.
+    return missing if actual + [(name, ddl, 0, None, 0) for name, ddl in missing] == expected else []
 HISTORY_MAX_ROWS = 500
 HISTORY_MAX_BYTES = 1024 * 1024
 HISTORY_PASS_ROWS = 2000
@@ -186,13 +197,8 @@ def _archive_schema(conn, archive, *, initialize: bool, pair_id: str, migrate_ro
             archive.execute(ddl)
         actual = [tuple(r)[1:] for r in archive.execute(f'PRAGMA table_info("{table}")')]
         if migrate_route_batch and table == ROUTE_TABLE and actual != expected:
-            additions = _ROUTE_BATCH_COLUMNS
-            names = {column[0] for column in actual}
-            missing = [(name, ddl) for name, ddl in additions if name not in names]
-            missing_names = {name for name, _ in missing}
-            # Only the exact known nullable batch-column delta is migratable.
-            if (missing and actual == [column for column in expected if column[0] not in missing_names]
-                    and all((name, ddl, 0, None, 0) in expected for name, ddl in missing)):
+            missing = _missing_route_columns(actual, expected)
+            if missing:
                 for name, ddl in missing:
                     archive.execute(f'ALTER TABLE "{table}" ADD COLUMN {name} {ddl}')
                 actual = [tuple(r)[1:] for r in archive.execute(f'PRAGMA table_info("{table}")')]
@@ -240,12 +246,8 @@ def migrate_route_batch_archive(conn) -> None:
     try:
         expected = [tuple(column)[1:] for column in conn.execute(f'PRAGMA table_info("{ROUTE_TABLE}")')]
         actual = [tuple(column)[1:] for column in archive.execute(f'PRAGMA table_info("{ROUTE_TABLE}")')]
-        names = {column[0] for column in actual}
-        missing = [(name, ddl) for name, ddl in _ROUTE_BATCH_COLUMNS if name not in names]
-        missing_names = {name for name, _ in missing}
-        migratable = (missing and actual == [column for column in expected if column[0] not in missing_names]
-                      and all((name, ddl, 0, None, 0) in expected for name, ddl in missing))
-        if actual != expected and not migratable:
+        missing = _missing_route_columns(actual, expected)
+        if actual != expected and not missing:
             return  # Other schemas retain the existing strict read-time refusal.
         indexed = archive.execute("SELECT 1 FROM sqlite_master WHERE type='index' "
                                   "AND name='idx_archive_receipt_proof_wire'").fetchone()

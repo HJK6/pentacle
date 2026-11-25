@@ -8,6 +8,7 @@ Store.submit worker boundary through the composed façade.
 from __future__ import annotations
 
 from retention import history_query, next_receipt_rowid
+from _shared.advisor_rule import OPERATOR_ORIGIN
 
 import asyncio
 import hashlib
@@ -15,7 +16,7 @@ import json
 import math
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Callable
 
 from store_specs import _row, _session_row
 from send_metadata import normalize_send_meta
@@ -1170,6 +1171,7 @@ class _RoutingStoreMixin:
         binding_env: dict[str, str] | None = None,
         voice_answers: dict[str, Any] | None = None,
         expected_origin_generation: str | None = None,
+        operator_admission: Callable[[], str | None] | None = None,
     ) -> dict[str, Any]:
         """Atomically append the visible USER event and its routing receipt.
 
@@ -1213,6 +1215,14 @@ class _RoutingStoreMixin:
         host, separator, session_name = stream_id.partition(":")
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
+
+        def operator_origin():
+            if operator_admission is None or desk_dispatch:
+                return None
+            principal = operator_admission()
+            if not principal or principal != actor_stream_id:
+                raise ValueError("authentication_required")
+            return OPERATOR_ORIGIN
 
         def _ensure_receipt(conn: sqlite3.Connection, stamp: str, frozen_meta: dict | None = None) -> str:
             # The canonical USER admission is landed even while its answer is
@@ -1285,6 +1295,7 @@ class _RoutingStoreMixin:
                         raise ValueError("assistant_request_owner_conflict")
                     if record["payload_digest"] != digest:
                         raise ValueError("assistant_input_idempotency_conflict")
+                    operator_origin()
                     prior_payload = json.loads(record["route_json"] or "{}")
                     frozen_meta = prior_payload.get("input_meta")
                     if frozen_meta is None:
@@ -1383,14 +1394,14 @@ class _RoutingStoreMixin:
                     """INSERT INTO v2_assistant_composite_routes(
                         route_id,stream_id,input_identity,payload_digest,input_request_id,event_id,body,
                         attachments_json,reply_to_message_id,reply_to_question_id,actor_stream_id,
-                        routing_state,delivery_state,route_json,created_at,updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        routing_state,delivery_state,route_json,created_at,updated_at,operator_origin
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         route_id, stream_id, input_identity, digest, input_request_id, event_id, body,
                         canonical_attachments, reply_to_message_id, reply_to_question_id, actor_stream_id,
                         "queued", None,
                         json.dumps(admission_payload, sort_keys=True, ensure_ascii=False) if admission_payload else None,
-                        timestamp, timestamp,
+                        timestamp, timestamp, operator_origin(),
                     ),
                 )
                 receipt_id = _ensure_receipt(conn, timestamp) if direct_primary else None

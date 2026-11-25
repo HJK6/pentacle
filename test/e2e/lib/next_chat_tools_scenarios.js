@@ -61,25 +61,27 @@ async function enter(ctx, width) {
   await wait(ctx, `!!${query(rail)} && [...window.PentacleChatStore.getState().sessions].some(s=>s.stream_id==='local:${A}')`, 'fixture inventory loaded');
 }
 
-const workspaceKeys = `key => key.startsWith('pentacle.next.') || key === 'pentacle.workspace.v1'`;
+const workspaceKey = 'pentacle.workspace.v1';
+const nextKeys = `key => key.startsWith('pentacle.next.')`;
+const nextStorage = `Object.fromEntries(Object.keys(localStorage).filter(${nextKeys}).sort()
+  .map(key=>[key,localStorage.getItem(key)]))`;
 async function saveFixtureBaseline(ctx) {
   const {session:s} = ctx;
   return {
     viewport: await readViewport(s),
-    ...await s.eval(`(() => {
-      const keys = Object.keys(localStorage).filter(${workspaceKeys}).sort();
-      return { storage: Object.fromEntries(keys.map(k=>[k,localStorage.getItem(k)])),
+    ...await s.eval(`({ storage: ${nextStorage}, workspace: localStorage.getItem('${workspaceKey}'),
         dpr: devicePixelRatio, reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
-        dark: matchMedia('(prefers-color-scheme: dark)').matches };
-    })()`),
+        dark: matchMedia('(prefers-color-scheme: dark)').matches })`),
   };
 }
 async function restoreFixtureBaseline(ctx, baseline) {
   const {session:s} = ctx;
   const snapshot=JSON.stringify(baseline.storage);
+  // Classic Web reads the saved workspace at startup.
   await s.eval(`(() => {
-    for (const key of Object.keys(localStorage).filter(${workspaceKeys})) localStorage.removeItem(key);
-    for (const [key,value] of Object.entries(${snapshot})) localStorage.setItem(key,value);
+    const workspace = ${JSON.stringify(baseline.workspace)};
+    if (workspace === null) localStorage.removeItem('${workspaceKey}');
+    else localStorage.setItem('${workspaceKey}', workspace);
     return true;
   })()`);
   await s.send('Emulation.setEmulatedMedia',{media:'',features:[]});
@@ -97,6 +99,12 @@ async function restoreFixtureBaseline(ctx, baseline) {
   await s.send('Emulation.clearDeviceMetricsOverride');
   await s.send('Page.navigate',{url:ctx.url});
   await wait(ctx,"document.readyState === 'complete' && !!document.getElementById('session-list') && !document.querySelector('.next-app')",'old web layout restored');
+  // The outgoing Next page can write seen marks when reset inventory arrives.
+  await s.eval(`(() => {
+    for (const key of Object.keys(localStorage).filter(${nextKeys})) localStorage.removeItem(key);
+    for (const [key,value] of Object.entries(${snapshot})) localStorage.setItem(key,value);
+    return true;
+  })()`);
   try {
     await clearAndSettle(s,baseline.viewport,{timeoutMs:2000});
   } catch (error) {
@@ -108,13 +116,12 @@ async function restoreFixtureBaseline(ctx, baseline) {
   const {width,height}=baseline.viewport;
   await wait(ctx,`innerWidth===${width} && innerHeight===${height}
     && devicePixelRatio===${baseline.dpr} && (${scheme}) && (${motion})
-    && JSON.stringify(Object.fromEntries(Object.keys(localStorage).filter(key=>key.startsWith('pentacle.next.'))
-      .sort().map(k=>[k,localStorage.getItem(k)])))===JSON.stringify(Object.fromEntries(
-        Object.entries(${snapshot}).filter(([k])=>k.startsWith('pentacle.next.'))))`,'viewport, media and Next storage restored');
+    && JSON.stringify(${nextStorage})===JSON.stringify(${snapshot})`,'viewport, media and Next storage restored');
 }
 function isolated(run, width = 1440) {
   return async ctx => {
     const baseline = await saveFixtureBaseline(ctx);
+    const failures = [];
     try {
       await command(ctx, { reset: true, settings: { enabled: true } });
       await enter(ctx, width);
@@ -122,10 +129,17 @@ function isolated(run, width = 1440) {
       await enter(ctx, width);
       await wait(ctx, "localStorage.getItem('pentacle.next.chat.seen') !== null", 'initial seen marks');
       await run(ctx);
-    } finally {
-      try { await command(ctx, { reset: true }); }
-      finally { await restoreFixtureBaseline(ctx, baseline); }
+    } catch (error) {
+      failures.push(error);
     }
+    try { await command(ctx, { reset: true }); }
+    catch (error) { failures.push(error); }
+    try { await restoreFixtureBaseline(ctx, baseline); }
+    catch (error) { failures.push(error); }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, failures.map(error => error.message).join(' | '));
+    }
+    if (failures.length) throw failures[0];
   };
 }
 

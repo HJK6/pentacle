@@ -239,3 +239,115 @@ def test_missing_or_malformed_qa_evidence_keeps_metadata_contract(change):
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def test_reader_projects_exact_advisor_accept_and_keeps_opaque_fields_private(tmp_path, monkeypatch):
+    import hashlib
+    from test_advisor_rule_forward import (
+        _connection, admit, forward, operator, rule_fixture, rule_report, seat, SEAT_A, SEAT_B, WORDS,
+    )
+
+    token = tmp_path / "reader-token"
+    token.write_text("synthetic-reader-secret")
+    token.chmod(0o600)
+    monkeypatch.setenv("PENTACLE_WORK_REPORT_READER_TOKEN_FILE", str(token))
+
+    async def run():
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            assert (await admit(socket))["type"] == "send.result"
+            async with seat(h, SEAT_A) as fd, seat(h, SEAT_B) as advisor:
+                assert (await forward(fd))["delivery_status"] == "delivered"
+                report = rule_report()
+                saved = await advisor("report", **report, details="Synthetic opaque review details.")
+                assert saved["type"] == "report.ok"
+                async with _connection(h.server) as reader:
+                    assert (await reader.hello(from_stream_id="work-report-reader",
+                        stream_token="synthetic-reader-secret", subscribe={"snapshot": False, "mode": "rpc"}
+                    ))[0]["type"] == "ready"
+                    response = await reader.rpc("work.report.get", report_id=report["report_id"])
+                    assert response.get("advisor_rule_accept") == {
+                        **report["extras"]["advisor_rule"],
+                        "advisor_stream_id": SEAT_B, "advisor_generation": h.gen[SEAT_B],
+                        "fd_stream_id": SEAT_A, "fd_generation": h.gen[SEAT_A], "fd_binding_revision": 0,
+                        "operator_text_sha256": hashlib.sha256(WORDS.encode()).hexdigest(),
+                    }
+                    assert response["session_generation"] == h.gen[SEAT_B]
+                    assert "details" not in response and "extras" not in response
+                    ordinary = await advisor("work.report.get", report_id=report["report_id"])
+                    assert ordinary["type"] == "work.report.get.ok"
+                    assert "advisor_rule_accept" not in ordinary and "session_generation" not in ordinary
+
+                    def corrupt_stamp(conn):
+                        conn.execute("UPDATE v2_reports SET advisor_rule_accept=json_set("
+                                     "advisor_rule_accept,'$.advisor_generation','invalid-other-generation') "
+                                     "WHERE report_id=?", (report["report_id"],))
+                        conn.commit()
+                    await h.store.submit(corrupt_stamp)
+                    corrupt = await reader.rpc("work.report.get", report_id=report["report_id"])
+                    assert corrupt["type"] == "work.report.get.ok"
+                    assert "advisor_rule_accept" not in corrupt and "session_generation" not in corrupt
+    asyncio.run(run())
+
+
+def test_advisor_accept_survives_restart_and_tell_retention(tmp_path, monkeypatch):
+    import store as store_module
+    from test_advisor_rule_forward import (
+        _connection, admit, forward, operator, rule_fixture, rule_report, seat, SEAT_A, SEAT_B, TELL_ID, WORDS,
+    )
+
+    token = tmp_path / "reader-token"
+    token.write_text("synthetic-reader-secret")
+    token.chmod(0o600)
+    monkeypatch.setenv("PENTACLE_WORK_REPORT_READER_TOKEN_FILE", str(token))
+
+    async def run():
+        report = rule_report()
+        async with rule_fixture(tmp_path) as (h, envelope), operator(h, envelope) as socket:
+            assert (await admit(socket))["type"] == "send.result"
+            async with seat(h, SEAT_A) as fd, seat(h, SEAT_B) as advisor:
+                assert (await forward(fd))["delivery_status"] == "delivered"
+                assert (await advisor("report", **report))["type"] == "report.ok"
+                stamp = (await h.store.get_report(report["report_id"], include_advisor_rule=True))["advisor_rule_accept"]
+                monkeypatch.setattr(store_module, "TELL_RETENTION", 1)
+                ordinary = await fd("tell", to_stream_id=SEAT_B, text="Synthetic retention sweep.",
+                                    tell_id="fixture-expire-old-tell")
+                assert ordinary["delivery_status"] == "delivered"
+                expired = await h.store.get_tell_delivery(TELL_ID)
+                assert expired is not None and "advisor_rule_tombstone" in expired
+                assert "delivery" not in expired and "advisor_rule_intent" not in expired
+                assert expired["reply"]["submission_confirmed"] is False
+                assert WORDS not in json.dumps(expired, ensure_ascii=False)
+
+                def prune_again(conn):
+                    conn.execute("DELETE FROM v2_tell_deliveries WHERE tell_id=?", (TELL_ID,))
+                    conn.commit()
+
+                await h.store.submit(prune_again)
+                assert await h.store.get_tell_delivery(TELL_ID) == expired
+                assert (await forward(fd)).get("error_code") == "advisor_rule_event_unverified"
+                assert (await forward(fd, body=WORDS + "edited")).get("error_code") == "tell_id_conflict"
+                ordinary_reuse = await fd("tell", to_stream_id=SEAT_B, text=WORDS, tell_id=TELL_ID)
+                assert ordinary_reuse.get("error_code") == "tell_id_conflict"
+                assert len(h.tmux.inputs) == 2
+                assert (await advisor("report", **report))["type"] == "report.ok"
+                assert (await advisor("report", **rule_report("fixture-expired"))).get("error_code") == "advisor_rule_event_unverified"
+                await h.rotate_fd()
+                assert (await advisor("report", **report))["type"] == "report.ok"
+
+        store = Store(str(tmp_path / "advisor-rules.db"))
+        store.start()
+        server = Server(host="127.0.0.1", port=0, store=store)
+        try:
+            assert await store.get_tell_delivery(TELL_ID) == expired
+            await server.bind()
+            async with _connection(server) as reader:
+                assert (await reader.hello(from_stream_id="work-report-reader",
+                    stream_token="synthetic-reader-secret", subscribe={"snapshot": False, "mode": "rpc"}
+                ))[0]["type"] == "ready"
+                response = await reader.rpc("work.report.get", report_id=report["report_id"])
+                assert response["advisor_rule_accept"] == stamp
+        finally:
+            await server.close()
+            store.stop()
+
+    asyncio.run(run())

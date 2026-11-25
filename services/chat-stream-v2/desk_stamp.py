@@ -2,8 +2,8 @@
 
 A small private map names the registry credentials that belong to desks. The
 daemon prefixes their sends so a receiver reads them as relayed content, and
-removing an entry (or the file) stops the stamp on the next send. This is
-attribution and per-credential revocation, not a reduction in privilege.
+removing an entry (or the file) stops the stamp on the next send. Relayed
+content carries the desk label as part of its stored body.
 """
 from __future__ import annotations
 
@@ -26,20 +26,23 @@ _BODY_FIELDS = ("text", "message")
 
 def load() -> dict[str, str]:
     """Credential id -> label; an invalid file or entry stamps nothing."""
+    return load_strict() or {}
+
+
+def load_strict() -> dict[str, str] | None:
+    """Return None when a configured map has a whole-file fault."""
     raw_path = os.environ.get(CONFIG_ENV)
-    if not raw_path:
-        return {}
-    path = Path(raw_path).expanduser()
-    if not private_file(path):
+    if raw_path is None:
         return {}
     try:
-        if path.stat().st_size > CONFIG_MAX_BYTES:
-            return {}
+        path = Path(raw_path).expanduser()
+        if not private_file(path) or path.stat().st_size > CONFIG_MAX_BYTES:
+            return None
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError):
-        return {}
+    except (OSError, ValueError, RuntimeError):
+        return None
     if not isinstance(value, dict) or len(value) > MAX_ENTRIES:
-        return {}
+        return None
     labels: dict[str, str] = {}
     for key, label in value.items():
         try:
@@ -53,22 +56,30 @@ def load() -> dict[str, str]:
 
 def stamp_message(msg: dict[str, Any]) -> dict[str, Any]:
     """Return `msg` with its body stamped when it came from a mapped desk credential."""
+    return stamp_with_label(msg)[0]
+
+
+def stamp_with_label(msg: dict[str, Any]) -> tuple[dict[str, Any], str | None, bool]:
+    """Return stamped text, the desk label, and whether map lookup had no fault."""
     auth = msg.get("_auth_context")
     if not isinstance(auth, dict) or auth.get("operator_authenticated") is not True:
-        return msg
+        return msg, None, True
     principal = str(auth.get("operator_principal") or "")
     if not principal.startswith("operator:"):
-        return msg
+        return msg, None, True
     try:
         credential_id = str(uuid.UUID(principal[len("operator:"):]))
     except ValueError:
-        return msg
-    label = load().get(credential_id)
+        return msg, None, True
+    labels = load_strict()
+    if labels is None:
+        return msg, None, False
+    label = labels.get(credential_id)
     if not label:
-        return msg
+        return msg, None, True
     stamped = dict(msg)
     for field in _BODY_FIELDS:
         body = msg.get(field)
         if isinstance(body, str) and body:
             stamped[field] = f"[from {label}]\n{sanitize_injectable(body)}"
-    return stamped
+    return stamped, label, True

@@ -1645,3 +1645,19 @@ def test_no_findings_marker_passes_cli_and_reaches_payload():
             "next_action": "none"}
     payload, _ = cli._report_payload_from_args(_args(result=json.dumps(body)))
     assert payload["no_findings"] is True and payload["findings"] == []
+
+
+def test_inline_advisor_rule_rejects_client_stamp():
+    rule = {
+        "version": 1, "verdict": "accept", "operator_message_id": "fixture-input", "fd_event_id": "fixture-tell",
+        "path": "docs/reference/assistant_" + "bar" + "t_context.md", "base_revision": "a" * 64, "new_bytes_sha256": "b" * 64,
+        "scope": {"mode": "single", "removed": [], "added": ["c" * 64]},
+    }
+    payload, blob = cli._report_payload_from_args(_args(
+        status="progress", msg_id=0, result=json.dumps({"extras": {"advisor_rule": rule}})))
+    assert payload["extras"]["advisor_rule"] == rule and blob is None
+    rule["advisor_generation"] = "forged-generation"
+    with pytest.raises(SchemaError) as rejected:
+        cli._report_payload_from_args(_args(
+            status="progress", msg_id=0, result=json.dumps({"extras": {"advisor_rule": rule}})))
+    assert rejected.value.code == "advisor_rule_invalid"

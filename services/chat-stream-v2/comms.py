@@ -596,6 +596,8 @@ class Comms:
 
         prior = await self.store.get_tell_delivery(tell_id)
         if prior is not None:
+            if "advisor_rule_intent" in prior or "advisor_rule_tombstone" in prior:
+                raise self._conflict(tell_id)
             # A logical FD retry after a rebind returns the original committed
             # outcome; an attempt is reconciled at the seat it was made on.
             matched = self._same_logical_payload(tell_id, digest, prior, logical, body) if logical else digest
@@ -613,7 +615,7 @@ class Comms:
             prior_digest, fut_pending = pending
             if prior_digest != digest:
                 raise self._conflict(tell_id)
-            kind, value = await fut_pending
+            kind, value = await asyncio.shield(fut_pending)
             if kind == "error":
                 raise value
             return {**value, "duplicate": True}
@@ -706,6 +708,72 @@ class Comms:
             self._inflight.pop(tell_id, None)
             if not fut.done():
                 fut.set_result(outcome)
+
+    async def tell_advisor_rule(self, msg, *, composite, lane_rulings):
+        """Dispatch one exact operator admission to the retained advisor."""
+        from _shared.advisor_rule import valid_id
+
+        message_id = msg.get("advisor_rule_message_id")
+        target = msg.get("to_stream_id")
+        tell_id = msg.get("tell_id", uuid.uuid4().hex)
+        body = msg.get("message") if "message" in msg else msg.get("text")
+        if (not valid_id(message_id) or not valid_id(tell_id)
+                or not isinstance(body, str) or not body):
+            raise VerbError("advisor_rule_invalid", "invalid advisor rule forward")
+        try:
+            body.encode("utf-8")
+        except UnicodeEncodeError:
+            raise VerbError("advisor_rule_invalid", "invalid advisor rule forward") from None
+        assert_injectable(body)
+        auth = msg.get("_auth_context") or {}
+        sender = msg.get("from_stream_id")
+        generation = auth.get("session_generation")
+        if (auth.get("token_verified") is not True or not sender or sender != auth.get("stream_id")
+                or not generation or composite is None):
+            raise VerbError("advisor_rule_fd_unverified", "live front desk principal required")
+        if not isinstance(target, str) or lane_rulings is None:
+            raise VerbError("advisor_rule_advisor_unverified", "retained advisor recipient required")
+
+        from store_lifecycle_authority import logical_payload_hash
+        digest = logical_payload_hash({**msg, "tell_id": tell_id})
+        wire = _peer_delivery_envelope(sender, "tell", tell_id, body)
+        while (pending := self._inflight.get(tell_id)) is not None:
+            # A caller's authenticated identity is also checked against the
+            # durable intent below, even when it waits for another call.
+            prior_digest, future = pending
+            if prior_digest != digest:
+                raise self._conflict(tell_id)
+            await asyncio.shield(future)
+        future = asyncio.get_running_loop().create_future()
+        self._inflight[tell_id] = (digest, future)
+        outcome = ("error", VerbError("delivery_failed", "tell did not complete"))
+        try:
+            prior = await self.store.reserve_advisor_rule_tell(
+                tell_id, digest, message_id, body, wire, sender, generation, target,
+                composite.config.stream_id, lane_rulings.binding_conn,
+            )
+            if prior is not None:
+                async with self._pane_input_lock(target):
+                    prior = (await self.store.promote_tell_delivery(
+                        tell_id, digest, reconcile=True)) or prior
+                reply = {**prior["reply"], "duplicate": True}
+            else:
+                route = await self._resolve_route({**msg, "stream_id": target}, verb="tell")
+                if route["final_target"] != target or route["original_target"] != target:
+                    raise VerbError("advisor_rule_advisor_unverified", "advisor delivery cannot be redirected")
+                async with self._pane_input_lock(target):
+                    reply = await self._deliver_tell(
+                        {**msg, "tell_id": tell_id, "_advisor_rule_dispatch": True},
+                        tell_id, route, wire, digest,
+                    )
+            outcome = ("ok", reply)
+            return reply
+        except Exception as exc:
+            outcome = ("error", exc)
+            raise
+        finally:
+            self._inflight.pop(tell_id, None)
+            future.set_result(outcome)
 
     async def _stamp_milestone_status(self, msg: dict[str, Any], body: str) -> None:
         """Best-effort card update after a new tell is delivered or persisted."""
@@ -919,7 +987,8 @@ class Comms:
                 tell_id, str(route["final_target"]), str(msg["_notification_answer_generation"]))
             if prior is not None:
                 return prior["reply"]
-        durable_notice = msg.get("_durable_notice_proof") is True
+        durable_notice = (msg.get("_durable_notice_proof") is True
+                          or msg.get("_advisor_rule_dispatch") is not None)
         delivery_status = "delivered"
         reason = None
         if durable_notice and provider in SUBMIT_PREDICATES and not confirmed:
@@ -1019,8 +1088,13 @@ class Comms:
             "delivered_at":None, "request_payload_hash":digest,
             "proof_generation":original.get("session_generation"),
             "proof_session_created_at":original.get("created_at"), **watermark_fields(watermark)}
-        await self.store.put_tell_delivery(tell_id,
-            {"payload_digest":digest, "reply":reply, "delivery":delivery})
+        envelope = {"payload_digest": digest, "reply": reply, "delivery": delivery}
+        if msg.get("_advisor_rule_dispatch") is not None:
+            delivery.update(original_to_stream_id=str(route["original_target"]),
+                            route_hops=list(route.get("hops") or []))
+            await self.store.prepare_advisor_rule_tell(tell_id, envelope)
+        else:
+            await self.store.put_tell_delivery(tell_id, envelope)
 
     def _tell_reply(
         self,
@@ -1466,8 +1540,11 @@ class Comms:
         host, name = self.sessions.split(target)
         row = self.sessions.get(target) or await self.store.fetch_session(host, name)
         provider = str((row or {}).get("provider") or "")
+        advisor_rule = msg.get("_advisor_rule_dispatch") is True
         if msg.get("_notification_answer_generation") and provider not in SUBMIT_PREDICATES:
             raise VerbError("bad_request", "answer delivery requires a supported USER-proof provider")
+        if advisor_rule and provider not in SUBMIT_PREDICATES:
+            raise VerbError("advisor_rule_advisor_unverified", "advisor delivery requires USER-event proof")
         tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
         async def prepare(watermark):
             if msg.get("_notification_answer_generation"):
@@ -1481,8 +1558,8 @@ class Comms:
         try:
             confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
                 tmux, name, body, provider, bool(msg.get("urgent")), target,
-                durable_proof=msg.get("_durable_notice_proof") is True,
-                before_paste=prepare,
+                durable_proof=msg.get("_durable_notice_proof") is True or advisor_rule,
+                before_paste=prepare, preserve_newlines=advisor_rule,
             )
         finally: _POOL_INPUT_MESSAGE.reset(token)
         return confirmed, attempts, provider, active_draft, proof, watermark
@@ -1520,7 +1597,7 @@ class Comms:
 
     async def _inject_body(
         self, tmux: Any, name: str, body: str, provider: str, urgent: bool, stream_id: str,
-        *, durable_proof: bool = False, before_paste: Any = None,
+        *, durable_proof: bool = False, before_paste: Any = None, preserve_newlines: bool = False,
     ) -> tuple[bool, int, bool, EventProof, EventWatermark]:
         """Paste once, then perform only the bounded provider recovery."""
         # B6: `urgent` is SENDER-chosen — one Escape, then the message. The
@@ -1531,7 +1608,7 @@ class Comms:
         if provider == "codex":
             before = await tmux.capture(name)
             await self._assert_codex_pane_input_safe(stream_id, before)
-        if urgent:
+        if urgent and not preserve_newlines:
             async with self._account_input_guard(stream_id):
                 await tmux.run("send-keys", "-t", f"={name}:", "Escape")
             before = None
@@ -1550,10 +1627,15 @@ class Comms:
             return confirmed, 1, False, proof, watermark
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._watermark_before_action(stream_id)
-        async with self._account_input_guard(stream_id,claim=True):
+        async with self._account_input_guard(stream_id, claim=True, execution=preserve_newlines):
             if before_paste is not None:
                 await before_paste(watermark)
-            await tmux.paste(name, body)
+            if preserve_newlines:
+                if urgent:
+                    await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+                await tmux.paste(name, body, preserve_newlines=True)
+            else:
+                await tmux.paste(name, body)
         if durable_proof:
             proof = await self._durable_submission_evidence(
                 stream_id, body, watermark=watermark,

@@ -4,8 +4,8 @@
 of its reporter's current session. `work.report.get` accepts only `report_id`
 besides the RPC envelope and returns `report_id`, `status`, `from_stream_id`,
 `provenance_qualified_spec_ids` and `created_at`. Missing rows return `not_found`;
-transport or store failures return `unavailable`. Report bodies and rejection
-history are never returned. A previously rejected attempt does not invalidate a
+transport or store failures return `unavailable`. Report prose and rejection
+history stay private. A previously rejected attempt does not invalidate a
 later accepted row. Consumers must check status and qualified spec themselves.
 
 Operators and authenticated internal seats can use this read verb. An isolated
@@ -27,9 +27,46 @@ Provisioning and runtime changes belong to the deployment owner.
 
 The client makes one attempt with a maximum twenty-second deadline covering
 connect, reply and cleanup. `--timeout` may shorten this deadline. Failure returns
-a JSON `work.report.get.error` and exit 1; success returns the five metadata
-fields with the usual type/request-id envelope and exit 0. Publisher activation
+a JSON `work.report.get.error` and exit 1. Success returns the metadata
+with the usual type/request-id envelope and exit 0. Publisher activation
 depends on installed lookup and a proven launcher-identity read journey.
+
+## Advisor rule acceptance
+
+The current front desk uses
+`agent-orch tell --advisor-rule-message-id <operator-input-id> -- <advisor-stream> '<exact original text>'`.
+Use the complete canonical operator input ID from the primary assistant composite
+and preserve its UTF-8 text, including line endings and trailing spaces. The
+input must originate from a registered operator WebSocket admission with the
+server's origin stamp. The protected tell reserves its full ID and captures the
+front desk binding revision and both seat generations before delivery. It
+qualifies when the original advisor generation receives the exact wire and
+the daemon confirms submission.
+
+The retained advisor files a single inline `agent-orch report --status progress
+--msg-id 0 --report-id <stable-id> --result '<JSON>'` with `extras.advisor_rule`.
+Its object contains `version: 1`, `verdict: "accept"`, `operator_message_id`,
+`fd_event_id` (the full tell ID), `path` fixed to
+the fixed operator rules document path (`advisor_rule.PATH`), `base_revision`,
+`new_bytes_sha256`, and `scope`. Scope has `mode` and sorted `removed` and
+`added` arrays of lowercase SHA256 hashes of complete changed rule lines
+without the LF delimiter. Modes are `single`, `batch`, and `reorganize`.
+The accepted report leaves the advisor seat open.
+
+For this report, the dedicated service reader receives `session_generation`
+and `advisor_rule_accept`. The attestation contains the reviewed object plus
+`advisor_stream_id`, `advisor_generation`, `fd_stream_id`, `fd_generation`,
+`fd_binding_revision`, and `operator_text_sha256`. The daemon persists those
+fields with the report after rechecking the advisor binding and confirmed tell.
+The original operator text, report prose, and unverified caller payload stay
+outside the lookup response. An identical authenticated replay returns the
+stored report. Its attestation survives seat changes, tell expiry, and daemon
+restart.
+
+A protected tell ID stays reserved after delivery retention removes its proof.
+Repeating that forward returns `advisor_rule_event_unverified`. A changed
+payload or an ordinary tell with the same ID returns `tell_id_conflict`.
+A fresh protected tell can reference the original stamped input with a new ID.
 
 For a publisher that cannot traverse the daemon user's home, install the
 read-only consumer at `/usr/local/libexec/pentacle-work-report/agent-orch`.

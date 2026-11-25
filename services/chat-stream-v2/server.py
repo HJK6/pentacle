@@ -57,6 +57,7 @@ except ImportError:  # pragma: no cover
 
 from _shared import operator_auth
 from _shared.asset_schema import hosted_dashboard_policy
+from _shared.report_payload_v1 import is_advisor_rule_report
 from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
 from tmux_transport import sanitize_injectable
 import store_lifecycle_authority as lifecycle_authority
@@ -2673,11 +2674,20 @@ class Server:
                     await self.store.require_current_actor(*actor)
                     if self._rejected_rpc(websocket, verb):
                         return [self._auth_error_frame(verb, request_id, "authentication_required")]
-                    reply = await handler(dispatch_msg)
+                    if (handler == self._on_report and websocket in self._clients
+                            and is_advisor_rule_report(dispatch_msg)):
+                        reply = await self._on_report(dispatch_msg, connected_seat=True)
+                    else:
+                        reply = await handler(dispatch_msg)
             else:
                 if self._rejected_rpc(websocket, verb):
                     return [self._auth_error_frame(verb, request_id, "authentication_required")]
-                reply = await handler(dispatch_msg)
+                if websocket is not None and handler == self._on_send:
+                    reply = await self._on_send(
+                        dispatch_msg, admit_operator=lambda: self._registered_operator_admission(websocket, auth),
+                    )
+                else:
+                    reply = await handler(dispatch_msg)
         except (VerbError, StatusCardError, host_transfer.TransferError) as exc:  # expected business failures
             reply = {"type": f"{verb}.error", "error_code": exc.code, "error": str(exc),
                      **getattr(exc, "extra", {})}
@@ -3686,6 +3696,26 @@ class Server:
             and trust.client_kind in operator_auth.CLIENT_KINDS
         )
 
+    def _registered_operator_admission(self, websocket, auth):
+        """Mint an in-process capability whose socket must still be trusted at INSERT."""
+        trust = self._connection_trust.get(websocket)
+        if (websocket not in self._clients or not self._operator_authenticated(websocket)
+                or trust is None or not trust.credential_id
+                or auth.get("token_verified") or auth.get("service_attempted")
+                or auth.get("local_admin_verified")):
+            return None
+        principal = f"operator:{trust.credential_id}"
+        if auth.get("operator_principal") != principal:
+            return None
+
+        def current_principal():
+            if (websocket in self._clients and self._operator_authenticated(websocket)
+                    and self._connection_trust.get(websocket) is trust):
+                return principal
+            return None
+
+        return current_principal
+
     @staticmethod
     def _is_loopback_client(websocket: Any) -> bool:
         """Bootstrap trusts local native tools, never browser-origin requests."""
@@ -4416,6 +4446,9 @@ class Server:
         return composite
 
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if "advisor_rule_message_id" in msg:
+            return await self.comms.tell_advisor_rule(
+                msg, composite=self._front_desk_composite(), lane_rulings=self.lane_rulings)
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_tell(msg)
         host, name = await self.sessions.resolve(msg)
@@ -4730,13 +4763,19 @@ class Server:
         return {**result, "type": "compact.error" if result.get("delivery") == "not_landed" else "compact.ok",
                 "request_id": request_id, "send_request_id": send_request_id}
 
-    async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _on_send(self, msg: dict[str, Any], *,
+                       admit_operator: Callable[[], Callable[[], str | None] | None] | None = None) -> dict[str, Any]:
         from provider_accounts import AccountError, reject_overrides
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
-        original_msg = msg
-        msg = desk_stamp.stamp_message(msg)
-        desk_dispatch = msg is not original_msg
+        msg, desk_label, desk_map_ok = desk_stamp.stamp_with_label(msg)
+        desk_dispatch = desk_label is not None
+        # Desk credentials are identified by the map. Before rollout, verify
+        # PENTACLE_DESK_STAMP_CONFIG is set and loads. Unset keeps legacy admission
+        # because the credential registry has no desk flag.
+        operator_admission = None
+        if admit_operator is not None and desk_map_ok and not desk_dispatch:
+            operator_admission = admit_operator()
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
@@ -4777,12 +4816,16 @@ class Server:
                 }
             if auth.get("operator_authenticated") is not True:
                 raise VerbError("assistant_send_unauthorized", "assistant composite send requires authenticated caller")
+            literal = msg.get("text") if "text" in msg else msg.get("message")
+            admission = (operator_admission if composite is self.assistant_composite
+                         and (literal is None or isinstance(literal, str)) else None)
             try:
                 attachments = await self._validate_assistant_input_attachments(msg.get("attachments"))
                 accepted = await composite.accept_input(
                     {**msg, "attachments": attachments},
                     operator_principal=str(auth.get("operator_principal") or "") or None,
                     desk_dispatch=desk_dispatch,
+                    operator_admission=admission,
                 )
             except ValueError as exc:
                 raise VerbError(str(exc), str(exc)) from exc
@@ -5286,12 +5329,14 @@ class Server:
             "type", "request_id", "report_id", "from_stream_id", "stream_token",
         } for key in msg):
             raise VerbError("invalid_report_lookup", "report_id is the only lookup argument")
+        from _shared.advisor_rule import ACCEPT_KEY
         if not isinstance(report_id, str) or not report_id.strip() or len(report_id) > 200:
             raise VerbError("invalid_report_id", "report_id must be a nonempty string of at most 200 characters")
         # Only ingestion is authoritative. Rejection history and live reporter
         # sessions have no bearing on this immutable accepted row.
         try:
-            report = await self.store.get_report(report_id)
+            report = (await self.store.get_report(report_id, include_advisor_rule=True)
+                      if service_reader else await self.store.get_report(report_id))
         except Exception as exc:
             raise VerbError("unavailable", "report store is unavailable") from exc
         if report is None:
@@ -5301,6 +5346,8 @@ class Server:
         )}}
         if report.get("completion_kind") == "seat_only":
             response.update(completion_kind="seat_only", provenance_qualified_spec_ids=[])
+        if service_reader and ACCEPT_KEY in report:
+            response.update({ACCEPT_KEY: report[ACCEPT_KEY], "session_generation": report["session_generation"]})
         # The dedicated reader may verify protected releases. Other metadata
         # readers retain their original response, and opaque payload stays private.
         extras = report.get("extras")
@@ -5648,10 +5695,13 @@ class Server:
     async def _on_inbound_audit(self, msg: dict[str, Any]) -> dict[str, Any]:
         return await self.ledger.inbound_audit(msg)
 
-    async def _on_report(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _on_report(self, msg: dict[str, Any], *, connected_seat: bool = False) -> dict[str, Any]:
         # Snapshot the authenticated generation before persistence can yield to
         # a close/reopen. The current session is not a replacement credential.
         auth = dict(msg.get("_auth_context") or {})
+        if is_advisor_rule_report(msg):
+            binding_conn = self.lane_rulings.binding_conn if connected_seat and self.lane_rulings else None
+            return await self.ledger.report(msg, advisor_binding_conn=binding_conn)
         extras = msg.get("extras")
         correlation = extras.get("assistant_composite") if isinstance(extras, dict) else None
         composite = self._composite_for(
