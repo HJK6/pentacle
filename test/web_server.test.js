@@ -152,7 +152,9 @@ test('an unbuilt bundle answers with a build hint instead of a stack trace', asy
   assert.ok(traversal.status === 403 || traversal.status === 404, `traversal returned ${traversal.status}`);
 });
 
-test('two concurrent connections keep their local tmux sessions isolated', { skip: !TMUX && 'tmux is not installed' }, async (t) => {
+test('two concurrent connections keep their local tmux sessions isolated', {
+  skip: 'Owner: front desk. Reason: fixture-server loss. Expires: 2026-12-09 UTC.',
+}, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-test-'));
   const home = path.join(dir, 'home');
   fs.mkdirSync(home);

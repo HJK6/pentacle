@@ -121,7 +121,7 @@ def test_close_binding_rejects_hidden_second_window_and_partial_response():
 
 
 @pytest.mark.parametrize("exit_kind", [
-    pytest.param("status", marks=pytest.mark.quarantined),
+    "status",
     "signal",
 ])
 def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentinel(

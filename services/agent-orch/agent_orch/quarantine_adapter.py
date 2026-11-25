@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -68,7 +69,9 @@ class ProductionAdapter:
             parents = [item.get('parents', []) for item in entry['occurrences']]
             if any(value != parents[0] for value in parents[1:]):
                 raise ValueError('quarantine test ancestry is ambiguous')
-            activations[test] = {'activation': entry['key'], 'parents': parents[0]}
+            activations[test] = {'id': test, 'owner': entry['decision']['owner'],
+                                 'reason': entry['occurrences'][0]['reason'],
+                                 'expires': (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat()}
         packet = prepare_bundle(PUBLIC_REPOSITORY, self.checker, FLEET_CHECKER_SHA256, directory,
                                 selected, activations=activations)
         if packet['state'] == 'already_present':

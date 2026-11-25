@@ -95,7 +95,7 @@ def test_predeploy_runs_only_the_v2_gate_and_agent_orch_suite(tmp_path):
         assert argv[argv.index('--select')+1] == 'tests'
         target, command, result, _, _ = _trace(name, argv, tmp_path)
         assert target['select']['root'] == 'services/' + service
-        assert command[1] == str(ROOT / 'scripts/admission_pytest.py')
+        assert command[1] == str(ROOT / 'scripts/quarantine_pytest.py')
         assert command[command.index('--suite') + 1] == suite
         assert command[command.index('--') + 1:] == ['tests']
         assert result['cwd'] == ROOT / 'services' / service

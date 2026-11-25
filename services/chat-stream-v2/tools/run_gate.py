@@ -38,10 +38,8 @@ PRE_FLIGHT = SERVICE_DIR / "tools" / "gate_preflight.sh"
 UNIT_SEPARATE_MARKERS = ("repin_exhaustive",)
 DEFAULT_TIMEOUTS = {"contract": 180.0, "unit": 900.0, "smoke": 900.0, "soak": 3900.0}
 MERGE_TIERS = ("contract", "unit", "smoke")
-PREFLIGHT_TIERS = {"contract", "smoke", "soak"}
 # Component bounds for the --deadline-seconds envelope. The reserve covers this
 # runner's own terminate (2x5s), reader drain (READER_JOIN_S), reap and evidence writes.
-PREFLIGHT_BOUND_S = 30.0
 USAGE_BOUND_S = 30.0
 DEFAULT_RESERVE_S = 60.0
 READER_JOIN_S = 10.0
@@ -59,6 +57,10 @@ _LAST_PROCESS: dict[str, Any] = {}
 
 
 class InvalidBaseTemp(ValueError):
+    pass
+
+
+class PreflightFailure(Exception):
     pass
 
 
@@ -102,14 +104,14 @@ def _apply_strict_full_soak(env: dict[str, str]) -> None:
     if env.get("V2_SOAK_STRICT_FULL") == "1":
         env.update({"SOAK_TIER": "full", **SOAK_PRESETS["full"]})
 def _tier_command(tier: str, junit: Path, basetemp: Path) -> list[str]:
-    unit_marker = " and ".join(f"not {name}" for name in (*UNIT_SEPARATE_MARKERS, "quarantined", "admission_hold"))
+    unit_marker = " and ".join(f"not {name}" for name in (*UNIT_SEPARATE_MARKERS, "quarantined"))
     args = {
         "contract": ["tests/contract", "-m", "", "-q", "-rs", "--timeout-method=signal",
                      "-p", "no:rerunfailures"],
         "unit": ["tests", "--ignore=tests/contract", "--ignore=tests/smoke", "--ignore=tests/soak",
                  "-m", unit_marker, "-q", "-rs"],
-        "smoke": ["tests/smoke", "-m", "not quarantined and not admission_hold", "-q", "-rs", "--maxfail=1"],
-        "soak": ["tests/soak", "-m", "soak", "-q", "-s", "-rs"],
+        "smoke": ["tests/smoke", "-m", "not quarantined", "-q", "-rs", "--maxfail=1"],
+        "soak": ["tests/soak", "-m", "soak and not quarantined", "-q", "-s", "-rs"],
     }.get(tier)
     if args is None:
         raise ValueError(f"unknown tier: {tier}")
@@ -247,9 +249,9 @@ def _run_process(command: list[str], *, env: dict[str, str], log_path: Path, tim
     reader.join(READER_JOIN_S)
     output["reader_joined"] = not reader.is_alive()
     return code, timed_out
-def _preflight(env: dict[str, str], log: Path) -> tuple[int, bool]:
+def _preflight(env: dict[str, str], log: Path, *, loopback: bool = True) -> tuple[int, bool]:
     print(f"[v2-gate] preflight: {PRE_FLIGHT}")
-    return _run_process([str(PRE_FLIGHT)], env=env, log_path=log, timeout=PREFLIGHT_BOUND_S)
+    return _run_process([str(PRE_FLIGHT), *([] if loopback else ["--host-only"])], env=env, log_path=log, timeout=25.0)
 def _result(tier: str, *, code: int, passed: bool, reason: str | None = None, command: list[str] | None = None, timed_out: bool = False, preflight: int | None = None, junit: Path | None = None, log: Path | None = None, counts: dict[str, Any] | None = None, soak: dict[str, str] | None = None, **facts: Any) -> dict[str, Any]:
     # reason is the primary outcome; secondary_outcomes keeps reporting/cleanup facts it must not erase.
     return {"tier": tier, "command": command or [], "returncode": code, "timed_out": timed_out, "preflight_returncode": preflight, "junit": str(junit) if junit else None, "log": str(log) if log else None, "counts": counts, "soak_parameters": soak, "passed": passed, "reason": reason, "primary_outcome": reason, "secondary_outcomes": [], **facts}
@@ -291,8 +293,7 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
         primary = "evidence_incomplete"
     return primary, reporting
 def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1,
-              shard_index: int | None = None, shard_count: int | None = None,
-              advisory_bound: float | None = None) -> dict[str, Any]:
+              shard_index: int | None = None, shard_count: int | None = None) -> dict[str, Any]:
     started = time.monotonic()
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
@@ -316,19 +317,13 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             soak = _effective_soak_parameters(env)
         except ValueError as exc:
             return _result(tier, code=2, passed=False, reason="invalid_soak_tier", junit=junit, log=log, soak={"error": str(exc)})
-    if tier in PREFLIGHT_TIERS:
-        if shutil.which("tmux") is None:
-            return _result(tier, code=127, passed=False, reason="tmux_missing", preflight=127, junit=junit, log=log, soak=soak)
-        preflight, preflight_timeout = _preflight(env, evidence / f"{tier}.preflight.log")
-        if preflight != 0:
-            return _result(tier, code=preflight, passed=False, reason="preflight_failed", timed_out=preflight_timeout, preflight=preflight, command=[str(PRE_FLIGHT)], junit=junit, log=log, soak=soak)
     command = _tier_command(tier, junit, basetemp)
-    admission_manifest = evidence / f'{tier}.admission.json'
-    scope_args = [f'--admission-separate-marker={name}' for name in UNIT_SEPARATE_MARKERS] if tier == 'unit' else []
-    if tier in {'unit', 'smoke'}:
-        admission_manifest.unlink(missing_ok=True)
-        command += ['-p', 'admission_plugin', f'--admission-root={REPO_ROOT}', '--admission-suite=daemon',
-                    f'--admission-manifest={admission_manifest}', *scope_args]
+    if tier != "contract":
+        quarantine_manifest = evidence / f'{tier}.quarantine.json'
+        scope_args = [f'--quarantine-separate-marker={name}' for name in UNIT_SEPARATE_MARKERS] if tier == 'unit' else []
+        quarantine_manifest.unlink(missing_ok=True)
+        command += ['-p', 'quarantine_plugin', f'--quarantine-root={REPO_ROOT}', '--quarantine-suite=daemon',
+                    f'--quarantine-manifest={quarantine_manifest}', *scope_args]
     worker_args = []
     if tier in {"contract", "unit"} and unit_workers > 1:
         worker_args = ["-n", str(unit_workers), "--max-worker-restart=0"]
@@ -350,67 +345,48 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     counts, progress = _junit_counts(junit), summarize_progress(journal)
     terminated = not timed_out and (_TERMINATION_REQUESTED or (facts.get("termination") or {}).get("kind") == "external_signal")
     reason, secondary = _classify(code=code, timed_out=timed_out, terminated=terminated, counts=counts, tier=tier, progress=progress, output=facts.get("output") or {})
-    result = _result(tier, code=code, passed=reason is None, reason=reason, command=command, timed_out=timed_out, preflight=preflight if tier in PREFLIGHT_TIERS else None, junit=junit, log=log, counts=counts, soak=soak,
+    result = _result(tier, code=code, passed=reason is None, reason=reason, command=command, timed_out=timed_out, junit=junit, log=log, counts=counts, soak=soak,
                      bound_s=timeout, subprocess_returncode=facts.get("subprocess_returncode"), termination=facts.get("termination"), output=facts.get("output"), progress=progress)
     result["secondary_outcomes"] = secondary
-    if tier in {'unit', 'smoke'} and counts and 'parse_error' not in counts and not terminated and not timed_out:
-        try:
-            admission_state = json.loads(admission_manifest.read_text())
-            if admission_state.get('complete') is not True or not isinstance(admission_state.get('held'), list):
-                raise ValueError('admission inventory incomplete')
-            if str(REPO_ROOT / 'scripts') not in sys.path:
-                sys.path.insert(0, str(REPO_ROOT / 'scripts'))
-            from admission_inputs import load_quarantine
-            data = load_quarantine(REPO_ROOT)
-            tests = data['nonblocking_tests']
-            if (data['version'] != 1 or not isinstance(tests, list)
-                    or any(not isinstance(t, str) or '::' not in t for t in tests)
-                    or len(set(tests)) != len(tests)):
-                raise ValueError('invalid quarantine inventory')
-            tests = [t.removeprefix('daemon::') for t in tests
-                     if t.startswith(('tests/', 'daemon::tests/'))]
-            tests = [t for t in tests if (t.startswith('tests/smoke/') if tier == 'smoke'
-                                           else not t.startswith(('tests/contract/', 'tests/smoke/', 'tests/soak/')))]
-            tests.extend(row['id'] for row in admission_state['held'])
-            separate = admission_state['separate_tiers'] if scope_args else {}
-            tests = sorted(set(tests).difference(separate))
-            files = sorted({t.split('::', 1)[0] for t in tests})
-            if shard_index is not None:
-                files = [file for file in files if int(hashlib.sha256(file.encode()).hexdigest(), 16) % shard_count == shard_index]
-            if files:
-                for test in tests:
-                    if test.split('::', 1)[0] in files:
-                        print('[v2-gate] advisory ' + test, flush=True)
-                remaining = advisory_bound if advisory_bound is not None else timeout - (time.monotonic() - started)
-                if remaining <= 0:
-                    raise ValueError('no time remaining for quarantine advisory')
-                advisory_junit = evidence / f'{tier}-advisory.junit.xml'
-                advisory_junit.unlink(missing_ok=True)
-                advisory_journal = evidence / f'{tier}-advisory.progress.jsonl'
-                advisory_journal.unlink(missing_ok=True)
-                advisory_command = [_python_bin(), '-m', 'pytest', *files, '-m', 'quarantined or admission_hold', '-q', '-rs',
-                                    '-p', 'admission_plugin', f'--admission-root={REPO_ROOT}', '--admission-suite=daemon',
-                                    f'--admission-manifest={evidence / (tier + "-advisory-admission.json")}',
-                                    f'--junitxml={advisory_junit}', '--basetemp', str(basetemp / (tier + '-advisory')),
-                                    '-p', 'tools.gate_progress', f'--gate-progress-journal={advisory_journal}',
-                                    f'--gate-progress-run-id={_ACTIVE_RUN_ID or ""}:{tier}-advisory',
-                                    *scope_args, *worker_args]
-                advisory_log = evidence / f'{tier}-advisory.log'
-                advisory_code, advisory_timeout = _run_process(advisory_command, env=env,
-                    log_path=advisory_log, timeout=remaining, advisory=True)
-                advisory_progress = summarize_progress(advisory_journal)
-                result['advisory'] = {'command': advisory_command, 'progress': advisory_progress, 'returncode': advisory_code,
-                                      'timed_out': advisory_timeout, 'junit': str(advisory_junit), 'log': str(advisory_log),
-                                      'bound_s': remaining, 'counts': _junit_counts(advisory_junit)}
-        except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as exc:
-            result['advisory_error'] = type(exc).__name__
-            result['advisory_detail'] = str(exc)[:500]
-            if result['passed']:
-                result.update(passed=False, reason='quarantine_advisory_incomplete',
-                              primary_outcome='quarantine_advisory_incomplete')
-            else:
-                result['secondary_outcomes'].append('quarantine_advisory_incomplete')
     return result
+
+
+def _run_advisory(result: dict[str, Any], evidence: Path, basetemp: Path, manifest: Path, bound: float) -> None:
+    tier = result['tier']
+    try:
+        junit = evidence / f'{tier}-advisory.junit.xml'
+        journal = evidence / f'{tier}-advisory.progress.jsonl'
+        advisory_manifest = evidence / f'{tier}-advisory.quarantine.json'
+        for path in (junit, journal, advisory_manifest):
+            path.unlink(missing_ok=True)
+        state = json.loads((evidence / f'{tier}.quarantine.json').read_text())
+        tests = state['quarantined']
+        if state.get('complete') is not True or not isinstance(tests, list):
+            raise ValueError('quarantine collection incomplete')
+        if not tests:
+            result['advisory'] = {'status': 'empty'}
+            return
+        if bound <= 0:
+            result['advisory'] = {'status': 'no_time_left'}
+            return
+        env = os.environ.copy()
+        env[MANIFEST_ENV] = str(manifest)
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (str(REPO_ROOT / 'scripts'), env.get('PYTHONPATH', ''))))
+        if tier == 'soak':
+            _apply_strict_full_soak(env)
+        command = [_python_bin(), '-m', 'pytest', *tests, '-m', 'quarantined', '-q', '-rs',
+                   '-p', 'quarantine_plugin', f'--quarantine-root={REPO_ROOT}', '--quarantine-suite=daemon',
+                   f'--quarantine-manifest={advisory_manifest}',
+                   f'--junitxml={junit}', '--basetemp', str(basetemp / (tier + '-advisory')),
+                   '-p', 'tools.gate_progress', f'--gate-progress-journal={journal}',
+                   f'--gate-progress-run-id={_ACTIVE_RUN_ID or ""}:{tier}-advisory']
+        log = evidence / f'{tier}-advisory.log'
+        code, timed_out = _run_process(command, env=env, log_path=log, timeout=bound, advisory=True)
+        result['advisory'] = {'returncode': code, 'timed_out': timed_out, 'log': str(log),
+                              'junit': str(junit), 'counts': _junit_counts(junit),
+                              'progress': summarize_progress(journal)}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        result['advisory'] = {'status': 'incomplete', 'error': f'{type(exc).__name__}: {exc}'}
 
 
 def _run_daemon_contract(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
@@ -527,9 +503,9 @@ def _run_usage_manifest(manifest: Path, evidence: Path, deployment_contract: Pat
         )
 
 
-def _write_evidence(gate: str, evidence: Path, output: Path | None, sha: str | None, before: str | None, after_sha: str | None, after: str | None, tiers: list[dict[str, Any]], *, finished: bool = True, deadline: dict[str, Any] | None = None) -> Path:
+def _write_evidence(gate: str, evidence: Path, output: Path | None, sha: str | None, before: str | None, after_sha: str | None, after: str | None, tiers: list[dict[str, Any]], *, finished: bool = True, deadline: dict[str, Any] | None = None, blocking_frozen: bool = False) -> Path:
     passed = finished and bool(tiers) and all(bool(item["passed"]) for item in tiers)
-    data = {"schema": "pentacle.v2.gate-evidence.v1", "gate": gate, "sha": sha, "source": {"sha_before": sha, "sha_after": after_sha, "clean_before": None if before is None else not before, "clean_after": None if after is None else not after, "status_before": before, "status_after": after}, "generated_at": datetime.now(timezone.utc).isoformat(), "repo_root": str(REPO_ROOT), "service_dir": str(SERVICE_DIR), "tiers": tiers, "finished": finished, "deadline": deadline, "passed": passed}
+    data = {"schema": "pentacle.v2.gate-evidence.v1", "gate": gate, "sha": sha, "source": {"sha_before": sha, "sha_after": after_sha, "clean_before": None if before is None else not before, "clean_after": None if after is None else not after, "status_before": before, "status_after": after}, "generated_at": datetime.now(timezone.utc).isoformat(), "repo_root": str(REPO_ROOT), "service_dir": str(SERVICE_DIR), "tiers": tiers, "finished": finished, "deadline": deadline, "passed": passed, "blocking_frozen": blocking_frozen}
     path = output or evidence / f"v2-{gate}-evidence.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic replace: a crash mid-write leaves the previous (started, unfinished) record intact.
@@ -548,7 +524,7 @@ def _positive_finite(value: str) -> float:
 def _envelope(remaining: list[tuple[str, float]], *, usage_pending: bool, reserve: float) -> dict[str, Any]:
     """Component bounds the remaining work may consume; no aggregate is invented beyond their sum."""
     tiers = {tier: limit for tier, limit in remaining}
-    preflight = {tier: PREFLIGHT_BOUND_S for tier, _ in remaining if tier in PREFLIGHT_TIERS}
+    preflight = {}
     usage = USAGE_BOUND_S if usage_pending else 0.0
     return {"tier_bounds_s": tiers, "preflight_bounds_s": preflight, "usage_bound_s": usage, "reserve_s": reserve,
             "required_s": sum(tiers.values()) + sum(preflight.values()) + usage + reserve}
@@ -610,8 +586,19 @@ def main() -> int:
     _TERMINATION_REQUESTED, _TERMINATION_SIGNAL = False, None
     owned_basetemp = None
     old_handlers, ready = {}, False
+    blocking_frozen = False
     try:
-        # Setup faults below land in the runner_error record rather than a bare traceback.
+        # Qualify the child context before any selectors, tiers, or Git children.
+        # The wrapper qualified its direct child. A nested invocation needs
+        # fresh checks in its own HOME, tool path and socket directory.
+        qualified_parent = os.environ.pop('PENTACLE_GATE_PREFLIGHT_DONE', None)
+        preflight_code, preflight_timeout = (0, False)
+        if qualified_parent != str(os.getppid()):
+            preflight_code, preflight_timeout = _preflight(os.environ.copy(), evidence / 'preflight.log',
+                                                          loopback=args.gate in {'contract', 'merge', 'smoke', 'soak'})
+        if preflight_code:
+            results.append(_result('setup', code=preflight_code, passed=False, reason='preflight_failed', timed_out=preflight_timeout, log=evidence / 'preflight.log'))
+            raise PreflightFailure
         sha, before = _sha(), _git_status()
         _write_evidence(args.gate, evidence, args.evidence_out, sha, before, None, None, [], finished=False, deadline=deadline)
         if args.basetemp is None:
@@ -623,12 +610,9 @@ def main() -> int:
         manifest = basetemp / ".owned.json"
         defaults = DEFAULT_TIMEOUTS
         merge_bounds = {}
-        advisory_bounds = {}
         if args.gate == "merge":
             config = json.loads((REPO_ROOT / "scripts" / "gate-env.json").read_text(encoding="utf-8"))
             merge_bounds = config["deadline"]["merge_check_bounds_s"]
-            if args.timeout_seconds is None:
-                advisory_bounds["unit"] = config["deadline"]["merge_unit_advisory_s"]
             defaults = {**DEFAULT_TIMEOUTS, **config["profiles"]["pentacle"]["targets"]["v2-merge"]["tier_timeouts"]}
         limits = [(tier, args.timeout_seconds if args.timeout_seconds is not None else float(os.environ.get(f"V2_{tier.upper()}_TIMEOUT_S", defaults[tier]))) for tier in tiers]
         reap_manifest(manifest)
@@ -641,16 +625,27 @@ def main() -> int:
         if before:
             results.append(_result("source_integrity", code=125, passed=False, reason="dirty_worktree", command=["git", "status", "--porcelain", "--untracked-files=all"]))
         else:
+            sys.path.insert(0, str(REPO_ROOT / 'scripts'))
+            try:
+                from quarantine_list import load_quarantine
+                load_quarantine(REPO_ROOT)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                results.append(_result('setup', code=2, passed=False, reason='quarantine_invalid', error=str(exc)))
             usage_pending = args.gate == "merge" and args.usage_manifest is not None
-            pending = [(tier, limit + advisory_bounds.get(tier, 0)) for tier, limit in limits]
+            pending = limits
             refusal = _deadline_check(deadline, clock_start, "deadline", pending, usage_pending=usage_pending,
                                      merge_bounds=merge_bounds)
             if refusal:
                 results.append(refusal)
-            else:
+            if not results:
                 if args.gate == "merge":
                     try:
                         base = _merge_contract_base(merge_bounds["merge_base"])
+                        from select_tests import check_coverage
+                        try:
+                            check_coverage(REPO_ROOT, base, sha, python=_python_bin(), timeout=merge_bounds['coverage'])
+                        except RuntimeError as exc:
+                            results.append(_result('coverage', code=1, passed=False, reason='coverage_loss' if str(exc).startswith('Coverage loss undeclared:') else 'coverage_inconclusive', error=str(exc)))
                         for name, check in (("daemon_contract", _run_daemon_contract),
                                             ("daemon_layer_selectors", _run_daemon_layer_selectors),
                                             ("daemon_b04_selectors", _run_daemon_b04_selectors)):
@@ -662,19 +657,39 @@ def main() -> int:
                     results.append(_run_usage_manifest(args.usage_manifest, evidence, args.usage_deployment_contract))
                 for index, (tier, limit) in enumerate(limits):
                     if _TERMINATION_REQUESTED:
-                        break
+                        raise KeyboardInterrupt
                     if (index or merge_bounds) and (refusal := _deadline_check(deadline, clock_start, "deadline", pending[index:], usage_pending=False)):
                         results.append(refusal)
                         break
                     results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest, unit_workers=args.unit_workers,
-                                             **({"advisory_bound": advisory_bounds[tier]} if tier in advisory_bounds else {}),
                                              **({"shard_index": args.shard_index, "shard_count": args.shard_count}
                                                 if args.shard_index is not None else {})))
                     if tier == "contract" and not results[-1]["passed"]:
                         break
+                # Persist the blocking verdict before the optional tail. The final write
+                # still incorporates source readback and owned cleanup failures.
+                frozen_sha, frozen_status = _sha(), _git_status()
+                if frozen_sha != sha or frozen_status != before:
+                    results.append(_result('source_integrity', code=125, passed=False, reason='source_changed_during_gate'))
+                _write_evidence(args.gate, evidence, args.evidence_out, sha, before, frozen_sha, frozen_status, results, deadline=deadline, blocking_frozen=True)
+                blocking_frozen = True
+                for item in results:
+                    if item['tier'] in tiers and item['tier'] != 'contract':
+                        if _TERMINATION_REQUESTED:
+                            item['advisory'] = {'status': 'interrupted'}
+                            continue
+                        left = (deadline['deadline_s'] - (time.monotonic() - clock_start) - deadline['reserve_s']) if deadline else 60.0
+                        try:
+                            _run_advisory(item, evidence, basetemp, manifest, max(0, left))
+                        except KeyboardInterrupt:
+                            _TERMINATION_REQUESTED = True
+                            item['advisory'] = {'status': 'interrupted'}
     except KeyboardInterrupt:
         _TERMINATION_REQUESTED = True
-        results.append(_result("owner", code=143, passed=False, reason="terminated", termination={"kind": "external_signal", "signal": _TERMINATION_SIGNAL or "SIGINT"}))
+        if not blocking_frozen:
+            results.append(_result("owner", code=143, passed=False, reason="terminated", termination={"kind": "external_signal", "signal": _TERMINATION_SIGNAL or "SIGINT"}))
+    except PreflightFailure:
+        pass
     except InvalidBaseTemp as exc:
         results.append(_result("setup", code=2, passed=False, reason="invalid_basetemp", error=str(exc)))
     except ManifestError as exc:
@@ -693,10 +708,9 @@ def main() -> int:
             if not cleanup_errors and not manifest.exists():
                 for tier in tiers:
                     shutil.rmtree(basetemp / tier, ignore_errors=True)
-                    if tier in {'unit', 'smoke'}:
-                        shutil.rmtree(basetemp / (tier + '-advisory'), ignore_errors=True)
-                        if (basetemp / (tier + '-advisory')).exists():
-                            cleanup_errors.append('basetemp_not_removed:' + tier + '-advisory')
+                    shutil.rmtree(basetemp / (tier + '-advisory'), ignore_errors=True)
+                    if (basetemp / (tier + '-advisory')).exists():
+                        cleanup_errors.append('basetemp_not_removed:' + tier + '-advisory')
                     if (basetemp / tier).exists():
                         cleanup_errors.append(f"basetemp_not_removed:{tier}")
             elif manifest.exists() and not cleanup_errors:
@@ -716,7 +730,7 @@ def main() -> int:
         if cleanup_errors:
             results.append(_result("cleanup", code=125, passed=False, reason="cleanup_failed", errors=cleanup_errors))
     try:
-        after_sha, after = _sha(), _git_status()
+        after_sha, after = (_sha(), _git_status()) if sha is not None else (None, None)
     except Exception as exc:
         after_sha = after = None
         results.append(_result("source_integrity", code=125, passed=False, reason="source_readback_failed", error=f"{type(exc).__name__}: {exc}"[:500]))
@@ -724,7 +738,7 @@ def main() -> int:
         if sha is not None and (after_sha != sha or (not before and after)):
             results.append(_result("source_integrity", code=125, passed=False, reason="source_changed_during_gate", command=["git", "rev-parse", "HEAD"]))
     try:
-        output = _write_evidence(args.gate, evidence, args.evidence_out, sha, before, after_sha, after, results, deadline=deadline)
+        output = _write_evidence(args.gate, evidence, args.evidence_out, sha, before, after_sha, after, results, deadline=deadline, blocking_frozen=blocking_frozen)
     except Exception as exc:
         print(f"[v2-gate] evidence write FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

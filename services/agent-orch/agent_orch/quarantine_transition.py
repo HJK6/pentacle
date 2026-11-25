@@ -39,7 +39,7 @@ def _save(path, state):
             os.unlink(name)
 
 
-def reconcile(state_path, occurrence_map, effective, adapter, *, restorations=None):
+def reconcile(state_path, occurrence_map, effective, adapter, *, restorations=None, history=()):
     restorations = restorations or {}
     path = Path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +49,11 @@ def reconcile(state_path, occurrence_map, effective, adapter, *, restorations=No
         if state.get("version") != 1 or not isinstance(state.get("tests"), dict):
             raise ValueError("invalid quarantine transition state")
         pending = {}
+        # Remember reviewed membership without inventing a decision. A removed
+        # row needs a verified restoration before old evidence can recur.
+        for test in effective:
+            state["tests"].setdefault(test, {"phase": "adopted"})
+        _save(path, state)
         for test, occurrences in sorted(occurrence_map.items()):
             unique = {}
             for occurrence in occurrences:
@@ -58,24 +63,30 @@ def reconcile(state_path, occurrence_map, effective, adapter, *, restorations=No
                 if oid in unique and unique[oid] != occurrence:
                     raise ValueError("conflicting quarantine occurrence")
                 unique[oid] = occurrence
+            if test in effective and not state["tests"][test].get("decision"):
+                continue
             if len(unique) < 2:
+                continue
+            if test.startswith("test/"):
+                adapter.alert(_key("node-recurrence", test), "Node test needs review: " + test)
                 continue
             all_occurrences = sorted(unique.values(), key=lambda item: item["id"])
             chosen = all_occurrences[:2]
             key = _key("activation", [test, [item["id"] for item in chosen]])
             entry = state["tests"].get(test)
             previous = None
-            if entry and entry.get("phase") in ("adopted", "notified") and test not in effective:
+            if test not in effective and ((entry and entry.get("phase") in ("adopted", "notified"))
+                                          or (entry is None and test in history)):
                 restoration = restorations.get(test)
                 try:
                     if (not restoration or not adapter.verify_restoration(test, restoration)
                             or any(instant(item["created"]) <= instant(restoration["at"]) for item in chosen)
-                            or entry.get("key") == key):
+                            or (entry is not None and entry.get("key") == key)):
                         raise ValueError("verified restoration and new series required")
                 except (KeyError, ValueError, TypeError, AttributeError):
                     adapter.alert(_key("restoration", test), f"Restoration or recurrence evidence incomplete for {test}")
                     continue
-                previous, entry = entry, None
+                previous, entry = entry or {"phase": "adopted"}, None
             try:
                 decision = adapter.decision(test, all_occurrences)
                 if (not all(decision.get(k) for k in ("item", "owner", "coverage"))

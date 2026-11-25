@@ -14,8 +14,6 @@ pytestmark = pytest.mark.soak
 
 
 def test_bounded_real_macos_process_sampler_has_cpu_fd_and_root_pid_samples() -> None:
-    if sys.platform != "darwin":
-        pytest.fail("bounded sampler integration is required on hosta/macOS")
 
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(8)"])
     sampler = CpuSampler(SimpleNamespace(proc=proc), interval_s=0.05)

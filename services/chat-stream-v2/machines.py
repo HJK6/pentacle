@@ -242,16 +242,27 @@ def _ssh_control_dir() -> Path:
 _CONTROL_PATH_LIMIT = 100
 
 
-def ssh_control_path(ssh_target: str) -> Path | None:
-    """Return the deterministic, target-derived daemon control socket."""
+def resolve_ssh_control_path(ssh_target: str, *, required: bool = False) -> Path | None:
+    """Compute the socket path without changing the control directory."""
     control_dir = _ssh_control_dir()
     prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", ssh_target).strip("._-") or "target"
     digest = hashlib.sha256(ssh_target.encode()).hexdigest()[:16]
     path = control_dir / f"cm-{prefix[:24]}-{digest}.sock"
     if len(os.fsencode(path)) > _CONTROL_PATH_LIMIT:
-        return None
-    control_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    control_dir.chmod(0o700)
+        path = control_dir / f"cm-{digest}.sock"
+        length = len(os.fsencode(path))
+        if length > _CONTROL_PATH_LIMIT:
+            if required:
+                raise ValueError(f"SSH control path {path} is {length} bytes (limit {_CONTROL_PATH_LIMIT})")
+            return None
+    return path
+
+
+def ssh_control_path(ssh_target: str) -> Path | None:
+    path = resolve_ssh_control_path(ssh_target)
+    if path is not None:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
     return path
 
 

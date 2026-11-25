@@ -25,11 +25,11 @@ def test_service_notice_strips_seat_identity_and_reuses_test_decision_key(tmp_pa
     monkeypatch.setattr(quarantine_adapter, 'prepare_bundle', lambda *a, **k: {'state': 'ready_for_fd_relay', 'bundle': relay})
     adapter = quarantine_adapter.ProductionAdapter(None, checker=tmp_path/'checker', packet_root=tmp_path)
     entry = {'decision': {'item': 'decision', 'owner': 'owner', 'coverage': 'coverage'},
-             'occurrences': [{'source': 'run/1'}, {'source': 'run/2'}]}
+             'occurrences': [{'source': 'run/1', 'reason': 'flake'}, {'source': 'run/2', 'reason': 'flake'}]}
     entry['key'] = 'activation:abc'
-    entry['relay'] = adapter.prepare_relay(['test/file.js::case'], 'relay:abc', {'test/file.js::case': entry})
-    adapter.send_relay('test/file.js::case', entry)
-    adapter.notify('activation:abc', {'test': 'test/file.js::case', **entry['decision'],
+    entry['relay'] = adapter.prepare_relay(['daemon::tests/test_example.py::test_case'], 'relay:abc', {'daemon::tests/test_example.py::test_case': entry})
+    adapter.send_relay('daemon::tests/test_example.py::test_case', entry)
+    adapter.notify('activation:abc', {'test': 'daemon::tests/test_example.py::test_case', **entry['decision'],
                    'occurrences': ['run/1', 'run/2'], 'relay': entry['relay']})
     first, second = calls
     assert first[1] == second[1] == {

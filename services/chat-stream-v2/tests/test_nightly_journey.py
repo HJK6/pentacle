@@ -310,3 +310,68 @@ def test_nightly_publishes_original_receipt_before_reconciling_work(tmp_path, mo
                       '--surface', 'nightly']]
     saved = json.loads(receipt.read_text())
     assert saved['item'] == item and saved['scorecard_items'] == [item]
+
+
+@pytest.mark.parametrize("free_kib, expected_rc", [(62914560, 0), (62914559, 2)])
+def test_daily_launcher_checks_date_and_space_after_wait(tmp_path, free_kib, expected_rc):
+    launcher = Path(nj.__file__).resolve().parents[1] / "deploy/daily-main/run-daily-main.sh"
+    python = tmp_path / "services/chat-stream-v2/.venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("""#!/bin/sh
+case "$1" in
+  */nightly_journey.py) touch "$HOME/admitted";;
+  */scheduled_admission.py) echo launched; echo 'source=fixture comparison=fixture profile=merge' > "$(dirname "$5")/launch";;
+  *) exit 99;;
+esac
+""")
+    python.chmod(0o755)
+    config = tmp_path / "config.zsh"
+    config.write_text("""CHECKOUT="$HOME"
+REPOSITORY=unused
+date() {
+  if [[ -e "$HOME/admitted" ]]; then print 2026-11-26T00:00:01Z; else print 2026-11-25T23:59:59Z; fi
+}
+df() {
+  print 'Filesystem 1024-blocks Used Available'
+  if [[ -e "$HOME/admitted" ]]; then print "disk 999 1 $FREE_KIB"; else print 'disk 999 1 70000000'; fi
+}
+""")
+    result = subprocess.run(["zsh", str(launcher)], text=True, capture_output=True, timeout=10,
+                            env={"HOME": str(tmp_path), "DAILY_MAIN_CONFIG": str(config),
+                                 "FREE_KIB": str(free_kib)})
+    assert result.returncode == expected_rc, result.stderr
+    runs = tmp_path / ".pentacle/daily-main/runs"
+    lines = (runs.parent / "results.log").read_text().splitlines()
+    assert lines == [line for line in result.stdout.splitlines() if "daily-main result=" in line]
+    assert len(lines) == 1
+    if expected_rc == 0:
+        assert len(list(runs.glob("attempt.*"))) == 1
+        assert "result=PASS" in result.stdout and "utc=2026-11-26T00:00:01Z" in result.stdout
+        assert "launched" in result.stdout.splitlines()
+    else:
+        assert list(runs.iterdir()) == []
+        assert "result=NOT_LAUNCHED reason=free_space" in result.stdout
+        assert "launched" not in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("envelope, expected_rc", [(10832, 2), (10850, 0)])
+def test_daily_launcher_fits_full_gate_inside_supervisor(tmp_path, monkeypatch, envelope, expected_rc):
+    launcher = Path(nj.__file__).resolve().parents[1] / "deploy/daily-main/run-daily-main.sh"
+    python = tmp_path / "services/chat-stream-v2/.venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    repo = tmp_path / "fixture"
+    gate = repo / "services/chat-stream-v2/tools/run_gate.py"
+    gate.parent.mkdir(parents=True)
+    gate.write_text("from pathlib import Path\nPath.home().joinpath('started').touch()\n")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-qm", "Seed local fixture"], check=True)
+    config = tmp_path / "config.zsh"
+    config.write_text('sleep 0.2\nCHECKOUT="$HOME"\nREPOSITORY="$HOME/fixture"\n')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("DAILY_MAIN_CONFIG", str(config))
+    rc = sa.bounded(["zsh", str(launcher), "--execute", str(tmp_path)], envelope, tmp_path / "bound.json")
+    assert rc == expected_rc
+    assert (tmp_path / "started").exists() == (expected_rc == 0)

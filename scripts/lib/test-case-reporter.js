@@ -1,31 +1,61 @@
 'use strict';
+const { createHash } = require('node:crypto');
+const fs = require('node:fs');
+const { junit } = require('node:test/reporters');
 
 // Node emits completed cases and their enclosing suites in depth-first order.
 // Keep the ancestry as an array so equal space-joined names stay distinguishable.
-module.exports = async function* (events) {
+async function* observe(events, completion, receipt) {
   const stack = [];
   const cases = [];
-  let summary;
-  for await (const {type, data} of events) {
+  let summary, fileSummary, incomplete = false;
+  for await (const event of events) {
+    const {type, data} = event;
     if (type === 'test:start') {
-      if (data.nesting !== stack.length) throw new Error('incomplete Node test ancestry');
+      if (data.nesting !== stack.length) incomplete = true;
       stack.push(data.name);
     } else if (type === 'test:pass' || type === 'test:fail') {
       if (data.nesting !== stack.length - 1 || stack.at(-1) !== data.name) {
-        throw new Error('incomplete Node test result');
+        incomplete = true;
       }
-      cases.push({
-        names: [...stack],
-        failure: type === 'test:fail' ? data.details.error?.failureType || 'unknown' : null,
-        skipped: !!(data.skip || data.todo),
-      });
+      const failure = data.details.error?.failureType;
+      if (type === 'test:fail' && !['testCodeFailure', 'subtestsFailed'].includes(failure)) {
+        incomplete = true;
+      }
+      const entry = {names: [...stack], skipped: !!(data.skip || data.todo)};
+      if (failure === 'testCodeFailure' && !entry.skipped) {
+        entry.assertion_digest = createHash('sha256').update(data.details.error.message).digest('hex');
+        if (receipt) {
+          completion.failures.push(entry);
+          fs.writeFileSync(receipt, JSON.stringify({failures: completion.failures}));
+        }
+      }
+      cases.push(entry);
       stack.pop();
-    } else if (type === 'test:summary' && !data.file) {
-      summary = data.counts;
+    } else if (type === 'test:summary') {
+      if (data.file) fileSummary = data.counts;
+      else summary = data.counts;
     }
+    yield event;
   }
-  if (stack.length || !summary || cases.length !== summary.tests + summary.suites) {
-    throw new Error('incomplete Node test discovery');
+  // A worker can exit zero before reporting and Node emits a passing file
+  // wrapper. A completed registration stream has its own per-file summary.
+  if (incomplete || stack.length || !fileSummary || !summary || fileSummary.cancelled || summary.cancelled ||
+      cases.length !== fileSummary.tests + fileSummary.suites || cases.length !== summary.tests + summary.suites) {
+    return;
   }
-  yield JSON.stringify(cases) + '\n';
+  completion.cases = cases;
+}
+
+module.exports = async function* (events) {
+  const receipt = process.env.PENTACLE_TEST_COMPLETION_PATH;
+  const completion = {failures: []};
+  const observed = observe(events, completion, receipt);
+  // Let native JUnit finish even when this invocation cannot prove completion.
+  if (receipt) yield* junit(observed);
+  else for await (const _ of observed) { /* Drain the events for collection. */ }
+  if (!completion.cases) return;
+  const result = JSON.stringify(completion.cases) + '\n';
+  if (receipt) fs.writeFileSync(receipt, result);
+  else yield result;
 };

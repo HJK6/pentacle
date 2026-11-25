@@ -1,13 +1,18 @@
 # Test admission and quarantine
 
-The blocking selectors use `scripts/quarantine.json` as the effective quarantine
-list from the accepted Git base. Candidate additions are reported as pending and
-have no effect until the relay publishes them on main. A quarantine names one exact case. Python identities use the suite prefix
-for new entries (`daemon::`, `cli::`, or `shared::`); the original unprefixed
-daemon entries remain valid. JavaScript identities are a test file, `::`, and
-the exact Node test name. The associated history records an activation identity
-and, for nested Node tests, the parent test names. The selectors run those cases
-visibly as advisory and preserve the remaining blocking outcomes.
+The blocking selectors use the candidate's `scripts/quarantine-v2.json` as the
+single effective list. Each row has an exact `id`, `owner`, `reason`, and ISO
+expiry date; an expired row fails the gate. Adding a row takes effect in that
+change, and removing it immediately restores blocking. Each blocking case lost
+by quarantine or deletion also needs a `Coverage-Drop: <exact ID>` commit
+trailer. Python IDs include the suite prefix (`daemon::`, `cli::`, or `shared::`).
+The retained v1 file at `scripts/quarantine.json` serves the installed legacy
+reader until its next release. New proposals update only the v2 file.
+The active list is for Python cases. Quarantined cases run as advisory and cannot
+change the blocking verdict. JavaScript cases use native skips in source; a skip
+of a formerly blocking case also requires a coverage-loss trailer. The automatic
+worker reports exact JavaScript case identities for review without proposing a
+list row. Nested names use a compact JSON array of ordered name components.
 
 A scheduled reconciliation consumes first-attempt scorecard classifications and
 retained test-level receipts. It counts distinct reviewed no-code occurrences,
@@ -35,56 +40,3 @@ uses only later occurrences; a missing or invalid proof raises an alert. To
 reopen a terminal decision, configure `requesting_stream_id` with the
 publisher's authorized host and seat identity. The original item and its
 observations remain linked to the new activation.
-
-## Blocking-tier admission
-
-The rollout inventory binds exact Python node IDs on their declared platforms and
-JavaScript test files to their test and relevant fixture fingerprints. Its
-source baseline is recorded in the inventory; the rollout receipt separately
-binds the selector implementation. Python admission is per collected case.
-The npm runner's admission is per test file. Separate gate entries that do not
-use these selectors continue to block under their own contracts.
-
-New or changed tests and tests restored after quarantine require an admission
-attestation. The selector trusts attestations already present on the accepted
-Git base. An attestation introduced by the current candidate is advisory until
-its reviewed metadata publication lands and the next run observes it on the
-base. A missing, stale, incomplete, or unreviewed record runs visibly as
-advisory. An unreadable inventory makes the gate incomplete while known
-blocking tests still run. Quarantine takes precedence over admission.
-
-The attestation records the suite and exact Python ID or JavaScript file,
-fingerprint, platforms, journey and boundary, failing-subject and
-passing-control receipt references and SHA256 digests, typed independent QA
-report ID, QA target commit, and any quarantine activation being restored.
-Place the matching record fields in a versioned evidence manifest at
-`scripts/test-admission-evidence/<sha256>.json`; the filename and attestation
-must name the SHA256 of its exact bytes. A single manifest can cover several
-cases. The reviewer checks the actual control receipts and uses that manifest
-SHA256 as the typed report's gate-evidence digest. Publishing an attestation or
-manifest does not change the test fingerprint.
-
-Before relay of a bundle that adds or changes attestations, run the checker from
-the accepted checker installation with the private work-report reader
-credential available:
-
-```
-python3 scripts/admission_attestation_check.py --root <checkout> --base <base-sha> --tip <candidate-sha>
-```
-
-Exit `0` accepts the changed attestations, `1` refuses an invalid or rejected
-attestation, and `2` reports unavailable Git or QA evidence. The checker reads
-the exact reviewed target source, the evidence-manifest digest, and the
-independently commissioned report. A refused or unavailable check cannot
-publish an attestation.
-
-For any relay bundle that adds quarantine entries, also run the checker from
-the accepted installation with the private scorecard register and work root:
-
-```
-python3 scripts/quarantine_addition_check.py --root <checkout> --base <base-sha> --tip <candidate-sha> --register <private-register> --work-root <private-work-root>
-```
-
-Exit `0` accepts, `1` refuses an addition without one open owned decision and
-two distinct first-attempt occurrence links, and `2` means the Git or private
-decision evidence is unavailable. A refusal or error blocks the relay.

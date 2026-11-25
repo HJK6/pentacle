@@ -1,12 +1,11 @@
 """Read exact failed Node cases from a retained first-attempt gate artifact."""
 from __future__ import annotations
 
-import hashlib
+import re
 import copy
 from io import BytesIO
 import json
 import subprocess
-from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 
 
@@ -33,36 +32,16 @@ def failures(raw):
             file = row['file']
             if not file.startswith('test/') or '..' in file.split('/'):
                 raise ValueError('invalid Node test file identity')
-            name = hashlib.sha256(file.encode()).hexdigest() + '.xml'
-            member = by_name.get('npm/gate/node-junit/' + name)
-            if not member or member.file_size > 12_000_000:
-                raise ValueError('Node JUnit unavailable')
-            root = ET.fromstring(archive.read(member))
-            before = len(result)
-            def walk(element, parents):
-                if element.tag == 'testsuite' and element.get('name'):
-                    parents = [*parents, element.get('name')]
-                if element.tag == 'testcase':
-                    nodes = [child for child in element if child.tag in ('failure', 'error')]
-                    if nodes:
-                        if len(nodes) != 1 or not element.get('name'):
-                            raise ValueError('ambiguous Node failure')
-                        name = ' '.join([*parents, element.get('name')])
-                        test = file + '::' + name
-                        if test in seen:
-                            raise ValueError('duplicate Node test identity')
-                        seen.add(test)
-                        detail = nodes[0]
-                        result.append({'test': test,
-                            'assertion_digest': hashlib.sha256(detail.get('message', '').encode()).hexdigest(),
-                            'phase': 'call' if detail.get('type') == 'testCodeFailure' else 'unknown',
-                            'parents': parents})
-                for child in element:
-                    if child.tag in ('testsuites', 'testsuite', 'testcase'):
-                        walk(child, parents)
-            walk(root, [])
-            if len(result) == before:
-                raise ValueError('Node failure has no exact test case')
+            facts = row.get('failures')
+            if row.get('reason') or not isinstance(facts, list) or not facts:
+                raise ValueError('Node failure has no exact native test case')
+            for fact in facts:
+                test, digest = fact['test'], fact['assertion_digest']
+                if (not isinstance(test, str) or not test.startswith(file + '::') or test in seen
+                        or not re.fullmatch('[a-f0-9]{64}', digest)):
+                    raise ValueError('invalid or ambiguous native Node failure')
+                seen.add(test)
+                result.append({'test': test, 'assertion_digest': digest, 'phase': 'call'})
         if not result:
             raise ValueError('Node job has no identified test failures')
         return result
@@ -93,7 +72,7 @@ def enrich(rows, settings, *, api, download):
                     continue
                 try:
                     facts = failures(download(settings['repository'], f"actions/artifacts/{int(artifact['id'])}/zip"))
-                except (OSError, ValueError, KeyError, TypeError, BadZipFile, ET.ParseError, subprocess.SubprocessError):
+                except (OSError, ValueError, KeyError, TypeError, BadZipFile, subprocess.SubprocessError):
                     continue
                 break
             if not facts:
@@ -102,9 +81,9 @@ def enrich(rows, settings, *, api, download):
                 failure['tests'] = [{k: fact[k] for k in ('test', 'assertion_digest')} for fact in facts]
                 for fact in facts:
                     bound[(str(row['id']), failure['job'], failure['step'], fact['test'])] = {
-                        'test': fact['test'], 'phase': fact['phase'], 'suite': 'javascript', 'parents': fact['parents']}
+                        'test': fact['test'], 'phase': fact['phase'], 'suite': 'javascript'}
             row['classification'], row['causes'] = reliability_hosted.classifications(
                 row, decisions, settings.get('signatures', []), settings.get('checkout'))
-        except (OSError, ValueError, KeyError, TypeError, BadZipFile, ET.ParseError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, TypeError, BadZipFile, subprocess.SubprocessError):
             missing.append(f"public-checks/{row.get('id')}/1: Node failure identity unavailable")
     return output, bound, missing

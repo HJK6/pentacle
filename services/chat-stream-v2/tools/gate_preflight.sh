@@ -7,6 +7,10 @@ if [[ "${TMUX+x}" == x ]]; then
   exit 2
 fi
 
+PYTHON_BIN="${V2_PYTHON_BIN:-python3}"
+"${PYTHON_BIN}" "$(dirname "${BASH_SOURCE[0]}")/gate_host_preflight.py"
+[[ "${1:-}" == "--host-only" ]] && exit 0
+
 LOOPBACK_ALIAS="127.0.0.2"
 SERVICE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMEDIATION="${SERVICE_DIR}/deploy/loopback-alias/README.md"

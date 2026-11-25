@@ -191,7 +191,7 @@ def report(config, as_of):
             work["cause_gaps"].append("unresolved scorecard occurrences: " + ", ".join(work["pending"]))
         for name, key, gaps, label in (("open_failure_items", "open_items", "cause_gaps", "open failure items"),
                                       ("open_quarantines", "open_tests", "quarantine_gaps", "quarantined tests")):
-            n = len(work[key])
+            n = len(work[key]) if work[key] is not None else None
             conditions[name] = condition(n, None, None, n == 0, work[gaps], [stamp(as_of)],
                 [s for s in (work["register"], work["selector"] if key == "open_tests" else None) if s],
                 f"{n} known {label}, need zero")
@@ -199,7 +199,15 @@ def report(config, as_of):
         result["diagnostics"]["weekly"] = weekly(work["history"], as_of)
     except errors as exc:
         unavailable("open_failure_items", "work", exc)
-        unavailable("open_quarantines", "work", exc)
+        try:
+            settings = config["work"]
+            from .reliability_selection import effective_tests
+            selected = effective_tests(settings["selector_checkout"]) if settings.get("selector_checkout") else set(read(settings["selector"])["nonblocking_tests"])
+            n = len(selected)
+            conditions["open_quarantines"] = condition(n, None, None, n == 0, [], [stamp(as_of)],
+                [settings.get("selector_checkout") or settings.get("selector")], f"{n} known quarantined tests, need zero")
+        except errors as selection_exc:
+            unavailable("open_quarantines", "work", selection_exc)
         result["diagnostics"]["weekly"] = {"missing": "work history unavailable"}
     try:
         result["diagnostics"]["speed"] = speed(config.get("speed", {}), as_of) or {"missing": "timing samples unavailable"}

@@ -72,7 +72,6 @@ async def settle():
 
 
 @pytest.mark.asyncio
-@pytest.mark.quarantined
 async def test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line(store, caplog, monkeypatch):
     caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
     monkeypatch.setattr(host_transfer, "require_active", lambda conn, *actor: None)

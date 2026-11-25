@@ -1,4 +1,4 @@
-"""Partition unit tests deterministically by file path."""
+"""Partition unit tests deterministically by pytest node ID."""
 from __future__ import annotations
 
 import hashlib
@@ -17,8 +17,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     index, count = config.getoption("gate_shard_index"), config.getoption("gate_shard_count")
     kept, dropped = [], []
     for item in items:
-        file = item.nodeid.split("::", 1)[0]
-        cell = int(hashlib.sha256(file.encode("utf-8")).hexdigest(), 16) % count
+        cell = int(hashlib.sha256(item.nodeid.encode("utf-8")).hexdigest(), 16) % count
         (kept if cell == index else dropped).append(item)
     config.hook.pytest_deselected(items=dropped)
     items[:] = kept
