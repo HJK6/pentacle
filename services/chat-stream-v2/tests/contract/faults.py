@@ -59,9 +59,9 @@ FAULTS = {
         "C5 send was not honestly marked unconfirmed",
     ),
     "C6": Fault(
-        "test_events.py::test_c6_append_and_live_identity", "ingest.py",
-        'return json.dumps(list(_jsonl_event_identity(payload)), separators=(",", ":"))',
-        'return json.dumps([*_jsonl_event_identity(payload), id(payload)], separators=(",", ":"))',
+        "test_events.py::test_c6_append_and_live_identity", "store.py",
+        "return int(cur.lastrowid) if cur.rowcount > 0 else None",
+        "return int(cur.lastrowid) if cur.lastrowid else None",
         "C6 live event identity or provider record deduplication changed",
     ),
     "C7": Fault(
@@ -183,7 +183,7 @@ def main():
     lines = output / "detections.jsonl"
     with tempfile.TemporaryDirectory(prefix="chat-contract-faults-") as temporary, lines.open("w") as receipt:
         checkout = Path(temporary) / "checkout"
-        _git(REPO, "clone", "--quiet", "--local", "--no-checkout", str(REPO), str(checkout))
+        _git(REPO, "clone", "--quiet", "--local", "--no-hardlinks", "--no-checkout", str(REPO), str(checkout))
         _git(checkout, "update-ref", main_ref, main_commit)
         _git(checkout, "checkout", "--quiet", "--detach", commit)
         service = checkout / SERVICE.relative_to(REPO)
