@@ -493,7 +493,7 @@ def test_stalled_probe_does_not_delay_the_hook_and_reads_unknown(tmp_path, monke
         await _seat(store, "hostx:v2-stuck", parent_stream_id=FD)
         composite = await _composite(store, fd)
         notice = _notice(store, composite, probe=_probe({FD: "alive"}, stall={"hostx:v2-stuck"}),
-                         clock=time.time)
+                         clock=time.time, probe_timeout_s=rn.PROBE_TIMEOUT_S)
         started = time.monotonic()
         task = notice.schedule(await notice.capture())
         assert time.monotonic() - started < 0.5 and not task.done()
@@ -501,7 +501,7 @@ def test_stalled_probe_does_not_delay_the_hook_and_reads_unknown(tmp_path, monke
         assert await _queued(store, notice.tell_id) == []  # still probing in the background
         marker = await asyncio.wait_for(task, 15)
         elapsed = time.monotonic() - started
-        assert rn.PROBE_TIMEOUT_S <= elapsed < rn.PROBE_TIMEOUT_S + 5
+        assert rn.PROBE_TIMEOUT_S <= elapsed < rn.PROBE_TIMEOUT_S + 1.0
         text = (await _queued(store, notice.tell_id))[0]["body"]
         assert '"" unknown parent=FD' in text and marker["kind"] == "first_instrumented_start"
     _run(body)
