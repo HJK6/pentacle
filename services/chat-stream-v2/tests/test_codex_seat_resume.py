@@ -48,6 +48,24 @@ def fixture_paths(tmp_path):
                    executable=str(executable)), path
 
 
+@pytest.fixture
+def codex_account_on_path(tmp_path, monkeypatch):
+    account, path = fixture_paths(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").symlink_to(account.executable)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return account, path
+
+
+def test_codex_resume_refuses_missing_executable(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    machine = launch.local_machine(HOST, cwd=str(tmp_path))
+    with pytest.raises(ValueError, match="local provider executable 'codex' is not discoverable"):
+        launch.build_launch(machine, provider="codex", tmux_session=NAME,
+                            launch_model="gpt-6-luna", launch_effort="low", resume_session_id=RESUME_ID)
+
+
 def test_codex_resume_refuses_changed_identity_after_lookup(tmp_path, monkeypatch):
     async def run():
         store, runtime = await setup(str(tmp_path / "retained seats.db"))
@@ -109,11 +127,11 @@ def test_closed_codex_resume_reopens_same_row_and_launches_native_session(tmp_pa
 
 
 @pytest.mark.parametrize("prompt", ["", "Use the earlier review."])
-def test_codex_resume_persists_generation_before_pane_creation(tmp_path, prompt):
+def test_codex_resume_persists_generation_before_pane_creation(tmp_path, prompt, codex_account_on_path):
     async def run():
         store, runtime = await setup()
         try:
-            account, path = fixture_paths(tmp_path)
+            account, path = codex_account_on_path
             await runtime.run(lambda registry: registry.register(account))
             prior = await retained(store, account, path)
             tmux = ResumeTmux()
@@ -208,11 +226,11 @@ def test_codex_resume_refuses_before_mutation(tmp_path, case, code):
     asyncio.run(run())
 
 
-def test_codex_resume_replays_only_its_own_delivered_generation(tmp_path):
+def test_codex_resume_replays_only_its_own_delivered_generation(tmp_path, codex_account_on_path):
     async def run():
         store, runtime = await setup()
         try:
-            account, path = fixture_paths(tmp_path)
+            account, path = codex_account_on_path
             await runtime.run(lambda registry: registry.register(account))
             await retained(store, account, path)
             tmux = ResumeTmux()
