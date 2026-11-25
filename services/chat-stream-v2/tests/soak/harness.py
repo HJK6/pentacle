@@ -56,9 +56,6 @@ from tools.gate_owner_manifest import (
 
 SERVICE_DIR = Path(__file__).resolve().parents[2]
 
-from store import Store  # noqa: E402  (after sys.path bootstrap)
-from launch import local_machine, stream_token_file_for
-
 BIND_DEADLINE_S = 5.0
 SHUTDOWN_DEADLINE_S = 5.0
 LOCAL_HOST = "soakhost"
@@ -161,7 +158,7 @@ def _parse_macos_fd_output(output: str, pid: int) -> int | None:
 class TmuxNamespace:
     """One run-owned tmux server addressed by a short private socket name."""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, *, env: dict[str, str] | None = None) -> None:
         real_tmux = shutil.which("tmux")
         if not real_tmux:
             raise RuntimeError("tmux is required for the soak tier")
@@ -182,7 +179,7 @@ class TmuxNamespace:
             json.dumps({"machines": [{"name": LOCAL_HOST}]}, indent=2) + "\n",
             encoding="utf-8",
         )
-        self._env = dict(os.environ)
+        self._env = dict(os.environ if env is None else env)
         self._env.pop("TMUX", None)
         self._env.pop("TMUX_TMPDIR", None)
         self.wrapper = tmp_path / f"tmux-{name}"
@@ -798,6 +795,8 @@ class RpcClient:
 
 
 def _seat_token_path(spawn_cwd: Path, stream_id: str) -> Path:
+    from launch import local_machine, stream_token_file_for
+
     host, name = stream_id.split(":", 1)
     return Path(stream_token_file_for(local_machine(host, cwd=str(spawn_cwd)), name))
 
@@ -825,6 +824,7 @@ def seed_offline_host(db: str, host: str, count: int) -> list[str]:
     non-mutating verbs; close/tell must answer `unsupported_host` fast. Returns
     the stream_ids."""
     import asyncio
+    from store import Store
 
     ids = [f"{host}:offline-{i}" for i in range(count)]
 

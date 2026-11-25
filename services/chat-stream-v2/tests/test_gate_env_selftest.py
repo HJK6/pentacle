@@ -84,7 +84,7 @@ def test_gate_env_deadline_is_accepted_by_the_real_runner_envelope(tmp_path) -> 
     spec.loader.exec_module(gate_env)
     config = json.loads((ROOT / "scripts" / "gate-env.json").read_text())
     service = ROOT / "services" / "chat-stream-v2"
-    for name in ("unit", "smoke", "merge"):
+    for name in ("contract", "unit", "smoke", "merge"):
         target = config["profiles"]["pentacle"]["targets"]["v2-" + name]
         command, results = gate_env.build_command(config, target, tmp_path / "venv", ROOT, service, tmp_path / "ev", tmp_path / "t" / "b", [], target["timeout_s"], {})
         deadline_s = float(command[command.index("--deadline-seconds") + 1])
@@ -92,7 +92,7 @@ def test_gate_env_deadline_is_accepted_by_the_real_runner_envelope(tmp_path) -> 
             tiers = list(target["tier_timeouts"].items())
         else:
             tier_s = float(command[command.index("--timeout-seconds") + 1])
-            tiers = [("unit", tier_s), ("smoke", tier_s)] if name == "merge" else [(name, tier_s)]
+            tiers = [(tier, tier_s) for tier in run_gate.MERGE_TIERS] if name == "merge" else [(name, tier_s)]
         for startup_s in (0.0, 5.0, 25.0):  # runner startup before its first check
             deadline = {"deadline_s": deadline_s, "reserve_s": float(config["deadline"]["reserve_s"]), "checks": []}
             merge_bounds = config["deadline"]["merge_check_bounds_s"] if name == "merge" else {}

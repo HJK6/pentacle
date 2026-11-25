@@ -31,7 +31,7 @@ from typing import Any, Callable, Iterator
 
 from websockets.sync.client import connect
 
-from tools.run_gate import _process_group_popen_kwargs
+from tools.run_gate import _process_group_exists, _process_group_popen_kwargs
 from tests.soak.harness import TmuxNamespace, LOCAL_HOST
 
 SERVICE_DIR = Path(__file__).resolve().parents[2]
@@ -76,6 +76,7 @@ class RestartDaemon:
         self.logpath = root / "daemon.log"
         self.proc: subprocess.Popen[str] | None = None
         self.port: int | None = None
+        self.bind_elapsed_s: float | None = None
         self.pids: list[int] = []
         self.ports: list[int] = []
         self.extra_env: dict[str, str] = {}
@@ -110,6 +111,7 @@ class RestartDaemon:
             log.write(f"\n==== daemon start {time.time():.3f} ====\n".encode())
             offset = log.tell()
         logf = open(self.logpath, "ab", buffering=0)
+        started = time.monotonic()
         self.proc = subprocess.Popen(argv, cwd=str(SERVICE_DIR), env=self.env(), stdout=logf,
                                      stderr=subprocess.STDOUT, text=True, **_process_group_popen_kwargs())
         logf.close()
@@ -123,6 +125,7 @@ class RestartDaemon:
                 for line in fh:
                     if "listening on" in line:
                         self.port = int(line.rsplit(":", 1)[1].strip())
+                        self.bind_elapsed_s = time.monotonic() - started
                         self.ports.append(self.port)
                         self.wait_spawn_ready()
                         return
@@ -161,6 +164,10 @@ class RestartDaemon:
             os.killpg(pgid, signal.SIGKILL)  # stragglers (blocked tmux wrappers)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # Darwin can report EPERM until terminal group members are reaped.
+            if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
+                raise
         self.proc = None
         return {"signal": sig.name, "rc": proc.returncode, "exit_s": round(time.monotonic() - started, 3),
                 "escalated_to_sigkill": escalated, "at_signal": at_signal}
@@ -169,12 +176,22 @@ class RestartDaemon:
         return self.proc is not None and self.proc.poll() is None
 
     def kill_quiet(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
+        proc = self.proc
+        if proc is None:
+            return
+        # The owned Popen started a new session with its PID as PGID. Avoid
+        # polling before signaling, so even a dead leader remains unreaped and
+        # its identity cannot be reused. An already reaped leader permits only
+        # an absence check, never a signal to a potentially recycled group.
+        pgid = proc.pid
+        if proc.returncode is None:
             try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
-                self.proc.wait(timeout=10)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
                 pass
+        proc.wait(timeout=10)
+        if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
+            raise RuntimeError(f"restart daemon process group {pgid} cleanup unresolved")
         self.proc = None
 
 

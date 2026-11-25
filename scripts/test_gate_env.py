@@ -157,6 +157,7 @@ class ConfigFailsClosed(Tmp):
         workers = {name: target["unit_workers"] for name, target in config["profiles"]["pentacle"]["targets"].items()
                    if "unit_workers" in target}
         self.assertGreaterEqual(workers["v2-unit"], 2)
+        self.assertEqual(workers.pop("v2-contract"), 2)
         self.assertTrue(all(value == workers["v2-unit"] for value in workers.values()))
         shard = config["profiles"]["pentacle"]["targets"]["v2-unit-ci-shard"]
         self.assertEqual((shard['gate'], shard['shardable'], shard.get('unit_workers', 1)), ('unit', True, 1))
@@ -610,10 +611,10 @@ class DeadlineEnvelope(Tmp):
 
     def test_deadline_covers_tiers_preflight_and_reserve(self):
         command, results = self.command("merge", "parser.add_argument('--deadline-seconds')")
-        self.assertEqual(command[command.index("--timeout-seconds") + 1], "900")
+        self.assertEqual(command[command.index("--timeout-seconds") + 1], "600")
         check_s = sum(REAL_CONFIG["deadline"]["merge_check_bounds_s"].values())
-        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(900 * 2 + 30 + 60 + 30 + check_s))
-        self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30 + check_s)
+        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(1800 + 60 + 60 + 30 + check_s))
+        self.assertEqual(results["wall_s"], 1800 + 60 + 60 + 30 + 30 + check_s)
         unit, results = self.command("unit", "--deadline-seconds")
         self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
         service = self.tmp / "svc"
@@ -1490,7 +1491,7 @@ class MigratedTargets(Tmp):
         self.assertEqual(cmd[cmd.index("--unit-workers") + 1], str(target["unit_workers"]))
         self.assertIn("merge", cmd)
         budget = cfg["deadline"]
-        deadline = sum(target["tier_timeouts"].values()) + budget["preflight_s"] + budget["reserve_s"] + budget["slack_s"]
+        deadline = sum(target["tier_timeouts"].values()) + 2 * budget["preflight_s"] + budget["reserve_s"] + budget["slack_s"]
         deadline += sum(budget["merge_check_bounds_s"].values()) + budget["merge_unit_advisory_s"]
         self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), deadline)
         self.assertEqual(result["wall_s"], deadline + budget["slack_s"])

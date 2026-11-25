@@ -16,7 +16,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts/ci_required_aggregate.py'
-JOBS = {'frontend', 'web', 'daemon-unit', 'daemon', 'contracts'}
+JOBS = {'daemon-contract', 'frontend', 'web', 'daemon-unit', 'daemon', 'contracts'}
 
 
 def required_needs(event='pull_request'):
@@ -99,8 +99,10 @@ class WorkflowControls(unittest.TestCase):
                 continue
             if job_id == 'daemon':
                 self.assertEqual(job['needs'], ['daemon-unit'])
-            else:
+            elif job_id == 'daemon-contract':
                 self.assertNotIn('needs', job)
+            else:
+                self.assertEqual(job['needs'], ['daemon-contract'])
             if job_id == 'daemon-unit':
                 self.assertEqual(job['strategy'], {'fail-fast': 'false', 'matrix': {'shard': ['0','1','2','3','4','5']}})
             steps = job['steps']
@@ -157,7 +159,7 @@ class WorkflowControls(unittest.TestCase):
                 args = shlex.split(line)
                 targets.append((args[args.index('--target') + 1], args[args.index('--select') + 1] if '--select' in args else None))
         self.assertCountEqual(targets, [('npm-test', None), ('web-gate', None),
-                                      ('v2-unit-ci-shard', None),
+                                      ('v2-contract', None), ('v2-unit-ci-shard', None),
                                       ('v2-smoke', None), ('cli-pytest', 'tests'), ('shared-pytest', 'tests')])
         jobs = self.workflow['jobs']
         unit = next(s['run'] for s in jobs['daemon-unit']['steps'] if '--target v2-unit-ci-shard' in s.get('run', ''))

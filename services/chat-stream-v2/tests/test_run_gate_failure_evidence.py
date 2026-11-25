@@ -326,10 +326,11 @@ def test_deadline_refuses_before_launch(tmp_path: Path) -> None:
     refusal = data["tiers"][0]
     assert code == 1 and len(data["tiers"]) == 1 and refusal["reason"] == "deadline_envelope_exceeded"
     check = refusal["deadline_check"]
-    assert check["tier_bounds_s"] == {"unit": 20.0, "smoke": 20.0} and check["preflight_bounds_s"] == {"smoke": 30.0}
+    assert check["tier_bounds_s"] == {"contract": 20.0, "unit": 20.0, "smoke": 20.0}
+    assert check["preflight_bounds_s"] == {"contract": 30.0, "smoke": 30.0}
     assert check["merge_check_bounds_s"] == {"merge_base": 20, "daemon_contract": 60,
                                             "daemon_layer_selectors": 90, "daemon_b04_selectors": 90}
-    assert check["required_s"] == 20 + 20 + 30 + run_gate.DEFAULT_RESERVE_S + sum(check["merge_check_bounds_s"].values())
+    assert check["required_s"] == 3 * 20 + 2 * 30 + run_gate.DEFAULT_RESERVE_S + sum(check["merge_check_bounds_s"].values())
     assert not (tmp_path / "evidence" / "unit.progress.jsonl").exists()
 
 
@@ -364,7 +365,7 @@ def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
 
     def fake_tier(tier, evidence_dir, limit, *, basetemp, manifest, unit_workers=1):
         seen.append(tier)
-        clock[0] += 50.0  # unit overran its 10s bound (terminate/drain), leaving too little for smoke
+        clock[0] += 5.0 if tier == "contract" else 50.0  # unit overrun leaves too little for smoke
         return run_gate._result(tier, code=0, passed=True)
 
     def base(timeout):
@@ -384,16 +385,16 @@ def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(run_gate, "_git_status", lambda: "")
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(sys, "argv", ["run_gate.py", "merge", "--evidence-dir", str(tmp_path / "evidence"), "--basetemp",
-                                      str(tmp_path / "base"), "--timeout-seconds", "10", "--deadline-seconds", "320",
+                                      str(tmp_path / "base"), "--timeout-seconds", "10", "--deadline-seconds", "358",
                                       "--deadline-reserve-seconds", "5"])
     assert run_gate.main() == 1
     data = json.loads((tmp_path / "evidence" / "v2-merge-evidence.json").read_text(encoding="utf-8"))
-    assert seen == ["unit"]
+    assert seen == ["contract", "unit"]
     assert [(t["tier"], t["reason"]) for t in data["tiers"]] == [
         ("selector", None), ("selector", None), ("selector", None),
-        ("unit", None), ("deadline", "deadline_envelope_exceeded"),
+        ("contract", None), ("unit", None), ("deadline", "deadline_envelope_exceeded"),
     ]
-    assert [check["ok"] for check in data["deadline"]["checks"]] == [True, True, False]
+    assert [check["ok"] for check in data["deadline"]["checks"]] == [True, True, True, False]
     assert data["deadline"]["checks"][-1]["tier_bounds_s"] == {"smoke": 10.0}
 
 

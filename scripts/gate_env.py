@@ -132,7 +132,7 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                 if not isinstance(required, list) or any(not isinstance(item, str) for item in required):
                     problems.append("required_select of " + tname)
                 limits = target.get("tier_timeouts")
-                if limits is not None and (target.get("gate") != "merge" or not isinstance(limits, dict) or set(limits) != {"unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values()) or sum(limits.values()) != target["timeout_s"]):
+                if limits is not None and (target.get("gate") != "merge" or not isinstance(limits, dict) or set(limits) != {"contract", "unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values()) or sum(limits.values()) != target["timeout_s"]):
                     problems.append("tier_timeouts of " + tname)
 
     if problems:
@@ -689,7 +689,8 @@ def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, can
         return ("product_failure" if counts.get("failures") else "unknown"), ff, secondary
     if reason == 'quarantine_advisory_incomplete':
         return 'incomplete', ff, secondary
-    if reason in ("missing_junit", "invalid_junit", "no_tests_collected", "source_changed_during_gate", "soak_skipped", "evidence_incomplete", "usage_manifest_invalid", "usage_manifest_timeout"):
+    if reason in ("missing_junit", "invalid_junit", "no_tests_collected", "source_changed_during_gate", "contract_skipped",
+                  "soak_skipped", "evidence_incomplete", "usage_manifest_invalid", "usage_manifest_timeout"):
         return "harness_failure", ff, secondary
     return "unknown", ff, secondary
 
@@ -1213,9 +1214,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 retention_reasons.append("owner_manifest_unresolved")
                 unresolved_paths.append(str(manifest))
             if scratch_allocated and target and target.get("kind") == "run_gate":
-                tiers = ("unit", "smoke") if target.get("gate") == "merge" else (target.get("gate"),)
+                tiers = ("contract", "unit", "smoke") if target.get("gate") == "merge" else (target.get("gate"),)
                 for tier in tiers:
-                    if tier in ("unit", "smoke", "soak"):
+                    if tier in ("contract", "unit", "smoke", "soak"):
                         tier_root = basetemp / tier
                         if tier_root.is_symlink() or tier_root.exists():
                             retention_reasons.append("tier_root_unresolved:" + tier)
@@ -1283,7 +1284,7 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
     gate_dir.mkdir(parents=True, exist_ok=True)
     kind = target["kind"]
     if kind == "run_gate":
-        tiers = 2 if target["gate"] == "merge" else 1
+        tiers = 3 if target["gate"] == "merge" else 1
         limits = target.get("tier_timeouts")
         tier_s = max(1, timeout_s // tiers)
         runner = service_dir / "tools" / "run_gate.py"
@@ -1296,7 +1297,7 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
         wall_s = timeout_s + config["reserve_s"]
         if "--deadline-seconds" in runner.read_text("utf-8"):  # runner owns the finite envelope when it supports one
             budget = config["deadline"]
-            preflights = 1 if target["gate"] in ("smoke", "merge") else 0
+            preflights = {"contract": 1, "smoke": 1, "merge": 2}.get(target["gate"], 0)
             # The runner measures the envelope from its own start, so launch/git-status time eats a bare sum: keep a start margin.
             deadline_s = (sum(limits.values()) if limits else tier_s * tiers) + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
             if target["gate"] == "merge":

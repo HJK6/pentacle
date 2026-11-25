@@ -11,7 +11,89 @@ env:
   # check so declared-version drift reaches gate_env and gets a receipt.
   TMUX_APT_PACKAGE: 'tmux=3.4*'
 jobs:
+  daemon-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+    - name: System packages
+      timeout-minutes: 5
+      run: |
+        missing=()
+        installed_tmux="$(dpkg-query -W -f='${db:Status-Status} ${Version}' tmux 2>/dev/null || true)"
+        [[ "$installed_tmux" == "installed "${TMUX_APT_PACKAGE#*=} ]] || missing+=("$TMUX_APT_PACKAGE")
+        for package in lsof zsh; do
+          command -v "$package" >/dev/null || missing+=("$package")
+        done
+        if ((${#missing[@]})); then
+          # Route only the runner's regional EC2 Ubuntu archive entry to the Azure archive;
+          # priorities, fallbacks, suites and signing stay as the image configured them.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i -E 's#^http://[a-z0-9-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?([[:space:]])#http://azure.archive.ubuntu.com/ubuntu/\1#' /etc/apt/apt-mirrors.txt
+            echo "apt mirror list:"; cat /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends --allow-downgrades "${missing[@]}"
+          for package in "${missing[@]}"; do echo "installed $package: $(command -v "${package%%=*}")"; done
+        fi
+    - name: Verify owned tmux server
+      run: |
+        version="$(tmux -V)"
+        echo "$version"
+        tmux_socket_dir="$(mktemp -d)"
+        cleanup_tmux() {
+          tmux -S "$tmux_socket_dir/server" kill-server >/dev/null 2>&1 || true
+          rm -f "$tmux_socket_dir/server"
+          rmdir "$tmux_socket_dir"
+        }
+        trap cleanup_tmux EXIT
+        tmux -S "$tmux_socket_dir/server" -f /dev/null new-session -d -s close-ci 'exec sleep 60'
+        server_version="$(tmux -S "$tmux_socket_dir/server" display-message -p '#{version}')"
+        echo "tmux server $server_version"
+        if [ "$server_version" != "${version#tmux }" ]; then
+          echo "::error::Owned tmux server version does not match its client."
+          exit 1
+        fi
+    - name: Source integrity after setup
+      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
+    - name: Chat core contract tier
+      run: |
+        python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/contract" --target v2-contract --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon-contract" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
+    - name: Source integrity at gate end
+      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
+      if: ${{ always() }}
+    - name: Retain gate summaries
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        path: |
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/contract/gate/v2-contract-evidence.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/contract/gate/contract.junit.xml
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/contract/gate/contract.progress.jsonl
+    - name: Retain failed gate evidence
+      if: ${{ failure() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: supported-gates-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   frontend:
+    needs: [daemon-contract]
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -87,6 +169,7 @@ jobs:
         if-no-files-found: warn
         path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   web:
+    needs: [daemon-contract]
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -149,6 +232,7 @@ jobs:
         if-no-files-found: warn
         path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   daemon-unit:
+    needs: [daemon-contract]
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
@@ -320,6 +404,7 @@ jobs:
         if-no-files-found: warn
         path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   contracts:
+    needs: [daemon-contract]
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -415,6 +500,7 @@ jobs:
         path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   checks:
     needs:
+    - daemon-contract
     - frontend
     - web
     - daemon-unit
