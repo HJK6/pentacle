@@ -12,7 +12,7 @@ Malformed input produces a transport error:
 |---|---|
 | invalid JSON | `protocol.error` with `error_code: "bad_json"` |
 | JSON that is not an object | `protocol.error` with `error_code: "bad_envelope"` |
-| unknown `type` | `<type>.error` with `error_code: "unsupported"` |
+| unknown `type` | `<type>.error` with `error_code: "unsupported_in_v2"` |
 
 Handler failures retain the requested verb. Expected failures use stable error codes; unexpected failures use `internal_error`.
 

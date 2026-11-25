@@ -36,7 +36,9 @@ SERVICE_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SERVICE_DIR.parents[1]
 PRE_FLIGHT = SERVICE_DIR / "tools" / "gate_preflight.sh"
 UNIT_SEPARATE_MARKERS = ("repin_exhaustive",)
-DEFAULT_TIMEOUTS = {"unit": 900.0, "smoke": 900.0, "soak": 3900.0}
+DEFAULT_TIMEOUTS = {"contract": 180.0, "unit": 900.0, "smoke": 900.0, "soak": 3900.0}
+MERGE_TIERS = ("contract", "unit", "smoke")
+PREFLIGHT_TIERS = {"contract", "smoke", "soak"}
 # Component bounds for the --deadline-seconds envelope. The reserve covers this
 # runner's own terminate (2x5s), reader drain (READER_JOIN_S), reap and evidence writes.
 PREFLIGHT_BOUND_S = 30.0
@@ -102,7 +104,9 @@ def _apply_strict_full_soak(env: dict[str, str]) -> None:
 def _tier_command(tier: str, junit: Path, basetemp: Path) -> list[str]:
     unit_marker = " and ".join(f"not {name}" for name in (*UNIT_SEPARATE_MARKERS, "quarantined", "admission_hold"))
     args = {
-        "unit": ["tests", "--ignore=tests/smoke", "--ignore=tests/soak", "-m", unit_marker, "-q", "-rs"],
+        "contract": ["tests/contract", "-m", "", "-q", "-rs", "--timeout-method=signal"],
+        "unit": ["tests", "--ignore=tests/contract", "--ignore=tests/smoke", "--ignore=tests/soak",
+                 "-m", unit_marker, "-q", "-rs"],
         "smoke": ["tests/smoke", "-m", "not quarantined and not admission_hold", "-q", "-rs", "--maxfail=1"],
         "soak": ["tests/soak", "-m", "soak", "-q", "-s", "-rs"],
     }.get(tier)
@@ -275,8 +279,8 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
             primary = "no_tests_collected"
         elif counts["failures"] or counts["errors"]:
             primary = "test_failures"
-        elif tier == "soak" and counts["skipped"]:
-            primary = "soak_skipped"
+        elif tier in {"contract", "soak"} and counts["skipped"]:
+            primary = f"{tier}_skipped"
     if primary is None and reporting[:1] and reporting[0] in {"missing_junit", "invalid_junit"}:
         primary = reporting.pop(0)
     if primary is None and code != 0:
@@ -309,7 +313,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             soak = _effective_soak_parameters(env)
         except ValueError as exc:
             return _result(tier, code=2, passed=False, reason="invalid_soak_tier", junit=junit, log=log, soak={"error": str(exc)})
-    if tier in {"smoke", "soak"}:
+    if tier in PREFLIGHT_TIERS:
         if shutil.which("tmux") is None:
             return _result(tier, code=127, passed=False, reason="tmux_missing", preflight=127, junit=junit, log=log, soak=soak)
         preflight, preflight_timeout = _preflight(env, evidence / f"{tier}.preflight.log")
@@ -323,9 +327,11 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
         command += ['-p', 'admission_plugin', f'--admission-root={REPO_ROOT}', '--admission-suite=daemon',
                     f'--admission-manifest={admission_manifest}', *scope_args]
     worker_args = []
-    if tier == "unit" and unit_workers > 1:
+    if tier in {"contract", "unit"} and unit_workers > 1:
         worker_args = ["-n", str(unit_workers), "--max-worker-restart=0"]
-        command.extend([*worker_args, "--dist", "loadfile"])
+        command.extend(worker_args)
+        if tier == "unit":
+            command.extend(["--dist", "loadfile"])
     command += ["-p", "tools.gate_progress", f"--gate-progress-journal={journal}", f"--gate-progress-run-id={_ACTIVE_RUN_ID or ''}:{tier}"]
     if tier == "unit" and shard_index is not None:
         command += ["-p", "tools.gate_shard", f"--gate-shard-index={shard_index}",
@@ -341,7 +347,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     counts, progress = _junit_counts(junit), summarize_progress(journal)
     terminated = not timed_out and (_TERMINATION_REQUESTED or (facts.get("termination") or {}).get("kind") == "external_signal")
     reason, secondary = _classify(code=code, timed_out=timed_out, terminated=terminated, counts=counts, tier=tier, progress=progress, output=facts.get("output") or {})
-    result = _result(tier, code=code, passed=reason is None, reason=reason, command=command, timed_out=timed_out, preflight=preflight if tier in {"smoke", "soak"} else None, junit=junit, log=log, counts=counts, soak=soak,
+    result = _result(tier, code=code, passed=reason is None, reason=reason, command=command, timed_out=timed_out, preflight=preflight if tier in PREFLIGHT_TIERS else None, junit=junit, log=log, counts=counts, soak=soak,
                      bound_s=timeout, subprocess_returncode=facts.get("subprocess_returncode"), termination=facts.get("termination"), output=facts.get("output"), progress=progress)
     result["secondary_outcomes"] = secondary
     if tier in {'unit', 'smoke'} and counts and 'parse_error' not in counts and not terminated and not timed_out:
@@ -361,7 +367,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             tests = [t.removeprefix('daemon::') for t in tests
                      if t.startswith(('tests/', 'daemon::tests/'))]
             tests = [t for t in tests if (t.startswith('tests/smoke/') if tier == 'smoke'
-                                           else not t.startswith(('tests/smoke/', 'tests/soak/')))]
+                                           else not t.startswith(('tests/contract/', 'tests/smoke/', 'tests/soak/')))]
             tests.extend(row['id'] for row in admission_state['held'])
             separate = admission_state['separate_tiers'] if scope_args else {}
             tests = sorted(set(tests).difference(separate))
@@ -539,7 +545,7 @@ def _positive_finite(value: str) -> float:
 def _envelope(remaining: list[tuple[str, float]], *, usage_pending: bool, reserve: float) -> dict[str, Any]:
     """Component bounds the remaining work may consume; no aggregate is invented beyond their sum."""
     tiers = {tier: limit for tier, limit in remaining}
-    preflight = {tier: PREFLIGHT_BOUND_S for tier, _ in remaining if tier in {"smoke", "soak"}}
+    preflight = {tier: PREFLIGHT_BOUND_S for tier, _ in remaining if tier in PREFLIGHT_TIERS}
     usage = USAGE_BOUND_S if usage_pending else 0.0
     return {"tier_bounds_s": tiers, "preflight_bounds_s": preflight, "usage_bound_s": usage, "reserve_s": reserve,
             "required_s": sum(tiers.values()) + sum(preflight.values()) + usage + reserve}
@@ -562,12 +568,12 @@ def main() -> int:
     global _ACTIVE_MANIFEST_PATH, _ACTIVE_RUN_ID, _TERMINATION_REQUESTED, _TERMINATION_SIGNAL
     clock_start = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("gate", choices=("unit", "smoke", "merge", "soak"))
+    parser.add_argument("gate", choices=(*MERGE_TIERS, "merge", "soak"))
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--evidence-out", type=Path)
     parser.add_argument("--basetemp", type=Path, help="gate base temp directory and owner-manifest home")
     parser.add_argument("--timeout-seconds", type=float)
-    parser.add_argument("--unit-workers", type=int, help="fixed unit-tier workers; 1 keeps serial execution")
+    parser.add_argument("--unit-workers", type=int, help="fixed contract and unit workers; 1 keeps serial execution")
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int)
     parser.add_argument("--deadline-seconds", type=_positive_finite,
@@ -594,7 +600,7 @@ def main() -> int:
         parser.error("usage manifest validation requires the merge gate")
     evidence = args.evidence_dir or Path(os.environ.get("V2_GATE_EVIDENCE_DIR") or tempfile.mkdtemp(prefix="pentacle-v2-gate-"))
     evidence.mkdir(parents=True, exist_ok=True)
-    tiers = ("unit", "smoke") if args.gate == "merge" else ("soak",) if args.gate == "soak" else (args.gate,)
+    tiers = MERGE_TIERS if args.gate == "merge" else (args.gate,)
     deadline = None if args.deadline_seconds is None else {"deadline_s": args.deadline_seconds, "reserve_s": args.deadline_reserve_seconds, "checks": []}
     sha = before = None
     results: list[dict[str, Any]] = []
@@ -661,6 +667,8 @@ def main() -> int:
                                              **({"advisory_bound": advisory_bounds[tier]} if tier in advisory_bounds else {}),
                                              **({"shard_index": args.shard_index, "shard_count": args.shard_count}
                                                 if args.shard_index is not None else {})))
+                    if tier == "contract" and not results[-1]["passed"]:
+                        break
     except KeyboardInterrupt:
         _TERMINATION_REQUESTED = True
         results.append(_result("owner", code=143, passed=False, reason="terminated", termination={"kind": "external_signal", "signal": _TERMINATION_SIGNAL or "SIGINT"}))

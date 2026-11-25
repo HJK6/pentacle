@@ -40,9 +40,11 @@ def test_gate_removes_tier_basetemps_and_keeps_evidence(tmp_path: Path, monkeypa
     monkeypatch.setattr(sys, "argv", ["run_gate.py", "merge", "--evidence-dir", str(evidence),
                                       "--basetemp", str(basetemp)])
     assert run_gate.main() == (0 if passed else 1)
-    assert seen == ["unit", "smoke"]
-    assert not (basetemp / "unit").exists() and not (basetemp / "smoke").exists()
-    assert (evidence / "unit.junit.xml").exists() and (evidence / "v2-merge-evidence.json").exists()
+    assert seen == (["contract", "unit", "smoke"] if passed else ["contract"])
+    assert all(not (basetemp / tier).exists() for tier in ("contract", "unit", "smoke"))
+    assert all((evidence / f"{tier}.junit.xml").exists() == (tier in seen)
+               for tier in ("contract", "unit", "smoke"))
+    assert (evidence / "v2-merge-evidence.json").exists()
 
 
 @pytest.mark.parametrize("reap_raises", [True, False])
@@ -69,12 +71,12 @@ def test_gate_retains_unresolved_cleanup_and_original_failure(tmp_path, monkeypa
     data = json.loads((evidence / "v2-merge-evidence.json").read_text())
     assert [(r["tier"], r["reason"]) for r in data["tiers"]] == [
         ("daemon_contract", None), ("daemon_layer_selectors", None), ("daemon_b04_selectors", None),
-        ("unit", "original_assertion"), ("smoke", "original_assertion"), ("cleanup", "cleanup_failed"),
+        ("contract", "original_assertion"), ("cleanup", "cleanup_failed"),
     ]
     assert data["tiers"][-1]["reason"] == "cleanup_failed"
     assert (basetemp / ".owned.json").exists()
-    assert (basetemp / "unit" / "original.log").read_text() == "first failure evidence"
-    assert (basetemp / "smoke" / "original.log").read_text() == "first failure evidence"
+    assert (basetemp / "contract" / "original.log").read_text() == "first failure evidence"
+    assert not (basetemp / "unit").exists() and not (basetemp / "smoke").exists()
 
 
 def test_direct_gate_refuses_untrusted_basetemp_before_creating_it(tmp_path, monkeypatch):

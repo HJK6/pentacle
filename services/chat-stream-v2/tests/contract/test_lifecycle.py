@@ -11,7 +11,7 @@ def _conversation(client, stream_id):
 
 
 def _identity(event):
-    return event_stamp(event), event["daemon_seq"], event["text"], event.get("stream_session_id")
+    return event_stamp(event), event["daemon_seq"], event["text"], event["session_id"]
 
 
 def test_c8_restart_continuity(chat):
@@ -48,7 +48,7 @@ def test_c8_restart_continuity(chat):
         client = chat.client()
         snapshot = client.subscribe()
         restored = {row["stream_id"]: row for row in snapshot["sessions"]}
-        assert seat.stream_id in restored and retired.stream_id not in restored, (
+        assert set(restored) == {seat.stream_id}, (
             "C8 first snapshot did not restore exactly the surviving fixture seat", list(restored),
         )
         assert restored[seat.stream_id]["session_generation"] == seat.generation

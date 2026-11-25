@@ -102,6 +102,15 @@
           "max_timeout_s": 699,
           "unit_workers": 4
         },
+        "v2-contract": {
+          "kind": "run_gate",
+          "gate": "contract",
+          "needs": ["python", "node", "tmux"],
+          "capabilities": "v2_host",
+          "timeout_s": 180,
+          "max_timeout_s": 180,
+          "unit_workers": 2
+        },
         "v2-smoke": {
           "kind": "run_gate",
           "gate": "smoke",
@@ -126,11 +135,12 @@
           "capabilities": "v2_host",
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
+            "contract": 180,
             "unit": 699,
             "smoke": 900
           },
-          "timeout_s": 1599,
-          "max_timeout_s": 1599,
+          "timeout_s": 1779,
+          "max_timeout_s": 1779,
           "unit_workers": 4
         },
         "v2-merge-capacity": {

@@ -314,6 +314,8 @@ termination. Audit rows are `manager_close*` with `actor_kind=front_desk`. See
 
 ## Tests and supported integrations
 
+See [test kinds](docs/testing.md) for the chat core contract tier and where to add tests.
+
 ```sh
 python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
 python -m pytest services/chat-stream-v2/tests

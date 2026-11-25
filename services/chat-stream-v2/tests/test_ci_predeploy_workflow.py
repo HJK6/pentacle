@@ -20,7 +20,7 @@ PROFILE = CONFIG['profiles']['pentacle']
 
 def _step():
     workflow = yaml.safe_load(PREDEPLOY.read_text())
-    expected = {'frontend': {'npm-test'}, 'web': {'web-gate'},
+    expected = {'daemon-contract': {'v2-contract'}, 'frontend': {'npm-test'}, 'web': {'web-gate'},
                 'daemon-unit': {'v2-unit-ci-shard'}, 'daemon': {'v2-smoke'},
                 'contracts': {'cli-pytest', 'shared-pytest'}}
     jobs = workflow['jobs']
@@ -39,14 +39,14 @@ def _step():
         assert len(argv) == len(targets)
         assert all(args[:3] == ['python3', 'scripts/gate_env.py', 'run'] for args in argv)
         assert {args[args.index('--target') + 1] for args in argv} == targets
-        if job_id in ('daemon-unit', 'daemon', 'contracts'):
+        if job_id in ('daemon-contract', 'daemon-unit', 'daemon', 'contracts'):
             commands.extend(line.replace('${GITHUB_JOB}', job_id).replace('${{ matrix.shard }}', '0') for line in lines)
     return workflow, {'run': '\n'.join(commands)}
 
 
 def _invocations(step):
     commands = [shlex.split(line) for line in step['run'].splitlines() if 'scripts/gate_env.py' in line]
-    assert len(commands) == 4
+    assert len(commands) == 5
     assert all(argv[:3] == ['python3', 'scripts/gate_env.py', 'run'] for argv in commands)
     assert all(argv[argv.index('--profile') + 1] == 'pentacle' for argv in commands)
     return {argv[argv.index('--target') + 1]: argv for argv in commands}
@@ -73,7 +73,11 @@ def _trace(name, argv, tmp_path, *, scratch=None, workspace=None, evidence=None)
 def test_predeploy_runs_only_the_v2_gate_and_agent_orch_suite(tmp_path):
     _, step = _step()
     invocations = _invocations(step)
-    assert set(invocations) == {'v2-unit-ci-shard', 'v2-smoke', 'cli-pytest', 'shared-pytest'}
+    assert set(invocations) == {'v2-contract', 'v2-unit-ci-shard', 'v2-smoke', 'cli-pytest', 'shared-pytest'}
+    contract, command, _, contract_env, _ = _trace('v2-contract', invocations['v2-contract'], tmp_path)
+    assert contract['kind'] == 'run_gate' and contract['gate'] == 'contract'
+    assert command[command.index('--unit-workers') + 1] == '2'
+    assert 'PYTEST_ADDOPTS' not in contract_env
     shard, command, _, shard_env, _ = _trace('v2-unit-ci-shard', invocations['v2-unit-ci-shard'], tmp_path)
     assert shard['kind'] == 'run_gate' and shard['gate'] == 'unit' and shard['shardable'] is True
     assert command[-4:] == ['--shard-index', '0', '--shard-count', '6']
@@ -83,7 +87,7 @@ def test_predeploy_runs_only_the_v2_gate_and_agent_orch_suite(tmp_path):
     assert smoke['kind'] == 'run_gate' and smoke['gate'] == 'smoke'
     assert str(ROOT / 'services/chat-stream-v2/tools/run_gate.py') in command
     assert 'PYTEST_ADDOPTS' not in smoke_env
-    for name in ('v2-unit-ci-shard', 'v2-smoke'):
+    for name in ('v2-contract', 'v2-unit-ci-shard', 'v2-smoke'):
         argv = invocations[name]
         assert argv[argv.index('--purpose') + 1] == 'acceptance'
     for name, service, suite in [('cli-pytest','agent-orch','cli'), ('shared-pytest','_shared','shared')]:
@@ -120,7 +124,7 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
     runner_temp = tmp_path / 'runner-temp'
     root = runner_temp / 'gate-evidence'
     patterns = []
-    job_ids = ('frontend', 'web', 'daemon-unit', 'daemon', 'contracts')
+    job_ids = ('daemon-contract', 'frontend', 'web', 'daemon-unit', 'daemon', 'contracts')
     for job_id in job_ids:
         uploads = [s for s in workflow['jobs'][job_id]['steps']
                    if s.get('uses') == 'actions/upload-artifact@v4' and s.get('if') == '${{ failure() }}']
@@ -145,7 +149,9 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
         assert all(p.startswith(str(root / job_id) + '/') and '..' not in Path(p).parts for p in selected)
         success_patterns.extend(selected)
     success_included = lambda p: any(fnmatch.fnmatch(str(p), pattern) for pattern in success_patterns)
-    for required in ('daemon-unit/daemon/gate/v2-unit-evidence.json', 'daemon-unit/daemon/gate/unit.junit.xml',
+    for required in ('daemon-contract/contract/gate/v2-contract-evidence.json',
+                     'daemon-contract/contract/gate/contract.junit.xml',
+                     'daemon-unit/daemon/gate/v2-unit-evidence.json', 'daemon-unit/daemon/gate/unit.junit.xml',
                      'daemon-unit/daemon/gate/unit.progress.jsonl', 'daemon-unit/daemon/gate/unit-advisory.junit.xml',
                      'daemon/smoke/gate/v2-smoke-evidence.json', 'daemon/smoke/gate/smoke.junit.xml',
                      'daemon/smoke/gate/smoke.progress.jsonl'):
