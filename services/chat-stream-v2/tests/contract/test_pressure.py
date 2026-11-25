@@ -27,7 +27,7 @@ def test_c12_slow_consumer_isolation(chat):
 
     # One subscribed socket pauses reading once its client queue fills. The
     # prelude exceeds the small receive window and precedes the overflow burst.
-    prelude = [burst.record("assistant", f"{i:03d} " + "a" * 65536) for i in range(24)]
+    prelude = [burst.record("assistant", f"{i:03d} " + "a" * 126976) for i in range(64)]
     burst.append(*prelude)
 
     def latest_stamp():
@@ -48,14 +48,20 @@ def test_c12_slow_consumer_isolation(chat):
     assert event["request_id"] == request_id
     assert [entry["text"] for entry in chat.inputs(receiver)] == [message]
     assert not healthy.events_since(burst.stream_id, start)
+    observed(latest_stamp, lambda stamp: stamp == (flood[-1]["uuid"], 0),
+             description="complete pressure burst with the subscriber still stalled", timeout=5)
 
     # Resume reads to observe the actual protocol close. A normal disconnect or
     # failure to fill the daemon's queue cannot satisfy this assertion.
     transport.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
     deadline = time.monotonic() + 5
-    with pytest.raises(ConnectionClosed) as closed:
-        while (remaining := deadline - time.monotonic()) > 0:
-            slow.receive(timeout=remaining)
+    try:
+        with pytest.raises(ConnectionClosed) as closed:
+            while (remaining := deadline - time.monotonic()) > 0:
+                slow.receive(timeout=remaining)
+    except TimeoutError as exc:
+        pytest.fail(f"C12 pressure did not close the stalled socket after "
+                    f"{len(slow.events_since(burst.stream_id, 0))} drained events: {exc}")
     received = closed.value.rcvd
     assert received is not None and (received.code, received.reason) == (1011, "slow_consumer"), (
         "C12 blocked subscriber did not receive the slow-consumer close", closed.value,

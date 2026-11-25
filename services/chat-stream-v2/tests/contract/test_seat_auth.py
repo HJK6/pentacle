@@ -11,17 +11,18 @@ def test_c10_retired_seat_is_fenced(chat):
     seat = chat.spawn(client, unique("reopen"))
     original = chat.token(seat)
 
-    def compact(token):
-        return client.call("compact", stream_id=seat.stream_id,
+    def compact(token, request_id):
+        return client.call("compact", request_id=request_id, stream_id=seat.stream_id,
                            from_stream_id=seat.stream_id, stream_token=token)
 
-    first = compact(original)
+    original_id = unique("compact")
+    first = compact(original, original_id)
     assert first["type"] == "compact.ok" and first["submission_confirmed"] is True, first
     initial = chat.inputs(seat)
     assert len(initial) == 1 and initial[0]["text"].startswith("/compact ")
     assert chat.close_seat(client, seat)["type"] == "close.ok"
     closed = chat.inspect(client, seat.stream_id, event_tail=0)["session"]
-    refusal = compact(original)
+    refusal = compact(original, original_id)
     assert (refusal["type"], refusal.get("error_code")) == ("compact.error", "compact_self_only"), (
         "C10 a retired token could still compact", refusal,
     )
@@ -33,12 +34,12 @@ def test_c10_retired_seat_is_fenced(chat):
     new_token = chat.token(replacement)
     assert new_token != original, "C10 replacement reused a retired credential"
     panes = chat.panes(replacement)
-    refusal = compact(original)
+    refusal = compact(original, original_id)
     assert (refusal["type"], refusal.get("error_code")) == ("compact.error", "compact_self_only"), refusal
     row = chat.inspect(client, replacement.stream_id, event_tail=0)["session"]
     assert (row["status"], row["session_generation"]) == ("open", replacement.generation)
     assert chat.panes(replacement) == panes and chat.inputs(replacement) == initial
-    current = compact(new_token)
+    current = compact(new_token, unique("compact"))
     assert current["type"] == "compact.ok" and current["submission_confirmed"] is True, current
     assert [item["text"] for item in chat.inputs(replacement)] == [initial[0]["text"]] * 2
 

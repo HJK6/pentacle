@@ -23,6 +23,7 @@ def test_c3_send_lands_once(chat):
     reply = client.call("send", request_id=request_id, optimistic_id=optimistic_id,
                         to_stream_id=seat.stream_id, text=text)
 
+    assert reply.get("submission_confirmed") is True, ("C3 send reply lost confirmation", reply)
     expect_landed(reply, seat.stream_id, request_id)
     assert [item["text"] for item in chat.inputs(seat)[len(before):]] == [text], (
         "C3 send produced a different number of provider inputs"
@@ -107,6 +108,7 @@ def test_c4_overlapping_send_and_disconnected_initiator(chat):
     second = _wait_user(observer, seat, start, text)
     assert second["daemon_seq"] > first["daemon_seq"] and event_stamp(second) != event_stamp(first)
     assert _input_texts(chat, seat) == [text, text]
+    assert retrying.call("ping")["type"] == "pong"
     assert sum(frame.body.get("request_id") == second_id for frame in retrying.frames[retry_start:]) == 1
 
 
@@ -164,6 +166,7 @@ def test_c9_send_receipts_across_restart(chat):
     client = chat.client()
     client.subscribe()
     replay = client.call("send", request_id=old_id, **payload)
+    assert replay.get("delivery") == "landed", ("C9 acknowledged replay lost its landed state", replay)
     expect_landed(replay, landed.stream_id, old_id)
     assert replay["coalesced"] is True and replay["receipt_id"] == acknowledged["receipt_id"], (
         "C9 acknowledged receipt was not preserved", replay,
