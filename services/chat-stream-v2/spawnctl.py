@@ -2279,6 +2279,23 @@ class SpawnCtl:
         resume_jsonl_path = ""
         resume_cwd = ""
         resume_prior_row: dict[str, Any] | None = None
+        request_id = str(msg.get("request_id") or f"spawn-{uuid.uuid4().hex}")
+        # Atomic claim below collapses concurrent same-key fires to one admission.
+        idempotency_key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
+        payload_hash = self._spawn_payload_hash(msg) if idempotency_key else ""
+        if resume_session_id is not None and msg.get("provider") == "codex" and idempotency_key:
+            # A lost response is a read of the already-delivered operation. It
+            # must not go through admission for a second pane on the live seat.
+            recorded = await self.store.spawn_record_for_key(host, idempotency_key)
+            if recorded and recorded["kind"] == "terminal" and recorded["row"].get("state") == "delivered":
+                prior = recorded["row"]
+                if prior.get("request_payload_hash") != payload_hash:
+                    raise VerbError("idempotency_key_conflict", "key belongs to a different spawn request")
+                generation = (prior.get("delivery_receipt") or {}).get("resume_generation")
+                replay = await self._reply_from_replay(host, request_id, "terminal", prior, idempotency_key)
+                if not generation or (replay.get("session") or {}).get("session_generation") != generation:
+                    raise VerbError("replayed_stream_dead", "the delivered Codex generation is no longer open")
+                return replay
         if resume_session_id is not None:
             name, resume_jsonl_path, resume_cwd, resume_prior_row = (
                 await self._resolve_resume_target(msg, host, tmux)
@@ -2306,10 +2323,6 @@ class SpawnCtl:
                     "invalid_cwd",
                     f"cwd is not an existing directory on target host {host}: {cwd}",
                 )
-        request_id = str(msg.get("request_id") or f"spawn-{uuid.uuid4().hex}")
-        # Atomic claim below collapses concurrent same-key fires to one admission.
-        idempotency_key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
-        payload_hash = self._spawn_payload_hash(msg) if idempotency_key else ""
         # Daemon-side admission freeze (deploy window): refuse only a NEW claim
         # with `spawn_frozen` while a TTL'd hold is set (BEFORE any reservation/
         # pane). A retry whose key ALREADY has an admitted seat must still replay
@@ -2581,6 +2594,8 @@ class SpawnCtl:
                 delivery_receipt=delivery_receipt,
                 native_initial_prompt=native_initial_prompt,
             )
+            if resume_session_id is not None and provider == "codex":
+                delivery_receipt["resume_generation"] = spawn_generation
             if native_initial_prompt and self.instance_id:
                 delivery_receipt["spawn_daemon_instance_id"] = self.instance_id
             # Graph admission ends before boot. A winning parent close makes
