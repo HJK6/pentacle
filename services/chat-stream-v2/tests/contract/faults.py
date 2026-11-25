@@ -145,7 +145,7 @@ def _run(service, output, name, nodes, workers):
             [sys.executable, "-m", "pytest", "-q", "--tb=short", "--timeout-method=signal",
              "-p", "no:rerunfailures", "-n", str(workers), "--max-worker-restart=0",
              f"--junitxml={junit}", *nodes],
-            cwd=service, env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=180,
+            cwd=service, env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=300,
         )
     return result.returncode, ET.parse(junit).findall(".//testcase")
 

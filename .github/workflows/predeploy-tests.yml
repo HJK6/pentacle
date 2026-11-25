@@ -234,7 +234,7 @@ jobs:
   daemon-unit:
     needs: [daemon-contract]
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:

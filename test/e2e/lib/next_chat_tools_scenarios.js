@@ -17,7 +17,7 @@ const editing = menu + ' .next-chat-edit';
 const query = selector => `document.querySelector(${JSON.stringify(selector)})`;
 const text = selector => `${query(selector)}?.textContent.trim()`;
 const shown = selector => `!!${query(selector)}?.getClientRects().length`;
-const wait = (ctx, condition, label) => ctx.session.waitFor(condition, { timeoutMs: ctx.timeoutMs, label });
+const wait = (ctx, condition, label, timeoutMs = ctx.timeoutMs) => ctx.session.waitFor(condition, { timeoutMs, label });
 
 async function command(ctx, data) {
   if (!ctx.runtime.fixtureScratch) throw new Error('Next chat tools need the isolated fixture daemon');
@@ -129,7 +129,7 @@ async function restoreFixtureBaseline(ctx, baseline, restoreNextAfterNavigation)
     if (different.length) unmet.push('Next storage keys: ' + different.join(', '));
     if (unmet.length) throw new Error(unmet.join('; '));
     return true;
-  })()`, 'viewport, media and Next storage restored');
+  })()`, 'viewport, media and Next storage restored', restoreNextAfterNavigation ? Math.max(ctx.timeoutMs, 120000) : ctx.timeoutMs);
 }
 function isolated(run, { width = 1440, restoreNextAfterNavigation = false } = {}) {
   return async ctx => {

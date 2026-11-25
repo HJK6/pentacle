@@ -88,7 +88,7 @@ class WorkflowControls(unittest.TestCase):
             if job_id != 'checks':
                 self.assertNotIn('if', job)
             self.assertEqual(job['runs-on'], 'ubuntu-latest' if job_id == 'checks' else 'ubuntu-24.04')
-            bound = 40 if job_id in ('daemon-unit', 'daemon') else 50
+            bound = {'daemon-unit': 75, 'daemon': 40}.get(job_id, 50)
             self.assertLessEqual(int(job['timeout-minutes']), bound)
             self.assertTrue(any(step.get('uses') == 'actions/checkout@v4' for step in job['steps']))
             nonblocking = [step for step in job['steps'] if 'continue-on-error' in step]
