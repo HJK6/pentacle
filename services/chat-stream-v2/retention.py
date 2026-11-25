@@ -1169,8 +1169,8 @@ def archive_events(
     tbl = f'"{ev.table}"'
     remaining = max_rows
     protected_stream_ids = protected_stream_ids or set()
-    scope = "".join(f' AND a."{c}" IS h."{c}"' for c in ("stream_id", "session_created_at")
-                    if c in ev.columns)
+    scope = [c for c in ("stream_id", "session_created_at") if c in ev.columns]
+    scope_eq = " AND ".join(f'"{c}" IS ?' for c in scope) or "1"
     alternates = [c for c in ("event_key", "identity") if c in ev.columns]
     read = list(dict.fromkeys([key, "stream_id", *ev.group_columns]))
     grp_pred = " AND ".join(f'"{c}" IS ?' for c in ev.group_columns)
@@ -1208,16 +1208,26 @@ def archive_events(
         return [row for row in found if still(row)]
 
     def conflicts(rows):
-        """Current hot events whose event key or identity another archived event holds."""
+        """Current hot events whose event key or identity another archived event holds.
+
+        The archive has no identity index, so it is probed once per stream and
+        birth with the batch's current values rather than once per row.
+        """
         ids = [row[key] for row in rows]
         clash = set()
         for column in alternates if ids else ():
-            clash.update(conn.execute(
-                f'SELECT h."{key}" FROM main.{tbl} h JOIN arch.{tbl} a ON a."{column}" = h."{column}"'
-                f'{scope} AND a."{key}" IS NOT h."{key}" WHERE h."{key}" IN ({",".join("?" for _ in ids)})',
-                ids).fetchall())
-        hold(found[0] for found in clash)
-        return {tuple(found) for found in clash}
+            groups: dict[tuple, dict] = {}
+            for event_id, *group, value in conn.execute(
+                    f'SELECT "{key}", {_q([*scope, column])} FROM main.{tbl} '
+                    f'WHERE "{key}" IN ({",".join("?" for _ in ids)}) AND "{column}" IS NOT NULL', ids):
+                groups.setdefault(tuple(group), {}).setdefault(value, set()).add(event_id)
+            for group, held in groups.items():
+                for value, holder in conn.execute(
+                        f'SELECT "{column}", "{key}" FROM arch.{tbl} WHERE {scope_eq} AND "{column}" IN '
+                        f'({",".join("?" for _ in held)})', [*group, *held]):
+                    clash.update(event_id for event_id in held[value] if event_id != holder)
+        hold(sorted(clash))
+        return {(event_id,) for event_id in clash}
 
     def place(rows):
         if not rows:
