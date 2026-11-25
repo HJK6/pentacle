@@ -76,6 +76,7 @@ class RestartDaemon:
         self.logpath = root / "daemon.log"
         self.proc: subprocess.Popen[str] | None = None
         self.port: int | None = None
+        self.bind_elapsed_s: float | None = None
         self.pids: list[int] = []
         self.ports: list[int] = []
         self.extra_env: dict[str, str] = {}
@@ -110,6 +111,7 @@ class RestartDaemon:
             log.write(f"\n==== daemon start {time.time():.3f} ====\n".encode())
             offset = log.tell()
         logf = open(self.logpath, "ab", buffering=0)
+        started = time.monotonic()
         self.proc = subprocess.Popen(argv, cwd=str(SERVICE_DIR), env=self.env(), stdout=logf,
                                      stderr=subprocess.STDOUT, text=True, **_process_group_popen_kwargs())
         logf.close()
@@ -123,6 +125,7 @@ class RestartDaemon:
                 for line in fh:
                     if "listening on" in line:
                         self.port = int(line.rsplit(":", 1)[1].strip())
+                        self.bind_elapsed_s = time.monotonic() - started
                         self.ports.append(self.port)
                         self.wait_spawn_ready()
                         return
