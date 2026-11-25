@@ -121,13 +121,13 @@ def test_spawn_resume_without_top_level_still_infers_parent_inside_session(monke
     assert payload["parent_stream_id"] == "hostc:claude-live-caller"
 
 
-def test_spawn_resume_requires_claude_provider(monkeypatch, tmp_path, capsys) -> None:
+def test_spawn_resume_requires_supported_provider(monkeypatch, tmp_path, capsys) -> None:
     _install_capture(monkeypatch, tmp_path)
 
-    result = cli.spawn(_resume_args(tmp_path, provider="codex"))
+    result = cli.spawn(_resume_args(tmp_path, provider="cursor"))
 
     assert result == 2
-    assert "requires --provider claude" in capsys.readouterr().err
+    assert "requires --provider claude or codex" in capsys.readouterr().err
 
 
 def test_spawn_resume_rejects_parent(monkeypatch, tmp_path, capsys) -> None:
