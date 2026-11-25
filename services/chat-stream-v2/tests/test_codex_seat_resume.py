@@ -143,3 +143,48 @@ def test_codex_resume_refuses_before_mutation(tmp_path, case, code):
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def test_codex_resume_replays_only_its_own_delivered_generation(tmp_path):
+    async def run():
+        store, runtime = await setup()
+        try:
+            account, path = fixture_paths(tmp_path)
+            await runtime.run(lambda registry: registry.register(account))
+            await retained(store, account, path)
+            tmux = ResumeTmux()
+            ctl = SpawnCtl(store, runtime.sessions, tmux=tmux,
+                           machine=launch.local_machine(HOST, cwd=str(tmp_path)))
+            ctl.account_runtime = runtime
+            commands = _install_successful_spawn(ctl, runtime.sessions, tmux)
+            msg = dict(provider="codex", resume_session_id=RESUME_ID, account=account.alias,
+                       model="gpt-6-luna", effort="low", _auth_context=AUTH,
+                       objective="Resume review", request_id="original", idempotency_key="resume-once")
+            first = await ctl.spawn(msg, HOST)
+            row = first["session"]
+            stat = path.stat()
+            assert await store.bind_observer_transcript(
+                row["stream_id"], generation=row["session_generation"], pane_pid="4321",
+                expected=row["observer_binding"], transcript={"path": str(path), "provider": "codex",
+                    "session_id": RESUME_ID, "file_id": [stat.st_dev, stat.st_ino]})
+            # The pane fixture replaces the boot step that persists the delivered receipt.
+            await store.set_spawn_outcome(HOST, NAME, "delivered", request_id=msg["request_id"],
+                                          idempotency_key=msg["idempotency_key"],
+                                          request_payload_hash=ctl._spawn_payload_hash(msg),
+                                          delivery_receipt=first["initial_prompt_delivery"])
+            replay = await ctl.spawn(dict(msg, request_id="retry"), HOST)
+            assert replay["replayed"] and replay["stream_id"] == row["stream_id"]
+            assert replay["session"]["session_generation"] == row["session_generation"]
+            with pytest.raises(VerbError, match="live|closed"):
+                await ctl.spawn(dict(msg, idempotency_key="different"), HOST)
+            with pytest.raises(VerbError) as conflict:
+                await ctl.spawn(dict(msg, account="spare"), HOST)
+            assert conflict.value.code in {"idempotency_key_conflict", "account_resume_cross_home_forbidden"}
+            await runtime.sessions.open(HOST, NAME, provider="codex", session_generation="successor")
+            with pytest.raises(VerbError) as stale:
+                await ctl.spawn(dict(msg, request_id="stale-retry"), HOST)
+            assert stale.value.code == "replayed_stream_dead"
+            assert len(commands) == 1
+        finally:
+            store.stop()
+    asyncio.run(run())
