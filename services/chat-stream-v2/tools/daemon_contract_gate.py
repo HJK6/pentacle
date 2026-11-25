@@ -17,6 +17,7 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_ROOT = SERVICE_ROOT / "daemon_contract"
 CONTRACT_PATH = CONTRACT_ROOT / "contract.json"
 INVENTORY_PATH = CONTRACT_ROOT / "inventory_manifest.json"
+LOCAL_OWNER_CONFIG_PATH = Path.home() / ".config" / "pentacle" / "daemon-contract.json"
 BASELINE_COMMIT = "f153ca8adce2a38e0c5092b2dc98ff5aec16e06e"
 PINNED_INVENTORIES = {
     "exceptions/F1_protected_core.txt": "501e96719f82ba6d1cc89c04de6ebe23eabccc342f64cfcf2cbf699ab9b3377f",
@@ -63,6 +64,24 @@ def _base_file(base: str, relative: str) -> bytes | None:
     return result.stdout
 
 
+def _local_structure_owner_configured() -> bool:
+    """Read the optional installation owner without exposing its value."""
+    try:
+        raw = LOCAL_OWNER_CONFIG_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise GateError("local daemon contract config is unreadable") from exc
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GateError("local daemon contract config is invalid JSON") from exc
+    owner = config.get("structure_owner") if isinstance(config, dict) else None
+    if not isinstance(owner, str) or not IDENTITY_RE.fullmatch(owner):
+        raise GateError("local daemon contract config must contain a valid structure_owner")
+    return True
+
+
 def _validate_contract() -> list[str]:
     errors: list[str] = []
     try:
@@ -76,12 +95,12 @@ def _validate_contract() -> list[str]:
         errors.append("max_active_daemon_lanes must remain exactly 2")
     if contract.get("layers") != EXPECTED_LAYERS:
         errors.append("the six daemon layers must appear once in the frozen order")
-    owner = contract.get("structure_owner")
-    owner_status = contract.get("structure_owner_status")
-    if owner is None and owner_status == "pending":
-        print("[daemon-contract] structure owner is pending the operator card")
-    elif not isinstance(owner, str) or not IDENTITY_RE.fullmatch(owner) or owner_status != "configured":
-        errors.append("structure_owner must be one configured host:v2-seat identity or explicit pending/null")
+    if contract.get("structure_owner") is not None or contract.get("structure_owner_status") != "pending":
+        errors.append("public structure_owner must remain explicit pending/null")
+    if not _local_structure_owner_configured():
+        print("[daemon-contract] structure owner is pending local configuration")
+    else:
+        print("[daemon-contract] local structure owner is configured")
 
     inventories = manifest.get("inventories")
     expected_names = {

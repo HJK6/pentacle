@@ -1,9 +1,10 @@
 """Admission: exercise the daemon contract CLI boundary, not its helper only.
 
-Journey: a candidate Store startup source or active exception list reaches the
-same CLI used by the local merge runner and protected CI. Boundary: every
-persistent startup addition and every moved/added allowance is refused, while
-the frozen baseline and exception removals pass. Supported runners are the
+Journey: candidate Store startup source, active exception list, or local owner
+configuration reaches the same CLI used by the local merge runner and
+protected CI. Boundary: every persistent startup addition, moved/added
+allowance, and malformed local owner is refused, while the frozen baseline,
+valid local owner and exception removals pass. Supported runners are the
 repository's Python 3.13 unit lane and Linux Python 3.13 contracts job.
 """
 from __future__ import annotations
@@ -44,6 +45,34 @@ class DaemonContractGateTests(unittest.TestCase):
 
     def test_frozen_contract_and_inventory_configuration_are_valid(self) -> None:
         self.assertEqual(daemon_gate._validate_contract(), [])
+
+    def test_local_structure_owner_config_is_optional_and_validated_at_cli_boundary(self) -> None:
+        temporary, root, service, base = self._fixture()
+        try:
+            home = root / "home"
+            config_path = home / ".config" / "pentacle" / "daemon-contract.json"
+            missing = self._run_fixture_gate(root, service, base, home=home)
+            self._record_result("local-owner-missing-cli-pass", base, missing)
+            self.assertEqual(missing.returncode, 0, missing.stdout + missing.stderr)
+            self.assertIn("pending local configuration", missing.stdout)
+
+            config_path.parent.mkdir(parents=True)
+            identity = "example:v2-seat"
+            config_path.write_text(json.dumps({"structure_owner": identity}), encoding="utf-8")
+            valid = self._run_fixture_gate(root, service, base, home=home)
+            self._record_result("local-owner-valid-cli-pass", base, valid)
+            self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+            self.assertIn("local structure owner is configured", valid.stdout)
+            self.assertNotIn(identity, valid.stdout + valid.stderr)
+
+            config_path.write_text(json.dumps({"structure_owner": "invalid"}), encoding="utf-8")
+            invalid = self._run_fixture_gate(root, service, base, home=home)
+            self._record_result("local-owner-invalid-cli-reject", base, invalid)
+            self.assertNotEqual(invalid.returncode, 0, invalid.stdout + invalid.stderr)
+            self.assertIn("valid structure_owner", invalid.stderr)
+            self.assertNotIn('"invalid"', invalid.stdout + invalid.stderr)
+        finally:
+            temporary.cleanup()
 
     def test_new_startup_write_is_detected(self) -> None:
         base = '''\
@@ -156,10 +185,14 @@ class Store:
                               text=True, capture_output=True).stdout.strip()
         return temporary, root, service, base
 
-    def _run_fixture_gate(self, root: Path, service: Path, base: str) -> subprocess.CompletedProcess[str]:
+    def _run_fixture_gate(self, root: Path, service: Path, base: str, *,
+                          home: Path | None = None) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        if home is not None:
+            environment["HOME"] = str(home)
         return subprocess.run(
             [sys.executable, str(service / "tools" / "daemon_contract_gate.py"), "--base", base],
-            cwd=root, text=True, capture_output=True, check=False,
+            cwd=root, env=environment, text=True, capture_output=True, check=False,
         )
 
     def test_checker_cli_passes_frozen_baseline_control(self) -> None:

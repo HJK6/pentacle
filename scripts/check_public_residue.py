@@ -25,7 +25,7 @@ PATTERN = re.compile("|".join(["host" + suffix for suffix in "abc"] + ["ab" + "r
 # As with the portable detector, assemble samples rather than embedding the
 # identifiers this guard is intended to prevent in public source.
 FLEET_NAMES = ["ama" + "terasu", "mer" + "lin", "tho" + "th",
-               "bar" + "t", "barti" + "maeus", "daff" + "odil"]
+               "barti" + "maeus", "daff" + "odil"]
 FLEET_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(FLEET_NAMES)
                            + r")(?![A-Za-z0-9])", re.IGNORECASE)
 # One existing wire identity is an explicitly retained compatibility contract.

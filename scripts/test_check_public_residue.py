@@ -245,6 +245,12 @@ def _fleet_additions():
                                 ("thorough", True)]:
             source.write_text(value + "\n")
             assert check()["passed"] == expected, "principal/token rule mismatch"
+        retired_table = "v2_assistant_" + "".join(("bar", "t")) + "_lanes"
+        source.write_text(retired_table + "\n")
+        assert check()["passed"], "retired host token inside the public table identifier must not match"
+        remaining_host = cpr.FLEET_NAMES[0]
+        source.write_text("owner=" + remaining_host + "\n")
+        assert not check()["passed"], "remaining fleet host terms must still be detected"
         source.write_text("clean end\n")
         tip = commit()
         source.write_text(word)  # working tree and index must not decide the result
