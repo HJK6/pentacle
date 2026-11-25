@@ -149,8 +149,11 @@ identical archived event is already copied. A hot event whose current row
 collides with a different archived event stays hot, is logged once and is counted
 in `events_retained`. The collision can be the same `event_id` with other bytes,
 or another archived `event_id` with the same `event_key` or non-null identity
-within the same stream and birth, including for an exact copy. Selection advances
-past retained rows. A reused session name keeps today's behavior: the newer
+within the same stream and birth, including for an exact copy. A same-id difference
+that appears between the copy and the delete is counted in that same pass. A row
+the delete refuses for any other reason (gone from hot, no longer eligible, its
+archived copy missing) is not a collision and is handled by the next pass.
+Selection advances past retained rows. A reused session name keeps today's behavior: the newer
 terminal row replaces the archived incarnation, through the same order. The
 archive still holds one row per `(host, session_name)`.
 

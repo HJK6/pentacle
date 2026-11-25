@@ -989,7 +989,7 @@ def _check_binding(conn, archive_path: Path, binding: tuple) -> None:
 
 
 def _move_copies(conn, archive_path, binding, table, keys, columns, candidates, *,
-                 current, place, conflicts=lambda rows: set()) -> int:
+                 current, place, conflicts=lambda rows: set(), unequal=lambda rows: None) -> int:
     """Archive commit -> verify -> hot delete, as receipts and routes move.
 
     `candidates` are key tuples a selection chose before either transaction;
@@ -1001,8 +1001,9 @@ def _move_copies(conn, archive_path, binding, table, keys, columns, candidates, 
     is absent. The second checks the configured archive binding, re-reads the
     rows, and deletes only those still eligible, equal to their archived copy
     in every column and free of `conflicts`, checking the binding again just
-    before the delete. A crash at any point leaves each row in the hot file,
-    the archive or both.
+    before the delete. Eligible rows that are not equal go to `unequal`, which
+    classifies them in this pass. A crash at any point leaves each row in the
+    hot file, the archive or both.
     """
     if not candidates:
         return 0
@@ -1023,6 +1024,7 @@ def _move_copies(conn, archive_path, binding, table, keys, columns, candidates, 
         _check_binding(conn, archive_path, binding)
         rows = current([key(row) for row in copied])
         same = _identical(conn, table, keys, columns, rows)
+        unequal([row for row in rows if key(row) not in same])
         rows = [row for row in rows if key(row) in same]
         bad = conflicts(rows)
         gone = [row for row in rows if key(row) not in bad]
@@ -1229,6 +1231,14 @@ def archive_events(
         hold(sorted(clash))
         return {(event_id,) for event_id in clash}
 
+    def unequal(rows):
+        """A same-id archived event with other bytes is a collision now; a missing
+        archived row is not, and is copied again by the next pass."""
+        ids = [row[key] for row in rows]
+        if ids:
+            hold(sorted(found[0] for found in conn.execute(
+                f'SELECT "{key}" FROM arch.{tbl} WHERE "{key}" IN ({",".join("?" for _ in ids)})', ids)))
+
     def place(rows):
         if not rows:
             return rows
@@ -1261,7 +1271,7 @@ def archive_events(
             cursor = candidates[-1][0]
             moved = _move_copies(conn, archive_path, binding, ev.table, [key], names,
                                  [tuple(found) for found in candidates],
-                                 current=current, place=place, conflicts=conflicts)
+                                 current=current, place=place, conflicts=conflicts, unequal=unequal)
             total += moved
             if remaining is not None:
                 remaining -= moved

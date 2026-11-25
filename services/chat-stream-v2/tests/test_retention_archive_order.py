@@ -86,7 +86,7 @@ def test_event_that_stops_being_eligible_after_the_copy_is_not_deleted(terminal,
     monkeypatch.setattr(r, "history_checkpoint", at("archive_committed", r.EVENT_TABLE,
                                                     lambda: write(terminal, reopen)))
     result = run_pass(terminal, cfg())
-    assert result.events_moved == 0
+    assert (result.events_moved, result.events_retained) == (0, 0)
     assert len(rows(terminal, r.EVENT_TABLE)) == 2
     assert len(rows(archive_of(terminal), r.EVENT_TABLE)) == 2
 
@@ -356,3 +356,63 @@ def test_an_archive_rebound_before_the_hot_delete_keeps_the_hot_rows(terminal, m
     assert configured == terminal.parent / "same-pair.db"
     assert rows(configured, r.EVENT_TABLE) == []
     assert "rebound" in refusal
+
+
+# --------------------------------------------------------------------------- #
+# every refusal at the delete is classified in the pass that makes it
+# --------------------------------------------------------------------------- #
+
+
+COLLIDES = "collides with a different archived event"
+
+
+@pytest.mark.parametrize("side", ["hot", "archive", "unchanged"])
+def test_a_same_id_copy_that_differs_at_the_delete_is_retained_in_this_pass(tmp_path, monkeypatch, caplog, side):
+    db = tmp_path / "sessions.db"
+    seed(db, open_names=[], terminal_names=["closed-1"], events_per_session=1)
+    original = rows(db, r.EVENT_TABLE)[0]
+    target = {"hot": db, "archive": archive_of(db)}.get(side)
+
+    def change():
+        assert rows(db, r.EVENT_TABLE) == rows(archive_of(db), r.EVENT_TABLE) == [original]
+        if target:
+            write(target, "UPDATE session_event_tail SET event_json='different' WHERE event_id=?",
+                  (original["event_id"],))
+    monkeypatch.setattr(r, "history_checkpoint", at("archive_committed", r.EVENT_TABLE, change))
+    with caplog.at_level("WARNING", logger=r.log.name):
+        result = run_pass(db, cfg())
+    warned = [m for m in caplog.messages if COLLIDES in m]
+    if target is None:
+        assert (result.events_moved, result.events_retained, warned) == (1, 0, [])
+        assert (rows(db, r.EVENT_TABLE), rows(archive_of(db), r.EVENT_TABLE)) == ([], [original])
+        return
+    assert (result.events_moved, result.events_retained) == (0, 1), "a same-id collision was not counted in this pass"
+    assert len(warned) == 1
+    hot, archived = rows(db, r.EVENT_TABLE), rows(archive_of(db), r.EVENT_TABLE)
+    assert len(hot) == len(archived) == 1 and hot[0]["event_json"] != archived[0]["event_json"]
+    assert (hot if side == "archive" else archived) == [original]
+
+
+def test_a_hot_event_deleted_after_the_copy_is_left_archived(terminal, monkeypatch, caplog):
+    events = rows(terminal, r.EVENT_TABLE, "1 ORDER BY event_id")
+    monkeypatch.setattr(r, "history_checkpoint", at("archive_committed", r.EVENT_TABLE,
+                                                    lambda: write(terminal, "DELETE FROM session_event_tail")))
+    with caplog.at_level("WARNING", logger=r.log.name):
+        result = run_pass(terminal, cfg())
+    assert (result.events_moved, result.events_retained) == (0, 0)
+    assert not [m for m in caplog.messages if COLLIDES in m]
+    assert rows(archive_of(terminal), r.EVENT_TABLE, "1 ORDER BY event_id") == events
+
+
+def test_an_archived_copy_missing_at_the_delete_is_copied_by_the_next_pass(terminal, monkeypatch, caplog):
+    events = rows(terminal, r.EVENT_TABLE, "1 ORDER BY event_id")
+    monkeypatch.setattr(r, "history_checkpoint", at("archive_committed", r.EVENT_TABLE,
+                                                    lambda: write(archive_of(terminal), "DELETE FROM session_event_tail")))
+    with caplog.at_level("WARNING", logger=r.log.name):
+        result = run_pass(terminal, cfg())
+    assert (result.events_moved, result.events_retained) == (0, 0)
+    assert not [m for m in caplog.messages if COLLIDES in m]
+    assert rows(terminal, r.EVENT_TABLE, "1 ORDER BY event_id") == events
+    monkeypatch.setattr(r, "history_checkpoint", lambda *_: None)
+    assert run_pass(terminal, cfg()).events_moved == 2
+    assert rows(archive_of(terminal), r.EVENT_TABLE, "1 ORDER BY event_id") == events
