@@ -94,8 +94,8 @@ launchd arguments and live interpreter and entry-point path.
 When managed rotation has removed the stderr boot marker, the controller
 requires a unique matching stdout marker and every configured stderr file to
 have been created after that PID's birth. It scans all retained stderr bytes
-and requires no boot marker there. This exception applies to the named manual
-recovery. Release observation still requires paired markers.
+and requires no boot marker there. The two no-restart recorders use this observation. Release observation still
+requires paired markers.
 
 After reviewing that authority, the currently bound FD must deliver this exact
 single-line tell body to the named physical recipient.
@@ -122,6 +122,81 @@ active pointer, stamp and immutable bundle remain untouched. Repeating the
 identical authority and GO on the same active pointer returns the same
 terminal receipt. A different grant cannot replace it. A later forward requires
 its own enrollment, rollback preimage and authorization.
+
+## Recording a failed operation as superseded by a serving successor
+
+Use this entry when an independently evidenced switch took the service from
+the failed bundle's target to another release. The serving release, current
+checkout HEAD and failed target stamp are three independent observations.
+The disposition closes only the named failed operation. A later deployment
+still requires its own preimage, gates and authority.
+
+From the reviewed controller's `services/chat-stream-v2` directory, the entry
+for a separately authorized application is
+
+```sh
+python -m deploy.ordinary_recovery \
+  --release-checkout <absolute-runtime-checkout> --bundle <absolute-failed-bundle> \
+  --authorization <absolute-fd-json> --successor-receipt <absolute-switch-result-json> \
+  --operator-credential <absolute-operator-v2-envelope> \
+  --deployer-stream-id <physical-go-recipient> --go-tell-id <delivered-go-id>
+```
+
+Supply three distinct, owner-only (0600) input files. Use the retained switch
+result as the successor receipt. Its `outcome` must be `serving`, `prior` the
+old bundle target, `target` the successor commit, and `old_pid` the displaced
+PID. Its `live` object records the successor's full `sha`, positive integer
+`pid` and exact UTC process `birth` string. Extra switch diagnostics are
+covered by the whole-file hash.
+
+The FD authorization JSON requires these fields.
+
+| Field | Value bound by the approval |
+| --- | --- |
+| `schema` | `pentacle.ordinary-superseded.v1` |
+| `failed` | `operation`, integer `sequence`, and SHA-256 of the exact bytes (including final newlines) in `pointer_bytes_sha256`, `bundle_bytes_sha256` and `journal_bytes_sha256` |
+| `expected_serving` | The full observation described below |
+| `successor_receipt_sha256` | SHA-256 of the original switch result bytes |
+| `replacement_controller_sha` | Full commit of the clean, separately reviewed controller checkout |
+| `deployer_stream_id` | Physical stream receiving the FD GO |
+
+Use the same `expected_serving` fields as the named manual recorder, with
+`source` set to checkout HEAD and `process.sha` set to the successor's welcome
+SHA. Include `checkout` (canonical absolute checkout path) and `branch`
+(output of `git rev-parse --symbolic-full-name HEAD`, including `HEAD` for
+a detached checkout). The process object contains exactly `loaded`, `pid`,
+`birth` and `sha`. The stamp must still name the failed target and have a
+byte hash and mode admitted by its failed journal. The recorder checks the
+loaded launch arguments, process cwd, listener owner, boot marker, current
+files and collector as in the manual recorder.
+
+The current FD delivers this exact tell to the recipient after reviewing both
+files and the replacement controller.
+
+```text
+GO supersede-ordinary <operation> <authorization-file-bytes-sha256> <replacement-controller-sha>
+```
+
+The same authenticated FD binding, delivery, freshness and Store checks as
+the manual recorder apply. Under the common deployment lock the tool compares
+the generation with the switch receipt and current listener, verifies the
+sealed preimages and Git bundle, then publishes one private, sealed disposition
+in the deployment state directory. Its JSON result names the disposition path
+and seal, with outcome `superseded` and `full_fleet_acceptance: false`. The
+audit retains the validated successor identity, authenticated readback, GO,
+receipt hashes, and complete before/after observations of the serving state
+and failed pointer, bundle and journal byte hashes. Publication includes verification against the files on disk.
+
+Repeat the same command for an idempotent readback while that operation is
+current. Replay requires the original authority, GO, receipt and matching
+current generation. The ordinary status entry also reports the recorded
+serving observation for the closed operation. Use a controller with this fence
+for subsequent work. Earlier controllers still read the preserved
+`recovery_required` journal. The deployment fence recognizes
+only a disposition bound to the exact active failure. Stale recovery and
+publication against that failure refuse. Missing evidence, lock contention
+and observed drift leave the failed operation for another separately
+authorized decision.
 
 ## Immutable bundle, authority and mutable journal
 

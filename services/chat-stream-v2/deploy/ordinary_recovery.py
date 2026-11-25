@@ -22,6 +22,7 @@ from deploy import coordinated as c
 ACTIVE = contextvars.ContextVar('ordinary_recovery_writer', default=None)
 SCHEMA = 'pentacle.ordinary-recovery.v1'
 MANUAL_SCHEMA = 'pentacle.ordinary-manual-recovery.v1'
+SUPERSEDED_SCHEMA = 'pentacle.ordinary-superseded.v1'
 MANUAL_OUTCOME = 'manual_recovered_serving_target'
 MANUAL_SEQUENCE = 9
 MANUAL_PROOF_SECONDS = 30
@@ -83,6 +84,84 @@ def sealed_read(path):
     return value
 
 
+def _disposition_path(repo, folder):
+    # Key on the bundle directory, so changing the journal operation cannot hide a disposition.
+    return c.state_root(repo) / ('ordinary-superseded-' + c.digest(str(folder)) + '.json')
+
+
+def _failed_snapshot(repo, folder):
+    pointer = c.private_file(c.state_root(repo) / 'ordinary-active.json').read_bytes()
+    bundle = c.private_file(folder / 'bundle.json').read_bytes()
+    journal = c.private_file(folder / 'journal.json').read_bytes()
+    b, j = c.strict_json(bundle), c.strict_json(journal)
+    for value in (b, j):
+        if value['sha256'] != c.digest({k: v for k, v in value.items() if k != 'sha256'}):
+            raise c.Invalid('supersession integrity mismatch')
+    if (b['schema'] != SCHEMA or j['schema'] != SCHEMA or b['folder'] != str(folder)
+            or b['repo'] != str(repo) or j['operation'] != b['operation']
+            or not re.fullmatch('[0-9a-f]{32}', j['operation'])
+            or c.strict_json(pointer) != {'operation': j['operation'], 'bundle': str(folder)}
+            or j['bundle_sha256'] != b['sha256'] or j['phase'] != 'recovery_required'
+            or type(j['sequence']) is not int or j['sequence'] < 1):
+        raise c.Invalid('supersession requires the active failed operation')
+    pins = {'operation': j['operation'], 'sequence': j['sequence'],
+            'pointer_bytes_sha256': hashlib.sha256(pointer).hexdigest(),
+            'journal_bytes_sha256': hashlib.sha256(journal).hexdigest(),
+            'bundle_bytes_sha256': hashlib.sha256(bundle).hexdigest()}
+    return pins, b, j
+
+
+def _successor_generation(switch, bundle, journal):
+    live = switch['live']
+    pid, birth, sha = live['pid'], live['birth'], live['sha']
+    if (switch['outcome'] != 'serving' or switch['prior'] != bundle['target_sha']
+            or not re.fullmatch('[0-9a-f]{40}', sha) or switch['target'] != sha
+            or sha in (bundle['prior_sha'], bundle['target_sha'])
+            or type(pid) is not int or pid <= 0 or not isinstance(birth, str) or not birth.strip()
+            or type(switch['old_pid']) is not int or switch['old_pid'] <= 0
+            or pid in (switch['old_pid'], journal['process']['pid']) or birth == journal['process']['birth']):
+        raise c.Invalid('successor receipt does not establish a distinct serving generation')
+    return {'pid': pid, 'birth': birth, 'sha': sha}
+
+
+def _verify_superseded_payloads(folder, bundle):
+    # The enrolled manifest covers the saved file contents and exact Git bundle.
+    for name, row in bundle['preimages'].items():
+        if not name or Path(name).name != name or name in ('.', '..'):
+            raise c.Invalid('supersession preimage name is invalid')
+        saved = folder / (name + '.before')
+        if row['sha256'] is None:
+            if os.path.lexists(saved):
+                raise c.Invalid('supersession preimage absence changed')
+        elif c.file_digest(c.private_file(saved)) != row['sha256']:
+            raise c.Invalid('supersession preimage changed')
+    if c.file_digest(c.private_file(folder / 'source.bundle')) != bundle['source']['sha256']:
+        raise c.Invalid('supersession source bundle changed')
+
+
+def _recorded_supersession(repo, folder):
+    path = _disposition_path(repo, folder)
+    if not os.path.lexists(path):
+        return None
+    record = sealed_read(path)
+    failed, bundle, journal = _failed_snapshot(repo, folder)
+    _verify_superseded_payloads(folder, bundle)
+    successor = _successor_generation(record['switch'], bundle, journal)
+    serving = record['after']['serving']
+    authority, proof = record['authority'], record['authenticated_readback']
+    if (record['schema'] != SUPERSEDED_SCHEMA or record['outcome'] != 'superseded'
+            or c.canonical(record['before']) != c.canonical(record['after'])
+            or c.canonical(record['after']['failed']) != c.canonical(failed)
+            or c.canonical(serving['process']) != c.canonical({'loaded': True, **successor})
+            or serving['checkout'] != str(repo) or serving['files']['stamp'] not in journal['allowed_files']['stamp']
+            or proof['outcome'] != 'passed' or proof['verb'] != 'ledger_get' or not proof['request_id']
+            or proof['runtime_sha'] != successor['sha'] or proof['go_tell_id'] != authority['go_tell_id']
+            or not re.fullmatch('[0-9a-f]{64}', authority['authorization_sha256'])
+            or not re.fullmatch('[0-9a-f]{64}', authority['successor_receipt_sha256'])):
+        raise c.Invalid('supersession disposition no longer matches the failed operation')
+    return record
+
+
 def fence(repo, *, recovering=None):
     path = c.state_root(repo) / 'ordinary-active.json'
     if not path.exists():
@@ -92,6 +171,10 @@ def fence(repo, *, recovering=None):
     journal = sealed_read(folder / 'journal.json')
     if journal['operation'] != pointer['operation']:
         raise c.Invalid('ordinary recovery active operation mismatch')
+    if _recorded_supersession(repo, folder) is not None:
+        if recovering is not None and Path(recovering).resolve() != folder:
+            raise c.Invalid('ordinary recovery active bundle mismatch')
+        return
     if journal['phase'] not in TERMINAL and (recovering is None or Path(recovering).resolve() != folder):
         raise c.Invalid('unfinished ordinary operation requires its authorized recovery')
 
@@ -159,7 +242,12 @@ class Bundle:
         self.folder = Path(folder).absolute()
         self.bundle = self.journal = None
 
+    def require_open_recovery(self):
+        if os.path.lexists(_disposition_path(self.a.repo, self.folder)):
+            raise c.Invalid('superseded operation is terminal')
+
     def persist(self, **updates):
+        self.require_open_recovery()
         if sealed_read(self.folder/'journal.json') != self.journal:
             raise c.Invalid('ordinary recovery journal changed during operation')
         if getattr(self, 'controller_grant', None):
@@ -288,10 +376,121 @@ class Bundle:
                      result={'disposition':result.get('disposition'), 'full_fleet_acceptance':False})
 
     def state(self):
+        record = _recorded_supersession(self.a.repo, self.folder)
+        if record is not None:
+            return {'phase': 'superseded', 'disposition_sha256': record['sha256'],
+                    'recorded_serving': record['after']['serving'], 'journal_sha256': self.journal['sha256']}
         now = self.a.observe(self.bundle)
         return {**now, 'journal_sha256':self.journal['sha256']}
 
+    def record_superseded(self, authorization, successor_receipt, credential, go):
+        before, b, j = _failed_snapshot(self.a.repo, self.folder)
+        self.load()
+        if self.bundle != b or self.journal != j:
+            raise c.Invalid('supersession bundle changed during validation')
+        path = _disposition_path(self.a.repo, self.folder)
+        auth_bytes = c.private_file(authorization).read_bytes()
+        switch_bytes = c.private_file(successor_receipt).read_bytes()
+        auth, switch = c.strict_json(auth_bytes), c.strict_json(switch_bytes)
+        inputs = [c.private_file(path).stat() for path in (authorization, successor_receipt, credential)]
+        if len({(entry.st_dev, entry.st_ino) for entry in inputs}) != len(inputs):
+            raise c.Invalid('supersession requires distinct authority, successor receipt and credential')
+
+        expected_keys = {'schema', 'failed', 'expected_serving', 'successor_receipt_sha256',
+                         'replacement_controller_sha', 'deployer_stream_id'}
+        switch_hash = hashlib.sha256(switch_bytes).hexdigest()
+        if (not isinstance(auth, dict) or set(auth) != expected_keys or auth['schema'] != SUPERSEDED_SCHEMA
+                or c.canonical(auth['failed']) != c.canonical(before)
+                or auth['successor_receipt_sha256'] != switch_hash
+                or not self.a.stream or auth['deployer_stream_id'] != self.a.stream
+                or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', go)):
+            raise c.Invalid('supersession authority does not match the failed operation or successor receipt')
+        controller = auth['replacement_controller_sha']
+        if not re.fullmatch('[0-9a-f]{40}', controller) or controller == b['metadata']['controller_sha']:
+            raise c.Invalid('supersession requires a separately reviewed controller')
+        authority = {'authorization_sha256': hashlib.sha256(auth_bytes).hexdigest(),
+                     'successor_receipt_sha256': switch_hash, 'replacement_controller_sha': controller,
+                     'deployer_stream_id': self.a.stream, 'go_tell_id': go}
+
+        generation = _successor_generation(switch, b, j)
+        successor = generation['sha']
+
+        def confirm_serving():
+            self.a.validate_controller(b, controller)
+            serving = self.a.observe_manual(b, successor_sha=successor)
+            observed = serving['process']
+            if (c.canonical(observed) != c.canonical({'loaded': True, **generation})
+                    or serving['files']['stamp'] not in j['allowed_files']['stamp']
+                    or c.canonical(serving) != c.canonical(auth['expected_serving'])):
+                raise c.Invalid('supersession checkout, files or serving generation drift')
+            return serving
+
+        def confirm_inputs():
+            _verify_superseded_payloads(self.folder, b)
+            after, _, _ = _failed_snapshot(self.a.repo, self.folder)
+            if (after != before or c.private_file(authorization).read_bytes() != auth_bytes
+                    or c.private_file(successor_receipt).read_bytes() != switch_bytes):
+                raise c.Invalid('supersession inputs changed before readback')
+            return after
+
+        def result(record):
+            return {'outcome': 'superseded', 'operation': before['operation'], 'full_fleet_acceptance': False,
+                    'disposition_path': str(path), 'disposition_sha256': record['sha256']}
+
+        serving = confirm_serving()
+        recorded = _recorded_supersession(self.a.repo, self.folder)
+        if recorded is not None:
+            if recorded['authority'] != authority or c.canonical(recorded['after']['serving']) != c.canonical(serving):
+                raise c.Invalid('supersession replay differs from committed authority or generation')
+            confirm_inputs()
+            if sealed_read(path) != recorded:
+                raise c.Invalid('supersession disposition changed during replay')
+            return result(recorded)
+
+        started = time.monotonic()
+        proof = self.a.prove_manual(serving, credential, authority, confirm_serving,
+                                    superseded_operation=before['operation'])
+        if (proof['outcome'] != 'passed' or proof['verb'] != 'ledger_get' or not proof['request_id']
+                or proof['runtime_sha'] != successor or proof['go_tell_id'] != go):
+            raise c.Invalid('authenticated successor or disposition GO missing')
+        after_serving = confirm_serving()
+        after = confirm_inputs()
+        switch_identity = {key: switch[key] for key in ('outcome', 'prior', 'target', 'old_pid')}
+        switch_identity['live'] = generation
+        record = {'schema': SUPERSEDED_SCHEMA, 'outcome': 'superseded',
+                  'before': {'failed': before, 'serving': serving}, 'after': {'failed': after, 'serving': after_serving},
+                  'switch': switch_identity, 'authority': authority, 'authenticated_readback': proof}
+        # Stage and fsync before the last comparison. Link once so a retry or collision
+        # cannot replace a previous decision. The transaction lock spans the readback.
+        staged = path.with_name('.supersession-' + uuid.uuid4().hex)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            sealed = sealed_write(staged, record)
+            confirm_serving()
+            confirm_inputs()
+            if time.monotonic() - started >= MANUAL_PROOF_SECONDS:
+                raise c.Invalid('supersession proof expired before recording')
+            os.link(staged, path)
+            try:
+                os.fsync(directory)
+                confirm_serving()
+                confirm_inputs()
+                if _recorded_supersession(self.a.repo, self.folder) != sealed:
+                    raise c.Invalid('supersession commit readback mismatch')
+            except Exception:
+                if path.exists() and path.samefile(staged):
+                    path.unlink()
+                    os.fsync(directory)
+                raise
+        finally:
+            try:
+                staged.unlink(missing_ok=True)
+            finally:
+                os.close(directory)
+        return result(sealed)
+
     def record_manual_recovery(self, authorization, operator_receipt, credential, go):
+        self.require_open_recovery()
         self.load()
         bundle, journal = self.bundle, self.journal
         if (bundle['operation'] != MANUAL_LEGACY['operation']
@@ -416,6 +615,7 @@ class Bundle:
         return readback(audit)
 
     def admit(self, authorization, go):
+        self.require_open_recovery()
         b, j = self.bundle, self.journal
         self.a.recovery_authorization = None
         if 'manual_recovery_audit' in j:
@@ -634,14 +834,14 @@ class OrdinaryRuntime:
                 'files':{k:file_state(Path(v['path'])) for k,v in bundle['preimages'].items()},
                 'process':self.process([bundle['prior_sha'],bundle['target_sha']]), 'collector':self.job(self.d.USAGE_COLLECTOR_LABEL)}
 
-    def observe_manual(self, bundle):
+    def observe_manual(self, bundle, *, successor_sha=None):
         from deploy.packet.log_scan import freeze, generation_ranges
 
         label = self.service.launchd_label
         source = self.git('rev-parse', 'HEAD')
         process = self.job(label)
         pid, birth = process['pid'], process['birth']
-        if source != bundle['target_sha'] or not process['loaded'] or not pid or not birth:
+        if (successor_sha is None and source != bundle['target_sha']) or not process['loaded'] or not pid or not birth:
             raise c.Invalid('manual recovery requires the registered target process')
 
         paths = self.paths(bundle['metadata'])
@@ -651,7 +851,8 @@ class OrdinaryRuntime:
             if files[name] != {'sha256': row['sha256'], 'mode': row['mode']}:
                 raise c.Invalid('manual recovery immutable managed input changed')
         stamp = paths['stamp'].read_bytes()
-        if (c.strict_json(stamp).get('sha') != source
+        stamped = c.strict_json(stamp)
+        if (not isinstance(stamped, dict) or stamped.get('sha') != bundle['target_sha']
                 or hashlib.sha256(stamp).hexdigest() != files['stamp']['sha256']):
             raise c.Invalid('manual recovery target stamp unavailable')
 
@@ -705,16 +906,31 @@ class OrdinaryRuntime:
                           and len(groups[1]) == len(managed.paths(log_paths[1])) > 1
                           and _logs_postdate_boot(groups[1], birth))
         _, _, markers = generation_ranges(groups, pid, birth, allow_rotated_stderr=rotated_stderr)
+        checkout = {}
+        serving_sha = source
+        if successor_sha is not None:
+            # Git HEAD and the failed stamp can both differ from the release resident in memory.
+            branch = self.git('rev-parse', '--symbolic-full-name', 'HEAD')
+            checkout = {'checkout': str(self.repo), 'branch': branch}
+            try:
+                with self.d.connect('ws://' + MANUAL_LISTENER, proxy=None, close_timeout=0,
+                                    origin='https://example.invalid', open_timeout=2) as sock:
+                    welcome = c.strict_json(sock.recv(timeout=2))
+            except Exception:
+                raise c.Invalid('successor welcome unavailable') from None
+            if not isinstance(welcome, dict) or welcome.get('type') != 'welcome' or welcome.get('runtime_sha') != successor_sha:
+                raise c.Invalid('successor serving release mismatch')
+            serving_sha = welcome['runtime_sha']
         if self.job(label) != process:
             raise c.Invalid('manual recovery process changed during observation')
-        return {'source': source, 'process': {**process, 'sha': source},
+        return {**checkout, 'source': source, 'process': {**process, 'sha': serving_sha},
                 'boot_uuid': markers[0]['identity']['boot_uuid'], 'listener': MANUAL_LISTENER,
                 'boot_evidence': 'paired' if len(markers) == 2 else 'stdout_stderr_rotated',
                 'launchd_label': label, 'launch_arguments_sha256': c.digest(argv),
                 'working_directory': working_directory,
                 'files': files, 'collector': self.job(self.d.USAGE_COLLECTOR_LABEL)}
 
-    def prove_manual(self, serving, credential, authority, confirm_serving):
+    def prove_manual(self, serving, credential, authority, confirm_serving, *, superseded_operation=None):
         from tools.live_window.core import operator_hello
 
         go = authority['go_tell_id']
@@ -750,7 +966,7 @@ class OrdinaryRuntime:
                                 origin='https://example.invalid', open_timeout=remaining(),
                                 max_size=128 * 1024 * 1024) as socket:
                 welcome = receive(socket)
-                if welcome.get('type') != 'welcome' or welcome.get('runtime_sha') != serving['source']:
+                if welcome.get('type') != 'welcome' or welcome.get('runtime_sha') != serving['process']['sha']:
                     raise c.Invalid('manual recovery listener reports a different serving release')
                 hello = operator_hello(c.private_file(credential), welcome)
                 correlated(socket, hello, 'hello')
@@ -770,8 +986,10 @@ class OrdinaryRuntime:
         sender = role(binding)
         session = seat.get('session') or {}
         tell = ledger.get('tell') or {}
-        expected_text = (f'GO record-ordinary-manual-recovery {MANUAL_LEGACY["operation"]} '
-                         f'{authority["authorization_sha256"]} {authority["replacement_controller_sha"]}')
+        verb, operation = (('record-ordinary-manual-recovery', MANUAL_LEGACY['operation'])
+                           if superseded_operation is None else ('supersede-ordinary', superseded_operation))
+        expected_text = (f'GO {verb} {operation} {authority["authorization_sha256"]} '
+                         f'{authority["replacement_controller_sha"]}')
         delivered = datetime.fromisoformat(tell['delivered_at'])
         age = (datetime.now(timezone.utc) - delivered).total_seconds()
         if (sender != role(current) or not sender['stream_id'] or not sender['generation']
@@ -1017,3 +1235,37 @@ print(json.dumps(result))
         m=bundle['metadata']
         receipt={'accounts':m['accounts'],'scope':m['scope'],'transaction_directory':bundle['folder']}
         return self.runtime.restoration_proof(receipt,{'sha':bundle['prior_sha'],'code_identity':m['identity']},boot)
+
+def supersede_main(argv=None):
+    """Record a successor through the same lock and Bundle used by ordinary deployment."""
+    import argparse
+    import subprocess
+    import sys
+    from deploy import deploy as deployer
+
+    parser = argparse.ArgumentParser(description='Record a failed ordinary operation as superseded.')
+    for name in ('release-checkout', 'bundle', 'authorization', 'successor-receipt', 'operator-credential'):
+        parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--deployer-stream-id', required=True)
+    parser.add_argument('--go-tell-id', required=True)
+    args = parser.parse_args(argv)
+    try:
+        repo = c.absolute(str(args.release_checkout))
+        folder = c.absolute(str(args.bundle))
+        # A mistyped checkout must not create fresh deployment state. Revalidated under the lock.
+        c.private_file(c.state_root(repo) / 'ordinary-active.json')
+        with c.transaction_lock(repo):
+            adapter = OrdinaryRuntime(deployer, deployer.SERVICES['chat-streamd-v2'], repo, deployer._run,
+                                      stream=args.deployer_stream_id, boot_wait_seconds=0)
+            result = Bundle(adapter, folder).record_superseded(args.authorization, args.successor_receipt,
+                                                               args.operator_credential, args.go_tell_id)
+    except (c.Invalid, deployer.DeployError, OSError, ValueError, TypeError, KeyError, IndexError,
+            subprocess.SubprocessError) as exc:
+        print(f'ordinary supersession refused: {exc}', file=sys.stderr)
+        return deployer.EXIT_REFUSED
+    print(json.dumps(result, sort_keys=True))
+    return deployer.EXIT_OK
+
+
+if __name__ == '__main__':
+    raise SystemExit(supersede_main())

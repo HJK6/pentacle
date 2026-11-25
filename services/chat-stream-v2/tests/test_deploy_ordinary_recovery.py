@@ -994,3 +994,324 @@ def test_concrete_manual_observation_binds_runtime_and_boot(manual_operation, mo
         assert evidence['launch_arguments_sha256']==o.c.digest(argv)
         assert evidence['working_directory'] == expected_cwd
         assert evidence['files']['stamp']==o.file_state(paths['stamp'])
+
+
+@pytest.fixture
+def supersession(manual_operation, monkeypatch, request):
+    a, bundle, failed, pointer, journal, manifest, legacy_auth, switch, wire, legacy_args = manual_operation
+    case = getattr(request, 'param', 1)
+    target = bundle.bundle['target_sha']
+    a.git('commit', '--allow-empty', '-qm', f'successor {case}')
+    successor = a.git('rev-parse', 'HEAD')
+    a.git('switch', '-qc', 'synthetic-launch')
+    a.git('commit', '--allow-empty', '-qm', 'later checkout')
+    paths = a.paths(bundle.bundle['metadata'])
+    stamp = {'sha': target, 'serving': False}
+    paths['stamp'].write_bytes(o.c.canonical(stamp))
+    failed['allowed_files']['stamp'] = [o.file_state(paths['stamp'])]
+    failed['allowed_source'] = [target]
+    failed.pop('sha256')
+    failed = o.sealed_write(journal, failed)
+    pid = 400 + case
+    birth = f'Tue Nov {10 + case} 01:02:03 2026'
+    boot = str(uuid4())
+    marker = {'pid': pid, 'start': birth, 'boot_uuid': boot}
+    generation = {'pid': pid, 'birth': birth, 'sha': successor}
+    wire['runtime_sha'] = successor
+    process = {'loaded': True, **generation}
+    label = a.service.launchd_label
+    python = d._venv_python(a.repo, a.service)
+    argv = [str(python), str(a.repo/'services/chat-stream-v2/main.py'), '--port', '7791']
+    paths['plist'].write_bytes(plistlib.dumps({'Label': label, 'ProgramArguments': argv}))
+    logs = [a.root/'stdout.log', a.root/'stderr.log']
+    for path in logs:
+        path.write_text(f'generation={json.dumps(marker)} chat_streamd_v2 listening on {o.MANUAL_LISTENER}\n')
+    monkeypatch.setattr(d, '_daemon_log_paths', lambda service: logs)
+    monkeypatch.setattr(d, '_managed_log_config', lambda service: None)
+    monkeypatch.setattr(SyntheticRuntime, 'job', lambda self, name: (
+        {k: process[k] for k in ('loaded', 'pid', 'birth')} if name == label else self.probes()['collector']))
+    commands = []
+    original_init = SyntheticRuntime.__init__
+
+    def install_reader(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        run = self.runtime.checked
+
+        def checked(cmd, *args, **kwargs):
+            commands.append(tuple(cmd))
+            if cmd[0] == 'git':
+                assert cmd[1:3] in (('bundle', 'verify'), ('bundle', 'list-heads'), ('clone', '--bare'))
+                return run(cmd, *args, **kwargs)
+            if tuple(cmd[:2]) == ('launchctl', 'print'):
+                out = f'\n program = {argv[0]}\n arguments = {{\n' + '\n'.join(argv) + '\n }\n'
+            elif cmd[0] == 'ps':
+                out = ' '.join(argv)
+            elif cmd[0] == '/usr/sbin/lsof':
+                out = f'p{process["pid"]}\n' + ('fcwd\nn/\n' if '-d' in cmd else f'n{o.MANUAL_LISTENER}\n')
+            else:
+                pytest.fail(f'unexpected process command {cmd!r}')
+            return SimpleNamespace(stdout=out)
+        self.runtime.checked = checked
+
+    monkeypatch.setattr(SyntheticRuntime, '__init__', install_reader)
+    monkeypatch.setattr(SyntheticRuntime, 'observe_manual', o.OrdinaryRuntime.observe_manual)
+    for name in ('stop', 'start', 'restore_source', 'ensure_stopped'):
+        monkeypatch.setattr(SyntheticRuntime, name, lambda *args: pytest.fail('process control or restore'))
+    monkeypatch.setattr(os, 'kill', lambda *args: pytest.fail('signal'))
+    monkeypatch.setattr(os, 'killpg', lambda *args: pytest.fail('signal'))
+    o.c.atomic_json(switch, {'outcome': 'serving', 'prior': target, 'target': successor,
+                             'old_pid': 202, 'live': generation})
+    authority = a.root/'supersession-authority.json'
+    owner = 'synthetic-owner'
+    controller = o.c.read_json(legacy_auth)['replacement_controller_sha']
+    pins = {'operation': failed['operation'], 'sequence': failed['sequence'],
+            'journal_bytes_sha256': o.c.file_digest(journal), 'bundle_bytes_sha256': o.c.file_digest(manifest),
+            'pointer_bytes_sha256': o.c.file_digest(pointer)}
+    serving = {'source': a.git('rev-parse', 'HEAD'), 'checkout': str(a.repo),
+               'branch': 'refs/heads/synthetic-launch', 'process': dict(process), 'boot_uuid': boot,
+               'boot_evidence': 'paired', 'listener': o.MANUAL_LISTENER, 'launchd_label': label,
+               'launch_arguments_sha256': o.c.digest(argv), 'working_directory': '/',
+               'files': {key: o.file_state(path) for key, path in paths.items()}, 'collector': a.probes()['collector']}
+    auth = {'schema': 'pentacle.ordinary-superseded.v1', 'failed': pins, 'expected_serving': serving,
+            'successor_receipt_sha256': o.c.file_digest(switch), 'replacement_controller_sha': controller,
+            'deployer_stream_id': owner}
+    o.c.atomic_json(authority, auth)
+    go = legacy_args[-1]
+    wire['ledger']['tell']['text'] = f'GO supersede-ordinary {failed["operation"]} {o.c.file_digest(authority)} {controller}'
+    args = ['--release-checkout', str(a.repo), '--bundle', str(bundle.folder), '--authorization', str(authority),
+            '--successor-receipt', str(switch), '--operator-credential', str(a.root/'operator-credential'),
+            '--deployer-stream-id', owner, '--go-tell-id', go]
+    monkeypatch.setattr(o, 'OrdinaryRuntime', SyntheticRuntime)
+    # The real controller may launch only these read-only Git commands (plus a
+    # bare validation clone in a temporary directory). OS probes above are synthetic.
+    real_popen = subprocess.Popen
+    def call():
+        def checked_popen(cmd, *args, **kwargs):
+            assert not kwargs.get('shell') and cmd[0] == 'git', f'unexpected process control: {cmd!r}'
+            assert cmd[1] in ('rev-parse', 'bundle') or tuple(cmd[1:3]) == ('clone', '--bare'), cmd
+            return real_popen(cmd, *args, **kwargs)
+        with monkeypatch.context() as guard:
+            guard.setattr(subprocess, 'Popen', checked_popen)
+            return o.supersede_main(args)
+
+    monkeypatch.setattr(o, 'MANUAL_LEGACY', {})
+    return SimpleNamespace(a=a, b=bundle, args=args, call=call, switch=switch, auth=authority, process=process,
+                           pointer=pointer, journal=journal, manifest=manifest, serving=serving, commands=commands,
+                           wire=wire, go=go)
+
+
+@pytest.mark.parametrize('supersession', [1, 2], indirect=True)
+def test_superseded_successor_and_idempotent_readback(supersession, capsys):
+    s = supersession
+    protected = supersession_files(s)
+    with pytest.raises(o.c.Invalid, match='unfinished'):
+        o.fence(s.a.repo)
+    assert s.call() == 0
+    result = json.loads(capsys.readouterr().out)
+    path = Path(result['disposition_path'])
+    receipt = o.sealed_read(path)
+    assert result['outcome'] == 'superseded' and result['full_fleet_acceptance'] is False
+    assert result['disposition_sha256'] == receipt['sha256']
+    assert receipt['before'] == receipt['after'] == {'failed': o.c.read_json(s.auth)['failed'], 'serving': s.serving}
+    assert receipt['switch']['live'] == {key: s.process[key] for key in ('sha', 'pid', 'birth')}
+    assert receipt['authenticated_readback']['runtime_sha'] == s.serving['process']['sha']
+    assert receipt['authority']['successor_receipt_sha256'] == o.c.file_digest(s.switch)
+    assert receipt['authority']['authorization_sha256'] == o.c.file_digest(s.auth)
+    assert s.serving['process']['sha'] != s.serving['source'] != s.b.bundle['target_sha']
+    o.fence(s.a.repo)
+    assert cli(s.a.root, ['--ordinary-recovery-status', str(s.b.folder)]) == d.EXIT_OK
+    status = json.loads(capsys.readouterr().out)['ordinary_recovery_status']
+    assert status['phase'] == 'superseded' and status['recorded_serving'] == s.serving
+    assert status['disposition_sha256'] == receipt['sha256']
+    recorded = path.read_bytes(), path.stat().st_mtime_ns
+    assert s.call() == 0
+    assert json.loads(capsys.readouterr().out) == result
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == recorded
+    protected[0][path] = recorded[0]
+    assert supersession_files(s) == protected
+    assert not (s.a.root/'events').exists()
+
+
+def supersession_files(s):
+    """Include the absence of a disposition, receipt bytes, live files and process state."""
+    paths = {s.switch, s.auth, s.pointer, *s.b.folder.iterdir(), *o.c.state_root(s.a.repo).iterdir(),
+             *(s.a.root/'files').iterdir()}
+    return ({p: p.read_bytes() if p.is_file() else None for p in paths},
+            copy.deepcopy(s.process), s.wire['runtime_sha'], s.a.probes(), s.a.git('rev-parse', 'HEAD'),
+            s.a.git('rev-parse', '--symbolic-full-name', 'HEAD'))
+
+
+def approve_supersession(s, auth):
+    o.c.atomic_json(s.auth, auth)
+    s.wire['ledger']['tell']['text'] = (f'GO supersede-ordinary {auth["failed"]["operation"]} '
+                                       f'{o.c.file_digest(s.auth)} {auth["replacement_controller_sha"]}')
+
+
+def assert_supersession_refused(s, capsys, reason):
+    before = supersession_files(s)
+    assert s.call() == d.EXIT_REFUSED
+    assert reason in capsys.readouterr().err
+    assert supersession_files(s) == before
+    with pytest.raises(o.c.Invalid, match='unfinished'):
+        o.fence(s.a.repo)
+
+
+@pytest.mark.parametrize('key,value,reason', [
+    ('failed.operation', '1'*32, 'authority'), ('failed.sequence', 3, 'authority'),
+    ('failed.bundle_bytes_sha256', '0'*64, 'authority'), ('failed.journal_bytes_sha256', '0'*64, 'authority'),
+    ('failed.pointer_bytes_sha256', '0'*64, 'authority'), ('replacement_controller_sha', '1'*40, 'controller'),
+    ('successor_receipt_sha256', '0'*64, 'authority'), ('expected_serving.source', '0'*40, 'checkout'),
+    ('expected_serving.checkout', '/other-checkout', 'checkout'),
+    ('expected_serving.branch', 'refs/heads/another-branch', 'checkout'),
+    ('expected_serving.boot_uuid', 'wrong-boot', 'generation drift'),
+])
+def test_superseded_mismatched_authority(supersession, capsys, key, value, reason):
+    s = supersession
+    auth = o.c.read_json(s.auth)
+    section, _, field = key.rpartition('.')
+    (auth[section] if section else auth)[field] = value
+    approve_supersession(s, auth)
+    assert_supersession_refused(s, capsys, reason)
+
+
+@pytest.mark.parametrize('damage,reason', [
+    ('prior', 'distinct serving'), ('receipt_pid', 'generation drift'), ('receipt_birth', 'generation drift'),
+    ('receipt_sha', 'distinct serving'), ('same_release', 'distinct serving'), ('same_pid', 'distinct serving'),
+    ('same_birth', 'distinct serving'), ('missing_identity', 'birth'), ('wrong_outcome', 'distinct serving'),
+])
+def test_superseded_inconsistent_switch(supersession, capsys, damage, reason):
+    s = supersession
+    switch = o.c.read_json(s.switch)
+    live = switch['live']
+    changes = {
+        'prior': lambda: switch.update(prior=s.b.bundle['prior_sha']),
+        'receipt_pid': lambda: live.update(pid=live['pid'] + 1),
+        'receipt_birth': lambda: live.update(birth=live['birth'] + ' changed'),
+        'receipt_sha': lambda: live.update(sha=s.serving['source']),
+        'same_pid': lambda: switch.update(old_pid=live['pid']),
+        'same_birth': lambda: live.update(birth=s.b.journal['process']['birth']),
+        'missing_identity': lambda: live.pop('birth'),
+        'wrong_outcome': lambda: switch.update(outcome='failed'),
+    }
+    if damage == 'same_release':
+        switch['target'] = live['sha'] = s.b.bundle['target_sha']
+    else:
+        changes[damage]()
+    o.c.atomic_json(s.switch, switch)
+    auth = o.c.read_json(s.auth)
+    auth['successor_receipt_sha256'] = o.c.file_digest(s.switch)
+    approve_supersession(s, auth)
+    assert_supersession_refused(s, capsys, reason)
+
+
+@pytest.mark.parametrize('damage,reason', [
+    ('receipt_absent', 'No such file'), ('actual_source', 'release mismatch'), ('stamp_bytes', 'checkout'),
+    ('stamp_sha', 'stamp unavailable'), ('malformed_stamp', 'stamp unavailable'),
+    ('pid', 'boot marker'), ('birth', 'boot marker'),
+    ('stale_journal', 'authority'), ('original_bundle', 'authority'), ('original_pointer', 'authority'),
+    ('archive', 'source bundle corrupt'), ('wrong_go', 'FD GO'), ('expired_go', 'FD GO'),
+])
+def test_superseded_readback_drift(supersession, capsys, damage, reason):
+    s = supersession
+    stamp = s.a.root/'files/stamp'
+    tell = s.wire['ledger']['tell']
+    def change_bytes(path):
+        path.write_bytes(path.read_bytes() + b'\n')
+    changes = {
+        'receipt_absent': s.switch.unlink,
+        'actual_source': lambda: s.wire.update(runtime_sha=s.serving['source']),
+        'stamp_bytes': lambda: change_bytes(stamp),
+        'malformed_stamp': lambda: stamp.write_bytes(b'[]'),
+        'stamp_sha': lambda: stamp.write_bytes(o.c.canonical({'sha': s.serving['source']})),
+        'pid': lambda: s.process.update(pid=s.process['pid'] + 1),
+        'birth': lambda: s.process.update(birth=s.process['birth'] + ' changed'),
+        'stale_journal': lambda: change_bytes(s.journal),
+        'original_bundle': lambda: change_bytes(s.manifest),
+        'original_pointer': lambda: change_bytes(s.pointer),
+        'archive': lambda: (s.b.folder/'source.bundle').write_bytes(b'damaged'),
+        'wrong_go': lambda: tell.update(text=tell['text'].replace('supersede-ordinary', 'record-ordinary-manual-recovery')),
+        'expired_go': lambda: tell.update(delivered_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()),
+    }
+    changes[damage]()
+    assert_supersession_refused(s, capsys, reason)
+
+
+def test_superseded_wrong_checkout_creates_no_state(supersession, capsys):
+    s = supersession
+    other = s.a.root/'other'
+    other.mkdir()
+    s.args[s.args.index('--release-checkout') + 1] = str(other)
+    assert_supersession_refused(s, capsys, 'No such file')
+    assert not o.c.state_root(other).exists()
+
+
+@pytest.mark.parametrize('edge', ['under_lock', 'before_link', 'after_link'])
+def test_superseded_refuses_lock_and_late_journal_mutation(supersession, monkeypatch, edge):
+    s = supersession
+    before = supersession_files(s)
+    if edge == 'under_lock':
+        with o.c.transaction_lock(s.a.repo):
+            assert s.call() == d.EXIT_REFUSED
+        assert supersession_files(s) == before
+        return
+    updated = o.sealed_read(s.journal)
+    updated.pop('sha256')
+    updated['sequence'] += 1
+    damaged = o.c.canonical({**updated, 'sha256': o.c.digest(updated)}) + b'\n'
+    if edge == 'before_link':
+        stage = o.sealed_write
+        def race(path, value):
+            result = stage(path, value)
+            if path.name.startswith('.supersession-'):
+                s.journal.write_bytes(damaged)
+            return result
+        monkeypatch.setattr(o, 'sealed_write', race)
+    else:
+        publish = os.link
+        def race(source, destination):
+            publish(source, destination)
+            s.journal.write_bytes(damaged)
+        monkeypatch.setattr(os, 'link', race)
+    assert s.call() == d.EXIT_REFUSED
+    before[0][s.journal] = damaged  # Only the competing writer's change survives.
+    assert supersession_files(s) == before
+    with pytest.raises(o.c.Invalid, match='unfinished'):
+        o.fence(s.a.repo)
+
+
+def test_superseded_refuses_generation_change_during_publication(supersession, monkeypatch, capsys):
+    s = supersession
+    publish = os.link
+    def switch_live(source, destination):
+        publish(source, destination)
+        s.wire['runtime_sha'] = s.serving['source']
+    monkeypatch.setattr(os, 'link', switch_live)
+    files_before, process, _, probes, head, branch = supersession_files(s)
+    assert s.call() == d.EXIT_REFUSED
+    assert 'release mismatch' in capsys.readouterr().err
+    assert supersession_files(s) == (files_before, process, s.serving['source'], probes, head, branch)
+    with pytest.raises(o.c.Invalid, match='unfinished'):
+        o.fence(s.a.repo)
+
+
+def test_superseded_refuses_recovery_and_stale_replay(supersession, capsys):
+    s = supersession
+    assert s.call() == d.EXIT_OK
+    path = Path(json.loads(capsys.readouterr().out)['disposition_path'])
+    before = supersession_files(s)
+    assert cli(s.a.root, ['--recover-ordinary', str(s.b.folder), '--ordinary-recovery-authorization',
+                          str(s.auth), '--recovery-go-tell-id', s.go]) == d.EXIT_REFUSED
+    assert 'superseded operation is terminal' in capsys.readouterr().err
+    assert supersession_files(s) == before
+    s.args[-1] = 'another-go'
+    assert s.call() == d.EXIT_REFUSED
+    assert 'replay differs' in capsys.readouterr().err
+    assert supersession_files(s) == before
+    s.args[-1] = s.go
+    s.journal.write_bytes(s.journal.read_bytes() + b'\n')
+    stale = supersession_files(s)
+    with pytest.raises(o.c.Invalid, match='no longer matches'):
+        o.fence(s.a.repo)
+    assert s.call() == d.EXIT_REFUSED
+    assert supersession_files(s) == stale
+    assert path.is_file()
