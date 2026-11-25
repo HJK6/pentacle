@@ -69,9 +69,9 @@ class Client:
         self.send({"type": verb, "request_id": request_id, **fields})
         return self.wait_reply(request_id, start=start, timeout=timeout)
 
-    def subscribe(self):
+    def subscribe(self, *, include_subagents=True):
         assert self.receive().body["type"] == "welcome"
-        reply = self.call("hello", subscribe={"include_subagents": True, "events_mode": "full"})
+        reply = self.call("hello", subscribe={"include_subagents": include_subagents, "events_mode": "full"})
         assert reply["type"] == "hello", reply
         snapshot = self.receive().body
         assert snapshot["type"] == "snapshot", snapshot
@@ -84,6 +84,10 @@ class Client:
             start=start, description=description, timeout=timeout,
         )
         return frame.body["event"]
+
+    def events_since(self, stream_id, start):
+        return [frame.body["event"] for frame in self.frames[start:]
+                if frame.body["type"] == "chat.event" and frame.body["event"]["stream_id"] == stream_id]
 
     def history(self, stream_id, *, limit, chunk_limit, **fields):
         request_id = unique("history")
@@ -119,7 +123,7 @@ class Seat:
     def append(self, *records):
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         with self.transcript.open("a", encoding="utf-8") as output:
-            output.write("".join(json.dumps(record) + "\n" for record in records))
+            output.write("".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records))
 
 
 def read_records(path):
@@ -202,6 +206,11 @@ class Contract:
 
     def inputs(self, seat):
         return read_records(self.control / f"{seat.name}.inputs")
+
+    def wait_for_input(self, seat, text):
+        return observed(lambda: self.inputs(seat),
+                        lambda records: any(record["text"] == text for record in records),
+                        description=f"provider input for {seat.stream_id}", timeout=REPLY_S)
 
     def hold_user(self):
         (self.control / "mode").write_text("withhold_user", encoding="utf-8")
