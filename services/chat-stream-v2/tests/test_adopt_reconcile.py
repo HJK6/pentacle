@@ -291,6 +291,10 @@ def test_event_store_user_arriving_during_slow_transcript_probe_wins_final_looku
 ) -> None:
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.03)
     brief = "[example-service-notice:late-event]\narrived during transcript probe"
+    # Scaled to this test's short window: the production floor and expiry
+    # transcript allowance would not fit inside it.
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_MIN_EVENT_LOOKUP_S", 0.01)
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S", 0.03)
 
     class LateHostStore(SubmissionReadStoreStub):
         def __init__(self) -> None:
@@ -351,6 +355,10 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
     deadline_s = 0.05
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", deadline_s)
     brief = "[example-service-notice:deadline]\nfinal read remains bounded"
+    # Scaled to this test's short window: the production floor and expiry
+    # transcript allowance would not fit inside it.
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_MIN_EVENT_LOOKUP_S", 0.01)
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S", deadline_s)
 
     order: list[str] = []
 
@@ -416,6 +424,10 @@ def test_final_store_slice_survives_advisory_probe_scheduler_overrun(
     deadline_s = 0.03
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", deadline_s)
     brief = "[example-service-notice:late-final-proof]\\nreserved lookup remains mandatory"
+    # Scaled to this test's short window: the production floor and expiry
+    # transcript allowance would not fit inside it.
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_MIN_EVENT_LOOKUP_S", 0.01)
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S", deadline_s)
 
     class PendingProof:
         def __init__(self) -> None:
@@ -595,6 +607,10 @@ def test_transcript_absent_with_unreachable_store_never_repastes(
 ) -> None:
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.2)
     brief = "[example-service-notice:absent-unavailable]\nnot safe to resend"
+    # Scaled to this test's short window: the production floor and expiry
+    # transcript allowance would not fit inside it.
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_MIN_EVENT_LOOKUP_S", 0.05)
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S", 0.2)
 
     class UnavailableProof:
         async def lookup(self, stream_id: str, *, expected_text: str,
@@ -1229,3 +1245,230 @@ def test_promptless_ready_observation_rechecks_original_pane_identity(change):
         assert result["outcome"]["state"] == "indeterminate"
         assert result["row"]["bootstrap_state"] == "starting"
         assert len(result["reservations"]) == 1
+
+
+# -- Settle-step boundary at boot expiry --------------------------------------
+#
+# A virtual clock bound only to ``spawnctl.time`` (asyncio keeps the real
+# clock) lets the post-paste loop reach its boot deadline in a fixed geometry:
+# the transcript source steps the clock to set instants, and the Store double
+# has a modelled service cost, so a grant shorter than that cost times out the
+# way a slow real read would. No assertion here reads wall time.
+
+SETTLE_EXPIRY_S = 20.0
+SETTLE_STORE_FLOOR_S = 0.25  # expected minimum offered to any Store lookup
+SETTLE_TRANSCRIPT_ALLOWANCE_S = 3.0  # expected final transcript observation allowance
+LEGACY_RECEIPT = {"proof_watermark": 0, "proof_watermark_state": "reachable"}
+
+
+class SettleClock:
+    """``spawnctl.time`` stand-in: only ``monotonic`` is virtual."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+        self.start = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def rel(self) -> float:
+        return round(self.now - self.start, 6)
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
+class CostedProof:
+    """Store proof double with a finite service cost per lookup; reads from
+    ``hold_from_s`` on wait on ``gate`` (released at teardown) instead."""
+
+    def __init__(self, clock: SettleClock, *, cost_s: float = 0.010,
+                 user_from_s: float | None = None) -> None:
+        self.clock = clock
+        self.cost_s = cost_s
+        self.user_from_s = user_from_s
+        self.calls: list[dict] = []
+        self.hold_from_s: float | None = None
+        self.gate = asyncio.Event()
+
+    async def lookup(self, stream_id: str, *, expected_text: str,
+                     watermark: object, timeout_s: float) -> EventProof:
+        call = {"at": self.clock.rel(), "timeout_s": timeout_s, "result": None}
+        self.calls.append(call)
+        if self.hold_from_s is not None and call["at"] >= self.hold_from_s:
+            call["result"] = "held"
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                call["result"] = "held-cancelled"
+                raise
+        if timeout_s < self.cost_s:
+            call["result"] = "timeout"
+            raise asyncio.TimeoutError
+        self.clock.now += self.cost_s
+        if self.user_from_s is not None and call["at"] >= self.user_from_s:
+            call["result"] = "user"
+            return EventProof("proven", stream_id, 0, event_id=11)
+        call["result"] = "pending"
+        return EventProof("pending", stream_id, 0)
+
+
+class SteppedTranscript:
+    """Underlying transcript source that steps the virtual clock to fixed instants."""
+
+    def __init__(self, clock: SettleClock, stops: list[float], *,
+                 found_from_s: float | None = None, after_stops_step_s: float = 0.05) -> None:
+        self.clock = clock
+        self.stops = list(stops)
+        self.found_from_s = found_from_s
+        self.after_stops_step_s = after_stops_step_s
+        self.calls: list[dict] = []
+
+    async def __call__(self, *_args: object, absolute_deadline: float | None = None, **_kw: object) -> str:
+        at = self.clock.rel()
+        self.calls.append({"at": at, "allowance_s": None if absolute_deadline is None
+                           else round(absolute_deadline - self.clock.now, 6)})
+        found = self.found_from_s is not None and at >= self.found_from_s
+        if self.stops:
+            self.clock.now = self.clock.start + self.stops.pop(0)
+        else:
+            self.clock.now += self.after_stops_step_s
+        return "found" if found else "no_transcript"
+
+
+# Transcript observations end 20 ms before expiry; the next one lands on it.
+SETTLE_STOPS = [5.0, 10.0, 15.0, 19.98, SETTLE_EXPIRY_S]
+
+
+def _settle_at_expiry(monkeypatch: pytest.MonkeyPatch, proof: CostedProof, transcript: SteppedTranscript,
+                      clock: SettleClock, *, receipt: dict | None = None) -> tuple[str, str, str]:
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", SETTLE_EXPIRY_S)
+    monkeypatch.setattr(spawnctl_mod, "time", clock)
+    brief = "[example-service-notice:expiry]\nsettle at the boot line"
+
+    async def run() -> tuple[str, str, str]:
+        db = Store(":memory:")
+        db.start()
+        try:
+            tmux = AdoptTmux(alive=True, pane_pid=DEAD_PID, screen="model loading")
+            sessions = Sessions(db, tmux=tmux, local_host="hosta")
+            ctl = SpawnCtl(db, sessions, tmux=tmux, submission_proof=proof)
+            ctl._transcript_status = transcript  # type: ignore[method-assign]
+            try:
+                return await asyncio.wait_for(ctl._settle_adoption(
+                    "hostb", "expiry", brief, tmux,
+                    delivery_receipt=dict(receipt or LEGACY_RECEIPT),
+                ), timeout=30.0)  # stuck detector only
+            finally:
+                proof.gate.set()
+                assert tmux.pasted == []
+        finally:
+            db.stop()
+
+    return asyncio.run(run())
+
+
+def _decisive(proof: CostedProof) -> dict:
+    return proof.calls[-1]
+
+
+def test_healthy_store_at_expiry_fails_closed_from_a_decisive_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock)
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock)
+    decisive = _decisive(proof)
+    assert decisive["at"] >= SETTLE_EXPIRY_S, proof.calls
+    assert decisive["timeout_s"] >= SETTLE_STORE_FLOOR_S, proof.calls
+    assert decisive["result"] == "pending", proof.calls
+    assert result == ("failed", "agent_never_started",
+                      "boot deadline expired with no provider transcript ever created")
+
+
+def test_no_store_lookup_is_offered_less_than_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock)
+    _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock)
+    assert proof.calls
+    assert all(c["timeout_s"] >= SETTLE_STORE_FLOOR_S for c in proof.calls), proof.calls
+
+
+def test_final_transcript_observation_and_store_sample_each_get_their_allowance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock)
+    transcript = SteppedTranscript(clock, SETTLE_STOPS)
+    _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    at_expiry = [c for c in transcript.calls if c["at"] >= SETTLE_EXPIRY_S]
+    assert len(at_expiry) == 1, transcript.calls
+    assert at_expiry[0]["allowance_s"] >= SETTLE_TRANSCRIPT_ALLOWANCE_S, transcript.calls
+    decisive = _decisive(proof)
+    assert decisive["at"] >= at_expiry[0]["at"], (proof.calls, transcript.calls)
+    assert decisive["timeout_s"] >= SETTLE_STORE_FLOOR_S, proof.calls
+
+
+def test_store_user_landing_in_the_tail_is_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    # Visible from 19.99 s: after the last in-window read, before expiry.
+    proof = CostedProof(clock, user_from_s=19.99)
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock)
+    assert result[:2] == ("delivered", "event_store"), (result, proof.calls)
+
+
+def test_transcript_landing_in_the_tail_is_seen_by_a_real_expiry_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = SettleClock()
+    # An instant Store keeps answering pending, so only a real transcript
+    # observation at expiry can see the brief.
+    proof = CostedProof(clock, cost_s=0.0)
+    transcript = SteppedTranscript(clock, SETTLE_STOPS, found_from_s=19.995)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert any(c["at"] >= SETTLE_EXPIRY_S for c in transcript.calls), transcript.calls
+    assert result[:2] == ("delivered", "transcript"), (result, transcript.calls, proof.calls)
+
+
+def test_matching_user_on_the_decisive_sample_is_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, user_from_s=SETTLE_EXPIRY_S)
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock)
+    assert _decisive(proof)["result"] == "user", proof.calls
+    assert result[:2] == ("delivered", "event_store")
+
+
+def test_decisive_sample_held_after_prior_pending_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock)
+    # Every read from the last iteration on is held until teardown.
+    proof.hold_from_s = 19.98
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock)
+    assert proof.calls[0]["result"] == "pending", proof.calls
+    assert _decisive(proof)["result"] == "held-cancelled", proof.calls
+    assert result == ("indeterminate", "live_pane_unproven",
+                      "event_store_timeout: adoption reconciliation deferred")
+
+
+def test_decisive_only_timeout_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+
+    class LastTimesOut(CostedProof):
+        async def lookup(self, stream_id: str, **kwargs: object) -> EventProof:
+            if self.clock.rel() >= 19.98:
+                self.calls.append({"at": self.clock.rel(), "timeout_s": kwargs["timeout_s"], "result": "timeout"})
+                raise asyncio.TimeoutError
+            return await super().lookup(stream_id, **kwargs)  # type: ignore[arg-type]
+
+    proof = LastTimesOut(clock)
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock)
+    assert proof.calls[0]["result"] == "pending" and _decisive(proof)["result"] == "timeout", proof.calls
+    assert result == ("indeterminate", "live_pane_unproven",
+                      "event_store_timeout: adoption reconciliation deferred")
+
+
+def test_saved_staged_watermark_with_pending_store_stays_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock,
+                               receipt={**LEGACY_RECEIPT, "transport": "staged"})
+    assert result == ("indeterminate", "live_pane_unproven",
+                      "spawn_delivery_unknown: saved pre-paste watermark; no affirmative prompt delivery proof")

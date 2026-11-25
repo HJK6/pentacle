@@ -266,10 +266,12 @@ RESUBMIT_GRACE_S = 2.0
 #: pane that never creates a session log inside this window is `agent_never_started`.
 ADOPTION_BOOT_DEADLINE_S = 20.0
 NATIVE_TRUST_POLL_S = 2.0
-# Reserve part of the remaining adoption budget for the authoritative Store
-# read that follows the advisory transcript probe.  The slice is capped by the
-# remote event-read bound and shrinks with short deterministic test deadlines.
-ADOPTION_FINAL_EVENT_LOOKUP_FRACTION = 0.10
+#: The least time any adoption Store lookup is offered. A shorter grant would
+#: time out a healthy read and look like an unreachable Store.
+ADOPTION_MIN_EVENT_LOOKUP_S = 0.25
+#: Stuck-detector allowance for the one transcript observation taken at boot
+#: expiry, matching the per-command bound of the remote transcript probe.
+ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S = 3.0
 #: The creation-nonce environment variable injected into every spawned pane
 #: (spec §D1). Readable off the live pane's process environment from the instant
 #: the pane exists — the identity signal that survives the F1 crash window.
@@ -4946,6 +4948,28 @@ class SpawnCtl:
         )
         return "adopted"
 
+    def _adoption_receipt_watermark(
+        self, stream_id: str, delivery_receipt: dict[str, Any] | None,
+    ) -> EventWatermark | None:
+        """The adoption proof boundary a receipt supports, or None when the
+        receipt is transcript-only."""
+        if not isinstance(delivery_receipt, dict):
+            return None
+        watermark_state = str(delivery_receipt.get("proof_watermark_state") or "")
+        if watermark_state not in {"reachable", "unreachable"}:
+            return None
+        try:
+            watermark = EventWatermark(
+                stream_id,
+                int(delivery_receipt.get("proof_watermark")),
+                watermark_state,
+                str(delivery_receipt.get("proof_watermark_reason") or ""),
+            )
+        except (TypeError, ValueError):
+            return None
+        # A pre-paste read that failed leaves the spawn's own fence as boundary.
+        return self._spawn_fenced_watermark(watermark)
+
     async def _adoption_event_proof(
         self,
         stream_id: str,
@@ -4964,22 +4988,9 @@ class SpawnCtl:
         Old test doubles may expose only ``watermark()``; those remain
         transcript-only and fail closed when lsof cannot find a file.
         """
-        if not isinstance(delivery_receipt, dict):
+        watermark = self._adoption_receipt_watermark(stream_id, delivery_receipt)
+        if watermark is None:
             return None
-        watermark_state = str(delivery_receipt.get("proof_watermark_state") or "")
-        if watermark_state not in {"reachable", "unreachable"}:
-            return None
-        try:
-            watermark = EventWatermark(
-                stream_id,
-                int(delivery_receipt.get("proof_watermark")),
-                watermark_state,
-                str(delivery_receipt.get("proof_watermark_reason") or ""),
-            )
-        except (TypeError, ValueError):
-            return None
-        # A pre-paste read that failed leaves the spawn's own fence as boundary.
-        watermark = self._spawn_fenced_watermark(watermark)
         lookup = getattr(self.submission_proof, "lookup", None)
         if not callable(lookup):
             return EventProof(
@@ -5166,13 +5177,43 @@ class SpawnCtl:
             # adoption (post-watermark USER event, else the transcript needle).
         needle = tmux_transport.receipt_needle(brief)
         deadline = time.monotonic() + ADOPTION_BOOT_DEADLINE_S
+        transcript_host = host if host != self.sessions.local_host else None
+        proof_capable = self._adoption_receipt_watermark(stream_id, delivery_receipt) is not None
         event_proof: EventProof | None = None
         while True:
             remaining = deadline - time.monotonic()
-            if remaining > 0:
-                event_proof = await self._adoption_event_proof(
-                    stream_id, brief, delivery_receipt,
-                    timeout_s=min(REMOTE_EVENT_LOOKUP_BOUND_S, remaining),
+            # At original expiry an unresolved proof-capable settlement takes
+            # one real transcript observation and then one decisive Store
+            # sample, each with its own allowance outside the window, so a
+            # negative result never rests on a sample older than expiry.
+            decisive = proof_capable and remaining <= 0
+            if decisive:
+                status = await self._bounded_adoption_transcript_status(
+                    name, needle, host=transcript_host, tmux=tmux,
+                    deadline=time.monotonic() + ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S,
+                )
+                if status != "found":
+                    event_proof = await self._adoption_event_proof(
+                        stream_id, brief, delivery_receipt,
+                        timeout_s=ADOPTION_MIN_EVENT_LOOKUP_S,
+                    )
+            else:
+                # Inside the window a lookup is offered only a usable budget;
+                # a shorter remainder waits for the decisive sample instead.
+                if remaining >= ADOPTION_MIN_EVENT_LOOKUP_S:
+                    event_proof = await self._adoption_event_proof(
+                        stream_id, brief, delivery_receipt,
+                        timeout_s=min(REMOTE_EVENT_LOOKUP_BOUND_S, remaining),
+                    )
+                if event_proof is not None and event_proof.proven:
+                    return (
+                        "delivered",
+                        "event_store",
+                        "adopted_after_restart: exact post-watermark USER event present in generation-fenced Store",
+                    )
+                # The provider probe is advisory and runs through expiry.
+                status = await self._bounded_adoption_transcript_status(
+                    name, needle, host=transcript_host, tmux=tmux, deadline=deadline,
                 )
             if event_proof is not None and event_proof.proven:
                 return (
@@ -5180,41 +5221,13 @@ class SpawnCtl:
                     "event_store",
                     "adopted_after_restart: exact post-watermark USER event present in generation-fenced Store",
                 )
-            final_store_budget = min(
-                REMOTE_EVENT_LOOKUP_BOUND_S,
-                remaining * ADOPTION_FINAL_EVENT_LOOKUP_FRACTION,
-            ) if remaining > 0 and event_proof is not None else 0.0
-            status = await self._bounded_adoption_transcript_status(
-                name, needle,
-                host=host if host != self.sessions.local_host else None,
-                tmux=tmux,
-                deadline=deadline - final_store_budget,
-            )
-            # The provider probe is advisory and may consume the remainder of
-            # the boot budget. Always give the authoritative Store one literal
-            # final chance after that probe before classifying the pane. Keep
-            # the reservation as a duration, rather than recomputing it from
-            # the wall clock: an event-loop wakeup can arrive just after the
-            # advisory probe deadline, and dropping the pre-reserved read then
-            # turns a real durable USER event into agent_never_started.
-            final_proof = (
-                await self._adoption_event_proof(
-                    stream_id, brief, delivery_receipt,
-                    timeout_s=final_store_budget,
-                )
-                if final_store_budget > 0 else None
-            )
-            if final_proof is not None and final_proof.proven:
-                return (
-                    "delivered",
-                    "event_store",
-                    "adopted_after_restart: exact post-watermark USER event present in generation-fenced Store",
-                )
-            if final_proof is not None:
-                event_proof = final_proof
             if status == "found":
                 return "delivered", "transcript", "adopted_after_restart: brief present in provider transcript"
-            if watermark_unknown and (status == "absent" or time.monotonic() >= deadline
+            # Only the decisive sample (or, for transcript-only receipts, the
+            # clock) ends the window; a proof-capable pass that merely ran
+            # past expiry loops once more to take that sample.
+            expired = decisive or (not proof_capable and time.monotonic() >= deadline)
+            if watermark_unknown and (status == "absent" or expired
                                       or (event_proof is not None and event_proof.state != "pending")):
                 if not await tmux.has_session(name):
                     return "failed", "pane_died_during_boot", "adopted pane died before delivery was proved"
@@ -5240,7 +5253,7 @@ class SpawnCtl:
             # NEVER re-paste blind here — wait out the boot window instead.
             if not await tmux.has_session(name):
                 return "failed", "pane_died_during_boot", "adopted pane died before its transcript appeared"
-            if time.monotonic() >= deadline:
+            if expired:
                 # The awaited liveness read can carry us past the deadline after
                 # the saved-watermark guard above evaluated false; that
                 # watermark still means the paste may have happened.

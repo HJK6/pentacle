@@ -28,6 +28,15 @@ A seat whose prompt went in as a native launch argument (`native_argv`) is
 proof-only on adoption: its first USER event proves delivery, otherwise the
 outcome stays `indeterminate`.
 
+Post-paste adoption polls until the 20 s adoption deadline (`ADOPTION_BOOT_DEADLINE_S`). When the receipt supports Store proof:
+
+- **Lookups in the window:** a Store lookup is offered only when at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) of the window remains. The transcript probe runs right up to the deadline.
+- **At the deadline:** if the spawn is still unresolved, adoption takes one transcript observation with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance, then one decisive Store sample with its own 0.25 s grant.
+- **The outcome:** `failed agent_never_started` requires a `pending` answer from that decisive sample. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained.
+- **Cost:** a settlement can end up to 3.25 s after the deadline. Startup settles intents one at a time, so N unresolved intents can add up to N × 3.25 s.
+
+Receipts without Store proof use the transcript alone, as before.
+
 The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 
 - **Budget:** 15 s by default. `PENTACLE_V2_SHUTDOWN_BUDGET_S` may lower it but never raise it.
