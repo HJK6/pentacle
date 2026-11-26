@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 import sys
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 
@@ -147,6 +149,23 @@ class DaemonLayerGateTests(unittest.TestCase):
                       "    age = host.snapshot['pane_status']\n"
                       "    return age\n")
         self.assertTrue(gate._added_observation_accesses("", "", field_read, "observers.py"))
+
+    def test_policy_scan_excludes_deploy_tools_and_retains_runtime_calls(self) -> None:
+        service = Path("services/chat-stream-v2")
+        with TemporaryDirectory() as directory, patch.object(gate, "REPO_ROOT", Path(directory)):
+            gate._git("init", "--quiet")
+            gate._git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                      "commit", "--quiet", "--allow-empty", "-m", "base")
+            deploy = service / "deploy" / "example.py"
+            runtime = service / "example.py"
+            for path in (deploy, runtime):
+                target = Path(directory) / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("def example():\n    return admit()\n", encoding="utf-8")
+            gate._git("add", str(service))
+            with patch.object(gate, "BASELINE_COMMIT", "HEAD"):
+                errors = gate._check_candidate_policy("HEAD")
+            self.assertEqual(errors, [f"F3_policy: new named policy call in {runtime}:example (admit)"])
 
     def test_unanchored_optional_policy_decision_fails_with_clean_control(self) -> None:
         base = "def ordinary(value):\n    return value\n"
