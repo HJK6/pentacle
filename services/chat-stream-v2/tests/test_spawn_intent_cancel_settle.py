@@ -697,3 +697,54 @@ def test_cancel_at_any_pre_pane_store_await_keeps_the_exit_contract(index: int, 
             store.stop()
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("intent", ["committed", "empty"])
+def test_second_cancel_while_the_settle_is_queued_reads_the_ordered_state(intent: str) -> None:
+    """Unknown timing: the waiter is cancelled while the settle sits queued
+    behind a held worker. The submitted conditional mutation still runs; the
+    durable state is read after an ordered Store observation."""
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        worker = WorkerHold()
+        try:
+            tmux = HostTmux()
+            ctl = new_ctl(store, tmux, "daemon-A")
+            hold = Hold()
+            hold_intent(store, hold, after_commit=intent == "committed")
+            client = asyncio.create_task(ctl.spawn(spawn_msg("orig"), HOST))
+            await stuck(hold.reached.wait())
+            [obligation] = [t for t in ctl._background_spawns if not t.done()]
+            [fixture] = await reservations(store)
+            queued = asyncio.Event()
+            real = store.settle_spawn_claim
+
+            async def queued_settle(*a, **kw):
+                store.settle_spawn_claim = real
+                await worker.start(store)
+                asyncio.get_running_loop().call_soon(queued.set)
+                return await real(*a, **kw)
+
+            store.settle_spawn_claim = queued_settle
+            drain = asyncio.create_task(ctl.drain_background_spawns())
+            await stuck(queued.wait())
+            obligation.cancel()
+            assert await stuck(drain) == {"cancelled": 1, "unfinished": 0}
+            assert obligation.cancelled()
+            await worker.release()
+            # Ordered observation: this read runs after the queued settle.
+            after = await reservations(store)
+            assert after == ([{**fixture, "owner_instance_id": None}] if intent == "committed" else [])
+            client.cancel()
+            await asyncio.gather(client, return_exceptions=True)
+            assert tmux.created == 0 and tmux.killed == []
+            assert await rows(store, "SELECT * FROM v2_spawn_outcomes") == []
+            if after:
+                await recover_retained(store, tmux, "orig")
+            await refire_then_replay(store, tmux, new_ctl(store, tmux, "daemon-D"))
+        finally:
+            await worker.release()
+            store.stop()
+
+    asyncio.run(go())
