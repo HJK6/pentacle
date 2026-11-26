@@ -44,9 +44,9 @@ def test_daemon_stage_restart(stage, sig, tmp_path, evidence):
 
 
 @pytest.mark.parametrize("sig", SIGNALS, ids=lambda s: s.name)
-def test_daemon_s3_both_windows(sig, tmp_path, evidence):
+def test_daemon_s3b_post_intent_window(sig, tmp_path, evidence):
     records = rm.run_s3(sig, tmp_path, evidence)
-    assert [r["cell"] for r in records] == [f"S3a-{sig.name}", f"S3b-{sig.name}"]
+    assert [r["cell"] for r in records] == [f"S3b-{sig.name}"]
     for record in records:
         _assert_pass(record)
 
@@ -62,3 +62,9 @@ def test_c2_keyed_spawn_across_restart(variant, tmp_path, evidence):
 
 def test_c3_report_across_restart(tmp_path, evidence):
     _assert_pass(rm.run_c3(tmp_path / "env", evidence))
+
+
+def test_daemon_s3a_pre_intent_sigterm(tmp_path, evidence):
+    """One held attempt: SIGTERM before intent submission releases only the
+    empty claim, and a same-key refire after restart makes one fresh seat."""
+    _assert_pass(rm.run_pre_intent_sigterm(tmp_path / "env", evidence))

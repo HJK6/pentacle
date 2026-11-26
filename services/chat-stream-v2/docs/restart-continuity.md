@@ -19,8 +19,8 @@ paste, and finally the `v2_spawn_outcomes` row.
 
 | Interrupted after | Restart outcome |
 |---|---|
-| claim, before intent | Startup reconcile records `failed` and releases the claim. A same-key retry replays that failure; a fresh key spawns normally. The staged file is content-addressed and unreferenced. |
-| intent, before the pane | `failed spawn_interrupted`, released; same replay rules. |
+| claim, before intent | After a crash the empty claim survives; once its pane is confirmed gone, reconcile records `failed` (`spawn_interrupted: … before spawn intent was persisted`) and releases it. A completed graceful drain releases the empty claim itself and records nothing, so `spawn-status` for the request id finds nothing. Either way a same-key retry makes one fresh claim: a failed outcome is not replayed. The staged file is content-addressed and unreferenced. |
+| intent, before the pane | The reservation and intent are retained, by a crash or by a graceful drain, which only clears its owner. While retained, a same-key retry returns the original starting handle and creates nothing. Once the pane is confirmed gone, reconcile records `failed` (`spawn_interrupted: … before the session row was persisted`), which `spawn-status` returns for the request id, and releases it; a same-key retry then makes one fresh claim. |
 | pane and row, before the paste | The pane is adopted by nonce. The intent has no pre-paste watermark, which proves no paste happened, so adoption waits for provider readiness and pastes the brief once. It then proves that paste like any post-paste adoption. A provider that is still booting leaves the outcome `indeterminate` and the reservation retained; a later reconcile pass delivers it. |
 | paste, before the outcome | Adoption proves delivery from the post-watermark USER event or the provider transcript. It never pastes again. Without proof by the adoption deadline, a saved pre-paste watermark keeps the outcome `indeterminate` (`spawn_delivery_unknown`, `do_not_respawn`) rather than `failed`: the paste may have happened. |
 
@@ -57,7 +57,16 @@ restart). It then cancels in-flight spawn tasks while the store is still running
 within at most 5 s (`SHUTDOWN_SPAWN_DRAIN_S`). When the drain completes
 (`unfinished=0` in its log line), each spawn has recorded its interruption handoff
 (retained intent, an `indeterminate` outcome for an admitted row, intent owner
-released) before the store stops. A nonzero `unfinished` count or an abandoned
+released) before the store stops. A cancelled spawn does not trust its own
+in-memory record of what it wrote: the cancel can land after the intent commits
+and before the write returns. Every exit without a confirmed outcome settles
+through one Store operation instead, queued behind any intent write the spawn
+submitted and matched on host, name, request id, creation nonce and current
+owner. A committed intent keeps its payload and only its owner is cleared; an
+empty claim with no pane is deleted; any other row (missing, foreign, tombstoned
+or pane-bound) is left alone. If that settle itself fails or is cancelled,
+nothing falls back to a delete, a pane kill or an invented outcome; the next
+daemon instance reconciles the row it finds. A nonzero `unfinished` count or an abandoned
 drain step leaves that handoff unproven; check `spawn-status` before relying on
 restart recovery. One step is never cut: a spawn that has persisted its pre-paste
 watermark gets up to half the drain window to land its paste before it is

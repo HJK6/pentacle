@@ -2530,8 +2530,8 @@ class SpawnCtl:
         # The existing atomic claim still decides concurrent NEW same-key fires.
         nonce = uuid.uuid4().hex
         # A claim interrupted after its commit and before it returns may hold
-        # this nonce's row; only a returned refusal or replay proves it does not.
-        claim_owned = True
+        # this fresh nonce's row. The settle matches that nonce, so a refused or
+        # replayed claim, which wrote no row with it, is never touched.
         try:
             if idempotency_key:
                 # Atomic check+claim: exactly one concurrent same-key caller wins
@@ -2544,7 +2544,6 @@ class SpawnCtl:
                     **({"qualification_message": qualification} if qualification is not None else {}),
                 )
                 status = claim["status"]
-                claim_owned = status == "claimed"
                 if status == "replay":
                     return await self._reply_from_replay(
                         host, request_id, claim["kind"], claim["row"], idempotency_key
@@ -2565,15 +2564,13 @@ class SpawnCtl:
                 host, name, ttl_s=RESERVATION_TTL_S, request_id=request_id,
                 nonce=nonce, owner_instance_id=self.instance_id, refuse_if_held=True,
             ):
-                claim_owned = False
                 # Keyless NEW admission: the reservation is refused in-txn if held; a
                 # sticky hold re-read only picks the error (spawn_frozen vs unavailable).
                 if await self.store.get_spawn_admission_hold(host) is not None:
                     raise VerbError("spawn_frozen", self._frozen_reason(host, None))
                 raise VerbError("stream_id_unavailable", f"{host}:{name} is live or already reserved")
         except BaseException:
-            if claim_owned:
-                await self._settle_unresolved_spawn(host, name, request_id, nonce)
+            await self._settle_unresolved_spawn(host, name, request_id, nonce)
             raise
 
         # A reservation does not prove tmux ownership; never kill an ambiguous pane.
@@ -2835,315 +2832,316 @@ class SpawnCtl:
                 return reply
             raise RuntimeError("prompt spawn retry loop exhausted without an outcome")
         except Exception as exc:
-            # Until this handler reaches one of its deliberate exits, a cancel
-            # or Store failure inside it leaves the disposition unconfirmed.
-            unresolved = True
-            # Daemon settlement is scoped below to this intent/request and its
-            # created generation. A retired initiator cannot disable rollback.
-            from store_host_transfer import actor_context
-            actor_context.set(None)
-            if isinstance(exc, SpecInputsUnavailable):
-                exc = VerbError("spec_source_changed", "source lifecycle or spec binding changed")
-            reason = getattr(exc, "code", None) or "spawn_failed"
-            if await self.store.spawn_cancelled(host, name, request_id):
-                keep_reservation = intent_recorded
-                if not created[0] and not creation_uncertain[0]:
-                    for res in await self.store.reservations(include_expired=True):
-                        if (res["host"], res["session_name"], res.get("request_id")) == (host, name, request_id):
-                            await self._cleanup_cancelled_spawn(res)
-                unresolved = False
-                return {
-                    "type": "spawn.cancelled", "ok": False, "state": "cancelled",
-                    "stream_id": f"{host}:{name}", "request_id": request_id,
-                }
-            if (delivery_receipt.get("transport") == "native_argv"
-                    and reason in {"native_initial_prompt_delivery_failed", CODEX_RESET_BLOCKED}):
-                pane = str(getattr(exc, "extra", {}).get("pane_capture") or "")
-                if not pane:
-                    try:
-                        pane = await tmux.capture(name)
-                    except Exception:
-                        pane = ""
-                await self._notice_native_delivery_failure(host, name, request_id,
-                    str(open_flds.get("parent_stream_id") or ""), reason, pane)
-            account = open_flds.get("account_binding")
-            if isinstance(exc, VerbError) and isinstance(account, dict):
-                exc.extra.update(host=host, provider=account["provider"], account=account["alias"])
-            outcome_fields: dict[str, Any] = {}
-            if reason == CODEX_RESET_BLOCKED:
-                # The provider pane is intentionally left OPEN and alive.  The
-                # operator must resolve the interstitial directly; this daemon
-                # records the block but never pastes, presses Enter, retries,
-                # reconciles, adopts, or kills this pane on that signal.
-                keep_reservation = True
-                blocked_receipt = {
-                    **delivery_receipt,
-                    "state": "blocked",
-                    "delivery_status": "blocked",
-                    "failure_code": CODEX_RESET_BLOCKED,
-                    "readiness_reason": CODEX_RESET_BLOCKED,
-                    "bootstrap_state": CODEX_RESET_BLOCKED,
-                    "submission_confirmed": False,
-                }
-                try:
-                    blocked_receipt = await self._persist_reset_blocked_spawn(
-                        host,
-                        name,
-                        request_id,
-                        open_flds,
-                        brief,
-                        delivery_receipt,
-                        spawn_generation=spawn_generation,
-                        idempotency_key=idempotency_key,
-                        payload_hash=payload_hash,
-                        operator_initiated_top_level=(
-                            not open_flds.get("parent_stream_id")
-                            and not open_flds.get("handoff_from_stream_id")
-                            and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
-                        ),
-                    )
-                except Exception:  # noqa: BLE001 - never authorize cleanup on a write failure
-                    log.exception("could not persist reset-blocked spawn for %s:%s", host, name)
-                if isinstance(exc, VerbError):
-                    exc.extra.update({
-                        "readiness_reason": CODEX_RESET_BLOCKED,
-                        "reset_blocked": True,
-                        "retryable": False,
-                        "nonretryable": True,
-                        "pane_preserved": True,
-                        "stream_id": f"{host}:{name}",
-                        "initial_prompt_delivery": blocked_receipt,
-                    })
-                unresolved = False
-                raise
-            if creation_uncertain[0] and not created[0]:
-                # `tmux new-session` timed out and its follow-up liveness probe
-                # remained inconclusive.  We cannot prove a pane exists, and so
-                # cannot kill it; equally, we must not release the only durable
-                # handle if recording its pane evidence fails.  The intent was
-                # written before the launch attempt and is enough for the
-                # existing reconciler to settle it later. The requester gets a
-                # typed pre-admission error, never an unowned success handle.
-                keep_reservation = True
-                try:
-                    await self.store.mark_tmux_created(host, name, request_id=request_id)
-                except Exception:  # noqa: BLE001 - retain the already-durable intent
-                    log.exception("could not mark creation-uncertain pane %s:%s", host, name)
-                unresolved = False
-                raise VerbError(
-                    "spawn_launch_unconfirmed",
-                    f"{reason}: creation unconfirmed before durable admission",
-                )
-            # DATA-only (rpc_delivery_determinism lane, outcome-matrix ownership):
-            # attach a truthful failed receipt on ANY prompt-requested failure,
-            # including one raised BEFORE staging (no transport yet) — not only the
-            # direct/staged paths. This closes the missing-receipt gap where a
-            # prompt-bearing spawn that hit the live-pane collision recorded no
-            # receipt at all. It does NOT change kill/confirm SEMANTICS:
-            # `_rollback_kill`, `mark_closed` conditions, and confirm timeouts below
-            # are untouched (lane 2 surface).
-            prompt_involved = (
-                delivery_receipt.get("transport") in {"direct", "staged", "native_argv"}
-                or delivery_receipt.get("state") not in (None, "not_requested")
-            )
-            if prompt_involved:
-                if delivery_receipt.get("state") != "delivered":
-                    delivery_receipt = {
+            try:
+                # Daemon settlement is scoped below to this intent/request and its
+                # created generation. A retired initiator cannot disable rollback.
+                from store_host_transfer import actor_context
+                actor_context.set(None)
+                if isinstance(exc, SpecInputsUnavailable):
+                    exc = VerbError("spec_source_changed", "source lifecycle or spec binding changed")
+                reason = getattr(exc, "code", None) or "spawn_failed"
+                if await self.store.spawn_cancelled(host, name, request_id):
+                    keep_reservation = intent_recorded
+                    if not created[0] and not creation_uncertain[0]:
+                        for res in await self.store.reservations(include_expired=True):
+                            if (res["host"], res["session_name"], res.get("request_id")) == (host, name, request_id):
+                                await self._cleanup_cancelled_spawn(res)
+                    return {
+                        "type": "spawn.cancelled", "ok": False, "state": "cancelled",
+                        "stream_id": f"{host}:{name}", "request_id": request_id,
+                    }
+                if (delivery_receipt.get("transport") == "native_argv"
+                        and reason in {"native_initial_prompt_delivery_failed", CODEX_RESET_BLOCKED}):
+                    pane = str(getattr(exc, "extra", {}).get("pane_capture") or "")
+                    if not pane:
+                        try:
+                            pane = await tmux.capture(name)
+                        except Exception:
+                            pane = ""
+                    await self._notice_native_delivery_failure(host, name, request_id,
+                        str(open_flds.get("parent_stream_id") or ""), reason, pane)
+                account = open_flds.get("account_binding")
+                if isinstance(exc, VerbError) and isinstance(account, dict):
+                    exc.extra.update(host=host, provider=account["provider"], account=account["alias"])
+                outcome_fields: dict[str, Any] = {}
+                if reason == CODEX_RESET_BLOCKED:
+                    # The provider pane is intentionally left OPEN and alive.  The
+                    # operator must resolve the interstitial directly; this daemon
+                    # records the block but never pastes, presses Enter, retries,
+                    # reconciles, adopts, or kills this pane on that signal.
+                    keep_reservation = True
+                    blocked_receipt = {
                         **delivery_receipt,
-                        "state": "failed",
-                        "delivery_status": "failed",
-                        "failure_code": reason,
-                        "failure_reason": str(exc),
-                        "delivery_failed_at": iso_now(),
+                        "state": "blocked",
+                        "delivery_status": "blocked",
+                        "failure_code": CODEX_RESET_BLOCKED,
+                        "readiness_reason": CODEX_RESET_BLOCKED,
+                        "bootstrap_state": CODEX_RESET_BLOCKED,
+                        "submission_confirmed": False,
                     }
-                outcome_fields = {
-                    "delivery_evidence": "failed",
-                    "delivery_receipt": delivery_receipt,
-                }
-            # Admission owns the pane, but a missing proof is not proof that it
-            # failed. Preserve its handle until a definitive observation arrives.
-            proof_preserved = False
-            proof_preservation_basis = "identity-matched pane remains alive"
-            if reason in {
-                "prompt_delivery_failed",
-                "native_initial_prompt_delivery_failed",
-                "boot_binding_indeterminate",
-            } and created[0]:
-                if str(open_flds.get("provider") or "") == "codex":
-                    # A Codex pane that is alive OR of ambiguous liveness keeps
-                    # its handle: rolling one back on an inconclusive probe kills
-                    # real work. This is the retained ownership rule, previously
-                    # keyed on attestation presence only because the manifest was
-                    # mandatory and therefore always present for Codex.
-                    pane_state = await self._session_state_for_wait(name, tmux)
-                    proof_preserved = pane_state != "gone"
-                    proof_preservation_basis = (
-                        "codex pane remains alive or liveness is ambiguous"
-                    )
-                else:
-                    proof_preserved = await self._current_spawn_pane_verified_alive(
-                        host, name, tmux, expected_generation=spawn_generation,
-                    )
-            if proof_preserved:
-                keep_reservation = True
-                proof_pending_reason = (
-                    str(exc)
-                    if reason in {
-                        "boot_binding_indeterminate",
-                        "native_initial_prompt_delivery_failed",
-                    }
-                    else str(
-                        delivery_receipt.get("proof_watermark_reason")
-                        or self._submission_proof_failures.pop(f"{host}:{name}", "")
-                        or "prompt_delivery_unproven"
-                    )
-                )
-                delivery_receipt = {
-                    **delivery_receipt,
-                    "state": "indeterminate",
-                    "delivery_status": "indeterminate",
-                    "bootstrap_state": "starting",
-                    "proof_state": (
-                        "unreachable"
-                        if delivery_receipt.get("proof_watermark_state") == "unreachable"
-                        else "pending"
-                    ),
-                    "proof_watermark": delivery_receipt.get("proof_watermark"),
-                    "proof_watermark_state": delivery_receipt.get("proof_watermark_state"),
-                    "proof_watermark_reason": delivery_receipt.get("proof_watermark_reason"),
-                    "failure_code": reason,
-                    "failure_reason": str(exc),
-                    "delivery_failed_at": iso_now(),
-                }
-                async with self.sessions._lifecycle_lock(host, name):
-                    current_row = await self.store.fetch_session(host, name)
-                    current_created_at = ""
-                    if (
-                        isinstance(current_row, dict)
-                        and str(current_row.get("session_generation") or "") == spawn_generation
-                    ):
-                        current_created_at = str(current_row.get("created_at") or "")
-                    row = await self.store.update_session(
-                        host, name,
-                        expected_generation=current_created_at,
-                        bootstrap_state="starting",
-                    )
-                if row is None:
-                    unresolved = False
-                    return self._starting_spawn_reply(
-                        host, name, request_id,
-                        "prompt_delivery_failed: lifecycle advanced",
-                        delivery_receipt,
-                    )
-                failure_reason = f"{proof_pending_reason}: {proof_preservation_basis}"
-                await self.store.set_spawn_outcome(
-                    host, name, "indeterminate", request_id=request_id,
-                    reason=failure_reason,
-                    delivery_evidence="live_pane_unproven",
-                    delivery_receipt=delivery_receipt,
-                    effective_model=open_flds.get("effective_model"),
-                    effective_effort=open_flds.get("effective_effort"),
-                    idempotency_key=idempotency_key or None,
-                    request_payload_hash=payload_hash or None,
-                )
-                await self._publish_spawn_state(host, name, "starting")
-                unresolved = False
-                return self._starting_spawn_reply(
-                    host, name, request_id, proof_pending_reason, delivery_receipt,
-                )
-            # Cleanup is scoped to the pane THIS spawn created — tracked
-            # explicitly, never inferred from the name. Best-effort: a remote
-            # kill that itself times out must not mask the original failure nor
-            # skip recording the outcome (SessionReconciler re-collects a stray pane).
-            row = None
-            if created[0]:
-                rolled_back = await self._rollback_kill(
-                    host, name, tmux, expected_generation=spawn_generation,
-                )
-                if not rolled_back:
+                    try:
+                        blocked_receipt = await self._persist_reset_blocked_spawn(
+                            host,
+                            name,
+                            request_id,
+                            open_flds,
+                            brief,
+                            delivery_receipt,
+                            spawn_generation=spawn_generation,
+                            idempotency_key=idempotency_key,
+                            payload_hash=payload_hash,
+                            operator_initiated_top_level=(
+                                not open_flds.get("parent_stream_id")
+                                and not open_flds.get("handoff_from_stream_id")
+                                and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001 - never authorize cleanup on a write failure
+                        log.exception("could not persist reset-blocked spawn for %s:%s", host, name)
+                    if isinstance(exc, VerbError):
+                        exc.extra.update({
+                            "readiness_reason": CODEX_RESET_BLOCKED,
+                            "reset_blocked": True,
+                            "retryable": False,
+                            "nonretryable": True,
+                            "pane_preserved": True,
+                            "stream_id": f"{host}:{name}",
+                            "initial_prompt_delivery": blocked_receipt,
+                        })
+                    raise
+                if creation_uncertain[0] and not created[0]:
+                    # `tmux new-session` timed out and its follow-up liveness probe
+                    # remained inconclusive.  We cannot prove a pane exists, and so
+                    # cannot kill it; equally, we must not release the only durable
+                    # handle if recording its pane evidence fails.  The intent was
+                    # written before the launch attempt and is enough for the
+                    # existing reconciler to settle it later. The requester gets a
+                    # typed pre-admission error, never an unowned success handle.
                     keep_reservation = True
                     try:
                         await self.store.mark_tmux_created(host, name, request_id=request_id)
                     except Exception:  # noqa: BLE001 - retain the already-durable intent
-                        log.exception("could not mark rollback-unconfirmed pane %s:%s", host, name)
-                    unresolved = False
-                    return self._starting_spawn_reply(
-                        host, name, request_id, f"{reason}: rollback unconfirmed", delivery_receipt
+                        log.exception("could not mark creation-uncertain pane %s:%s", host, name)
+                    raise VerbError(
+                        "spawn_launch_unconfirmed",
+                        f"{reason}: creation unconfirmed before durable admission",
                     )
-                # Admission now precedes readiness and delivery, so every
-                # confirmed rollback can have an OPEN row to settle. Close it,
-                # but ONLY on a CONFIRMED death: the tri-state `session_state`
-                # tells "gone" (tmux exit 1) apart from "unreachable" (a dropped
-                # ssh reads as no-pane), so a remote kill racing an ssh blip never
-                # marks a row closed over a live remote pane (the
-                # `row_closed_tree_alive` cascade the close ladder forbids).
-                pane_gone = await tmux.session_state(name) == "gone"
-            elif admission is not None and admission.done():
-                row = await self.store.fetch_session(host, name)
-            # Key the FAILED outcome (DATA-only) so a same-key retry finds this
-            # terminal failure after the reservation is released and replays it
-            # truthfully (Outcome Matrix class B) instead of minting a new pane.
-            failure_reason = f"{reason}: {exc}"
-            await self.store.set_spawn_outcome(
-                host, name, "failed", request_id=request_id, reason=failure_reason,
-                idempotency_key=idempotency_key or None,
-                request_payload_hash=payload_hash or None,
-                # Defect 2 (spawn_outcomes coverage/semantics spec): `boot_not_ready`
-                # is the bounded readiness poll timing out, not a boot verdict --
-                # admission already happened. Flag it so a consumer can tell this
-                # apart from a genuine boot/registration failure without parsing
-                # `reason` prose (AC3).
-                readiness_timed_out=(reason == "boot_not_ready"),
-                **outcome_fields,
-            )
-            await self._publish_spawn_state(
-                host, name, "failed", reason=failure_reason,
-            )
-            if created[0] and pane_gone and await self.store.fetch_session(host, name):
-                # Rollback has only confirmed the tmux pane is gone. It has
-                # not captured the process/boot identity needed to prove an
-                # empty tree, so leave a durable unknown for the closed
-                # survivor reconciler instead of silently recording reaped.
-                await self.sessions.mark_closed(
-                    host, name, reason=failure_reason,
-                    reap_status="unknown", survivors=[],
-                    expected_generation=spawn_generation,
-                    close_kind="spawn_rollback",
+                # DATA-only (rpc_delivery_determinism lane, outcome-matrix ownership):
+                # attach a truthful failed receipt on ANY prompt-requested failure,
+                # including one raised BEFORE staging (no transport yet) — not only the
+                # direct/staged paths. This closes the missing-receipt gap where a
+                # prompt-bearing spawn that hit the live-pane collision recorded no
+                # receipt at all. It does NOT change kill/confirm SEMANTICS:
+                # `_rollback_kill`, `mark_closed` conditions, and confirm timeouts below
+                # are untouched (lane 2 surface).
+                prompt_involved = (
+                    delivery_receipt.get("transport") in {"direct", "staged", "native_argv"}
+                    or delivery_receipt.get("state") not in (None, "not_requested")
                 )
-            elif (
-                isinstance(row, dict)
-                and str(row.get("session_generation") or "") == spawn_generation
-            ):
-                await self.sessions.mark_closed(
-                    host, name, reason=failure_reason,
-                    expected_generation=spawn_generation,
-                    close_kind="spawn_rollback",
+                if prompt_involved:
+                    if delivery_receipt.get("state") != "delivered":
+                        delivery_receipt = {
+                            **delivery_receipt,
+                            "state": "failed",
+                            "delivery_status": "failed",
+                            "failure_code": reason,
+                            "failure_reason": str(exc),
+                            "delivery_failed_at": iso_now(),
+                        }
+                    outcome_fields = {
+                        "delivery_evidence": "failed",
+                        "delivery_receipt": delivery_receipt,
+                    }
+                # Admission owns the pane, but a missing proof is not proof that it
+                # failed. Preserve its handle until a definitive observation arrives.
+                proof_preserved = False
+                proof_preservation_basis = "identity-matched pane remains alive"
+                if reason in {
+                    "prompt_delivery_failed",
+                    "native_initial_prompt_delivery_failed",
+                    "boot_binding_indeterminate",
+                } and created[0]:
+                    if str(open_flds.get("provider") or "") == "codex":
+                        # A Codex pane that is alive OR of ambiguous liveness keeps
+                        # its handle: rolling one back on an inconclusive probe kills
+                        # real work. This is the retained ownership rule, previously
+                        # keyed on attestation presence only because the manifest was
+                        # mandatory and therefore always present for Codex.
+                        pane_state = await self._session_state_for_wait(name, tmux)
+                        proof_preserved = pane_state != "gone"
+                        proof_preservation_basis = (
+                            "codex pane remains alive or liveness is ambiguous"
+                        )
+                    else:
+                        proof_preserved = await self._current_spawn_pane_verified_alive(
+                            host, name, tmux, expected_generation=spawn_generation,
+                        )
+                if proof_preserved:
+                    keep_reservation = True
+                    proof_pending_reason = (
+                        str(exc)
+                        if reason in {
+                            "boot_binding_indeterminate",
+                            "native_initial_prompt_delivery_failed",
+                        }
+                        else str(
+                            delivery_receipt.get("proof_watermark_reason")
+                            or self._submission_proof_failures.pop(f"{host}:{name}", "")
+                            or "prompt_delivery_unproven"
+                        )
+                    )
+                    delivery_receipt = {
+                        **delivery_receipt,
+                        "state": "indeterminate",
+                        "delivery_status": "indeterminate",
+                        "bootstrap_state": "starting",
+                        "proof_state": (
+                            "unreachable"
+                            if delivery_receipt.get("proof_watermark_state") == "unreachable"
+                            else "pending"
+                        ),
+                        "proof_watermark": delivery_receipt.get("proof_watermark"),
+                        "proof_watermark_state": delivery_receipt.get("proof_watermark_state"),
+                        "proof_watermark_reason": delivery_receipt.get("proof_watermark_reason"),
+                        "failure_code": reason,
+                        "failure_reason": str(exc),
+                        "delivery_failed_at": iso_now(),
+                    }
+                    async with self.sessions._lifecycle_lock(host, name):
+                        current_row = await self.store.fetch_session(host, name)
+                        current_created_at = ""
+                        if (
+                            isinstance(current_row, dict)
+                            and str(current_row.get("session_generation") or "") == spawn_generation
+                        ):
+                            current_created_at = str(current_row.get("created_at") or "")
+                        row = await self.store.update_session(
+                            host, name,
+                            expected_generation=current_created_at,
+                            bootstrap_state="starting",
+                        )
+                    if row is None:
+                        return self._starting_spawn_reply(
+                            host, name, request_id,
+                            "prompt_delivery_failed: lifecycle advanced",
+                            delivery_receipt,
+                        )
+                    failure_reason = f"{proof_pending_reason}: {proof_preservation_basis}"
+                    await self.store.set_spawn_outcome(
+                        host, name, "indeterminate", request_id=request_id,
+                        reason=failure_reason,
+                        delivery_evidence="live_pane_unproven",
+                        delivery_receipt=delivery_receipt,
+                        effective_model=open_flds.get("effective_model"),
+                        effective_effort=open_flds.get("effective_effort"),
+                        idempotency_key=idempotency_key or None,
+                        request_payload_hash=payload_hash or None,
+                    )
+                    await self._publish_spawn_state(host, name, "starting")
+                    return self._starting_spawn_reply(
+                        host, name, request_id, proof_pending_reason, delivery_receipt,
+                    )
+                # Cleanup is scoped to the pane THIS spawn created — tracked
+                # explicitly, never inferred from the name. Best-effort: a remote
+                # kill that itself times out must not mask the original failure nor
+                # skip recording the outcome (SessionReconciler re-collects a stray pane).
+                row = None
+                if created[0]:
+                    rolled_back = await self._rollback_kill(
+                        host, name, tmux, expected_generation=spawn_generation,
+                    )
+                    if not rolled_back:
+                        keep_reservation = True
+                        try:
+                            await self.store.mark_tmux_created(host, name, request_id=request_id)
+                        except Exception:  # noqa: BLE001 - retain the already-durable intent
+                            log.exception("could not mark rollback-unconfirmed pane %s:%s", host, name)
+                        return self._starting_spawn_reply(
+                            host, name, request_id, f"{reason}: rollback unconfirmed", delivery_receipt
+                        )
+                    # Admission now precedes readiness and delivery, so every
+                    # confirmed rollback can have an OPEN row to settle. Close it,
+                    # but ONLY on a CONFIRMED death: the tri-state `session_state`
+                    # tells "gone" (tmux exit 1) apart from "unreachable" (a dropped
+                    # ssh reads as no-pane), so a remote kill racing an ssh blip never
+                    # marks a row closed over a live remote pane (the
+                    # `row_closed_tree_alive` cascade the close ladder forbids).
+                    pane_gone = await tmux.session_state(name) == "gone"
+                elif admission is not None and admission.done():
+                    row = await self.store.fetch_session(host, name)
+                # Key the FAILED outcome (DATA-only) so a same-key retry finds this
+                # terminal failure after the reservation is released and replays it
+                # truthfully (Outcome Matrix class B) instead of minting a new pane.
+                failure_reason = f"{reason}: {exc}"
+                await self.store.set_spawn_outcome(
+                    host, name, "failed", request_id=request_id, reason=failure_reason,
+                    idempotency_key=idempotency_key or None,
+                    request_payload_hash=payload_hash or None,
+                    # Defect 2 (spawn_outcomes coverage/semantics spec): `boot_not_ready`
+                    # is the bounded readiness poll timing out, not a boot verdict --
+                    # admission already happened. Flag it so a consumer can tell this
+                    # apart from a genuine boot/registration failure without parsing
+                    # `reason` prose (AC3).
+                    readiness_timed_out=(reason == "boot_not_ready"),
+                    **outcome_fields,
                 )
-                if emit_if_changed := getattr(
-                    getattr(self.sessions, "_inventory_emitter", None), "emit_if_changed", None,
+                await self._publish_spawn_state(
+                    host, name, "failed", reason=failure_reason,
+                )
+                if created[0] and pane_gone and await self.store.fetch_session(host, name):
+                    # Rollback has only confirmed the tmux pane is gone. It has
+                    # not captured the process/boot identity needed to prove an
+                    # empty tree, so leave a durable unknown for the closed
+                    # survivor reconciler instead of silently recording reaped.
+                    await self.sessions.mark_closed(
+                        host, name, reason=failure_reason,
+                        reap_status="unknown", survivors=[],
+                        expected_generation=spawn_generation,
+                        close_kind="spawn_rollback",
+                    )
+                elif (
+                    isinstance(row, dict)
+                    and str(row.get("session_generation") or "") == spawn_generation
                 ):
-                    await emit_if_changed(immediate=True)
-            if (
-                isinstance(exc, VerbError)
-                and exc.code == AUTH_CONTEXT_FAILURE_MARKER.removesuffix(":")
-                and isinstance(outcome_fields.get("delivery_receipt"), dict)
-            ):
-                # `Server._dispatch` exposes VerbError extras in `spawn.error`.
-                # Preserve the prompt-bearing receipt in the same public
-                # envelope where the terminal outcome records it.
-                exc.extra.setdefault(
-                    "initial_prompt_delivery", outcome_fields["delivery_receipt"]
-                )
-            unresolved = False
-            raise exc
+                    await self.sessions.mark_closed(
+                        host, name, reason=failure_reason,
+                        expected_generation=spawn_generation,
+                        close_kind="spawn_rollback",
+                    )
+                    if emit_if_changed := getattr(
+                        getattr(self.sessions, "_inventory_emitter", None), "emit_if_changed", None,
+                    ):
+                        await emit_if_changed(immediate=True)
+                if (
+                    isinstance(exc, VerbError)
+                    and exc.code == AUTH_CONTEXT_FAILURE_MARKER.removesuffix(":")
+                    and isinstance(outcome_fields.get("delivery_receipt"), dict)
+                ):
+                    # `Server._dispatch` exposes VerbError extras in `spawn.error`.
+                    # Preserve the prompt-bearing receipt in the same public
+                    # envelope where the terminal outcome records it.
+                    exc.extra.setdefault(
+                        "initial_prompt_delivery", outcome_fields["delivery_receipt"]
+                    )
+                raise exc
+            except BaseException as escaped:
+                # A cancel or Store failure inside this cleanup leaves the
+                # disposition unconfirmed; only its own deliberate raises are.
+                if escaped is not exc and not (
+                    isinstance(escaped, VerbError) and escaped.code == "spawn_launch_unconfirmed"
+                ):
+                    unresolved = True
+                raise
         except BaseException:
             # INV-3: `asyncio.CancelledError` (and any other `BaseException`) is
             # NOT a confirmed terminal outcome — it bypasses the `except
             # Exception` cleanup above. Once a durable spawn intent exists, a
             # teardown must RETAIN the reservation + intent as the recovery
             # handle: the shielded spawn task can leave a live pane whose only
-            # addressable record is this reservation. Never blind-release it:
-            # a false `intent_recorded` does not prove the write did not commit.
+            # addressable record is this reservation. Never blind-release it.
+            if intent_recorded:
+                keep_reservation = True
+            # A false `intent_recorded` does not prove the write did not commit.
             unresolved = True
             # Defect 1 (spawn_outcomes coverage/semantics spec): a bare
             # BaseException (asyncio.CancelledError, etc.) skips the `except
