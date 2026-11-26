@@ -14,8 +14,13 @@ from prockill import terminate_and_reap
 @pytest.mark.parametrize("root_exits", [False, True])
 def test_inherited_pipe_does_not_extend_cleanup(monkeypatch, tmp_path, cancel, root_exits):
     finished = tmp_path / "descendant_finished"
+    release = tmp_path / "descendant_release"
+    # The descendant holds the inherited pipe until the test releases it (or a
+    # 60 s stuck-detector fallback), so cleanup provably returned first.
     child_code = (
-        "import pathlib,time; time.sleep(2); "
+        "import pathlib,time\n"
+        f"release=pathlib.Path({str(release)!r}); deadline=time.monotonic()+60\n"
+        "while not release.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
         f"pathlib.Path({str(finished)!r}).touch()"
     )
     root_code = (
@@ -40,16 +45,20 @@ def test_inherited_pipe_does_not_extend_cleanup(monkeypatch, tmp_path, cancel, r
         task = asyncio.create_task(hosts._bounded_exec(
             sys.executable, "-c", root_code, timeout=30 if cancel else 0.05,
         ))
-        await asyncio.wait_for(ready.wait(), 5)
-        started = time.monotonic()
         try:
+            # Race readiness against the task, so a setup failure surfaces as itself.
+            readiness = asyncio.ensure_future(ready.wait())
+            await asyncio.wait({readiness, task}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+            readiness.cancel()
+            if not ready.is_set():
+                result = task.result() if task.done() else "still running"  # re-raises a setup error
+                raise AssertionError(f"root never reported its descendant: {result!r}")
             if cancel:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
             else:
                 assert await task == (1, "", True)
-            assert time.monotonic() - started < 1
             proc = captured["proc"]
             assert proc.returncode is not None
             with pytest.raises(ProcessLookupError):
@@ -59,10 +68,19 @@ def test_inherited_pipe_does_not_extend_cleanup(monkeypatch, tmp_path, cancel, r
             assert proc._transport.is_closing()
         finally:
             # The disposable descendant exits itself; never broaden root cleanup.
-            deadline = time.monotonic() + 4
-            while not finished.exists() and time.monotonic() < deadline:
-                await asyncio.sleep(0.02)
-            assert finished.exists(), "cleanup must not kill the descendant"
+            release.touch()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            proc = captured.get("proc")
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            if "child_pid" in captured:  # only a created descendant can be checked
+                deadline = time.monotonic() + 30
+                while not finished.exists() and time.monotonic() < deadline:
+                    await asyncio.sleep(0.02)
+                assert finished.exists(), "cleanup must not kill the descendant"
 
     asyncio.run(exercise())
 

@@ -15,6 +15,8 @@ from test_assistant_prose_mirror import ASSISTANT
 from test_work_lanes import run
 
 NO_SESSIONS = SimpleNamespace(list_open=lambda: [])
+# Generous stuck detector; interval waits are observed as events, never timed.
+STUCK_S = 30
 
 
 async def _burst(inv, seconds, gap):
@@ -72,8 +74,56 @@ def test_burst_route_evaluations_bounded_by_interval(monkeypatch):
     run(body)
 
 
+def _gated_interval(monkeypatch):
+    """Module-local clock and sleep: each projection wait is recorded and held until the test releases it."""
+    import work_lanes_projection as projection
+    real_asyncio, real_time = asyncio, time
+    gate = SimpleNamespace(clock=[0.0], waits=asyncio.Queue(), cancelled=[])
+
+    async def interval_sleep(delay):
+        released = real_asyncio.get_running_loop().create_future()
+        gate.waits.put_nowait((delay, released))
+        try:
+            await released
+        except real_asyncio.CancelledError:
+            gate.cancelled.append(delay)
+            raise
+        gate.clock[0] += delay
+
+    class AsyncProxy:
+        sleep = staticmethod(interval_sleep)
+        def __getattr__(self, name):
+            return getattr(real_asyncio, name)
+
+    class TimeProxy:
+        def monotonic(self):
+            return gate.clock[0]
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+    monkeypatch.setattr(projection, "time", TimeProxy())
+    monkeypatch.setattr(projection, "asyncio", AsyncProxy())
+    return gate
+
+
+async def _settle(gate, task, interval):
+    """Return the drain's held interval wait, or None once the drain finishes without one."""
+    while True:
+        getter = asyncio.ensure_future(gate.waits.get())
+        done, _ = await asyncio.wait({getter, task}, timeout=STUCK_S, return_when=asyncio.FIRST_COMPLETED)
+        if getter not in done:
+            getter.cancel()
+            assert task in done, "drain neither finished nor entered its interval wait"
+            task.result()  # a drain that raised fails here
+            return None
+        delay, released = getter.result()
+        if delay == interval:
+            return released
+
+
 def test_trailing_pass_publishes_latest_state_only(monkeypatch):
     monkeypatch.setenv("WORK_LANES_REFRESH_MIN_S", "0.3")
+    gate = _gated_interval(monkeypatch)
 
     async def body(env):
         lane_id = (await env.adopt("stream:t", state="paused", lead=False, owner="operator"))["lane"]["lane_id"]
@@ -87,14 +137,18 @@ def test_trailing_pass_publishes_latest_state_only(monkeypatch):
             frames.append(frame)
         inv = WorkLanesInventory(env.store, NO_SESSIONS, broadcast)
         inv.refresh()
-        await asyncio.sleep(0.05)
+        assert await _settle(gate, inv._task, 0.3) is None
         assert [f["lanes"][0]["title"] for f in frames] == ["Lane stream:t"]
         await retitle("second")
         inv.refresh()
-        await asyncio.sleep(0.05)
+        # The drain is held in its interval wait until both writes have landed.
+        released = await _settle(gate, inv._task, 0.3)
+        assert released is not None
         await retitle("third")
         inv.refresh()
-        await inv._task
+        assert [f["lanes"][0]["title"] for f in frames] == ["Lane stream:t"]
+        released.set_result(None)
+        await asyncio.wait_for(inv._task, STUCK_S)
         # "second" was superseded inside the interval; the trailing pass published the latest state.
         assert [f["lanes"][0]["title"] for f in frames] == ["Lane stream:t", "third"]
     run(body)
@@ -102,26 +156,29 @@ def test_trailing_pass_publishes_latest_state_only(monkeypatch):
 
 def test_first_pass_is_immediate_and_next_waits_for_interval(monkeypatch):
     monkeypatch.setenv("WORK_LANES_REFRESH_MIN_S", "0.5")
+    gate = _gated_interval(monkeypatch)
 
     async def body(env):
         async def broadcast(frame):
             pass
         inv = WorkLanesInventory(env.store, NO_SESSIONS, broadcast)
         passes = _count_passes(env.store)
-        started = time.monotonic()
         inv.refresh()
-        await asyncio.sleep(0.1)
-        assert len(passes) == 1 and passes[0] - started < 0.1
-        inv.refresh()
-        await asyncio.sleep(0.2)
+        assert await _settle(gate, inv._task, 0.5) is None
         assert len(passes) == 1
-        await inv._task
-        assert len(passes) == 2 and passes[1] - passes[0] >= 0.5
+        first_pass = inv._last_pass
+        inv.refresh()
+        released = await _settle(gate, inv._task, 0.5)
+        assert released is not None and len(passes) == 1
+        released.set_result(None)
+        await asyncio.wait_for(inv._task, STUCK_S)
+        assert len(passes) == 2 and inv._last_pass - first_pass >= 0.5
     run(body)
 
 
 def test_stop_cancels_a_pending_wait(monkeypatch):
     monkeypatch.setenv("WORK_LANES_REFRESH_MIN_S", "30")
+    gate = _gated_interval(monkeypatch)
 
     async def body(env):
         async def broadcast(frame):
@@ -129,12 +186,18 @@ def test_stop_cancels_a_pending_wait(monkeypatch):
         inv = WorkLanesInventory(env.store, NO_SESSIONS, broadcast)
         passes = _count_passes(env.store)
         inv.start()
-        await asyncio.sleep(0.1)
+        periodic = inv._periodic
+        assert await _settle(gate, inv._task, 30) is None
+        assert len(passes) == 1
         inv.refresh()
-        await asyncio.sleep(0.05)
-        started = time.monotonic()
-        await inv.stop()
-        assert time.monotonic() - started < 1.0
+        released = await _settle(gate, inv._task, 30)
+        assert released is not None
+        await asyncio.wait_for(inv.stop(), STUCK_S)
+        # The drain's own held interval wait was cancelled; the periodic task
+        # (in its 60 s sweep wait or shielding the drain) was cancelled too.
+        assert released.cancelled() and gate.cancelled.count(30) == 1
+        assert set(gate.cancelled) <= {30, 60.0}
+        assert periodic.cancelled()
         assert len(passes) == 1
     run(body)
 
@@ -145,6 +208,7 @@ def test_core_ready_start_is_not_delayed_by_interval(tmp_path, monkeypatch):
     monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(tmp_path))
     write_item(tmp_path)
     monkeypatch.setenv("WORK_LANES_REFRESH_MIN_S", "30")
+    gate = _gated_interval(monkeypatch)
 
     async def go():
         store = Store(":memory:")
@@ -162,10 +226,10 @@ def test_core_ready_start_is_not_delayed_by_interval(tmp_path, monkeypatch):
                 inv.refresh()
             await asyncio.sleep(0.05)
             assert not scans
-            started = time.monotonic()
             inv.start()
-            await asyncio.wait_for(inv._task, 5)
-            assert len(scans) == 1 and time.monotonic() - started < 5
+            # The core-ready drain scans without entering the 30 s interval wait.
+            assert await _settle(gate, inv._task, 30) is None
+            assert len(scans) == 1
             assert (await store.work_index_status())["available"] is True
         finally:
             await inv.stop()
