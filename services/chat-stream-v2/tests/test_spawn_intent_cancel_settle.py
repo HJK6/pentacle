@@ -599,3 +599,101 @@ def test_settle_touches_nothing_it_does_not_own(case: str) -> None:
             store.stop()
 
     asyncio.run(go())
+
+
+# -- Pause at every Store await before the pane --------------------------------
+
+
+def _store_methods() -> list[str]:
+    return [n for n in dir(Store) if not n.startswith("__") and asyncio.iscoroutinefunction(getattr(Store, n))]
+
+
+def instrument(store: Store, on_call) -> None:
+    """Route every Store coroutine through `on_call(name, call)` for spawn tasks."""
+    main = asyncio.current_task()
+    for method in _store_methods():
+        real = getattr(store, method)
+
+        async def wrapper(*a, _real=real, _name=method, **kw):
+            if asyncio.current_task() is main:
+                return await _real(*a, **kw)
+            return await on_call(_name, lambda: _real(*a, **kw))
+
+        setattr(store, method, wrapper)
+
+
+def _pre_pane_calls() -> list[str]:
+    """The Store awaits one healthy spawn makes before its pane is created."""
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            tmux = HostTmux()
+            ctl = new_ctl(store, tmux, "daemon-A")
+            calls: list[str] = []
+
+            async def on_call(name, call):
+                if tmux.created == 0:
+                    calls.append(name)
+                return await call()
+
+            instrument(store, on_call)
+            await stuck(ctl.spawn(spawn_msg("orig"), HOST))
+            return calls
+        finally:
+            store.stop()
+
+    return asyncio.run(go())
+
+
+PRE_PANE_CALLS = _pre_pane_calls()
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+@pytest.mark.parametrize("index", range(len(PRE_PANE_CALLS)),
+                         ids=[f"{i:02d}-{n}" for i, n in enumerate(PRE_PANE_CALLS)])
+def test_cancel_at_any_pre_pane_store_await_keeps_the_exit_contract(index: int, side: str) -> None:
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            tmux = HostTmux()
+            ctl = new_ctl(store, tmux, "daemon-A")
+            hold = Hold()
+            seen = [0]
+
+            async def on_call(name, call):
+                seen[0] += 1
+                if seen[0] - 1 != index or hold.reached.is_set():
+                    return await call()
+                assert name == PRE_PANE_CALLS[index]
+                if side == "before":
+                    await hold.wait()
+                    return await call()
+                result = await call()
+                await hold.wait()
+                return result
+
+            instrument(store, on_call)
+            client = asyncio.create_task(ctl.spawn(spawn_msg("orig"), HOST))
+            await stuck(hold.reached.wait())
+            [obligation] = [t for t in ctl._background_spawns if not t.done()] or [None]
+            at_barrier = await reservations(store)
+            committed = [r for r in at_barrier if r["request_id"] == "orig" and r["payload"] is not None]
+            assert await stuck(ctl.drain_background_spawns()) == {"cancelled": int(obligation is not None),
+                                                                   "unfinished": 0}
+            client.cancel()
+            await asyncio.gather(client, return_exceptions=True)
+            after = await reservations(store)
+            assert tmux.created == 0 and tmux.killed == []
+            if committed:
+                assert after == [{**committed[0], "owner_instance_id": None}]
+                await recover_retained(store, tmux, "orig")
+            else:
+                assert after == []
+                assert (await status(ctl, "orig"))["found"] is False
+            await refire_then_replay(store, tmux, new_ctl(store, tmux, "daemon-D"))
+        finally:
+            store.stop()
+
+    asyncio.run(go())
