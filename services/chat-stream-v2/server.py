@@ -725,8 +725,17 @@ def _welcome_frame(*, nonce: str, expires_at: float, runtime_sha: str = "") -> d
     }
 
 
+#: Verbs that put input into a pane or commit an answer. An admitted one
+#: outlives its submitting connection and is drained at shutdown; once the
+#: drain begins, a new one is refused before anything is recorded.
+_INPUT_VERBS = frozenset({
+    "send", "tell", "compact", "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
+    "voice_answer.answer",
+})
+
+
 def _is_send_frame(raw: Any) -> bool:
-    """Cheap pre-dispatch peek for send and answer mutations. Used to
+    """Cheap pre-dispatch peek for input verbs (`_INPUT_VERBS`). Used to
     let accepted durable work outlive the submitting connection
     (spec_example_2026_01). Any
     parse failure falls through to the normal (connection-scoped) path."""
@@ -734,10 +743,7 @@ def _is_send_frame(raw: Any) -> bool:
         msg = json.loads(raw)
     except (TypeError, ValueError):
         return False
-    return isinstance(msg, dict) and str(msg.get("type") or "") in {
-        "send", "compact", "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
-        "voice_answer.answer",
-    }
+    return isinstance(msg, dict) and str(msg.get("type") or "") in _INPUT_VERBS
 
 
 class Server:
@@ -860,6 +866,8 @@ class Server:
         #: gone client). Durable receipt queryability is supplied separately by
         #: the append-only receipt log, never by this task registry.
         self._detached_send_tasks: set[asyncio.Task] = set()
+        #: Set by `drain_input` at the start of shutdown; refuses new input.
+        self._input_stopping = False
         self._admission_connections = 0
         self._admission_connection_limit = max(1, int(os.environ.get("PENTACLE_ADMIT_CONNECTIONS", 32)))
         self._admission_pools = {name: _RequestPool(name, limits)
@@ -1228,6 +1236,27 @@ class Server:
     async def serve_forever(self) -> None:
         assert self._ws_server is not None, "bind() must be called before serve_forever()"
         await self._ws_server.serve_forever()
+
+    def begin_stopping(self) -> None:
+        """The stop transition, the one place the stopping flag is set: input
+        verbs are refused retryably from here on and spawn admission closes.
+        Synchronous, so the signal handler runs it the instant a stop is
+        requested, even mid-boot; boot never reopens either once it is set."""
+        self._input_stopping = True
+        self.spawn_ready.clear()
+
+    @property
+    def stopping(self) -> bool:
+        return self._input_stopping
+
+    async def drain_input(self, timeout: float) -> int:
+        """Wait up to `timeout` for admitted input (each may already have
+        committed its pre-input record) to finish its paste and outcome record
+        while the Store still runs. Returns how many are still running; `close`
+        keeps its own bounded wait for them."""
+        if self._detached_send_tasks:
+            await asyncio.wait(tuple(self._detached_send_tasks), timeout=max(0.0, timeout))
+        return len(self._detached_send_tasks)
 
     async def close(self, *, deadline: float | None = None) -> None:
         """Stop serving. `deadline` (monotonic) is the daemon's shutdown
@@ -2662,6 +2691,11 @@ class Server:
         ingress_reset = None
         account_runtime = getattr(self, "account_runtime", None)
         try:
+            if self._input_stopping and verb in _INPUT_VERBS:
+                # Nothing is recorded, so the same id delivers once after boot.
+                raise VerbError("daemon_stopping", "daemon is restarting; nothing was sent; retry with the same id",
+                                retryable=True, action_committed=False, submission_confirmed=False,
+                                phase="not_started")
             auth = dispatch_msg.get('_auth_context') or {}
             if (account_runtime is not None and verb in {"tell", "send", "spawn"} and websocket is not None
                     and self._recovery_ingress(auth, dispatch_msg)):

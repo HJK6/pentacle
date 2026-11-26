@@ -492,6 +492,9 @@ class _Server:
     def __init__(self):
         self.spawn_ready = asyncio.Event()
 
+    def begin_stopping(self):
+        self.spawn_ready.clear()
+
     async def close(self, *, deadline):
         return None
 

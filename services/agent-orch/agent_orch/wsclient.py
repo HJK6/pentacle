@@ -300,6 +300,11 @@ def _retry_next_delay(policy: RetryPolicy, deadline: float, attempt: int) -> tup
     return delay, ""
 
 
+class DaemonStopping(ConnectionError):
+    """The daemon refused input while restarting and recorded nothing, so the
+    same id is retried as a transport loss and delivers once after boot."""
+
+
 # A refused, reset or dropped socket (a daemon restart). Only these get the
 # deadline-bound reconnect; any other exception keeps the attempt bound.
 _TRANSPORT_LOSS_ERRORS: tuple[type[BaseException], ...] = (
@@ -1664,11 +1669,13 @@ async def _one_shot_rpc(
         response_timeout_extra = 0.0
     verb = _rpc_verb(payload)
     attempts = 0
-    sent_any = False
+    sent_any = False  # some transmitted attempt has an unknown outcome
+    refusal: dict[str, Any] | None = None  # the last definite daemon_stopping refusal
     last_message: str | None = None
     transport_loss = False
     while True:
         attempts += 1
+        transmitted = [False]  # this attempt's frame may have reached the daemon
         if attempts > 1 and verb == "send":
             payload["retry"] = True
         ws = None
@@ -1683,10 +1690,14 @@ async def _one_shot_rpc(
                 ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id)
             else:
                 ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id, infer_from_env=False)
-            await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id)
-            sent_any = True
+            await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id,
+                             on_handoff=lambda: transmitted.__setitem__(0, True))
             response_deadline = time.monotonic() + wait_timeout + response_timeout_extra
             response = await _read_rpc_response(ws, request_id, prefix=prefix, deadline=response_deadline)
+            if retry_eligible and isinstance(response, dict) and response.get("error_code") == "daemon_stopping":
+                # A definite refusal with nothing recorded: this attempt sent nothing.
+                transmitted[0], refusal = False, response
+                raise DaemonStopping("daemon_stopping")
             hook = _OWNER_RESPONSE_HOOK.get()
             if hook is not None:
                 hook(response)  # before the socket cleanup in `finally`
@@ -1705,6 +1716,7 @@ async def _one_shot_rpc(
             if not retry_eligible:
                 raise
         finally:
+            sent_any = sent_any or transmitted[0]
             if ws is not None:
                 await _close_within(ws, deadline_at)
         attempt_bound: int | str = retry_policy.max_attempts
@@ -1716,6 +1728,8 @@ async def _one_shot_rpc(
             delay, giveup_reason = _retry_next_delay(retry_policy, retry_deadline, attempts)
         if delay is None:
             _log_rpc_giveup(verb, attempts, giveup_reason)
+            if refusal is not None and not sent_any:
+                return refusal  # every transmitted attempt was definitely refused
             return _retry_failure_response(
                 prefix,
                 request_id,

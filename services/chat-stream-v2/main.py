@@ -29,6 +29,7 @@ import time
 import uuid
 
 import socket
+from collections.abc import Callable
 from pathlib import Path
 
 from alerts import Alerts
@@ -331,6 +332,23 @@ def _spec_catalog(sessions: Sessions) -> object | None:
         session_summaries=sessions.list_open,
         changed_callback=lambda _spec_ids: None,
     )
+
+
+def stop_requester(server: Server, stop: asyncio.Future) -> Callable[..., None]:
+    """The SIGTERM/SIGINT handler: make the stop transition at once, even
+    mid-boot, so input and spawn admission close before boot finishes; the
+    first signal also resolves `stop`, and a repeat is harmless."""
+    def _request_stop(*_a: object) -> None:
+        server.begin_stopping()
+        if not stop.done():
+            stop.set_result(None)
+    return _request_stop
+
+
+def open_spawn_gate(server: Server) -> None:
+    """Boot's one spawn-gate opening, which a requested stop overrides."""
+    if not server.stopping:
+        server.spawn_ready.set()
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -958,11 +976,7 @@ async def run(args: argparse.Namespace) -> int:
     # stop future), not the default disposition that kills the process (rc=-15);
     # boot still finishes, then `await stop` returns at once and shutdown runs.
     stop = asyncio.get_running_loop().create_future()
-
-    def _request_stop(*_a: object) -> None:
-        if not stop.done():
-            stop.set_result(None)
-
+    _request_stop = stop_requester(server, stop)
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             asyncio.get_running_loop().add_signal_handler(sig, _request_stop)
@@ -1065,7 +1079,7 @@ async def run(args: argparse.Namespace) -> int:
     await watch_wake.tick()
     # Reconciliation has settled the inventory and every interrupted intent, so
     # a new spawn can no longer race it: open the spawn gate (QA #18).
-    server.spawn_ready.set()
+    open_spawn_gate(server)
     if assistant_config.enabled and server.lane_rulings is not None:
         await server.lane_rulings.start()
     await lifted  # both are fast; ensure done before the background tasks below
@@ -1206,6 +1220,8 @@ async def run(args: argparse.Namespace) -> int:
 
 #: How much earlier than its shutdown step Server.close's own waits must end.
 SERVER_CLOSE_MARGIN_S = 0.1
+#: How long shutdown lets admitted input finish before stopping anything else.
+SHUTDOWN_INPUT_DRAIN_S = 5.0
 
 
 async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composites, lane_rulings,
@@ -1214,9 +1230,19 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     every step gets min(its cap, what remains), and an overrunning step is
     abandoned, so the store stops before launchd's SIGKILL. Never touches
     panes (B10)."""
-    # Restart continuity: no new spawn admission once stopping, then hand every
-    # in-flight admitted spawn to durable state while the store still runs.
-    server.spawn_ready.clear()
+    # The stop transition (normally already made by the signal handler):
+    # refuse new input retryably and close spawn admission. Then let input
+    # already admitted (its pre-input record may be committed) paste and
+    # record its outcome while every dependency below still runs. The wait
+    # takes at most a third of the budget, and ends a little before its step
+    # does, so stuck input never starves the steps below.
+    server.begin_stopping()
+    if hasattr(server, "drain_input"):
+        drain_s = min(SHUTDOWN_INPUT_DRAIN_S, budget.remaining() / 3)
+        await budget.step("input-drain", server.drain_input(max(0.0, drain_s - SERVER_CLOSE_MARGIN_S)),
+                          cap=drain_s)
+    # Restart continuity: spawn admission closed above; hand every in-flight
+    # admitted spawn to durable state while the store still runs.
     if getattr(server, "queued_send_now", None) is not None:
         await budget.step("queued-send-now", server.queued_send_now.close(), cap=2.0)
     if getattr(server, "account_runtime", None) is not None:

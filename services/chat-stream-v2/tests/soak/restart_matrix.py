@@ -1014,26 +1014,34 @@ def run_c2(root: Path, evidence: Path, *, variant: str = "pre_admission") -> dic
             cell.daemon.start()
             first = finish(spawner, 200)
             cell.note("spawn_cli_finished", **first)
-            settled = wait_for(lambda: _settled(cell, name, request_id), SETTLE_DEADLINE_S, 0.5)
-            outcome = next((o for o in cell.outcomes(name) if o.get("request_id") == request_id), None)
-            status = finish(cli(cell, "parent", "spawn-status", key), 60)
-            awaited = finish(cli(cell, "parent", "await-spawn", "--request-id", request_id, "--timeout", "30"), 60)
-            refire = finish(cli(cell, "parent", *args_for(key)), 200)
-            snap = cell.snapshot("after-refire", name)
-            record.update(stop=stop, first_cli=first, spawn_status_cli=status, await_spawn_cli=awaited,
-                          refire_cli=refire, settled=bool(settled), name=name, request_id=request_id, key=key,
-                          outcome=outcome and {k: outcome.get(k) for k in ("state", "reason", "delivery_evidence")})
             try:
                 first_json = json.loads(first["stdout"].strip().splitlines()[-1])
             except (ValueError, IndexError):
                 first_json = {}
+            # Recovery records the interrupted attempt failed and frees its name;
+            # the CLI's same-request retry may then open the key's seat under a
+            # new name. That seat, named in the reply, is the one judged.
+            seat = name
+            replied = str(first_json.get("stream_id") or "")
+            if (first_json.get("type") == "spawn.ok" and first_json.get("request_id") == request_id
+                    and replied.startswith(f"{LOCAL_HOST}:")):
+                seat = replied.split(":", 1)[1]
+            settled = wait_for(lambda: _settled(cell, seat, request_id), SETTLE_DEADLINE_S, 0.5)
+            outcome = next((o for o in cell.outcomes(seat) if o.get("request_id") == request_id), None)
+            status = finish(cli(cell, "parent", "spawn-status", key), 60)
+            awaited = finish(cli(cell, "parent", "await-spawn", "--request-id", request_id, "--timeout", "30"), 60)
+            refire = finish(cli(cell, "parent", *args_for(key)), 200)
+            snap = cell.snapshot("after-refire", seat)
+            record.update(stop=stop, first_cli=first, spawn_status_cli=status, await_spawn_cli=awaited,
+                          refire_cli=refire, settled=bool(settled), name=name, seat=seat, request_id=request_id,
+                          key=key, outcome=outcome and {k: outcome.get(k) for k in ("state", "reason", "delivery_evidence")})
             typed = json.dumps(first_json)
             # The key is named in the typed reply or on the CLI's documented
             # pre-RPC `spawn key: K` stderr line (cli.py prints it for exactly
             # this interrupted-caller case); the request id must be in the reply.
             key_named = key in typed or f"spawn key: {key}" in first["stderr"]
             ready = (first_json.get("type") == "spawn.ok" and first_json.get("state") == "ready"
-                     and first_json.get("stream_id") == f"{LOCAL_HOST}:{name}")
+                     and first_json.get("stream_id") == f"{LOCAL_HOST}:{seat}")
             recorded_code = str((outcome or {}).get("reason") or "").split(":", 1)[0]
             checks = {
                 "typed_reply_names_key_and_request": ready or (
@@ -1052,10 +1060,14 @@ def run_c2(root: Path, evidence: Path, *, variant: str = "pre_admission") -> dic
                     "spawn_status_truthful": status["rc"] == 0 and '"delivered"' in status["stdout"],
                     "await_spawn_truthful": awaited["rc"] == 0 and '"ready"' in awaited["stdout"],
                     "refire_replays_one_seat": refire["rc"] == 0 and '"replayed":true' in refire["stdout"]
-                        and f"{LOCAL_HOST}:{name}" in refire["stdout"],
+                        and f"{LOCAL_HOST}:{seat}" in refire["stdout"],
                     "one_pane": len(snap["panes"]) == 1,
-                    "prompt_delivered_once": _deliveries(cell, name, prompt) == 1,
+                    "prompt_delivered_once": _deliveries(cell, seat, prompt) == 1,
                 })
+                if seat != name:
+                    interrupted = [o for o in cell.outcomes(name) if o.get("request_id") == request_id]
+                    checks["interrupted_attempt_failed_without_pane"] = (
+                        [o.get("state") for o in interrupted] == ["failed"] and not cell.panes(name))
             else:
                 recorded = str((outcome or {}).get("reason") or "").split(":", 1)[0]
                 fresh = finish(cli(cell, "parent", *args_for(f"{key}-fresh")), 200)

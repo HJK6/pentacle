@@ -303,7 +303,7 @@ def test_main_shutdown_drains_spawns_before_server_and_store_stop():
     source = (Path(spawnctl_mod.__file__).parent / "main.py").read_text()
     tail = source[source.index("async def shutdown("):]
     drain = tail.index("spawnctl.drain_background_spawns(")
-    assert tail.index("server.spawn_ready.clear()") < drain
+    assert tail.index("server.begin_stopping()") < tail.index("server.drain_input(") < drain
     assert drain < tail.index("server.close(") < tail.index("store.stop(")
 
 
