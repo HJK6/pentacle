@@ -12,7 +12,9 @@ import asyncio
 import json
 import os
 import shutil
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -150,16 +152,16 @@ def test_foreign_nonce_mismatch_terminalizes_without_kill_or_delivery() -> None:
 # -- Expiry does not delete a payload-bearing intent ---------------------------
 
 
-def test_expiry_exempts_a_payload_bearing_intent() -> None:
+@patch("store.time", wraps=time)
+def test_expiry_exempts_a_payload_bearing_intent(clock) -> None:
     async def _go():
         store = Store(":memory:")
         store.start()
         try:
-            # A pre-create intent: payload present, tmux_created=0, TTL lapsed.
-            # No nonce is needed for this payload-retention case.
-            assert await store.reserve_stream_id(HOST, "pending", ttl_s=0.01, request_id="r")
-            await store.record_spawn_intent(HOST, "pending", {"open_fields": {"objective": "Exercise interrupted spawn adoption", }, "brief": BRIEF})
-            await asyncio.sleep(0.03)
+            clock.time.return_value = 1_000.0
+            assert await store.reserve_stream_id(HOST, "pending", ttl_s=60.0, request_id="r")
+            assert await store.record_spawn_intent(HOST, "pending", {"open_fields": {"objective": "Exercise interrupted spawn adoption", }, "brief": BRIEF})
+            clock.time.return_value += 61.0
             # A reservation of another id runs the expiry sweep. The sweep
             # collects only rows that are BOTH pane-less AND intent-less, so the
             # payload-bearing intent survives to be reconciled.
