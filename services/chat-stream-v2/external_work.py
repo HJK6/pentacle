@@ -209,6 +209,9 @@ def install(server, store, sessions, outbound, composite, environ=None) -> "Exte
     """Daemon startup wiring: load the private config once and serve the verbs."""
     runtime = ExternalWork(store, sessions, outbound, config=load_config(environ),
                            env_binding=composite._env_binding, specs=getattr(getattr(server, "work_lanes", None), "specs", None))
+    lanes = getattr(server, "work_lanes", None)
+    if lanes is not None:
+        runtime.lanes_changed = lanes.refresh
     server.external_work = runtime
     server.handlers.update(runtime.wire_handlers())
     return runtime
@@ -221,6 +224,8 @@ class ExternalWork:
         self.store, self.sessions, self.config, self.clock = store, sessions, config, clock
         self._env_binding = env_binding
         self.specs = specs
+        # Lane frames carry the open packets; main wires the lane reconcile request.
+        self.lanes_changed = None
         self.store.external_work_config = config
         if outbound is not None:
             # Registered even when disabled, so a queued reminder is refused rather than delivered.
@@ -281,6 +286,8 @@ class ExternalWork:
                 elif state is not None or spec_id is not None:
                     raise PacketError("invalid_request")
                 result = await self.store.external_work_packet(op=op, tag=tag, spec_id=spec_id, state=state, **caller)
+                if self.lanes_changed is not None:
+                    self.lanes_changed()
             else:
                 if validate_record(record)["request_id"] != request_id:
                     raise ValueError("invalid_request")
@@ -312,6 +319,8 @@ class ExternalWork:
             if not _text(mail_id, 128) or type(at) is not int or at < 0 or at > now + 300:
                 raise PacketError("invalid_request")
             result = await self.store.external_work_mail(config=self.config, tag=tag, mail_id=mail_id, at=at, now=now)
+            if self.lanes_changed is not None:
+                self.lanes_changed()
             reply = {"type": "external_work.mail.ok", "ok": True, **result}
         except ValueError as exc:
             reply = {"type": "external_work.error", "ok": False,

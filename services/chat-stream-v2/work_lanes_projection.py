@@ -42,6 +42,28 @@ def _line(member, field_id, raw_key):
 
 
 LANE_FRAME_CAP = 64
+# Durable seat fields the lane reconciles read; activity and display fields are not inputs.
+LANE_INPUT_FIELDS = ("stream_id", "session_generation", "status", "presumed_dead_at", "offline_since_ts",
+                     "pane_status", "role", "visibility", "provider", "assigned_spec_id", "spec_id", "spec_ids")
+
+
+def _grants(row: dict[str, Any]) -> list[list[Any]]:
+    """Attendance grant identities and provenance; grant times are not lane inputs."""
+    grants = row.get("spec_binding_provenance")
+    if isinstance(grants, str):
+        try:
+            grants = json.loads(grants)
+        except ValueError:
+            return [[grants]]
+    if not isinstance(grants, list):
+        return []
+    return sorted(([grant.get("spec_id"), grant.get("provenance"), grant.get("granting_principal")]
+                   if isinstance(grant, dict) else [grant] for grant in grants), key=str)
+
+
+def lane_input_signature(sessions: list[dict[str, Any]]) -> str:
+    return json.dumps(sorted([[*(row.get(key) for key in LANE_INPUT_FIELDS), _grants(row)] for row in sessions],
+                             key=str), default=str, separators=(",", ":"))
 log = logging.getLogger(__name__)
 _STATE_ORDER = {"blocked": 0, "active": 1, "paused": 2, "done": 3}
 
@@ -432,6 +454,12 @@ class WorkLanesInventory:
         self._last_signature: str | None = None
         self._lock = asyncio.Lock()
         self._dirty = False
+        self._emit_dirty = False
+        self._input_signature: str | None = None
+        # Reconcile passes started and finished; waiters wait for a pass, not for emit work.
+        self._reconciles_started = 0
+        self._reconciles_done = 0
+        self._reconcile_done = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._periodic: asyncio.Task[None] | None = None
         # Standalone emitters without a file index keep their existing refresh
@@ -443,14 +471,12 @@ class WorkLanesInventory:
         path = getattr(store, "path", None)
         root = getattr(specs, "memory_root", None)
         self.worked = WorkedCache(Path(path).parent if path and path != ":memory:" else None,
-                                  Path(root) / "work" if root else None, changed=self.refresh)
+                                  Path(root) / "work" if root else None, changed=self.request_emit)
 
     async def refresh_for_close(self):
-        """Wait for the existing coalesced inventory drain."""
+        """Wait through the reconcile pass this call requests, not later emit work."""
         self._index_dirty = True
-        self.refresh()
-        if self._task is not None:
-            await asyncio.shield(self._task)
+        await asyncio.shield(self._reconciled(self._request_reconcile()))
         if self.specs is not None and self._index_dirty:
             raise RuntimeError("work_index_refresh_pending")
 
@@ -468,24 +494,62 @@ class WorkLanesInventory:
             self.refresh()
 
     def refresh(self) -> None:
-        """Coalesced, non-blocking: reconcile lead loss then emit if changed.
+        """Coalesced, non-blocking: reconcile lanes from changed inputs, then emit if changed.
 
-        Called on every session-inventory recompute and lane write; one task
-        drains repeated calls so the session hot path never waits on it.
+        Called on lane writes, reports, closes, boot, the watcher and the periodic
+        pass; one task drains repeated calls so no caller waits on it.
         """
         self._dirty = True
+        self._start_drain()
+
+    def request_emit(self) -> None:
+        """Coalesced re-emit with current overlays; runs no reconcile."""
+        self._emit_dirty = True
+        self._start_drain()
+
+    def sessions_changed(self) -> None:
+        """Session inventory changed: reconcile only if a lane input field changed."""
+        if lane_input_signature(self.sessions.list_open()) != self._input_signature:
+            self.refresh()
+        else:
+            self.request_emit()
+
+    def _request_reconcile(self) -> int:
+        """Request a reconcile now; returns the number of the pass that will consume it."""
+        target = self._reconciles_started + 1
+        self.refresh()
+        return target
+
+    async def _reconciled(self, target: int) -> None:
+        """Wait until reconcile pass ``target`` has finished, never for later emit work."""
+        while self._reconciles_done < target and self._task is not None and not self._task.done():
+            self._reconcile_done.clear()
+            # A drain that ends or is cancelled first must not strand the waiter.
+            finished = asyncio.ensure_future(self._reconcile_done.wait())
+            try:
+                await asyncio.wait({finished, self._task}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                finished.cancel()
+
+    def _start_drain(self) -> None:
         if (self._running or self.specs is None) and (self._task is None or self._task.done()):
             self._task = asyncio.create_task(self._drain())
 
     async def _drain(self) -> None:
-        while (self._running or self.specs is None) and self._dirty:
+        while (self._running or self.specs is None) and (self._dirty or self._emit_dirty):
             wait = self._last_pass + self.refresh_min_s - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
                 continue
-            self._dirty = False
+            reconcile, self._dirty, self._emit_dirty = self._dirty, False, False
             self._last_pass = time.monotonic()
             try:
+                if not reconcile:
+                    await self.emit_if_changed()
+                    continue
+                # Recorded before the reads, so a change during this pass reconciles again.
+                self._reconciles_started += 1
+                self._input_signature = lane_input_signature(self.sessions.list_open())
                 await self.reconcile_index()
                 # Complete, settle and reopen lanes from their goals before the
                 # episode alerts and the frame are built from the new state.
@@ -499,6 +563,10 @@ class WorkLanesInventory:
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
                 log.exception("work lanes refresh failed")
+            finally:
+                if reconcile:
+                    self._reconciles_done = self._reconciles_started
+                    self._reconcile_done.set()
 
     async def reconcile_index(self, *, force_sweep: bool = False) -> None:
         if self.specs is None:
@@ -555,12 +623,11 @@ class WorkLanesInventory:
                                                       name="work-index-watcher-start")
         async def periodic() -> None:
             while True:
-                # The due timestamp is recorded after the scan. Align the
-                # interval with that drain so the next tick cannot skip it.
-                if self._task is not None:
-                    await asyncio.shield(self._task)
+                # The due timestamp is recorded after the scan. Align the interval
+                # with that reconcile pass so the next tick cannot skip it; emit-only
+                # work on the shared task never holds the deadline back.
+                await asyncio.shield(self._reconciled(self._request_reconcile()))
                 await asyncio.sleep(min(interval_s, self.sweep_interval_s))
-                self.refresh()
         if self._periodic is None:
             self._periodic = asyncio.create_task(periodic())
             self.refresh()

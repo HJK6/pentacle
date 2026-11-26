@@ -459,3 +459,7 @@ class Mirror:
             await self.store.update_session(host, name, **cols)
         except Exception:  # noqa: BLE001 - a row may have just closed; never fail the pass
             log.debug("mirror persist failed %s:%s", host, name, exc_info=True)
+            return
+        # The registry moved first; lane reconciles read the durable pane state.
+        if "pane_status" in cols and (reconcile := getattr(self.sessions, "request_lane_reconcile", None)):
+            reconcile()
