@@ -2256,10 +2256,13 @@ def test_the_wrappers_own_elapsed_allowance_is_no_transcript() -> None:
 def test_short_window_fixture_with_an_injected_floor_reads_an_unreachable_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _short_window_with_an_injected_floor(monkeypatch, SettleClock())
+
+
+def _short_window_with_an_injected_floor(monkeypatch: pytest.MonkeyPatch, clock: SettleClock) -> None:
     # The companion of the unchanged 0.2 s fixture. A floor injected below the
     # window and a virtual clock fix the ordinary remainder at 0.2 s, so the
     # in-window read always happens, then the gate sample.
-    clock = SettleClock()
     monkeypatch.setattr(spawnctl_mod, "time", clock)
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.2)
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_MIN_EVENT_LOOKUP_S", 0.05)
@@ -2969,18 +2972,23 @@ def test_found_at_expiry_still_reads_the_pane(monkeypatch: pytest.MonkeyPatch) -
 def test_companion_fixture_is_independent_of_dispatch_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
+    # A real 160 ms pause at the first dispatch after the deadline is set.
+    # Product time is the companion's own virtual clock, so the controlled
+    # 0.2 s remainder and its in-window read survive the pause.
     clock = SettleClock()
-    base = clock.now
+    product_monotonic = clock.monotonic
+    paused: list[float] = []
 
     def monotonic() -> float:
         caller = sys._getframe(1)
-        if caller.f_code.co_name == "_settle_adoption" and "deadline" in caller.f_locals:
-            clock.now = base + 0.16
-        return clock.now
+        if not paused and caller.f_code.co_name == "_settle_adoption" and "deadline" in caller.f_locals:
+            paused.append(clock.rel())
+            time.sleep(0.16)  # the injected scheduler pause, not synchronization
+        return product_monotonic()
 
     clock.monotonic = monotonic  # type: ignore[method-assign]
-    monkeypatch.setattr(spawnctl_mod, "time", clock)
-    test_short_window_fixture_with_an_injected_floor_reads_an_unreachable_store(monkeypatch)
+    _short_window_with_an_injected_floor(monkeypatch, clock)
+    assert paused == [0.0], paused  # consumed once, on the settlement's first dispatch
 
 
 def test_a_window_gate_sample_that_crosses_expiry_decides_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
