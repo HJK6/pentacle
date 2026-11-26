@@ -30,13 +30,16 @@ outcome stays `indeterminate`.
 
 Post-paste adoption polls until the 20 s adoption deadline (`ADOPTION_BOOT_DEADLINE_S`). When the receipt supports Store proof:
 
-- **Lookups in the window:** a Store lookup is offered only when at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) of the window remains. It can only prove delivery early. The transcript probe runs right up to the deadline.
-- **At the deadline:** if the spawn is still unresolved, adoption takes one transcript observation. That observation always runs, with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance measured from when it starts, so a late wake cannot shorten it. Adoption then checks the pane.
-- **Every result:** each pass that ends the settlement takes one Store sample after its last transcript and pane observation. The sample has its own 0.25 s grant. A proven answer means delivered, even when the transcript was also found. Otherwise a found transcript means delivered. A failure (`transcript_absent`, `pane_died_during_boot`, `agent_never_started`) stands only when the sample answered `pending`. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained. If the transcript probe raises, a proven sample still means delivered; otherwise the reconcile pass defers.
-- **Pane liveness:** read as alive, gone or unknown. Only gone is a dead pane. An unreadable pane (an SSH or tmux failure) never produces a failure; at the deadline it defers.
-- **Added wait:** at most 3.25 s of new I/O per settlement at the deadline (the 3 s observation and the 0.25 s sample), or one 0.25 s sample when a pass ends the settlement inside the window. This is not an end-to-end deadline: the liveness read (10 s transport timeout), scheduling delay and cancellation cleanup fall outside it. Startup settles intents one at a time, so the added wait accrues for each unresolved intent with Store proof.
+Each pass observes in a fixed order and then decides once, from a single table, using only what that pass saw.
 
-Receipts without Store proof use the transcript alone, as before, and read pane liveness the same three-state way.
+- **Early lookup:** inside the window, a Store lookup is offered only when at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) remains. It can only prove delivery; any other answer is ignored.
+- **Transcript:** the probe runs up to the deadline. At the deadline, one more observation always runs, with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance measured from when it starts. An error from the probe is held until the decision.
+- **Pane liveness:** read on every pass, as alive, gone or unknown. Any error reading it (an SSH or tmux failure) counts as unknown, and unknown never produces a failure.
+- **Store sample:** one sample with its own 0.25 s grant follows the observations. A pass that reaches the deadline before or during that sample decides nothing. The expiry pass then observes again, keeping only a found transcript or a held error from the earlier pass.
+- **Decision:** a proven sample means delivered, ahead of a found transcript. A failure (`transcript_absent`, `pane_died_during_boot`, `agent_never_started`) needs a `pending` sample and a pane read as alive or gone. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained. A held probe error is re-raised unless delivery is proven, so the reconcile pass defers.
+- **Added wait:** one full 0.25 s gate per window pass admitted before expiry, plus at most 3.25 s of transcript/Store grants on an unresolved expiry pass. This is not an end-to-end deadline. The early lookup, the liveness read (10 s transport timeout), scheduling delay and cancellation cleanup fall outside it. Startup settles intents one at a time, so these costs accrue for each unresolved intent with Store proof.
+
+Receipts without Store proof use the transcript alone, as before. They read pane liveness the same three-state way on every pass; an unknown pane keeps polling and defers at the deadline.
 
 The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 
