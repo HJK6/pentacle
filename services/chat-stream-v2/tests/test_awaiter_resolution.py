@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from ledger import Ledger
+from ledger import AwaiterResolutionConfig, AwaiterResolutionJob, Ledger
 from sessions import Sessions
 from store import Store
 
@@ -160,6 +160,42 @@ def test_startup_sweep_re_drives_row_left_by_crash_and_is_idempotent(tmp_path) -
             assert (await store2.get_awaiter_result(stream_id, 9))["outcome"] == "closed_without_report"
         finally:
             store2.stop()
+
+    asyncio.run(go())
+
+
+def test_waiter_registered_during_startup_resolves_on_job_first_pass() -> None:
+    async def go() -> None:
+        store, sessions, ledger = await _state()
+        job = None
+        try:
+            child = await _open_child(sessions, "startup")
+            stream_id = child["stream_id"]
+            # A parent awaits while boot is still running and before the job starts.
+            waiter = asyncio.create_task(ledger.await_report({
+                "stream_id": stream_id, "msg_id": 4, "timeout": 30,
+            }))
+            await _wait_for_registered(store, stream_id, 4)
+            # The child closes without the ledger callback (as in a crash window).
+            await store.mark_closed(
+                HOST,
+                "startup",
+                closed_at="2026-08-09T00:00:03Z",
+                pane_status="pane_dead",
+                expected_generation=child["session_generation"],
+            )
+            assert not waiter.done()
+            # A long interval proves the first pass, not a later one, resolves it.
+            job = asyncio.create_task(AwaiterResolutionJob(
+                ledger, AwaiterResolutionConfig(interval_s=3600),
+            ).run_forever())
+            reply = await asyncio.wait_for(waiter, timeout=5)
+            assert reply["type"] == "await_report.closed_without_report"
+            assert (await ledger.sweep_awaited_unreported())["checked"] == 0
+        finally:
+            if job is not None:
+                job.cancel()
+            store.stop()
 
     asyncio.run(go())
 

@@ -128,9 +128,10 @@ def apply_report_gate(conn, report, reporter, context, now):
         if known and not line:
             raise ReportStatusRefusal("report_status_invalid", spec, "Status is missing or invalid")
         if known and boundary and boundary["known"] and line == boundary["status_line"]:
-            raise ReportStatusRefusal("report_status_unchanged", spec, "Status is unchanged since the last assignment or report")
-        receipt.update(outcome="unverifiable", cause="source_unavailable" if not known else "assignment_history_unavailable")
-        if known and boundary and boundary["known"]:
+            # Accepted; the owner sees the stale checkpoint on the receipt and as status_behind.
+            receipt.update(outcome="unchanged")
+        elif known and boundary and boundary["known"]:
+            receipt.update(outcome="unverifiable", cause="assignment_history_unavailable")
             record = observation(conn, spec)
             change = record.get("status_change") or {}
             publication = checkpoint.get("status_publication") or {}
@@ -148,5 +149,7 @@ def apply_report_gate(conn, report, reporter, context, now):
                 receipt.pop("cause")
             else:
                 receipt["cause"] = "publication_order_unverifiable"
+        else:
+            receipt.update(outcome="unverifiable", cause="source_unavailable" if not known else "assignment_history_unavailable")
         save_boundary(conn, stream, generation, spec, now, known, line, rev)
     report["status_freshness"] = receipt

@@ -112,8 +112,8 @@ async def test_exact_publication_age_and_single_use(fixture, age, covered):
     f = fixture
     await f.scan()
     await f.seat("reviewer")
-    with pytest.raises(VerbError,match="unchanged"):
-        await f.report("reviewer","unchanged")
+    stale = await f.report("reviewer","unchanged")
+    assert stale["status_freshness"]["outcome"] == "unchanged"
     f.clock += 2
     f.publish(summary(CHANGED))
     f.clock += age
@@ -125,10 +125,14 @@ async def test_exact_publication_age_and_single_use(fixture, age, covered):
     assert proof["published_at"] == f.clock-age
     f.clock += 1
     await f.scan()
-    with pytest.raises(VerbError,match="unchanged"):
-        await f.report("reviewer","second")
     f.clock += 1800
     assert await f.behind() is (not covered)
+    second = await f.report("reviewer","second")
+    assert second["status_freshness"]["outcome"] == "unchanged"
+    assert not second["status_freshness"].get("covers_event")
+    f.clock += 1800
+    # The accepted unchanged report is the latest event, so Status is behind it.
+    assert await f.behind()
     assert (await f.report("reviewer","first"))["status_freshness"] == proof
     await f.seat("qa",role="qa")
     reply = await f.report("qa","verdict",qa_verdict="accept",target_sha="a"*40)
@@ -203,8 +207,9 @@ async def test_unreadable_source_and_reassignment(fixture, monkeypatch):
     assert receipt["status_freshness"]["cause"] == "source_unavailable"
     monkeypatch.setenv("PENTACLE_MEMORY_ROOT",str(f.root))
     await f.store.update_session("fixture","worker",assigned_spec_id=OTHER)
-    with pytest.raises(VerbError,match=OTHER):
-        await f.report("worker","reassigned")
+    # A report right after reassignment is attributed to the new item, unchanged since assignment.
+    moved = (await f.report("worker","reassigned"))["status_freshness"]
+    assert (moved["spec_id"], moved["outcome"]) == (OTHER, "unchanged")
     assert (await f.report("worker","unavailable"))["status_freshness"] == receipt["status_freshness"]
     monkeypatch.setenv("PENTACLE_MEMORY_ROOT",str(f.root/"unavailable"))
     next_report = await f.report("worker","other-item")
@@ -243,15 +248,13 @@ async def test_unrelated_edit_reversion_and_uncertain_witness(fixture):
     await f.seat("helper")
     f.clock += 2
     f.publish(summary(ORIGINAL,"Check the new note."))
-    with pytest.raises(VerbError,match="unchanged"):
-        await f.report("helper","next-only")
+    assert (await f.report("helper","next-only"))["status_freshness"]["outcome"] == "unchanged"
     f.clock += 2
     f.publish(summary(CHANGED))
     await f.scan()
     f.clock += 2
     f.publish(summary(ORIGINAL))
-    with pytest.raises(VerbError,match="unchanged"):
-        await f.report("helper","reverted")
+    assert (await f.report("helper","reverted"))["status_freshness"]["outcome"] == "unchanged"
     await f.seat("peer")
     await f.store.update_session("fixture","peer",pane_status="unknown")
     with pytest.raises(VerbError,match="unverifiable"):
@@ -271,3 +274,32 @@ async def test_review_after_progress_in_same_second_keeps_its_own_obligation(fix
     assert reply["status_freshness"]["seat_role"] == "qa"
     f.clock += 1801
     assert await f.behind()
+
+
+@pytest.mark.asyncio
+async def test_audit_probe_unchanged_status_is_stored_and_other_refusals_hold(fixture):
+    f = fixture
+    await f.scan()
+    await f.seat("lead")
+    # Authenticated lead, correct assignment, same Status, new summary revision.
+    f.clock += 2
+    f.publish(summary(ORIGINAL, "Read the new note."))
+    await f.scan()
+    receipt = await f.report("lead","probe")
+    assert receipt["type"] == "report.ok"
+    assert receipt["status_freshness"]["outcome"] == "unchanged"
+    assert receipt["status_freshness"]["spec_id"] == SPEC
+    stored = await f.store.get_report("probe")
+    assert stored is not None and stored["status_freshness"]["outcome"] == "unchanged"
+    awaited = await f.ledger.await_report({"stream_id": "fixture:lead", "msg_id": 0, "timeout": 1})
+    assert awaited["report"]["status_freshness"]["outcome"] == "unchanged"
+    assert (await f.report("lead","probe"))["ledger_row_id"] == receipt["ledger_row_id"]
+    with pytest.raises(VerbError) as collision:
+        await f.report("lead","probe",summary="Different material.")
+    assert collision.value.code == "report_id_replay_conflict"
+    f.clock += 2
+    f.publish(f"**Next action** — Review the draft.\n")
+    await f.scan()
+    with pytest.raises(VerbError) as invalid:
+        await f.report("lead","no-status")
+    assert invalid.value.code == "report_status_invalid"
