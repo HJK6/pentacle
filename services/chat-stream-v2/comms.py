@@ -103,6 +103,11 @@ def is_codex_usage_command(value: object) -> bool:
 
 CODEX_INITIAL_PROMPT_PENDING = "initial_prompt_pending"
 _POOL_INPUT_MESSAGE = ContextVar("pool_input_message",default=None)
+# Server-set route marker; recovery eligibility also needs its minted decision.
+_INGRESS_ROUTE = "_account_ingress_route"
+# These tells validate their destination inside the before-paste callback.
+_TARGET_CHECKED_TELLS = ("_assistant_authority_request_generation", "_guidelines_token",
+                         "_notification_answer_generation")
 
 
 def _verified_operator_provenance(msg: dict[str, Any]) -> bool:
@@ -685,6 +690,7 @@ class Comms:
                                                                  baseline_id, status)
                         if status not in {'delivered', 'committed_pending_proof'}:
                             raise VerbError('guidelines_delivery_unconfirmed', 'advisor guidelines delivery is unconfirmed')
+                self._arm_tell_ingress(msg, route)
                 reply = await self._deliver_tell(msg, tell_id, route, wire, digest)
             if reply.get("delivery_status") == "delivered":
                 await self._stamp_milestone_status(msg, body)
@@ -706,6 +712,13 @@ class Comms:
             self._inflight.pop(tell_id, None)
             if not fut.done():
                 fut.set_result(outcome)
+
+    def _arm_tell_ingress(self, msg: dict[str, Any], route: dict[str, Any]) -> None:
+        """A server-routed external tell may spend its decision on this target."""
+        runtime = getattr(self, "account_runtime", None)
+        if (runtime is not None and msg.get(_INGRESS_ROUTE) is True
+                and not any(msg.get(k) for k in _TARGET_CHECKED_TELLS)):
+            runtime.arm_ingress("tell", route["final_target"])
 
     async def _stamp_milestone_status(self, msg: dict[str, Any], body: str) -> None:
         """Best-effort card update after a new tell is delivered or persisted."""
@@ -912,7 +925,7 @@ class Comms:
             await self._prepare_tell_input(msg, tell_id, route, body, digest, original, watermark)
             prepared = True
         confirmed, attempts, provider, active_draft, proof, watermark = await self._attempt_delivery(
-            msg, route, body, before_paste=before_paste,
+            msg, route, body, before_paste=before_paste, recovery_verb="tell",
         )
         if msg.get("_notification_answer_generation"):
             prior = await self.reconcile_notification_answer(
@@ -1457,7 +1470,7 @@ class Comms:
 
     async def _attempt_delivery(
         self, msg: dict[str, Any], route: dict[str, Any], body: str,
-        *, before_paste=None,
+        *, before_paste=None, recovery_verb=None,
     ) -> tuple[bool, int, str, bool, EventProof, EventWatermark]:
         """Deliver ``body`` and return proof, attempts, provider, and active-draft evidence."""
         target = str(route["final_target"])
@@ -1482,7 +1495,7 @@ class Comms:
             confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
                 tmux, name, body, provider, bool(msg.get("urgent")), target,
                 durable_proof=msg.get("_durable_notice_proof") is True,
-                before_paste=prepare,
+                before_paste=prepare, recovery_verb=recovery_verb,
             )
         finally: _POOL_INPUT_MESSAGE.reset(token)
         return confirmed, attempts, provider, active_draft, proof, watermark
@@ -1520,7 +1533,7 @@ class Comms:
 
     async def _inject_body(
         self, tmux: Any, name: str, body: str, provider: str, urgent: bool, stream_id: str,
-        *, durable_proof: bool = False, before_paste: Any = None,
+        *, durable_proof: bool = False, before_paste: Any = None, recovery_verb: str | None = None,
     ) -> tuple[bool, int, bool, EventProof, EventWatermark]:
         """Paste once, then perform only the bounded provider recovery."""
         # B6: `urgent` is SENDER-chosen — one Escape, then the message. The
@@ -1532,7 +1545,7 @@ class Comms:
             before = await tmux.capture(name)
             await self._assert_codex_pane_input_safe(stream_id, before)
         if urgent:
-            async with self._account_input_guard(stream_id):
+            async with self._account_input_guard(stream_id,recovery_verb=recovery_verb):
                 await tmux.run("send-keys", "-t", f"={name}:", "Escape")
             before = None
             if provider == "codex":
@@ -1540,7 +1553,7 @@ class Comms:
                 await self._assert_codex_pane_input_safe(stream_id, before)
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
-            async with self._account_input_guard(stream_id,claim=True):
+            async with self._account_input_guard(stream_id,claim=True,recovery_verb=recovery_verb):
                 await tmux.paste(name, body)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(body), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
@@ -1550,7 +1563,7 @@ class Comms:
             return confirmed, 1, False, proof, watermark
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._watermark_before_action(stream_id)
-        async with self._account_input_guard(stream_id,claim=True):
+        async with self._account_input_guard(stream_id,claim=True,recovery_verb=recovery_verb):
             if before_paste is not None:
                 await before_paste(watermark)
             await tmux.paste(name, body)
@@ -1862,7 +1875,8 @@ class Comms:
         return reply
 
     @asynccontextmanager
-    async def _account_input_guard(self,target,*,phase="not_started",claim=False,execution=False):
+    async def _account_input_guard(self,target,*,phase="not_started",claim=False,execution=False,
+                                  recovery_verb=None):
         runtime=getattr(self,"account_runtime",None)
         if runtime is None and not execution:
             yield
@@ -1871,7 +1885,8 @@ class Comms:
         host,name=self.sessions.split(target)
         try:
             account_guard = (runtime.input_guard(await self.store.fetch_session(host,name) or {},
-                message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim) if runtime is not None else nullcontext())
+                message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim,
+                recovery_verb=recovery_verb) if runtime is not None else nullcontext())
             # Provider preparation precedes this fence. Hold the graph only for
             # one physical action, never submission evidence or an Enter wait.
             async with account_guard, (self.sessions._graph_lock if execution else nullcontext()):
@@ -1899,7 +1914,7 @@ class Comms:
             before = await tmux.capture(name)
             await self._assert_codex_pane_input_safe(target, before)
         if plan.message.get("urgent"):
-            async with self._account_input_guard(target,execution=True):
+            async with self._account_input_guard(target,execution=True,recovery_verb="send"):
                 await tmux.run("send-keys", "-t", f"={name}:", "Escape")
             before = None
             if provider == "codex":
@@ -1908,7 +1923,7 @@ class Comms:
 
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
-            async with self._account_input_guard(target,claim=True,execution=True):
+            async with self._account_input_guard(target,claim=True,execution=True,recovery_verb="send"):
                 pane_mode_reason = await tmux.paste(name, plan.wire_text)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
@@ -1924,7 +1939,7 @@ class Comms:
 
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
-        async with self._account_input_guard(target,claim=True,execution=True):
+        async with self._account_input_guard(target,claim=True,execution=True,recovery_verb="send"):
             pane_mode_reason = await tmux.paste(name, plan.wire_text)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
@@ -2158,7 +2173,8 @@ class Comms:
                 account_runtime = getattr(self, "account_runtime", None)
                 if account_runtime is not None:
                     from provider_accounts import AccountError
-                    try: await account_runtime.before_input(await self.store.fetch_session(host,name) or {})
+                    try: await account_runtime.before_input(
+                        await self.store.fetch_session(host,name) or {}, recovery_verb="send", message=plan.message)
                     except AccountError as exc:
                         raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
                 if self.capacity_retry is not None:
@@ -2403,6 +2419,10 @@ class Comms:
             return await self._coalesced_send_result(
                 plan, request_id=request_id, receipt_id=receipt_id, winner=claim["winner"],
             )
+        runtime = getattr(self, "account_runtime", None)
+        if runtime is not None and msg.get(_INGRESS_ROUTE) is True:
+            # Only the fresh claim winner of an external send may signal.
+            runtime.arm_ingress("send", target)
         if self.capacity_retry is not None:
             async with self._pane_input_lock(target):
                 await self.capacity_retry.cancel_input(target)

@@ -823,6 +823,35 @@ class SpawnCtl:
                 log.warning("Admitting commission for %s: %s", spec_id, outcome)
         return None
 
+    @staticmethod
+    def _refusal_qa_row(msg, role):
+        """The QA-relevant open-row fields at selection: role and phase.
+
+        Equivalent for classification to ``open_flds`` in ``_spawn_impl``, whose
+        spec binding carries only spec fields and whose overrides add only role
+        among the classified keys (pinned by a test).
+        """
+        return {**tmux_transport.open_fields(msg), "role": role}
+
+    async def _signal_spawn_refusal(self, exc, msg, host, name, role):
+        """At the selection owner, mark only when no replay, lane, QA, handoff
+        or pool decision is pending.
+
+        Lane admission can refuse only a ``provision_only`` request (_lane_admission).
+        """
+        runtime = getattr(self, "account_runtime", None)
+        if runtime is None:
+            return
+        from account_runtime import pool_override_requested
+        if (msg.get("_account_admitted_replay") or msg.get("provision_only") or msg.get("handoff")
+                or pool_override_requested(msg) or qa_dispatch.classified(msg, self._refusal_qa_row(msg, role))):
+            return
+        key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
+        if key and await self.store.spawn_record_for_key(host, key):
+            return  # A retained record is replay, never a fresh signal.
+        runtime.arm_ingress("spawn", f"{host}:{name}")
+        runtime.signal_refusal(exc, "spawn", f"{host}:{name}")
+
     async def _lane_admission(self, msg, binding, role):
         """The same guard covers new work, supporting work, resume and scheduled fire."""
         spec = effective_assignment(binding)
@@ -1934,6 +1963,9 @@ class SpawnCtl:
             context = actor_context.set((auth.get('stream_id'), auth.get('session_generation')))
         try:
             task = asyncio.create_task(self._spawn_effect_guarded(msg, local_host, admission=admission))
+            # Only this external request's own effect task may spend its decision.
+            from account_runtime import transfer_ingress
+            transfer_ingress("spawn", task)
         finally:
             if context is not None:
                 actor_context.reset(context)
@@ -3888,6 +3920,7 @@ class SpawnCtl:
                 account_binding = await account_runtime.choose_launch(host=host, provider=provider, model=model,
                     effort=effort, message=msg)
             except AccountError as exc:
+                await self._signal_spawn_refusal(exc, msg, host, name, resolved.get("role", msg.get("role")))
                 raise VerbError(str(exc), str(exc), **exc.context) from None
         if account_binding is not None and handoff and not self._prompt_requested(msg):
             raise VerbError("account_handoff_checkpoint_required", "Prepare the conversation checkpoint before the requested handoff")

@@ -6,9 +6,11 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 from account_store import AccountStore
 from account_revalidation import interrupt_pending
@@ -17,6 +19,69 @@ from sessions import VerbError
 from error_adapters import ErrorFact
 
 log=logging.getLogger("chat_streamd_v2.provider_accounts")
+AUTH_HEALTH_SELF_RECOVERY_COOLDOWN_SECONDS=120
+#: Server-minted, in-process only: one fresh verified tell/send/spawn request.
+RECOVERY_INGRESS=ContextVar("account_recovery_ingress",default=None)
+
+
+class _IngressDecision:
+    """Origin of one verified external request; spendable once by its own route."""
+    __slots__=("verb","owner","state","target","transferred")
+
+    def __init__(self,verb,owner):
+        self.verb,self.owner,self.state,self.target,self.transferred=verb,owner,"fresh",None,False
+
+
+def pool_override_requested(message):
+    return "pool_override_reason" in message or "pool_authority_ref" in message
+
+
+def _current_task():
+    try: return asyncio.current_task()
+    except RuntimeError: return None
+
+
+def _owned_ingress(verb):
+    decision=RECOVERY_INGRESS.get()
+    task=_current_task()
+    if (decision is None or task is None or decision.owner is not task
+            or decision.state!="fresh" or decision.verb!=verb): return None
+    return decision
+
+
+def mint_ingress(verb):
+    """Return a reset token, or None when there is no owning task."""
+    task=_current_task()
+    if task is None: return None
+    return RECOVERY_INGRESS.set(_IngressDecision(verb,task))
+
+
+def arm_ingress(verb,target):
+    """Bind the decision to the external route's resolved destination, once."""
+    decision=_owned_ingress(verb)
+    if decision is None: return
+    if decision.target is None: decision.target=str(target)
+    elif decision.target!=str(target): decision.state="retired"
+
+
+def take_ingress(verb,target):
+    decision=_owned_ingress(verb)
+    if decision is None or decision.target is None or decision.target!=str(target): return False
+    decision.state="used"
+    return True
+
+
+def retire_ingress():
+    decision=RECOVERY_INGRESS.get()
+    task=_current_task()
+    if decision is not None and task is not None and decision.owner is task: decision.state="retired"
+
+
+def transfer_ingress(verb,task):
+    """Hand the spawn decision to its own effect task, once."""
+    decision=_owned_ingress(verb)
+    if decision is None or decision.transferred or task is None: return
+    decision.owner,decision.transferred=task,True
 
 
 def load_policy(path=None):
@@ -62,12 +127,23 @@ class _PinInputBarrier:
 
 
 class AccountRuntime:
-    def __init__(self,store,sessions,*,policy=None,clock=time.time,executor=None):
+    def __init__(self,store,sessions,*,policy=None,clock=time.time,monotonic=time.monotonic,executor=None):
         self.store,self.sessions=store,sessions
-        self.policy,self.clock,self.executor={"enabled":False} if policy is None else policy,clock,executor
+        self.policy,self.clock,self.monotonic,self.executor={"enabled":False} if policy is None else policy,clock,monotonic,executor
         validate_policy_scope(self.policy)
         self.server=self.spawnctl=self.comms=None
         self._next_probe=0; self._collector_task=None; self._stopping=False
+        self._self_recovery_marks={}
+        self._self_recovery_last_dispatch={}
+        self._self_recovery_inflight=set()
+        # Last committed active enabled key per registered cell (None: none).
+        # One entry per cell, never per generation.
+        self._self_recovery_cells={}
+        # Store-thread handoff of committed registrations, keyed by cell, so it
+        # is bounded by the number of cells and the latest commit wins.
+        self._cell_commits={}
+        self._cell_commits_lock=threading.Lock()
+        self.AUTH_HEALTH_SELF_RECOVERY_COOLDOWN_SECONDS=AUTH_HEALTH_SELF_RECOVERY_COOLDOWN_SECONDS
         self._health_epoch=uuid.uuid4().hex; self._health_started=False
         self.pin_lock=asyncio.Lock()
         self.pin_inputs=_PinInputBarrier()
@@ -100,8 +176,47 @@ class AccountRuntime:
         server.handlers["account"]=self.operation
 
     async def run(self,function,*,settle_on_cancel=False):
+        function=self._tracking_registrations(function)
         work=lambda conn:function(AccountStore(conn,self.policy,initialize=False))
-        return await self.store.submit(work,settle_on_cancel=True) if settle_on_cancel else await self.store.submit(work)
+        try:
+            return await self.store.submit(work,settle_on_cancel=True) if settle_on_cancel else await self.store.submit(work)
+        finally:
+            self._apply_cell_commits()
+
+    def _tracking_registrations(self,function):
+        def tracked(ledger):
+            try:
+                return function(ledger)
+            finally:
+                if ledger.registered_cells and not ledger.conn.in_transaction:
+                    self._record_cell_commits(ledger)
+        return tracked
+
+    def _record_cell_commits(self,ledger):
+        """Store thread: hand over the committed state of each touched cell."""
+        try:
+            states={cell:ledger.committed_cell(cell) for cell in ledger.registered_cells}
+        except Exception:
+            return  # Never replace the caller's own result or exception.
+        with self._cell_commits_lock:
+            self._cell_commits.update(states)
+
+    def _apply_cell_commits(self):
+        """Loop: retire marks and spacing of keys a committed registration replaced."""
+        with self._cell_commits_lock:
+            commits,self._cell_commits=self._cell_commits,{}
+        for cell,active in commits.items():
+            self._self_recovery_cells[cell]=active
+            prefix=":".join(cell)+":"
+            for table in (self._self_recovery_marks,self._self_recovery_last_dispatch):
+                for key in [k for k in table if k[0].startswith(prefix) and k[0]!=active]:
+                    table.pop(key,None)
+
+    def _self_recovery_live(self,key):
+        """False once a committed registration retired this binding key."""
+        self._apply_cell_commits()
+        cell=tuple(key.split(":")[:3])
+        return cell not in self._self_recovery_cells or self._self_recovery_cells[cell]==key
 
     async def start(self):
         # This is the owned daemon-start boundary, not a Store connection open.
@@ -135,6 +250,10 @@ class AccountRuntime:
         if self._collector_task:
             self._collector_task.cancel()
             await asyncio.gather(self._collector_task,return_exceptions=True)
+        self._self_recovery_marks.clear()
+        self._self_recovery_cells.clear()
+        self._self_recovery_last_dispatch.clear()
+        self._self_recovery_inflight.clear()
 
     async def authorize_choice(self,message):
         if "account" in message:
@@ -206,6 +325,14 @@ class AccountRuntime:
     def manages(self,host,provider=None):
         return policy_manages(self.policy,host,provider)
 
+    def _mark_auth_self_recovery(self,binding,revision):
+        """Keep one payload-free mark for this exact binding generation."""
+        key=(binding.key,binding.generation)
+        if not self._self_recovery_live(binding.key): return
+        prior=self._self_recovery_marks.get(key)
+        if prior is None or revision>=prior:
+            self._self_recovery_marks[key]=revision
+
     async def enrolled(self,host,provider=None):
         return await self.run(lambda a:a.conn.execute(
             "SELECT 1 FROM v2_account_bindings WHERE host=?" + (" AND provider=?" if provider else "") + " LIMIT 1",
@@ -236,6 +363,7 @@ class AccountRuntime:
             return binding
         if message.get("resume_session_id"):
             raise AccountError("account_resume_cross_home_forbidden")
+        # A refusal keeps its private snapshot; only the spawn route publishes.
         binding=await self.run(lambda accounts:accounts.select(host=host,provider=provider,alias=message.get("account")))
         from provider_cli_pin import check
         await self.run(lambda a:check(a,binding))
@@ -272,7 +400,7 @@ class AccountRuntime:
         if message.get('_account_admitted_replay') is True: return
         if await self._advisor_restore_launch(message): return
         override=None
-        if "pool_override_reason" in message or "pool_authority_ref" in message:
+        if pool_override_requested(message):
             if any(not isinstance(message.get(k),str) or not message[k].strip()
                    for k in ("pool_override_reason","pool_authority_ref")):
                 raise AccountError("account_request_invalid")
@@ -401,7 +529,24 @@ class AccountRuntime:
         if not matched: await self._alert(account,"identity_unverified")
         return matched
 
-    async def before_input(self,row,*,verify=True):
+    # Core modules reach the ingress decision through the attached runtime.
+    mint_ingress=staticmethod(mint_ingress)
+    arm_ingress=staticmethod(arm_ingress)
+
+    @staticmethod
+    def reset_ingress(token):
+        RECOVERY_INGRESS.reset(token)
+
+    def signal_refusal(self,exc,verb,target,binding=None):
+        """Publish one mark if this exact refusal is the route's first eligible one."""
+        snapshot=getattr(exc,"_binding",None)
+        if (str(exc)!="account_unavailable" or getattr(exc,"_health",None)!="auth_unhealthy"
+                or not getattr(exc,"_active",False) or snapshot is None): return
+        if binding is not None and (binding.key,binding.generation)!=(snapshot.key,snapshot.generation): return
+        if take_ingress(verb,target):
+            self._mark_auth_self_recovery(snapshot,exc._health_revision)
+
+    async def before_input(self,row,*,verify=True,recovery_verb=None,message=None):
         await self.maintenance_input(row)
         # Rollback can disable new launches while existing bound agents drain.
         if not row.get("account_binding") and await self.enrolled(row.get("host"),row.get("provider")):
@@ -413,7 +558,13 @@ class AccountRuntime:
                 pass  # Corrupt history is never pre-enforcement.
             raise AccountError("provider_cli_pin_unavailable",reason="binding_unknown")
         if row.get("account_binding"):
-            await self.run(lambda accounts:accounts.ensure_available(self.key(row["account_binding"])))
+            try:
+                await self.run(lambda accounts:accounts.ensure_available(self.key(row["account_binding"])))
+            except AccountError as exc:
+                if recovery_verb is not None:
+                    self.signal_refusal(exc,recovery_verb,f"{row.get('host')}:{row.get('session_name')}",
+                        Binding.from_public(row["account_binding"]))
+                raise
             from provider_cli_pin import check
             binding=Binding.from_public(row["account_binding"])
             pin=await self.run(lambda a:check(a,binding))
@@ -450,16 +601,19 @@ class AccountRuntime:
                 raise AccountError("provider_cli_pin_mismatch",reason="resource_hash_mismatch")
 
     @asynccontextmanager
-    async def input_guard(self,row,*,message=None,phase="not_started",claim=False):
+    async def input_guard(self,row,*,message=None,phase="not_started",claim=False,recovery_verb=None):
+        recovery_verb=recovery_verb if phase=="not_started" else None
         # Remote preparation must never hold the fleet pin decision lock/barrier.
-        await self.before_input(row)
+        await self.before_input(row,recovery_verb=recovery_verb,message=message)
         async with self.maintenance_guard(row):
             async with self.pin_inputs.read():
                 async with self.pin_lock:
                     # Recheck after preparation and barrier admission; this path cannot invoke SSH.
-                    await self.before_input(row,verify=False)
+                    await self.before_input(row,verify=False,recovery_verb=recovery_verb,message=message)
                     if phase=="not_started":
                         await self.cap_input(row,message or {},claim=claim)
+                    # The first physical input ends this request's recovery eligibility.
+                    retire_ingress()
                 yield  # The caller scopes this to one physical action, never evidence waiting.
 
     async def cap_exemptions(self):
