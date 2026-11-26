@@ -301,6 +301,11 @@ def visibility_counts(members, sessions, questions, *, source_available, packets
             "complete": {"source": complete, "presence": sessions is not None, "questions": questions is not None}}
 
 
+# The show reply carries the newest lane events; item changes reach members through
+# the bounded trail, so the whole history never has to fit in one frame.
+SHOW_EVENT_BOUND = 100
+
+
 def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
                      members_after=None, goal_filter=None, sessions_by_stream=None, questions_by_spec=None) -> dict:
     """A live cursor page; aggregate/goals/revision inputs were computed uncapped."""
@@ -354,7 +359,8 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
             if not key.startswith("_") and key not in {"members", "members_json", "hue_open_order"}}
     lane["members"] = [member["spec_id"] for member in page]
     response = {"type": "work_lanes.show.ok", "lane": lane, "projection": projection,
-                "events": shown["events"], "updates": shown["updates"], "members": page,
+                "events": shown["events"][-SHOW_EVENT_BOUND:], "events_total": len(shown["events"]),
+                "updates": shown["updates"], "members": page,
                 "members_total": total, "members_next": cursor,
                 "explicit_member_positions": {m["spec_id"]: explicit_positions[m["spec_id"]] for m in page
                                               if m["spec_id"] in explicit_positions},
