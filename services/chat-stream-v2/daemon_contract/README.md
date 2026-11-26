@@ -38,7 +38,12 @@ connection sites are checked against the frozen and merge-base sources. The merg
 runner and predeploy workflow run this check alongside the existing contract
 and policy/observation/delivery checks.
 
-### Reviewed core correctness fixes
+Merge and hosted checks run the B04 and layer selectors with `--report-only`.
+Their output lists findings and a count for the independent reviewer, who
+accepts or rejects the reported lines by name. Existing admission data is
+retained for historical replay. Stop adding admission blocks.
+
+### Historical admissions for reviewed core correctness fixes
 
 An independently accepted core correctness fix may need an exact B04 admission
 for a short, keyed Store write revalidated in its transaction, an account

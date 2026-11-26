@@ -667,6 +667,7 @@ def validate_layer_scopes(base: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True, help="trusted merge-base commit SHA")
+    parser.add_argument("--report-only", action="store_true")
     args = parser.parse_args(argv)
     try:
         if len(args.base) != 40 or any(char not in "0123456789abcdef" for char in args.base):
@@ -674,8 +675,14 @@ def main(argv: list[str] | None = None) -> int:
         _git("cat-file", "-e", f"{args.base}^{{commit}}")
         errors = validate_layer_scopes(args.base)
     except (OSError, UnicodeError, SyntaxError, ValueError, RuntimeError) as exc:
-        print(f"[daemon-layer] FAIL: {type(exc).__name__}: {exc}", file=sys.stderr)
+        label = "report incomplete (finding count unavailable)" if args.report_only else "FAIL"
+        print(f"[daemon-layer] {label}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+    if args.report_only:
+        for error in errors:
+            print(f"[daemon-layer] REVIEW: {error}")
+        print(f"[daemon-layer] report-only findings={len(errors)}")
+        return 0
     if errors:
         for error in errors:
             print(f"[daemon-layer] FAIL: {error}", file=sys.stderr)
