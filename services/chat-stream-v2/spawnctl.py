@@ -5310,10 +5310,11 @@ class SpawnCtl:
             except Exception as exc:  # noqa: BLE001 - decided below, after the Store gate
                 transcript_error, transcript = exc, "error"
             if expiry_pass and crossed is not None:
-                # The crossed observation still counts: found wins, then an error.
+                # The crossed observation still counts: found wins, then the
+                # first captured error.
                 if transcript != "found" and crossed == "found":
                     transcript = "found"
-                elif transcript not in {"found", "error"} and crossed == "error":
+                elif transcript != "found" and crossed == "error":
                     transcript, transcript_error = "error", crossed_error
             expired_before_pane = time.monotonic() >= deadline
             pane = await self._adoption_pane_state(name, tmux)
