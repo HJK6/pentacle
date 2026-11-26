@@ -8,6 +8,7 @@ const { spawn, execFileSync } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 
 const DEFAULTS = Object.freeze({ fileTimeoutMs: 60000, runTimeoutMs: 900000, termGraceMs: 250, killGraceMs: 1000 });
+const SOURCE_IDENTITY_TIMEOUT_MS = 30_000;
 const TAIL_BYTES = 65536;
 const FORWARD_BYTES = 1048576;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -47,11 +48,16 @@ async function stopOwnedTmux(home, env) {
   }
 }
 
-function sourceIdentity(repoRoot, timeoutMs) {
+function sourceIdentity(repoRoot, remainingMs) {
   try {
-    timeoutMs = Math.max(1, Math.floor(timeoutMs));
-    const sha = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], {encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'ignore']}).trim();
-    const dirty = !!execFileSync('git', ['-C', repoRoot, 'status', '--porcelain', '--untracked-files=all'], {encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'ignore']}).trim();
+    const deadline = performance.now() + Math.min(SOURCE_IDENTITY_TIMEOUT_MS, remainingMs);
+    const readGit = args => {
+      const timeout = Math.floor(deadline - performance.now());
+      if (timeout <= 0) throw new Error('source identity deadline exceeded');
+      return execFileSync('git', ['-C', repoRoot, ...args], {encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore']}).trim();
+    };
+    const sha = readGit(['rev-parse', 'HEAD']);
+    const dirty = !!readGit(['status', '--porcelain', '--untracked-files=all']);
     return {sha, dirty};
   } catch { return null; }
 }
@@ -248,7 +254,7 @@ async function run(repoRoot, options, injected = {}) {
   const start = deps.now(), deadline = start + limits.runTimeoutMs;
   const entries = discover(repoRoot, options.patterns);
   if (!entries.length) throw new Error('no tests matched');
-  const summary = { version: 1, repo_root: path.resolve(repoRoot), source_before: deps.sourceIdentity(repoRoot, Math.min(1000, Math.max(1, deadline - deps.now()))), files: [], discovered: entries, file_timeout_ms: limits.fileTimeoutMs, run_timeout_ms: limits.runTimeoutMs, cleanup_allowance_ms: limits.termGraceMs + limits.killGraceMs, duration_ms: 0, exit_code: 1, runner_errors: [], directory_cleanup_errors: [] };
+  const summary = { version: 1, repo_root: path.resolve(repoRoot), source_before: deps.sourceIdentity(repoRoot, deadline - deps.now()), files: [], discovered: entries, file_timeout_ms: limits.fileTimeoutMs, run_timeout_ms: limits.runTimeoutMs, cleanup_allowance_ms: limits.termGraceMs + limits.killGraceMs, duration_ms: 0, exit_code: 1, runner_errors: [], directory_cleanup_errors: [] };
   const cacheRoot = path.join(repoRoot, 'node_modules', '.cache');
   const priorFiles = new Set();
   let outDir, testHome, env;
@@ -338,7 +344,7 @@ async function run(repoRoot, options, injected = {}) {
   }
   summary.duration_ms = Math.round(deps.now() - start);
   summary.generated_at = new Date().toISOString();
-  summary.source_after = deps.sourceIdentity(repoRoot, Math.min(1000, Math.max(1, deadline - deps.now())));
+  summary.source_after = deps.sourceIdentity(repoRoot, deadline - deps.now());
   summary.exit_code = summary.files.every(row => row.status === 'pass') && !summary.runner_errors.length && !summary.directory_cleanup_errors.length ? 0 : 1;
   deps.stderr.write('\nFILE\tSTATUS\tDURATION_MS\tCLEANUP\n');
   for (const row of summary.files) deps.stderr.write(`${row.file}\t${row.status}\t${row.duration_ms}\t${row.cleanup.status}${row.reason ? ` (${row.reason})` : ''}\n`);
