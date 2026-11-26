@@ -21,15 +21,21 @@ PLIST=/Library/LaunchDaemons/com.pentacle.loopback-alias.plist
 
 sudo install -d -o root -g wheel -m 755 "$INSTALL_DIR"
 sudo install -o root -g wheel -m 755 ensure_loopback_alias.sh "$INSTALL_DIR/ensure_loopback_alias.sh"
-sed "s#__INSTALL_DIR__#${INSTALL_DIR}#g" com.pentacle.loopback-alias.plist \
-  | sudo install -o root -g wheel -m 644 /dev/stdin "$PLIST"
+RENDERED=$(mktemp)
+sed "s#__INSTALL_DIR__#${INSTALL_DIR}#g" com.pentacle.loopback-alias.plist > "$RENDERED"
+sudo install -o root -g wheel -m 644 "$RENDERED" "$PLIST"
+rm -f "$RENDERED"
 
 sudo launchctl bootout system/com.pentacle.loopback-alias 2>/dev/null || true
 sudo launchctl bootstrap system "$PLIST"
 sudo launchctl kickstart -k system/com.pentacle.loopback-alias
 
-ifconfig lo0 | grep 'inet 127.0.0.2'
+for _ in 1 2 3 4 5; do ifconfig lo0 | grep 'inet 127.0.0.2' && break; sleep 1; done
 ```
+
+macOS `install` refuses a pipe as its source (`/dev/stdin: Inappropriate file
+type or format`), so the plist is rendered to a temporary file first. The job
+runs asynchronously after `kickstart`, so the check retries for a few seconds.
 
 The `bootout` is scoped to this one label and is safe when the service is not
 already loaded. Do not use `launchctl load` for the root LaunchDaemon on recent
