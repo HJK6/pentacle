@@ -100,18 +100,23 @@ def execute(args):
                 if key in result: raise ValueError()
                 result[key]=value
             return result
+        input_option = None
         if getattr(args,"pin_file",None):
             if args.action not in {"pin-set","pin-status"}: raise ValueError()
+            input_option = "--pin-file"
             payload["pin"]=json.loads(Path(args.pin_file).read_text(),object_pairs_hook=unique)
         if getattr(args,"target_pin_file",None):
             if args.action!="repin" or args.expected_pin_revision!=0:raise ValueError()
+            input_option = "--target-pin-file"
             payload["target_pin"]=json.loads(Path(args.target_pin_file).read_text(),object_pairs_hook=unique)
         if getattr(args,"initial_parked_cells_file",None):
             if args.action not in {"pin-set","pin-status"}:raise ValueError()
+            input_option = "--initial-parked-cells-file"
             payload["initial_parked_cells"]=json.loads(Path(args.initial_parked_cells_file).read_text(),object_pairs_hook=unique)
             if not isinstance(payload["initial_parked_cells"],list):raise ValueError()
         if getattr(args,"local_admin_token_file",None):
             if args.action not in {"pin-set","pin-status"}: raise ValueError()
+            input_option = "--local-admin-token-file"
             import os,stat
             path=Path(args.local_admin_token_file)
             info=path.lstat()
@@ -119,7 +124,9 @@ def execute(args):
                     or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1): raise ValueError()
             payload["local_admin_token"]=path.read_text().strip()
     except (ValueError,OSError):
-        _print_response({"type":"account.error","error_code":"account_request_invalid"}); return 2
+        response={"type":"account.error","error_code":"account_request_invalid"}
+        if input_option is not None: response["option"]=input_option
+        _print_response(response); return 2
     if (args.action == "default") != (args.default_action == "set"):
         _print_response({"type": "account.error", "error_code": "account_action_invalid"}); return 2
     if args.action not in {"status","pin-status","pin-set","pool-control-set","seat-override-set"}:

@@ -554,6 +554,7 @@ def test_relogin_health_transition_and_receipt_roll_back_together_on_interruptio
         runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
         account=binding()
         async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe-bound'
             return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
         executor=RealAccountExecutor(runtime,None,execute=execute)
         try:

@@ -63,14 +63,15 @@ def test_front_desk_defaults_and_concurrent_agents_bind_once(tmp_path):
         finally: store.stop()
     asyncio.run(run())
 
-def test_watcher_auth_failure_reports_only_cell_and_never_relogs():
+@pytest.mark.parametrize("kind", ["auth", "identity"])
+def test_watcher_auth_failure_reports_only_cell_and_never_relogs(kind):
     async def run():
         store,runtime=await setup(); calls=[]
         runtime.policy["watchers"]={"host-a:account-watcher":{"host":"host-a"}}
         class Executor:
             async def recover(self,*args,**kwargs): calls.append("relogin"); raise AssertionError()
         runtime.executor=Executor()
-        message={"action":"observe-failure","host":"host-a","provider":"codex","account":"primary","kind":"auth",
+        message={"action":"observe-failure","host":"host-a","provider":"codex","account":"primary","kind":kind,
             "login_generation":"login-one","_auth_context":{"service_authenticated":True,"service_actor":"host-a:account-watcher"}}
         try:
             assert (await runtime.operation(message))["accepted"]
