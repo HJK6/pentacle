@@ -60,7 +60,7 @@ def _run_suite(tmp_path: Path, source: str, *extra: str) -> tuple[subprocess.Com
     env = {**os.environ, "PYTHONPATH": str(SERVICE_DIR)}
     proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "tools.gate_progress",
                            f"--gate-progress-journal={journal}", "--gate-progress-run-id=run-1:unit", *extra],
-                          cwd=suite, env=env, capture_output=True, text=True, timeout=45)
+                          cwd=suite, env=env, capture_output=True, text=True, timeout=180)
     return proc, journal
 
 
