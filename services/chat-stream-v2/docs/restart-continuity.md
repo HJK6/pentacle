@@ -67,12 +67,15 @@ deleted, even when its request was cancelled (the cancellation record and the
 `cancelled` status stay). A committed intent keeps its payload and only its
 owner is cleared; under a cancellation only when the spawn had already decided
 to hand it off, and cancellation cleanup then decides the pane. Any other row
-(missing, foreign or pane-bound) is left alone. If that settle itself fails or
+(missing, foreign, or a bound empty claim) is left alone. If that settle itself fails or
 is cancelled, nothing falls back to a delete, a pane kill or an invented
 outcome; the next daemon instance reconciles the row it finds. A drain that
 lands once a spawn has started writing its confirmed failure takes the ordinary
-failure teardown instead, so a committed failure frees the name for one fresh
-retry at once. This settle is the only part of teardown matched on the creation
+failure teardown instead and releases its reservation. In the clean pre-pane
+case a committed failure then frees the name for one fresh retry at once. If
+the spawn had already admitted its session row and the drain interrupts the
+close that follows the failure, that row stays open and refuses a retry until
+it is closed, as before this change. This settle is the only part of teardown matched on the creation
 nonce and owner; the other spawn writes are still addressed by name or request. A nonzero `unfinished` count or an abandoned
 drain step leaves that handoff unproven; check `spawn-status` before relying on
 restart recovery. One step is never cut: a spawn that has persisted its pre-paste
