@@ -295,20 +295,38 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
 B04_TEST_FILE = "tests/test_daemon_b04_gate.py"
 
 
+def _b04_input(path: str) -> bool:
+    if path.startswith("services/_shared/") and path.endswith(".py"):
+        return True
+    if path in {".github/workflows/predeploy-tests.yml", "scripts/gate-env.json",
+                "scripts/quarantine_list.py", "scripts/quarantine_plugin.py", "scripts/quarantine-v2.json"}:
+        return True
+    service = "services/chat-stream-v2/"
+    if not path.startswith(service):
+        return False
+    name = path[len(service):]
+    if name.startswith(("daemon_contract/", "tests/fixtures/b04_reads/")):
+        return True
+    if name in {B04_TEST_FILE, "pytest.ini", "tests/conftest.py", "tools/daemon_b04_gate.py",
+                "tools/daemon_b04_anchors.py", "tools/daemon_import_census.py", "tools/run_gate.py",
+                "tools/gate_owner_manifest.py", "tools/gate_progress.py", "tools/gate_temp.py",
+                "tools/source_integrity.py", "tools/gate_shard.py"}:
+        return True
+    return name.endswith(".py") and not {"deploy", "tools", "tests"}.intersection(name.split("/")[:-1])
+
+
 def _run_b04_self_tests(base: str | None, head: str) -> bool:
     """Keep full coverage for daily self-comparisons and unavailable diffs."""
     reason = "full unit selection"
     if base == head:
         reason = "base and head are identical"
     elif base and re.fullmatch(r"[0-9a-f]{40}", base):
-        paths = ["daemon_contract", B04_TEST_FILE, "tools/daemon_b04_gate.py",
-                 "tools/daemon_b04_anchors.py", "tools/daemon_import_census.py"]
-        diff = subprocess.run(["git", "diff", "--quiet", "--no-ext-diff", "--no-renames",
-                               base, head, "--", *paths], cwd=SERVICE_DIR, timeout=30)
-        if diff.returncode == 0:
+        diff = subprocess.run(["git", "diff", "--name-only", "-z", "--no-relative", "--no-ext-diff",
+                               "--no-renames", base, head], cwd=SERVICE_DIR, stdout=subprocess.PIPE, timeout=30)
+        if diff.returncode == 0 and not any(_b04_input(path) for path in os.fsdecode(diff.stdout).split("\0")):
             print(f"[v2-gate] skipping {B04_TEST_FILE}: B04 subject unchanged", flush=True)
             return False
-        reason = "B04 subject changed" if diff.returncode == 1 else "base diff unavailable"
+        reason = "B04 subject changed" if diff.returncode == 0 else "base diff unavailable"
     print(f"[v2-gate] running {B04_TEST_FILE}: {reason}", flush=True)
     return True
 

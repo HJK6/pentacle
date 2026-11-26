@@ -7,6 +7,8 @@ changed exceptions. Controls: unchanged baseline and named clean mutations.
 Runner: Python 3.13 and pytest. Dependencies: Git and isolated temporary clones;
 no network, production database, daemon or web host.
 """
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,6 +19,34 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 SERVICE = Path('services/chat-stream-v2')
 BASE = '36255a907c7b330bc7e18e156df62d3ff4d20733'
+
+
+@pytest.fixture(scope="session")
+def b04_excluded_inputs(tmp_path_factory):
+    from tools.run_gate import _b04_input
+
+    names = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"])
+    excluded = [path for path in os.fsdecode(names).split("\0") if path and not _b04_input(path)]
+    target = tmp_path_factory.mktemp("b04-inputs") / "excluded.json"
+    target.write_text(json.dumps(excluded), encoding="utf-8")
+    return target
+
+
+@pytest.fixture(autouse=True)
+def b04_check_reads(b04_excluded_inputs, tmp_path, monkeypatch):
+    from tests.fixtures.b04_reads import sitecustomize as guard
+
+    report = tmp_path / "off-list-reads"
+    config = ([str(ROOT), str((tmp_path / "repo").resolve())], str(b04_excluded_inputs), str(report))
+    monkeypatch.setenv("PENTACLE_B04_READ_GUARD", json.dumps(config))
+    monkeypatch.setenv("PYTHONPATH", str(Path(guard.__file__).parent), prepend=os.pathsep)
+    guard.enable(config)
+    try:
+        yield
+    finally:
+        guard.disable()
+    if report.exists():
+        pytest.fail("B04 self-test read outside routing inputs: " + ", ".join(sorted(set(report.read_text().splitlines()))))
 
 
 @pytest.fixture
