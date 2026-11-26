@@ -151,6 +151,43 @@ def test_a_malformed_record_json_on_write_and_on_read_with_and_without_the_index
     assert _malformed(True, existing=False) == {
         "build": "ok", "write": bad, "membership read": "ok", "unblocks read": "ok",
         "indexes": ["v2_work_item_observations_epic", "v2_work_item_observations_status"]}
-    # A store already holding a malformed row cannot build the indexes.
+    # A store already holding a malformed row skips the indexes and reads exactly as today.
     assert _malformed(True, existing=True) == {
-        "write": "ok", "build": bad, "membership read": bad, "unblocks read": bad, "indexes": []}
+        "write": "ok", "build": "ok", "membership read": bad, "unblocks read": bad, "indexes": []}
+
+
+def test_a_store_holding_a_malformed_record_starts_without_the_indexes(tmp_path, caplog):
+    import logging
+
+    def restart(path, row):
+        async def go():
+            store = Store(str(path)); store.start()
+            try:
+                if row is not None:
+                    def write(conn):
+                        for name in ("v2_work_item_observations_epic", "v2_work_item_observations_status"):
+                            conn.execute(f"DROP INDEX {name}")
+                        conn.execute("INSERT INTO v2_work_item_observations VALUES ('spec_x__row',?)", (row,))
+                        conn.commit()
+                    await store.submit(write)
+            finally:
+                store.stop()
+            store = Store(str(path)); store.start()
+            try:
+                return await store.submit(lambda conn: sorted(
+                    r[1] for r in conn.execute("PRAGMA index_list(v2_work_item_observations)")
+                    if not r[1].startswith("sqlite_autoindex")))
+            finally:
+                store.stop()
+        return asyncio.run(go())
+
+    with caplog.at_level(logging.WARNING, logger="store_work_index"):
+        assert restart(tmp_path / "malformed.db", MALFORMED) == []
+    assert "work index: v2_work_item_observations_epic not built: malformed JSON" in caplog.text
+    assert "work index: v2_work_item_observations_status not built: malformed JSON" in caplog.text
+    caplog.clear()
+    clean = json.dumps({"member": {"status": "active"}, "last_good": {"_epic": "epic_a"}})
+    with caplog.at_level(logging.WARNING, logger="store_work_index"):
+        assert restart(tmp_path / "clean.db", clean) == ["v2_work_item_observations_epic",
+                                                          "v2_work_item_observations_status"]
+    assert "not built" not in caplog.text

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 import sys
 from contextlib import closing
@@ -27,14 +28,19 @@ DDL = (
     "PRIMARY KEY(spec_id,gate))",
     "CREATE TABLE IF NOT EXISTS v2_work_item_observations (spec_id TEXT PRIMARY KEY, record_json TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_work_index_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), state_json TEXT NOT NULL)",
-    # Lane reads filter observations on these two JSON paths; the expressions
-    # match their statements exactly, so neither decodes every record_json.
-    "CREATE INDEX IF NOT EXISTS v2_work_item_observations_epic ON v2_work_item_observations("
-    "json_extract(record_json,'$.last_good._epic'), spec_id) WHERE json_type(record_json,'$.last_good._epic')='text'",
-    "CREATE INDEX IF NOT EXISTS v2_work_item_observations_status ON v2_work_item_observations("
-    "json_extract(record_json,'$.member.status'))",
+)
+# Lane reads filter observations on these two JSON paths; the expressions
+# match their statements exactly, so neither decodes every record_json.
+OBSERVATION_INDEX_DDL = (
+    ("v2_work_item_observations_epic",
+     "CREATE INDEX IF NOT EXISTS v2_work_item_observations_epic ON v2_work_item_observations("
+     "json_extract(record_json,'$.last_good._epic'), spec_id) WHERE json_type(record_json,'$.last_good._epic')='text'"),
+    ("v2_work_item_observations_status",
+     "CREATE INDEX IF NOT EXISTS v2_work_item_observations_status ON v2_work_item_observations("
+     "json_extract(record_json,'$.member.status'))"),
 )
 INDEX_FIELDS = ("available", "root_configured", "snapshot_at", "last_sweep_at", "error")
+log = logging.getLogger(__name__)
 EMPTY_STATE = {"available": False, "root_configured": False, "snapshot_at": None,
                "last_sweep_at": None, "error": "work_index_unavailable"}
 
@@ -42,6 +48,12 @@ EMPTY_STATE = {"available": False, "root_configured": False, "snapshot_at": None
 def ensure_work_index_schema(conn) -> None:
     for statement in DDL:
         conn.execute(statement)
+    for name, statement in OBSERVATION_INDEX_DDL:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            # A malformed stored record cannot be indexed; reads then scan as before.
+            log.warning("work index: %s not built: %s", name, exc)
 
 
 def member_ids(lane: dict) -> list[str]:
