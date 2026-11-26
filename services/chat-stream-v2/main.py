@@ -84,7 +84,6 @@ from voice_answers import dispatch_block as voice_answers_dispatch_block
 from send_metadata import voice_context_from_route, voice_context_dispatch_block
 from window_schedule import WindowSchedule
 import restart_notice
-import quarantine_scheduler
 
 log = logging.getLogger("chat_streamd_v2")
 
@@ -1193,11 +1192,6 @@ async def run(args: argparse.Namespace) -> int:
     # limits.update on change (no probing, no on-loop fsync — see usage_publisher).
     if not args.disable_usage_state_publisher:
         tasks.append(asyncio.create_task(limits_publisher.run_forever(), name="usage-state-publisher"))
-
-    quarantine_config = os.environ.get("PENTACLE_QUARANTINE_CONFIG", "").strip()
-    if quarantine_config:
-        tasks.append(asyncio.create_task(quarantine_scheduler.run_forever(quarantine_config),
-                                         name="flaky-test-quarantine"))
 
     await stop
     log.info("shutdown requested")
