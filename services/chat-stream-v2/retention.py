@@ -919,6 +919,42 @@ def ensure_archive(archive_path: Path, schema: Schema, *, require_existing: bool
     ensure_archive_table(archive_path, schema.create_sql, "sessions", require_existing=require_existing)
 
 
+ARCHIVE_IDENTITY_INDEX = "idx_archive_session_event_tail_identity"
+
+
+def _build_identity_index(conn: sqlite3.Connection, archive_path: Path, binding: tuple, table: str) -> None:
+    """Try the attached archive's optional identity index in its own transaction.
+
+    The binding recheck the copy and delete rely on runs first, inside the same
+    transaction: a refused archive raises as before and is never written. The
+    index (non-unique: archives may already hold one identity under two event
+    ids) only lets `conflicts` search all three keys, so any other failure rolls
+    back this transaction alone, warns with its cause and leaves today's probe;
+    the next pass tries again.
+    """
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.Error as exc:
+        log.warning("retention: archive %s identity index not built (%s); "
+                    "using the unindexed probe this pass", archive_path, exc)
+        return
+    try:
+        _check_binding(conn, archive_path, binding)
+    except BaseException:
+        conn.rollback()
+        raise
+    try:
+        conn.execute(f'CREATE INDEX IF NOT EXISTS arch.{ARCHIVE_IDENTITY_INDEX} '
+                     f'ON "{table}"(stream_id, session_created_at, identity)')
+        conn.commit()
+    except sqlite3.Error as exc:
+        conn.rollback()  # an error here propagates: no clean connection
+        if conn.in_transaction:
+            raise
+        log.warning("retention: archive %s identity index not built (%s); "
+                    "using the unindexed probe this pass", archive_path, exc)
+
+
 def _attach_archive(conn: sqlite3.Connection, archive_path: Path, *, require_existing: bool) -> tuple:
     """ATTACH the archive as `arch` and return the binding to re-check before deletion."""
     # ATTACH is illegal inside a transaction, and the daemon's store connection
@@ -1150,6 +1186,7 @@ def archive_events(
     *, require_existing: bool = False,
     statuses: Sequence[str] = TERMINAL_STATUSES,
     retained: set | None = None,
+    identity_index: bool = False,
 ) -> tuple[int, int]:
     """Move archivable event rows out. Requires temp.hot_streams loaded.
 
@@ -1161,6 +1198,9 @@ def archive_events(
     a different archived event (same event id with other bytes, or another
     event id with its event key / non-null identity within its stream and
     birth) stays hot, is added to `retained` and is logged once.
+
+    `identity_index` first tries the archive's optional identity index on the
+    attached, validated archive (`_build_identity_index`).
 
     `max_rows` is a budget shared across BOTH passes, so a capped call spends it
     on terminal rows first and only then on trimming open sessions' tails.
@@ -1212,8 +1252,10 @@ def archive_events(
     def conflicts(rows):
         """Current hot events whose event key or identity another archived event holds.
 
-        The archive has no identity index, so it is probed once per stream and
-        birth with the batch's current values rather than once per row.
+        Probed once per stream and birth with the batch's current values. The
+        event key uses the table's unique index; identity uses
+        `ARCHIVE_IDENTITY_INDEX` when this pass could build it, and otherwise
+        reads the stream and birth's archived rows.
         """
         ids = [row[key] for row in rows]
         clash = set()
@@ -1279,6 +1321,8 @@ def archive_events(
 
     try:
         binding = _attach_archive(conn, archive_path, require_existing=require_existing)
+        if identity_index and {"stream_id", "session_created_at", "identity"} <= set(ev.columns):
+            _build_identity_index(conn, archive_path, binding, ev.table)
         terminal_moved = move(
             '"stream_id" NOT IN (SELECT stream_id FROM temp.hot_streams)', []
         )
@@ -1556,6 +1600,7 @@ class RetentionJob:
 
         if wants_events and budget > 0:
             retained: set = set()
+            build_index = [True]
 
             def _events(conn: sqlite3.Connection, limit: int) -> tuple[int, int]:
                 # Rebuild the hot set each chunk: rows the sessions pass just
@@ -1563,11 +1608,15 @@ class RetentionJob:
                 # archive with them.
                 schema = Schema(conn)
                 _load_hot_table(conn, hot_stream_ids(conn, schema, cfg.statuses))
+                # The identity index is tried once per pass, on the first
+                # chunk: never at Store startup or per batch.
+                once, build_index[0] = build_index[0], False
                 return archive_events(
                     conn, EventSchema(conn), archive_path, cfg.tail_keep,
                     cfg.batch_size, max_rows=limit,
                     protected_stream_ids=composite_stream_ids(conn),
                     require_existing=True, statuses=cfg.statuses, retained=retained,
+                    identity_index=once,
                 )
 
             ev_moved = await self._drain_pairs(budget, _events)

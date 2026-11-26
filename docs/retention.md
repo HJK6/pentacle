@@ -159,6 +159,32 @@ Selection advances past retained rows. A reused session name keeps today's behav
 terminal row replaces the archived incarnation, through the same order. The
 archive still holds one row per `(host, session_name)`.
 
+The collision check looks up each batch's event keys and non-null identities in
+the archive, once per stream and birth. Event keys use the table's unique index.
+Identities use `idx_archive_session_event_tail_identity` on
+`(stream_id, session_created_at, identity)`. Each eligible pass tries
+`CREATE INDEX IF NOT EXISTS` for it once, on the first event chunk: after the
+archive is prepared and attached, in its own `BEGIN IMMEDIATE` transaction on the
+Store connection, right after the same binding check the delete uses (configured
+path, device, inode and pair), and before the first copy transaction. It never
+runs at Store startup, during receipt work or per batch, and a failed attempt
+still counts as the pass's attempt. A binding refusal rolls back and fails the
+pass as before, before any schema write: a stale binding cannot receive the index
+write. A rebind after the index commits can leave a valid index on the former
+archive; the copy and delete then behave as they do without the index. The
+index is not unique, because an archive written before the collision check may
+hold one identity under two event ids. A first build on a large archive holds
+both write locks, the hot database's and the archive's, for the whole build
+(about half a second to a second per million rows), so other hot writers and
+queued Store work wait; the busy timeout governs acquiring the locks, not the
+build. If the reservation, the build or its commit fails, that transaction alone
+rolls back, the pass logs one warning with the SQLite error, probes without the
+index (reading the stream and birth's archived rows) and tries again next pass.
+An archive outage that also stops the copy fails the pass as before. The index
+changes no table, marker or pair id, and older code reads and writes an indexed
+archive the same way. To remove it, run
+`DROP INDEX IF EXISTS idx_archive_session_event_tail_identity` on the archive.
+
 Late receipt reconciliation treats one empty-identity event that is found in both
 files with the same id and bytes as a single match.
 
