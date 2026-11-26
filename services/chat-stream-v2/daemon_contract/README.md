@@ -37,3 +37,43 @@ references. `main.py` is the composition exemption for core imports. SQLite
 connection sites are checked against the frozen and merge-base sources. The merge
 runner and predeploy workflow run this check alongside the existing contract
 and policy/observation/delivery checks.
+
+### Reviewed core correctness fixes
+
+An independently accepted core correctness fix may need an exact B04 admission
+for a short, keyed Store write revalidated in its transaction, an account
+runtime operation, a protected callback or a deadline-bounded loop. A writer
+may neither scan nor await. Feature work and new scheduling sites are ineligible.
+
+For a work loop, the item's final reviewer must confirm its explicit deadline
+or budget and that it does no steady-state work. A steady-state loop may only
+report state it already owns under a recorded driver ruling for the accepted
+spec. Review the code reached by the admitted call at the ruled commit,
+including changes to arguments of an existing call. The observation adds no
+loop, scheduling primitive, cadence change, sleep, retry or wait for work or
+external state. It may copy a fixed number of bounded fields under an identified
+existing progress lock. Only bounded memory bookkeeping occurs under that lock.
+Formatting, callbacks and logging occur outside it.
+
+The observation's in-memory work is bounded independently of event throughput,
+queue length and payload size. Its only output may be a bounded diagnostic
+record through the existing log sink. The reviewer names the trigger,
+deduplication key and aggregate emission bound for the loop. Additional
+Store submissions, awaits, subprocesses, network or file operations, sinks,
+retries, backlogs, feature work and policy work are ineligible.
+
+Run the B04 checker and its admission generator with `python3.13`. The stored
+signatures use that interpreter's AST representation, as in CI.
+Use `python3.13 tools/emit_b04_admission.py --help` for the arguments to generate
+a proposed block from the base and candidate commits. Each item in `b04_f1_admissions.json` carries its
+spec ID, independent spec acceptance report ID, one-line reason and scopes.
+A scope lists the repo-relative path, qualified symbol and exact scanner nodes
+(kind, SHA-256 of the UTF-8 AST fingerprint, positive count above frozen).
+Remove obsolete entries with their sites.
+
+Each block's `sha256` covers its other fields encoded as UTF-8 JSON with sorted
+object keys, compact separators, unescaped Unicode and no trailing newline.
+The item's independent final reviewer must explicitly rule that block digest.
+Record its digest and final report ID in the PR body and merge approval. When
+stacking, verify the manifest is exactly the union of the ruled blocks and
+recompute the whole-file byte digest in `ADMISSIONS_SHA256`.
