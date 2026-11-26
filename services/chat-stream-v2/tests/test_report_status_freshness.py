@@ -280,7 +280,7 @@ async def test_review_after_progress_in_same_second_keeps_its_own_obligation(fix
 async def test_audit_probe_unchanged_status_is_stored_and_other_refusals_hold(fixture):
     f = fixture
     await f.scan()
-    await f.seat("lead")
+    await f.seat("lead", role="lead")
     # Authenticated lead, correct assignment, same Status, new summary revision.
     f.clock += 2
     f.publish(summary(ORIGINAL, "Read the new note."))
