@@ -21,6 +21,8 @@ def initialize(conn):
       UNIQUE(parent_generation,child_generation,kind,ref_id));
     CREATE INDEX IF NOT EXISTS v2_child_exchange_page
       ON v2_child_exchange(parent,child,seq);
+    CREATE INDEX IF NOT EXISTS v2_child_exchange_ref
+      ON v2_child_exchange(kind,ref_id);
     CREATE TABLE IF NOT EXISTS v2_agent_report_state (
       stream_id TEXT PRIMARY KEY, generation TEXT NOT NULL,
       status TEXT NOT NULL, ts TEXT NOT NULL);

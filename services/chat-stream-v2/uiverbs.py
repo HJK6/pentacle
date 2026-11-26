@@ -509,6 +509,9 @@ class UIVerbs:
             stream_id,
             **{key: value for key, value in updated.items() if key != "stream_id"},
         )
+        # Attendance grants decide lane ownership; reconcile after the durable write.
+        if reconcile := getattr(self.sessions, "request_lane_reconcile", None):
+            reconcile()
         reply = {
             "type": "session.spec_update.ok",
             "request_id": rid,
