@@ -127,6 +127,12 @@ def _subject_gone(tier: dict) -> bool:
     ("tools/daemon_import_census.py", True),
     ("daemon_contract/active/boundary.txt", True),
     ("tests/test_daemon_b04_gate.py", True),
+    ("work_lanes_projection.py", True),
+    ("main.py", True),
+    ("new_package/runtime.py", True),
+    ("tools/run_gate.py", True),
+    ("deploy/unrelated.py", False),
+    ("tests/test_other.py", False),
     ("tools/other.py", False),
 ])
 def test_b04_self_test_routing(tmp_path, monkeypatch, path, selected):
@@ -148,6 +154,22 @@ def test_b04_self_test_routing(tmp_path, monkeypatch, path, selected):
     monkeypatch.setattr(run_gate, "SERVICE_DIR", service)
     assert run_gate._run_b04_self_tests(base, head) is selected
     assert run_gate._run_b04_self_tests(head, head)  # daily main
+
+
+def test_b04_reports_an_undeclared_read_in_a_child(tmp_path):
+    from tests.fixtures.b04_reads import sitecustomize as guard
+
+    root = tmp_path / "source copy"
+    root.mkdir()
+    name = "off-list.txt"
+    (root / name).write_text("fixture")
+    inventory = tmp_path / "excluded.json"
+    inventory.write_text(json.dumps([name]))
+    report = tmp_path / "reads"
+    env = dict(os.environ, PYTHONPATH=str(Path(guard.__file__).parent),
+               PENTACLE_B04_READ_GUARD=json.dumps([[str(root)], str(inventory), str(report)]))
+    subprocess.run([sys.executable, "-c", "open('off-list.txt').read()"], cwd=root, env=env, check=True)
+    assert report.read_text().splitlines() == [name]
 
 
 def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
