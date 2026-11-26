@@ -30,13 +30,13 @@ outcome stays `indeterminate`.
 
 Post-paste adoption polls until the 20 s adoption deadline (`ADOPTION_BOOT_DEADLINE_S`). When the receipt supports Store proof:
 
-- **Lookups in the window:** a Store lookup is offered only when at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) of the window remains. The transcript probe runs right up to the deadline.
-- **At the deadline:** if the spawn is still unresolved, adoption takes one transcript observation with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance and checks the pane. Then it takes one decisive Store sample with its own 0.25 s grant.
-- **Any failed outcome:** `transcript_absent`, `pane_died_during_boot` and `agent_never_started`, in the window or at the deadline, each need a `pending` answer from a Store sample taken after that pass's last transcript and pane observation. That sample has its own 0.25 s grant. A proven answer means delivered. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained.
-- **A found transcript:** is enough on its own to mean delivered; no Store sample is needed.
-- **Cost:** a settlement can end up to 3.25 s after the deadline. A failure inside the window adds at most one 0.25 s sample. Startup settles intents one at a time, so N unresolved intents can add up to N × 3.25 s.
+- **Lookups in the window:** a Store lookup is offered only when at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) of the window remains. It can only prove delivery early. The transcript probe runs right up to the deadline.
+- **At the deadline:** if the spawn is still unresolved, adoption takes one transcript observation. That observation always runs, with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance measured from when it starts, so a late wake cannot shorten it. Adoption then checks the pane.
+- **Every result:** each pass that ends the settlement takes one Store sample after its last transcript and pane observation. The sample has its own 0.25 s grant. A proven answer means delivered, even when the transcript was also found. Otherwise a found transcript means delivered. A failure (`transcript_absent`, `pane_died_during_boot`, `agent_never_started`) stands only when the sample answered `pending`. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained. If the transcript probe raises, a proven sample still means delivered; otherwise the reconcile pass defers.
+- **Pane liveness:** read as alive, gone or unknown. Only gone is a dead pane. An unreadable pane (an SSH or tmux failure) never produces a failure; at the deadline it defers.
+- **Added wait:** at most 3.25 s of new I/O per settlement at the deadline (the 3 s observation and the 0.25 s sample), or one 0.25 s sample when a pass ends the settlement inside the window. This is not an end-to-end deadline: the liveness read (10 s transport timeout), scheduling delay and cancellation cleanup fall outside it. Startup settles intents one at a time, so the added wait accrues for each unresolved intent with Store proof.
 
-Receipts without Store proof use the transcript alone, as before.
+Receipts without Store proof use the transcript alone, as before, and read pane liveness the same three-state way.
 
 The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 

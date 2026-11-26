@@ -5033,17 +5033,26 @@ class SpawnCtl:
 
     async def _bounded_adoption_transcript_status(
         self, name: str, needle: str, *, host: str | None, tmux: tmux_transport.Tmux,
-        deadline: float,
+        deadline: float | None = None, allowance_s: float | None = None,
     ) -> str:
         """Run the advisory transcript probe inside the adoption deadline.
+
+        With ``allowance_s`` the probe gets that full allowance measured from
+        this invocation and its source is always invoked. Otherwise it runs to
+        the absolute ``deadline``; a deadline already spent returns
+        ``unobserved`` without invoking the source.
 
         The fallback invocation preserves injected transcript doubles that
         predate the absolute-deadline keyword.  The outer wait still bounds
         those doubles to the same deadline.
         """
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return "no_transcript"
+        if allowance_s is not None:
+            remaining = float(allowance_s)
+            deadline = time.monotonic() + remaining
+        else:
+            remaining = float(deadline) - time.monotonic()
+            if remaining <= 0:
+                return "unobserved"
         try:
             try:
                 probe = self._transcript_status(
@@ -5058,40 +5067,50 @@ class SpawnCtl:
         except asyncio.TimeoutError:
             return "no_transcript"
 
-
     _ADOPTION_DELIVERED_EVENT = (
         "delivered",
         "event_store",
         "adopted_after_restart: exact post-watermark USER event present in generation-fenced Store",
     )
 
-    async def _gate_adoption_negative(
-        self, failure: tuple[str, str, str], *, stream_id: str, brief: str,
-        delivery_receipt: dict[str, Any] | None, sample: EventProof | None,
-    ) -> tuple[str, str, str]:
-        """The single gate for every negative adoption result.
+    @staticmethod
+    def _saved_prepaste_watermark(receipt: dict[str, Any] | None) -> bool:
+        """A direct/staged receipt whose pre-paste watermark was saved: the
+        paste may have happened, so missing proof is never a failure."""
+        return bool(
+            isinstance(receipt, dict)
+            and receipt.get("transport") in {"direct", "staged"}
+            and receipt.get("proof_watermark_state") == "reachable"
+        )
 
-        For a receipt that supports Store proof, ``failure`` stands only when a
-        Store sample taken after the iteration's last evidence observation
-        answers pending. That sample gets its own full minimum grant outside
-        the window (``sample`` reuses one already taken that way). A proven
-        answer is delivery; a timeout, withheld or unreachable answer defers.
-        Transcript-only receipts return ``failure`` unchanged."""
+    async def _gate_adoption_terminal(
+        self, decide: Callable[[EventProof], Awaitable[tuple[str, str, str] | None]], *,
+        stream_id: str, brief: str, delivery_receipt: dict[str, Any] | None,
+    ) -> tuple[tuple[str, str, str] | None, EventProof | None]:
+        """The single terminal gate of the post-paste loop for a receipt that
+        supports Store proof.
+
+        Takes one Store sample with its own full minimum grant, after the
+        pass's last transcript and pane observation. A proven answer is
+        delivery, ahead of a found transcript. Otherwise ``decide`` classifies
+        the pass from that sample (``None`` keeps polling); a failure stands
+        only on a pending answer, and any other answer defers. Returns the
+        result and the sample."""
+        sample = await self._adoption_event_proof(
+            stream_id, brief, delivery_receipt, timeout_s=ADOPTION_MIN_EVENT_LOOKUP_S,
+        )
         if sample is None:
-            sample = await self._adoption_event_proof(
-                stream_id, brief, delivery_receipt, timeout_s=ADOPTION_MIN_EVENT_LOOKUP_S,
-            )
-        if sample is None:
-            return failure
+            return None, None
         if sample.proven:
-            return self._ADOPTION_DELIVERED_EVENT
-        if sample.state != "pending":
-            return (
+            return self._ADOPTION_DELIVERED_EVENT, sample
+        result = await decide(sample)
+        if result is not None and result[0] == "failed" and sample.state != "pending":
+            result = (
                 "indeterminate",
                 "live_pane_unproven",
                 f"{sample.reason or 'event_store_unreachable'}: adoption reconciliation deferred",
             )
-        return failure
+        return result, sample
 
     async def _settle_adoption(
         self, host: str, name: str, brief: str, tmux: tmux_transport.Tmux,
@@ -5183,12 +5202,7 @@ class SpawnCtl:
                 "native_initial_prompt_delivery_failed: "
                 f"{observed.reason or observed.state}",
             )
-        watermark_unknown = bool(
-            isinstance(delivery_receipt, dict)
-            and delivery_receipt.get("transport") in {"direct", "staged"}
-            and delivery_receipt.get("proof_watermark_state") == "reachable"
-        )
-        if provider == "codex" and not watermark_unknown:
+        if provider == "codex" and not self._saved_prepaste_watermark(delivery_receipt):
             # Existing staged Codex intents predate the native route. They may
             # never be re-pasted or Enter-recovered after a restart.
             return (
@@ -5212,6 +5226,8 @@ class SpawnCtl:
         needle = tmux_transport.receipt_needle(brief)
         deadline = time.monotonic() + ADOPTION_BOOT_DEADLINE_S
         transcript_host = host if host != self.sessions.local_host else None
+        # Classify from the receipt that enters the loop, after any recovery paste.
+        watermark_unknown = self._saved_prepaste_watermark(delivery_receipt)
         proof_capable = self._adoption_receipt_watermark(stream_id, delivery_receipt) is not None
         event_proof: EventProof | None = None
         while True:
@@ -5220,98 +5236,122 @@ class SpawnCtl:
             # one real transcript observation with its own allowance outside
             # the window; the window itself is never shortened for it.
             at_expiry = proof_capable and remaining <= 0
-            if at_expiry:
-                status = await self._bounded_adoption_transcript_status(
-                    name, needle, host=transcript_host, tmux=tmux,
-                    deadline=time.monotonic() + ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S,
-                )
-            else:
+            if not at_expiry and remaining >= ADOPTION_MIN_EVENT_LOOKUP_S:
                 # Inside the window a lookup is offered only a usable budget.
-                # It is the fast positive path; negative exits re-sample below.
-                if remaining >= ADOPTION_MIN_EVENT_LOOKUP_S:
-                    event_proof = await self._adoption_event_proof(
-                        stream_id, brief, delivery_receipt,
-                        timeout_s=min(REMOTE_EVENT_LOOKUP_BOUND_S, remaining),
+                # It is the fast positive path; every terminal pass re-samples.
+                event_proof = await self._adoption_event_proof(
+                    stream_id, brief, delivery_receipt,
+                    timeout_s=min(REMOTE_EVENT_LOOKUP_BOUND_S, remaining),
+                )
+                if event_proof is not None and event_proof.proven:
+                    return self._ADOPTION_DELIVERED_EVENT
+            try:
+                if at_expiry:
+                    status = await self._bounded_adoption_transcript_status(
+                        name, needle, host=transcript_host, tmux=tmux,
+                        allowance_s=ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S,
                     )
-                if event_proof is not None and event_proof.proven:
-                    return self._ADOPTION_DELIVERED_EVENT
-                # The provider probe is advisory and runs through expiry.
-                status = await self._bounded_adoption_transcript_status(
-                    name, needle, host=transcript_host, tmux=tmux, deadline=deadline,
-                )
-            if status == "found":
-                return "delivered", "transcript", "adopted_after_restart: brief present in provider transcript"
-            pane_alive: bool | None = None
+                else:
+                    # The provider probe is advisory and runs through expiry.
+                    status = await self._bounded_adoption_transcript_status(
+                        name, needle, host=transcript_host, tmux=tmux, deadline=deadline,
+                    )
+            except Exception:
+                # Store proof still decides delivery; otherwise the caller defers.
+                if proof_capable:
+                    async def keep_exception(_sample: EventProof) -> None:
+                        return None
 
-            async def alive() -> bool:
-                nonlocal pane_alive
-                if pane_alive is None:
-                    pane_alive = await tmux.has_session(name)
-                return pane_alive
+                    proven, _sample = await self._gate_adoption_terminal(
+                        keep_exception, stream_id=stream_id, brief=brief,
+                        delivery_receipt=delivery_receipt,
+                    )
+                    if proven is not None:
+                        return proven
+                raise
+            if status == "unobserved":
+                if proof_capable:
+                    # A probe that never ran supports nothing; the next pass
+                    # is the expiry observation.
+                    continue
+                status = "no_transcript"
+            pane_state: str | None = None
 
-            post_sample: EventProof | None = None
-            if at_expiry:
-                # Observe the pane before the decisive sample so that sample
-                # is the last word for every exit below.
-                await alive()
-                post_sample = await self._adoption_event_proof(
-                    stream_id, brief, delivery_receipt, timeout_s=ADOPTION_MIN_EVENT_LOOKUP_S,
-                )
-                event_proof = post_sample
-                if event_proof is not None and event_proof.proven:
-                    return self._ADOPTION_DELIVERED_EVENT
+            async def pane() -> str:
+                nonlocal pane_state
+                if pane_state is None:
+                    pane_state = await self._session_state_for_wait(name, tmux)
+                return pane_state
 
-            async def negative(failure: tuple[str, str, str]) -> tuple[str, str, str]:
-                return await self._gate_adoption_negative(
-                    failure, stream_id=stream_id, brief=brief,
-                    delivery_receipt=delivery_receipt, sample=post_sample,
-                )
+            def expired() -> bool:
+                # Only the expiry pass ends a proof-capable window; transcript-
+                # only receipts read the clock after their liveness check.
+                return at_expiry if proof_capable else time.monotonic() >= deadline
 
-            # Only the decisive sample (or, for transcript-only receipts, the
-            # clock) ends the window; a proof-capable pass that merely ran
-            # past expiry loops once more to take that sample.
-            expired = at_expiry or (not proof_capable and time.monotonic() >= deadline)
-            if watermark_unknown and (status == "absent" or expired
-                                      or (event_proof is not None and event_proof.state != "pending")):
-                if not await alive():
-                    return await negative(
-                        ("failed", "pane_died_during_boot", "adopted pane died before delivery was proved"))
-                return (
-                    "indeterminate", "live_pane_unproven",
-                    "spawn_delivery_unknown: saved pre-paste watermark; no affirmative prompt delivery proof",
-                )
-            if event_proof is not None and event_proof.state != "pending":
-                if not await alive():
-                    return await negative(
-                        ("failed", "pane_died_during_boot", "adopted pane died before its transcript appeared"))
-                return (
-                    "indeterminate",
-                    "live_pane_unproven",
-                    f"{event_proof.reason or 'event_store_unreachable'}: adoption reconciliation deferred",
-                )
-            if status == "absent":
-                return await negative((
-                    "failed",
-                    "transcript_absent",
-                    "adopted_after_restart: transcript located without brief; daemon does not re-paste",
-                ))
-            # no_transcript: the provider has not created its session log yet.
-            # NEVER re-paste blind here — wait out the boot window instead.
-            if not await alive():
-                return await negative(
-                    ("failed", "pane_died_during_boot", "adopted pane died before its transcript appeared"))
-            if expired:
-                # The awaited liveness read can carry us past the deadline after
-                # the saved-watermark guard above evaluated false; that
-                # watermark still means the paste may have happened.
-                if watermark_unknown:
+            async def decide(proof: EventProof | None) -> tuple[str, str, str] | None:
+                """This pass's terminal result, or None to keep polling."""
+                if status == "found":
+                    return "delivered", "transcript", "adopted_after_restart: brief present in provider transcript"
+                if watermark_unknown and (status == "absent" or expired()
+                                          or (proof is not None and proof.state != "pending")):
+                    if await pane() == "gone":
+                        return "failed", "pane_died_during_boot", "adopted pane died before delivery was proved"
                     return (
                         "indeterminate", "live_pane_unproven",
                         "spawn_delivery_unknown: saved pre-paste watermark; no affirmative prompt delivery proof",
                     )
-                log.warning("adoption: %s never created a provider transcript; agent_never_started", name)
-                return await negative(
-                    ("failed", "agent_never_started", "boot deadline expired with no provider transcript ever created"))
+                if proof is not None and proof.state != "pending":
+                    if await pane() == "gone":
+                        return "failed", "pane_died_during_boot", "adopted pane died before its transcript appeared"
+                    return (
+                        "indeterminate",
+                        "live_pane_unproven",
+                        f"{proof.reason or 'event_store_unreachable'}: adoption reconciliation deferred",
+                    )
+                if status == "absent":
+                    return (
+                        "failed",
+                        "transcript_absent",
+                        "adopted_after_restart: transcript located without brief; daemon does not re-paste",
+                    )
+                # no_transcript: the provider has not created its session log yet.
+                # NEVER re-paste blind here — wait out the boot window instead.
+                state = await pane()
+                if state == "gone":
+                    return "failed", "pane_died_during_boot", "adopted pane died before its transcript appeared"
+                if expired():
+                    # The awaited liveness read can carry us past the deadline after
+                    # the saved-watermark guard above evaluated false; that
+                    # watermark still means the paste may have happened.
+                    if watermark_unknown:
+                        return (
+                            "indeterminate", "live_pane_unproven",
+                            "spawn_delivery_unknown: saved pre-paste watermark; no affirmative prompt delivery proof",
+                        )
+                    if state != "alive":
+                        # Unreadable liveness is neither alive nor dead.
+                        return (
+                            "indeterminate", "live_pane_unproven",
+                            "pane_liveness_unknown: adoption reconciliation deferred",
+                        )
+                    log.warning("adoption: %s never created a provider transcript; agent_never_started", name)
+                    return "failed", "agent_never_started", "boot deadline expired with no provider transcript ever created"
+                return None
+
+            if not proof_capable:
+                result = await decide(event_proof)
+                if result is not None:
+                    return result
+            elif await decide(event_proof) is not None:
+                # A terminal pass: observe the pane first, so the gate sample
+                # is the last word whatever it answers.
+                if status != "found":
+                    await pane()
+                result, event_proof = await self._gate_adoption_terminal(
+                    decide, stream_id=stream_id, brief=brief, delivery_receipt=delivery_receipt,
+                )
+                if result is not None:
+                    return result
             await asyncio.sleep(min(tmux_transport.POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
 
     @staticmethod

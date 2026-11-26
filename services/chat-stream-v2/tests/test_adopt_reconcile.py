@@ -1360,9 +1360,9 @@ class LoggingTmux(AdoptTmux):
         self.events = events
         self.clock = clock
 
-    async def has_session(self, name: str) -> bool:
+    async def session_state(self, name: str) -> str:
         self.events.append(("pane", {"at": self.clock.rel(), "alive": self.alive}))
-        return self.alive
+        return "alive" if self.alive else "gone"
 
 
 # Transcript observations end 20 ms before expiry; the next one lands on it.
@@ -1371,7 +1371,7 @@ SETTLE_STOPS = [5.0, 10.0, 15.0, 19.98, SETTLE_EXPIRY_S]
 
 def _settle_at_expiry(monkeypatch: pytest.MonkeyPatch, proof: CostedProof, transcript: SteppedTranscript,
                       clock: SettleClock, *, receipt: dict | None = None,
-                      events: list | None = None) -> tuple[str, str, str]:
+                      events: list | None = None, tmux: AdoptTmux | None = None) -> tuple[str, str, str]:
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", SETTLE_EXPIRY_S)
     monkeypatch.setattr(spawnctl_mod, "time", clock)
     brief = "[example-service-notice:expiry]\nsettle at the boot line"
@@ -1380,19 +1380,19 @@ def _settle_at_expiry(monkeypatch: pytest.MonkeyPatch, proof: CostedProof, trans
         db = Store(":memory:")
         db.start()
         try:
-            tmux = (LoggingTmux(events, clock) if events is not None
-                    else AdoptTmux(alive=True, pane_pid=DEAD_PID, screen="model loading"))
-            sessions = Sessions(db, tmux=tmux, local_host="hosta")
-            ctl = SpawnCtl(db, sessions, tmux=tmux, submission_proof=proof)
+            pane = tmux or (LoggingTmux(events, clock) if events is not None
+                            else AdoptTmux(alive=True, pane_pid=DEAD_PID, screen="model loading"))
+            sessions = Sessions(db, tmux=pane, local_host="hosta")
+            ctl = SpawnCtl(db, sessions, tmux=pane, submission_proof=proof)
             ctl._transcript_status = transcript  # type: ignore[method-assign]
             try:
                 return await asyncio.wait_for(ctl._settle_adoption(
-                    "hostb", "expiry", brief, tmux,
+                    "hostb", "expiry", brief, pane,
                     delivery_receipt=dict(receipt or LEGACY_RECEIPT),
                 ), timeout=30.0)  # stuck detector only
             finally:
                 proof.gate.set()
-                assert tmux.pasted == []
+                assert pane.pasted == []
         finally:
             db.stop()
 
@@ -1408,8 +1408,8 @@ def test_healthy_store_at_expiry_fails_closed_from_a_decisive_sample(monkeypatch
     proof = CostedProof(clock)
     result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, SETTLE_STOPS), clock)
     decisive = _decisive(proof)
-    assert decisive["at"] >= SETTLE_EXPIRY_S, proof.calls
-    assert decisive["timeout_s"] >= SETTLE_STORE_FLOOR_S, proof.calls
+    assert [c for c in proof.calls if c["at"] >= SETTLE_EXPIRY_S] == [decisive], proof.calls
+    assert decisive["timeout_s"] == SETTLE_STORE_FLOOR_S, proof.calls
     assert decisive["result"] == "pending", proof.calls
     assert result == ("failed", "agent_never_started",
                       "boot deadline expired with no provider transcript ever created")
@@ -1565,3 +1565,469 @@ def test_every_negative_exit_rests_on_a_pending_sample_after_the_last_observatio
     assert last_store > last_observation, events
     sample = events[last_store][1]
     assert sample["result"] == "pending" and sample["timeout_s"] >= SETTLE_STORE_FLOOR_S, events
+
+
+# -- Final-review oracles: one terminal gate for every exit, the expiry
+# observation's allowance measured from its invocation, transcript-only parity
+# with the pre-change loop, and tri-state pane liveness.
+
+TRANSCRIPT_DELIVERED = ("delivered", "transcript")
+
+
+class OfflineFromExpiry(CostedProof):
+    """Answers pending until 19.98 s, then reports the Store unreachable."""
+
+    async def lookup(self, stream_id: str, **kwargs: object) -> EventProof:
+        if self.clock.rel() >= 19.98:
+            self.calls.append({"at": self.clock.rel(), "timeout_s": kwargs["timeout_s"], "result": "unreachable"})
+            return EventProof("unreachable", stream_id, 0, reason="event_store_unreachable")
+        return await super().lookup(stream_id, **kwargs)  # type: ignore[arg-type]
+
+
+class StatedTmux(AdoptTmux):
+    """A pane whose tri-state liveness comes from ``state``; every read is logged."""
+
+    def __init__(self, state, clock: SettleClock) -> None:
+        super().__init__(alive=True, pane_pid=DEAD_PID, screen="model loading")
+        self.state = state
+        self.clock = clock
+        self.reads: list[float] = []
+
+    async def has_session(self, name: str) -> bool:
+        return await self.session_state(name) == "alive"
+
+    async def session_state(self, name: str) -> str:
+        self.reads.append(self.clock.rel())
+        return self.state(self) if callable(self.state) else self.state
+
+
+@pytest.mark.parametrize("answer", ["found", "absent"])
+def test_user_landing_during_an_in_window_probe_wins_over_its_answer(
+    monkeypatch: pytest.MonkeyPatch, answer: str,
+) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0, user_from_s=0.5)
+
+    async def transcript(*_a: object, **_kw: object) -> str:
+        clock.now = clock.start + 1
+        return answer
+
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert result[:2] == ("delivered", "event_store"), (result, proof.calls)
+
+
+def test_store_proof_wins_over_a_transcript_found_at_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0, user_from_s=19.995)
+    transcript = SteppedTranscript(clock, SETTLE_STOPS, found_from_s=19.995)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert result[:2] == ("delivered", "event_store"), (result, proof.calls, transcript.calls)
+
+
+def test_absent_below_the_floor_after_prior_pending_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = OfflineFromExpiry(clock, cost_s=0.0)
+
+    async def transcript(*_a: object, **_kw: object) -> str:
+        if clock.rel() < 19.98:
+            clock.now = clock.start + 19.98
+            return "no_transcript"
+        clock.now = clock.start + SETTLE_EXPIRY_S
+        return "absent"
+
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert result[:2] == ("indeterminate", "live_pane_unproven"), (result, proof.calls)
+
+
+def test_expiry_observation_allowance_runs_from_its_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+    # The in-window probe wakes late, 0.4 s past expiry.
+    transcript = SteppedTranscript(clock, [20.4])
+    _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    last = transcript.calls[-1]
+    assert last["at"] == 20.4 and last["allowance_s"] == SETTLE_TRANSCRIPT_ALLOWANCE_S, transcript.calls
+
+
+def test_late_expiry_observation_still_invokes_its_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+    transcript = SteppedTranscript(clock, [SETTLE_EXPIRY_S], found_from_s=19.99)
+    original = SpawnCtl._bounded_adoption_transcript_status
+
+    async def delayed(self: SpawnCtl, *a: object, **kw: object) -> str:
+        if clock.rel() >= SETTLE_EXPIRY_S:
+            clock.now += 3.1  # a wake later than the whole allowance
+        return await original(self, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SpawnCtl, "_bounded_adoption_transcript_status", delayed)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert [c["at"] for c in transcript.calls] == [0.0, 23.1], transcript.calls
+    assert result[:2] == TRANSCRIPT_DELIVERED, (result, transcript.calls, proof.calls)
+
+
+def test_liveness_wait_is_outside_the_expiry_allowances(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+
+    def slow_at_expiry(pane: StatedTmux) -> str:
+        if clock.rel() >= SETTLE_EXPIRY_S:
+            clock.now += 4.0  # within tmux's ordinary ten-second allowance
+        return "alive"
+
+    pane = StatedTmux(slow_at_expiry, clock)
+    transcript = SteppedTranscript(clock, [SETTLE_EXPIRY_S])
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock, tmux=pane)
+    observed = [c for c in transcript.calls if c["at"] >= SETTLE_EXPIRY_S]
+    decisive = _decisive(proof)
+    assert len(observed) == 1 and observed[0]["allowance_s"] == SETTLE_TRANSCRIPT_ALLOWANCE_S, transcript.calls
+    # The decisive sample follows the slow liveness read with its own grant.
+    assert decisive["at"] >= pane.reads[-1] + 4.0 and decisive["timeout_s"] == SETTLE_STORE_FLOOR_S, proof.calls
+    assert result[:2] == ("failed", "agent_never_started")
+
+
+def test_full_store_grant_after_an_exhausted_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+    transcript = SteppedTranscript(clock, [SETTLE_EXPIRY_S], after_stops_step_s=SETTLE_TRANSCRIPT_ALLOWANCE_S)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert proof.calls[-1]["at"] == SETTLE_EXPIRY_S + SETTLE_TRANSCRIPT_ALLOWANCE_S, proof.calls
+    assert proof.calls[-1]["timeout_s"] == SETTLE_STORE_FLOOR_S, proof.calls
+    assert result[:2] == ("failed", "agent_never_started")
+
+
+def test_expiry_observation_that_times_out_counts_as_no_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The allowance is scaled down so its real timeout fires quickly; the
+    # held probe is the expiry observation and nothing else.
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S", 0.05)
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+    stepped = SteppedTranscript(clock, [SETTLE_EXPIRY_S])
+    held: list[str] = []
+
+    async def transcript(*a: object, **kw: object) -> str:
+        if clock.rel() < SETTLE_EXPIRY_S:
+            return await stepped(*a, **kw)
+        held.append("held")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            held.append("cancelled")
+            raise
+        raise AssertionError("held probe returned")
+
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert held == ["held", "cancelled"]
+    assert _decisive(proof)["at"] >= SETTLE_EXPIRY_S and _decisive(proof)["timeout_s"] == SETTLE_STORE_FLOOR_S
+    assert result[:2] == ("failed", "agent_never_started")
+
+
+@pytest.mark.parametrize("receipt", [{"transport": "legacy"}, None], ids=["legacy-transport", "no-watermark"])
+def test_transcript_only_liveness_crossing_matches_the_previous_loop(
+    monkeypatch: pytest.MonkeyPatch, receipt: dict | None,
+) -> None:
+    # Transcript-only: one liveness read, then the deadline is read after it.
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+    transcript = SteppedTranscript(clock, [19.98])
+    checks: list[float] = []
+
+    def crossing(pane: StatedTmux) -> str:
+        checks.append(clock.rel())
+        clock.now = clock.start + 20.1
+        return "alive" if len(checks) == 1 else "gone"
+
+    pane = StatedTmux(crossing, clock)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock, receipt=receipt or {"transport": "direct"},
+                               tmux=pane)
+    assert checks == [19.98], checks
+    assert proof.calls == []
+    assert result == ("failed", "agent_never_started",
+                      "boot deadline expired with no provider transcript ever created")
+
+
+def test_original_short_window_fixture_runs_at_the_production_floor() -> None:
+    # The 0.2 s fixture never scales the floor or the expiry allowance.
+    class WindowOnly:
+        def __init__(self) -> None:
+            self.patched: list[str] = []
+
+        def setattr(self, target: object, attr: str, value: object) -> None:
+            self.patched.append(attr)
+            setattr(target, attr, value)
+
+    patch = WindowOnly()
+    original = spawnctl_mod.ADOPTION_BOOT_DEADLINE_S
+    try:
+        test_transcript_absent_with_unreachable_store_never_repastes(patch)  # type: ignore[arg-type]
+    finally:
+        spawnctl_mod.ADOPTION_BOOT_DEADLINE_S = original
+    assert patch.patched == ["ADOPTION_BOOT_DEADLINE_S"]
+
+
+def test_recovery_paste_enters_the_saved_watermark_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    from submission_events import EventWatermark
+
+    clock = SettleClock()
+    monkeypatch.setattr(spawnctl_mod, "time", clock)
+    proof = CostedProof(clock, cost_s=0.0)
+
+    async def watermark(stream: str) -> EventWatermark:
+        return EventWatermark(stream, 0, "reachable")
+
+    proof.watermark = watermark  # type: ignore[attr-defined]
+
+    async def run() -> None:
+        db = Store(":memory:")
+        db.start()
+        try:
+            pane = AdoptTmux(alive=True, pane_pid=DEAD_PID)
+            ctl = SpawnCtl(db, Sessions(db, tmux=pane, local_host="hosta"), tmux=pane, submission_proof=proof)
+
+            async def session(*_args: object) -> dict:
+                return {"provider": "gemini"}
+
+            monkeypatch.setattr(db, "fetch_session", session)
+
+            async def ready(*_args: object, **_kwargs: object) -> object:
+                return spawnctl_mod.BootReadyOutcome(True, 0, 1)
+
+            monkeypatch.setattr(ctl, "_await_provider_ready", ready)
+            ctl._transcript_status = SteppedTranscript(clock, [SETTLE_EXPIRY_S])  # type: ignore[method-assign]
+            assert await db.reserve_stream_id("hosta", "restart", ttl_s=30, request_id="r", nonce="n")
+            result = await ctl._settle_adoption(
+                "hosta", "restart", "review synthetic brief", pane,
+                delivery_receipt={"transport": "staged"},
+                resume={"request_id": "r", "nonce": "n", "expires_at": clock.time() + 30},
+            )
+            saved = json.loads((await db.reservations(include_expired=True))[0]["payload"])["delivery_receipt"]
+            assert len(pane.pasted) == 1 and saved["proof_watermark_state"] == "reachable", saved
+            assert result[0] == "indeterminate" and result[2].startswith("spawn_delivery_unknown"), result
+        finally:
+            db.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["late_user_absent", "late_user_dead", "transcript_error",
+                                  "store_error", "transcript_cancel", "store_cancel"])
+def test_reconcile_journey_keeps_or_proves_the_handle(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    clock = SettleClock()
+    monkeypatch.setattr(spawnctl_mod, "time", clock)
+
+    async def run() -> None:
+        db = Store(":memory:")
+        db.start()
+        try:
+            host, name, request = "hosta", "synthetic-review", "r1"
+            sid, brief = f"{host}:{name}", "QA synthetic user brief"
+            pane = AdoptTmux(alive=True, pane_pid=DEAD_PID)
+            proof = DurableUserEventProof(db, local_host=host)
+            ctl = SpawnCtl(db, Sessions(db, tmux=pane, local_host=host), tmux=pane, submission_proof=proof)
+
+            async def nonce(*_args: object) -> tuple[bool, str]:
+                return True, "TEST"
+
+            ctl._tmux_nonce = nonce  # type: ignore[method-assign]
+            gate, held = asyncio.Event(), asyncio.Event()
+
+            async def hold() -> str:
+                held.set()
+                await gate.wait()
+                raise AssertionError("hold returned unexpectedly")
+
+            async def transcript(*_args: object, **_kwargs: object) -> str:
+                if mode.startswith("late_user"):
+                    lifecycle = await db.fetch_open_session_lifecycle(sid, pane_pid=DEAD_PID)
+                    assert lifecycle is not None
+                    assert await db.append_session_events_lifecycle_cas([{
+                        "stream_id": sid, "event": {"stream_id": sid, "kind": "USER", "text": brief,
+                                                    "timestamp": "2026-08-28T11:26:39.537Z"},
+                        "identity": "review-user", "lifecycle": lifecycle}], limit=500)
+                    clock.now = clock.start + 1
+                    if mode == "late_user_dead":
+                        pane.alive = False
+                        return "no_transcript"
+                    return "absent"
+                if clock.rel() < SETTLE_EXPIRY_S:
+                    clock.now = clock.start + SETTLE_EXPIRY_S
+                    return "no_transcript"
+                if mode == "transcript_error":
+                    raise ValueError("synthetic observation failure")
+                if mode == "transcript_cancel":
+                    return await hold()
+                return "no_transcript"
+
+            ctl._transcript_status = transcript  # type: ignore[method-assign]
+            original = proof.lookup
+
+            async def lookup(*a: object, **kw: object) -> EventProof:
+                if clock.rel() >= SETTLE_EXPIRY_S:
+                    if mode == "store_cancel":
+                        await hold()
+                    if mode == "store_error":
+                        raise ValueError("synthetic read failure")
+                return await original(*a, **kw)  # type: ignore[arg-type]
+
+            proof.lookup = lookup  # type: ignore[method-assign]
+            assert await db.reserve_stream_id(host, name, ttl_s=30, request_id=request, nonce="TEST")
+            assert await db.record_spawn_intent(host, name, {
+                "open_fields": {"objective": "Exercise interrupted spawn adoption", "provider": "claude"},
+                "brief": brief, "delivery_receipt": dict(LEGACY_RECEIPT)})
+            await db.mark_tmux_created(host, name, pane_pid=DEAD_PID)
+            task = asyncio.create_task(ctl.reconcile_spawn_intents())
+            if mode.endswith("cancel"):
+                await asyncio.wait_for(held.wait(), 10)  # stuck detector only
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 10)
+                gate.set()
+            else:
+                await asyncio.wait_for(task, 10)  # stuck detector only
+            row = await db.get_spawn_outcome(host, name) or {}
+            reservations = await db.reservations(include_expired=True)
+            events = await db.fetch_session_event_tail(sid, limit=10, after_daemon_seq=0)
+            exact = any(e["kind"] == "USER" and e["text"] == brief for e in events)
+            assert pane.pasted == []
+            if mode.startswith("late_user"):
+                assert exact and not reservations
+                assert (row.get("state"), row.get("delivery_evidence")) == ("delivered", "event_store"), row
+            else:
+                assert len(reservations) == 1 and reservations[0]["request_id"] == request
+                assert row.get("state") != "failed", row
+        finally:
+            db.stop()
+
+    asyncio.run(run())
+
+
+def test_unreadable_remote_liveness_after_a_store_outage_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tmux_transport
+
+    clock = SettleClock()
+    proof = OfflineFromExpiry(clock, cost_s=0.0)
+
+    class Peer(AdoptTmux):
+        has_session = tmux_transport.Tmux.has_session
+        session_state = tmux_transport.Tmux.session_state
+
+        async def run(self, *a: str, **_kw: object) -> tuple[int, str]:
+            assert a[0] == "has-session"
+            return (255, "synthetic connection lost") if proof.calls[-1]["result"] == "unreachable" else (0, "")
+
+    pane = Peer(alive=True, pane_pid=DEAD_PID, screen="model loading")
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, [SETTLE_EXPIRY_S]), clock, tmux=pane)
+    assert result[:2] == ("indeterminate", "live_pane_unproven"), (result, proof.calls)
+
+
+def test_unknown_liveness_with_a_pending_store_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+
+    def unknown_at_expiry(pane: StatedTmux) -> str:
+        return "unreachable" if clock.rel() >= SETTLE_EXPIRY_S else "alive"
+
+    pane = StatedTmux(unknown_at_expiry, clock)
+    result = _settle_at_expiry(monkeypatch, proof, SteppedTranscript(clock, [SETTLE_EXPIRY_S]), clock, tmux=pane)
+    assert _decisive(proof)["result"] == "pending" and _decisive(proof)["at"] >= pane.reads[-1], proof.calls
+    assert result == ("indeterminate", "live_pane_unproven",
+                      "pane_liveness_unknown: adoption reconciliation deferred")
+
+
+def test_positive_store_after_a_transcript_exception_is_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0, user_from_s=19.99)
+
+    async def transcript(*_a: object, **_kw: object) -> str:
+        if clock.rel() >= SETTLE_EXPIRY_S:
+            raise OSError("synthetic pane PID read failure")
+        clock.now = clock.start + SETTLE_EXPIRY_S
+        return "no_transcript"
+
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert result[:2] == ("delivered", "event_store"), (result, proof.calls)
+
+
+def test_transcript_exception_without_store_proof_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+
+    async def transcript(*_a: object, **_kw: object) -> str:
+        if clock.rel() >= SETTLE_EXPIRY_S:
+            raise OSError("synthetic pane PID read failure")
+        clock.now = clock.start + SETTLE_EXPIRY_S
+        return "no_transcript"
+
+    with pytest.raises(OSError):
+        _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert _decisive(proof)["at"] >= SETTLE_EXPIRY_S and _decisive(proof)["timeout_s"] == SETTLE_STORE_FLOOR_S
+
+
+def test_short_window_fixture_with_an_injected_floor_reads_an_unreachable_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The companion of the unchanged 0.2 s fixture: a floor injected below the
+    # window lets the in-window read actually happen and answer unreachable.
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.2)
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_MIN_EVENT_LOOKUP_S", 0.05)
+    reads: list[float] = []
+
+    class UnavailableProof:
+        async def lookup(self, stream_id: str, *, expected_text: str,
+                         watermark: object, timeout_s: float) -> EventProof:
+            reads.append(timeout_s)
+            return EventProof("unreachable", stream_id, 0, reason="event_store_unreachable")
+
+    async def run() -> tuple[tuple[str, str, str], AdoptTmux]:
+        db = Store(":memory:")
+        db.start()
+        try:
+            tmux = AdoptTmux(alive=True, pane_pid=DEAD_PID, screen="$ ")
+            ctl = SpawnCtl(db, Sessions(db, tmux=tmux, local_host="hosta"), tmux=tmux,
+                           submission_proof=UnavailableProof())
+
+            async def transcript_absent(*_args: object, **_kwargs: object) -> str:
+                return "absent"
+
+            ctl._transcript_status = transcript_absent  # type: ignore[method-assign]
+            return await ctl._settle_adoption(
+                "hostc", "absent-unavailable", "[example-service-notice:floor]\nnot safe to resend", tmux,
+                delivery_receipt={"proof_watermark": 0, "proof_watermark_state": "reachable"},
+            ), tmux
+        finally:
+            db.stop()
+
+    result, tmux = asyncio.run(run())
+    assert len(reads) == 2 and reads[0] > 0.05, reads  # the in-window read, then the gate sample
+    assert result == ("indeterminate", "live_pane_unproven",
+                      "event_store_unreachable: adoption reconciliation deferred")
+    assert tmux.pasted == []
+
+
+TERMINAL_EXITS = {
+    # name: (transcript kwargs, proof kwargs, expected (state, evidence))
+    "absent-pending": (dict(stops=[1.0], absent_from_s=1.0), {}, ("failed", "transcript_absent")),
+    "absent-unreachable": (dict(stops=[1.0], absent_from_s=1.0), dict(unreachable_from_s=0.5),
+                           ("indeterminate", "live_pane_unproven")),
+    "pane-died-unreachable": (dict(stops=[1.0], pane_dies_at_s=1.0), dict(unreachable_from_s=0.5),
+                              ("indeterminate", "live_pane_unproven")),
+    "found": (dict(stops=[1.0], found_from_s=0.0), {}, ("delivered", "transcript")),
+    "expiry-unreachable": (dict(stops=SETTLE_STOPS), dict(unreachable_from_s=19.98),
+                           ("indeterminate", "live_pane_unproven")),
+}
+
+
+@pytest.mark.parametrize("exit_name", sorted(TERMINAL_EXITS))
+def test_no_observation_follows_the_terminal_gate_sample(monkeypatch: pytest.MonkeyPatch, exit_name: str) -> None:
+    transcript_kwargs, proof_kwargs, expected = TERMINAL_EXITS[exit_name]
+    clock = SettleClock()
+    events: list = []
+    proof = CostedProof(clock, events=events, **proof_kwargs)
+    kwargs = dict(transcript_kwargs)
+    stops = kwargs.pop("stops")
+    transcript = SteppedTranscript(clock, stops, events=events, **kwargs)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock, events=events)
+    assert result[:2] == expected, (result, events)
+    kinds = [kind for kind, _ in events]
+    assert kinds[-1] == "store", events
+    assert events[-1][1]["timeout_s"] == SETTLE_STORE_FLOOR_S, events
