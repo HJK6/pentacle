@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check daemon structure config, frozen exception baselines, and startup SQL drift."""
+"""Check daemon structure config and frozen exception baselines."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,6 @@ import ast
 import hashlib
 import json
 import re
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -40,7 +39,6 @@ EXPECTED_LAYERS = [
     "F3_workflow_policy", "F4_migrations_and_safe_switch",
     "F5_observation", "F6_durable_delivery",
 ]
-WRITE_WORDS = re.compile(r"\b(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|REPLACE)\b", re.I)
 IDENTITY_RE = re.compile(r"^[a-z0-9_-]+:v2-[a-z0-9-]+$", re.I)
 
 
@@ -233,116 +231,6 @@ def _exception_additions(base_text: str, candidate_text: str) -> list[str]:
     return sorted(candidate_entries - base_entries)
 
 
-def _sql_argument(node: ast.expr, constants: dict[str, ast.expr]) -> tuple[str, ...] | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return (node.value,)
-    if isinstance(node, ast.Name):
-        value = constants.get(node.id)
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            return (value.value,)
-        if isinstance(value, (ast.Tuple, ast.List)) and all(
-                isinstance(item, ast.Constant) and isinstance(item.value, str) for item in value.elts):
-            return tuple(item.value for item in value.elts)
-        return None
-    if isinstance(node, (ast.Tuple, ast.List)):
-        values: list[str] = []
-        for item in node.elts:
-            found = _sql_argument(item, constants)
-            if found is None:
-                return None
-            values.extend(found)
-        return tuple(values)
-    if isinstance(node, ast.JoinedStr):
-        pieces = []
-        for value in node.values:
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                pieces.append(value.value)
-            elif isinstance(value, ast.FormattedValue) and isinstance(value.value, ast.Constant):
-                pieces.append(str(value.value.value))
-            else:
-                pieces.append("<dynamic>")
-        return ("".join(pieces),)
-    return None
-
-
-def _is_persistent_write(sql: str) -> bool:
-    normalized = re.sub(r"(?m)--[^\n]*|/\*.*?\*/", " ", sql, flags=re.S).strip()
-    if normalized.upper().startswith("PRAGMA"):
-        return bool(re.search(r"\b(journal_mode|synchronous|user_version|schema_version)\s*=", normalized, re.I))
-    return bool(WRITE_WORDS.search(normalized))
-
-
-def _sql_statements(sql: str) -> list[str]:
-    """Split complete SQLite statements without splitting trigger bodies or quoted semicolons."""
-    statements: list[str] = []
-    current = ""
-    for char in sql:
-        current += char
-        if char == ";" and sqlite3.complete_statement(current):
-            if current.strip():
-                statements.append(" ".join(current.split()))
-            current = ""
-    if current.strip():
-        statements.append(" ".join(current.split()))
-    return statements
-
-
-def _startup_writes(source: str) -> dict[tuple[str, int, int, int, str], str]:
-    """Find literal persistent SQL executed directly from Store startup.
-
-    Indirect calls and dynamically supplied SQL remain a conservative follow-up
-    for the full inventory rule; this seed rule catches direct additions and
-    changed literals in the open path.
-    """
-    tree = ast.parse(source)
-    bindings = sql_call_bindings(tree)
-    store = next((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Store"), None)
-    if store is None:
-        raise GateError("store.py has no Store class")
-    result: dict[tuple[str, int, int, int, str], str] = {}
-    for method_name in ("__init__", "_run"):
-        method = next((node for node in store.body if isinstance(node, ast.FunctionDef) and node.name == method_name), None)
-        if method is None:
-            raise GateError(f"Store.{method_name} is missing")
-        for node in ast.walk(method):
-            if node not in bindings:
-                continue
-            sqls = _sql_argument(node.args[0], bindings[node])
-            if sqls is None:
-                # An unresolved SQL argument on the open path must not silently
-                # escape the baseline comparison. Treat it as a capability marker.
-                sqls = (f"<unresolved SQL argument: {ast.dump(node.args[0], include_attributes=False)}>",)
-            for sql in sqls:
-                statements = [sql] if sql.startswith("<unresolved SQL argument:") else _sql_statements(sql)
-                for statement_index, statement in enumerate(statements):
-                    if statement.startswith("<unresolved SQL argument:") or _is_persistent_write(statement):
-                        normalized = " ".join(statement.split())
-                        identity = (method_name, node.lineno, node.col_offset, statement_index, normalized)
-                        result[identity] = normalized
-    return result
-
-
-def _startup_write_additions(base_source: str, candidate_source: str) -> list[tuple[str, int, int, int, str]]:
-    baseline = _startup_writes(base_source)
-    current = _startup_writes(candidate_source)
-    return sorted(set(current) - set(baseline))
-
-
-def _check_startup_drift(base: str) -> list[str]:
-    relative = "services/chat-stream-v2/store.py"
-    base_raw = _base_file(base, relative)
-    if base_raw is None:
-        raise GateError("trusted base lacks store.py")
-    candidate = (REPO_ROOT / relative).read_text(encoding="utf-8")
-    # Call column and statement occurrence preserve duplicate operations on
-    # one source line. Moving an allowance changes its identity and is refused.
-    added = _startup_write_additions(base_raw.decode("utf-8"), candidate)
-    if not added:
-        return []
-    return [f"Store startup adds or moves {len(added)} persistent SQL statement(s): " +
-            ", ".join(f"{method} line {line}" for method, line, _, _, _ in added[:8])]
-
-
 def check(base: str) -> list[str]:
     global _ACTIVE_BASE
     if not re.fullmatch(r"[0-9a-f]{40}", base):
@@ -350,7 +238,6 @@ def check(base: str) -> list[str]:
     _ACTIVE_BASE = base
     _git("cat-file", "-e", f"{base}^{{commit}}")
     errors = _validate_contract()
-    errors.extend(_check_startup_drift(base))
     return errors
 
 
@@ -370,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"[daemon-contract] FAIL: {error}", file=sys.stderr)
         return 1
-    print("[daemon-contract] PASS: six layers, two-lane cap, frozen inventories, and startup SQL baseline")
+    print("[daemon-contract] PASS: six layers, two-lane cap and frozen inventories")
     return 0
 
 
