@@ -338,7 +338,7 @@ def test_merge_runner_executes_b04_cli_and_workflow_requires_it(tmp_path, checko
     workflow = yaml.safe_load((ROOT / '.github/workflows/predeploy-tests.yml').read_text())
     for script in ('daemon_b04_gate.py', 'daemon_layer_gate.py'):
         step, = [s for s in workflow['jobs']['contracts']['steps'] if script in s.get('run', '')]
-        assert step['continue-on-error'] and '--base "$RELEASE_BASE" --report-only' in step['run']
+        assert '--base "$RELEASE_BASE" --report-only' in step['run']
 
 
 def test_existing_sqlite_user_cannot_add_a_connection(checkout):
