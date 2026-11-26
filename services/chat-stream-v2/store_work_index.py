@@ -27,6 +27,12 @@ DDL = (
     "PRIMARY KEY(spec_id,gate))",
     "CREATE TABLE IF NOT EXISTS v2_work_item_observations (spec_id TEXT PRIMARY KEY, record_json TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_work_index_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), state_json TEXT NOT NULL)",
+    # Lane reads filter observations on these two JSON paths; the expressions
+    # match their statements exactly, so neither decodes every record_json.
+    "CREATE INDEX IF NOT EXISTS v2_work_item_observations_epic ON v2_work_item_observations("
+    "json_extract(record_json,'$.last_good._epic'), spec_id) WHERE json_type(record_json,'$.last_good._epic')='text'",
+    "CREATE INDEX IF NOT EXISTS v2_work_item_observations_status ON v2_work_item_observations("
+    "json_extract(record_json,'$.member.status'))",
 )
 INDEX_FIELDS = ("available", "root_configured", "snapshot_at", "last_sweep_at", "error")
 EMPTY_STATE = {"available": False, "root_configured": False, "snapshot_at": None,

@@ -694,7 +694,8 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
     # reconcile pass), so the rows it reads are the ones that transaction sees.
     named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
     snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
-    route_dispatch_map = resolved_route_dispatch_map(conn)
+    # One lane uses its own indexed route query; the two global scans pay off only across lanes.
+    route_dispatch_map = resolved_route_dispatch_map(conn) if lane_id is None else None
     from store_external_work import current_packets_conn
     # Reuse the already-resolved snapshot and decoded observations for the packet
     # terminal filter only on the coherent reader; other callers resolve fresh.
@@ -725,7 +726,8 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
         lane["_lead_row"] = lead
         lane["_qualifies"] = work_lane_lead_qualifies(lane, lead)
         lane["_lead_reported_done"] = lead_reported_done_conn(
-            conn, lane, route_dispatch_ids=route_dispatch_map.get((lane["stream_id"], lane["lane_id"]), set()))
+            conn, lane, route_dispatch_ids=None if route_dispatch_map is None
+            else route_dispatch_map.get((lane["stream_id"], lane["lane_id"]), set()))
         lane["_chat_kind"], lane["_chat_available"] = _chat_available(conn, lane)
         last = conn.execute(
             "SELECT update_id,update_kind,publication_event_id,created_at FROM v2_work_lane_events "
