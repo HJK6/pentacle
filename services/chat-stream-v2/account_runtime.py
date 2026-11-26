@@ -126,6 +126,22 @@ class _PinInputBarrier:
                 self.writer=False;self.condition.notify_all()
 
 
+def _snapshot(a,read):
+    """Run read-only account checks on one SQLite snapshot (a read transaction)."""
+    if a.conn.in_transaction: raise AccountError("account_transaction_nested")
+    a.conn.execute("BEGIN")
+    try:
+        return read()
+    finally:
+        a.conn.commit()
+
+
+def _enrolled_conn(conn,host,provider=None):
+    return conn.execute(
+        "SELECT 1 FROM v2_account_bindings WHERE host=?" + (" AND provider=?" if provider else "") + " LIMIT 1",
+        (host,provider) if provider else (host,)).fetchone() is not None
+
+
 class AccountRuntime:
     def __init__(self,store,sessions,*,policy=None,clock=time.time,monotonic=time.monotonic,executor=None):
         self.store,self.sessions=store,sessions
@@ -162,14 +178,16 @@ class AccountRuntime:
         await self.run(lambda a:assert_input(a,row))
 
     @asynccontextmanager
-    async def maintenance_guard(self,row):
+    async def maintenance_guard(self,row,*,check=True):
+        """Hold the seat home's input read; `check=False` leaves the maintenance
+        assertion to the caller's own transaction under this hold."""
         @asynccontextmanager
         async def home_read():
             if row.get("account_binding"):
                 async with self.home_inputs(Binding.from_public(row["account_binding"])).read():yield
             else:yield
         async with home_read():
-            await self.maintenance_input(row)
+            if check: await self.maintenance_input(row)
             yield
 
     def attach(self,server,spawnctl,comms):
@@ -343,9 +361,7 @@ class AccountRuntime:
             self._index_self_recovery(key)
 
     async def enrolled(self,host,provider=None):
-        return await self.run(lambda a:a.conn.execute(
-            "SELECT 1 FROM v2_account_bindings WHERE host=?" + (" AND provider=?" if provider else "") + " LIMIT 1",
-            (host,provider) if provider else (host,)).fetchone() is not None)
+        return await self.run(lambda a:_enrolled_conn(a.conn,host,provider))
 
     async def choose_launch(self,*,host,provider,model,effort,message):
         await self.authorize_choice(message)
@@ -560,72 +576,110 @@ class AccountRuntime:
         if take_ingress(verb,target):
             self._mark_auth_self_recovery(snapshot,exc._health_revision)
 
-    async def before_input(self,row,*,verify=True,recovery_verb=None,message=None):
-        await self.maintenance_input(row)
+    def _input_state(self,a,row):
+        """Every input check of `before_input` on one Store read, in its order.
+
+        Returns None when input is admitted without an artifact proof, else
+        `(binding, pin, receipt)`; `receipt` is None when only verification can
+        admit. Reads only: it opens no account transaction."""
+        from provider_cli_maintenance import assert_input
+        from provider_cli_pin import check,pristine
+        assert_input(a,row)
         # Rollback can disable new launches while existing bound agents drain.
-        if not row.get("account_binding") and await self.enrolled(row.get("host"),row.get("provider")):
-            from provider_cli_pin import pristine
+        if not row.get("account_binding"):
+            if not _enrolled_conn(a.conn,row.get("host"),row.get("provider")): return None
             try:
-                if await self.run(pristine):
-                    return  # Legacy input stays usable before the first pin.
+                if pristine(a):
+                    return None  # Legacy input stays usable before the first pin.
             except AccountError:
                 pass  # Corrupt history is never pre-enforcement.
             raise AccountError("provider_cli_pin_unavailable",reason="binding_unknown")
-        if row.get("account_binding"):
-            try:
-                await self.run(lambda accounts:accounts.ensure_available(self.key(row["account_binding"])))
-            except AccountError as exc:
-                if recovery_verb is not None:
-                    self.signal_refusal(exc,recovery_verb,f"{row.get('host')}:{row.get('session_name')}",
-                        Binding.from_public(row["account_binding"]))
-                raise
-            from provider_cli_pin import check
-            binding=Binding.from_public(row["account_binding"])
-            pin=await self.run(lambda a:check(a,binding))
-            if pin is None: return
-            key="provider_cli.admission:"+row["stream_id"]+":"+row["session_generation"]
-            receipt=await self.run(lambda a:a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone())
-            if receipt and json.loads(receipt[0]).get("mode")=="pre_enforcement":
-                receipt=None  # Keep that historical admission; observe current bytes separately.
-            if not receipt:
-                # Pre-enforcement seats keep their historical admission unknown.
-                # A separate read-only observation proves current bytes without
-                # relabeling their original launch or restarting a compliant seat.
-                key="provider_cli.observed:"+row["stream_id"]+":"+row["session_generation"]
-                receipt=await self.run(lambda a:a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone())
-                if not receipt:
-                    if not verify: raise AccountError("provider_cli_verification_unavailable")
-                    if self.executor is None: raise AccountError("provider_cli_verification_unavailable")
-                    async with self.executor._host_locks.setdefault(binding.host,asyncio.Lock()):
-                        proof=await self.executor.verify_artifact(binding,pin)
-                    from provider_cli_pin import canonical,consumer_current
-                    def record(a):
-                        from account_store import transaction
-                        with transaction(a.conn):
-                            if check(a,binding)!=pin: raise AccountError("provider_cli_pin_mismatch")
-                            consumer_current(a,binding.host,getattr(self.sessions,"local_host",None),self.clock())
-                            data=canonical({"artifact":proof,"binding_key":binding.key})
-                            a.conn.execute("INSERT OR IGNORE INTO kv VALUES (?,?)",(key,data))
-                            a.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",("provider_cli.verified:"+binding.key,
-                                canonical({"proof":proof,"verified_at":self.clock()})))
-                            return (data,)
-                    receipt=await self.run(record,settle_on_cancel=True)
-            artifact=json.loads(receipt[0])["artifact"]
-            if artifact.get("artifact")!=pin["providers"][binding.provider]["artifacts"].get(artifact.get("platform")):
-                raise AccountError("provider_cli_pin_mismatch",reason="resource_hash_mismatch")
+        try:
+            a.ensure_available(self.key(row["account_binding"]))
+        except AccountError as exc:
+            exc._input_unavailable=True  # the refusal that may signal self-recovery
+            raise
+        binding=Binding.from_public(row["account_binding"])
+        pin=check(a,binding)
+        if pin is None: return None
+        key="provider_cli.admission:"+row["stream_id"]+":"+row["session_generation"]
+        receipt=a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone()
+        if receipt and json.loads(receipt[0]).get("mode")=="pre_enforcement":
+            receipt=None  # Keep that historical admission; observe current bytes separately.
+        if not receipt:
+            # Pre-enforcement seats keep their historical admission unknown.
+            # A separate read-only observation proves current bytes without
+            # relabeling their original launch or restarting a compliant seat.
+            key="provider_cli.observed:"+row["stream_id"]+":"+row["session_generation"]
+            receipt=a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone()
+        return binding,pin,receipt
+
+    @staticmethod
+    def _require_receipt(state):
+        """The pure tail of an admitted state: the proven artifact is the pinned one."""
+        binding,pin,receipt=state
+        artifact=json.loads(receipt[0])["artifact"]
+        if artifact.get("artifact")!=pin["providers"][binding.provider]["artifacts"].get(artifact.get("platform")):
+            raise AccountError("provider_cli_pin_mismatch",reason="resource_hash_mismatch")
+
+    async def _checked_input(self,row,recovery_verb,function,*,settle_on_cancel=False):
+        try:
+            return await self.run(function,settle_on_cancel=settle_on_cancel)
+        except AccountError as exc:
+            if recovery_verb is not None and getattr(exc,"_input_unavailable",False):
+                self.signal_refusal(exc,recovery_verb,f"{row.get('host')}:{row.get('session_name')}",
+                    Binding.from_public(row["account_binding"]))
+            raise
+
+    async def before_input(self,row,*,verify=True,recovery_verb=None,message=None):
+        state=await self._checked_input(row,recovery_verb,lambda a:_snapshot(a,lambda:self._input_state(a,row)))
+        if state is None: return
+        binding,pin,receipt=state
+        if not receipt:
+            key="provider_cli.observed:"+row["stream_id"]+":"+row["session_generation"]
+            if not verify: raise AccountError("provider_cli_verification_unavailable")
+            if self.executor is None: raise AccountError("provider_cli_verification_unavailable")
+            async with self.executor._host_locks.setdefault(binding.host,asyncio.Lock()):
+                proof=await self.executor.verify_artifact(binding,pin)
+            from provider_cli_pin import canonical,check,consumer_current
+            def record(a):
+                from account_store import transaction
+                with transaction(a.conn):
+                    if check(a,binding)!=pin: raise AccountError("provider_cli_pin_mismatch")
+                    consumer_current(a,binding.host,getattr(self.sessions,"local_host",None),self.clock())
+                    data=canonical({"artifact":proof,"binding_key":binding.key})
+                    a.conn.execute("INSERT OR IGNORE INTO kv VALUES (?,?)",(key,data))
+                    a.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",("provider_cli.verified:"+binding.key,
+                        canonical({"proof":proof,"verified_at":self.clock()})))
+                    return (data,)
+            receipt=await self.run(record,settle_on_cancel=True)
+        self._require_receipt((binding,pin,receipt))
 
     @asynccontextmanager
     async def input_guard(self,row,*,message=None,phase="not_started",claim=False,recovery_verb=None):
         recovery_verb=recovery_verb if phase=="not_started" else None
         # Remote preparation must never hold the fleet pin decision lock/barrier.
         await self.before_input(row,recovery_verb=recovery_verb,message=message)
-        async with self.maintenance_guard(row):
+        message=message or {}
+        # A plain seat's cap decision is a read and joins the locked recheck. A
+        # pool notice keeps its async guard first, and a direct operator claim
+        # writes its cap state, so each keeps its own settled admission after.
+        joined=phase=="not_started" and self._cap_read_only(row,message,claim)
+        async with self.maintenance_guard(row,check=False):
             async with self.pin_inputs.read():
                 async with self.pin_lock:
-                    # Recheck after preparation and barrier admission; this path cannot invoke SSH.
-                    await self.before_input(row,verify=False,recovery_verb=recovery_verb,message=message)
-                    if phase=="not_started":
-                        await self.cap_input(row,message or {},claim=claim)
+                    # Recheck after preparation and barrier admission, on one
+                    # read that also asserts maintenance; this path cannot invoke SSH.
+                    def recheck(a):
+                        state=self._input_state(a,row)
+                        if state is not None:
+                            if not state[2]: raise AccountError("provider_cli_verification_unavailable")
+                            self._require_receipt(state)
+                        if joined: return self._cap_check(a,row,message,claim)
+                    await self._checked_input(row,recovery_verb,lambda store:_snapshot(store,lambda:recheck(store)),
+                                              settle_on_cancel=joined and claim)
+                    if phase=="not_started" and not joined:
+                        await self.cap_input(row,message,claim=claim)
                     # The first physical input ends this request's recovery eligibility.
                     retire_ingress()
                 yield  # The caller scopes this to one physical action, never evidence waiting.
@@ -671,12 +725,16 @@ class AccountRuntime:
                     result.add((row["stream_id"], row["generation"]))
         return result
 
+    def _cap_read_only(self,row,message,claim):
+        """True when `cap_input` would make no async call and no write."""
+        from account_pool_control import operator,NOTICE_TOKEN
+        if not row or message.get("_pool_notice_token") is NOTICE_TOKEN: return False
+        return not (claim and operator(message.get("_auth_context") or {}))
+
     async def cap_input(self,row,message,*,claim=False):
-        from account_pool_control import operator,read,write,seat_key,eligibility,NOTICE_TOKEN
+        from account_pool_control import NOTICE_TOKEN
         if not row: return
         stream=row.get("stream_id") or f"{row['host']}:{row['session_name']}"
-        generation=row.get("session_generation")
-        auth=message.get("_auth_context") or {}
         if message.get("_pool_notice_token") is NOTICE_TOKEN:
             notice={"kind":message['_pool_notice_kind'],"metadata":message['_pool_notice_metadata'],
                     "recipient_stream_id":stream,"tell_id":message.get("tell_id")}
@@ -684,53 +742,60 @@ class AccountRuntime:
             if decision:
                 raise AccountError("pool_notice_stale" if decision.action=='terminal' else "pool_notice_deferred")
         if not row.get("account_binding"): return
+        return await self.run(lambda a:self._cap_check(a,row,message,claim),settle_on_cancel=claim)
+
+    def _cap_check(self,a,row,message,claim):
+        """The synchronous cap decision of `cap_input`, after its notice guard."""
+        from account_pool_control import operator,read,write,seat_key,eligibility,NOTICE_TOKEN
+        if not row or not row.get("account_binding"): return None
+        stream=row.get("stream_id") or f"{row['host']}:{row['session_name']}"
+        generation=row.get("session_generation")
+        auth=message.get("_auth_context") or {}
         source=(auth.get("stream_id"),auth.get("session_generation"))
         reason=None
         if operator(auth): reason="direct_operator_order"
         elif message.get("_pool_notice_token") is NOTICE_TOKEN: reason="pool_control_notice"
-        def check(a):
-            from store_assistant_binding import _seat_conn
-            target=_seat_conn(a.conn,stream)
-            if not target or target.get("status")!="open" or target.get("session_generation")!=generation:
-                raise AccountError("account_seat_generation_stale")
-            exemptions=self._cap_exemptions_conn(a.conn)
-            if (message.get('_pool_notice_token') is NOTICE_TOKEN
-                    and message.get('_pool_notice_kind') in {'account_cap_reminder','account_cap_blocker'}):
-                metadata=message['_pool_notice_metadata']
-                source_row=_seat_conn(a.conn,metadata['stream'])
-                state=read(a,f"account.cap-seat:{metadata['stream']}:{metadata['generation']}") or {}
-                directed=state.get('operator_input') or {}
-                boundary=state.get('idle_boundary') or {}
-                source_override=read(a,seat_key(metadata['stream'],metadata['generation'])) or {}
-                if (not source_row or source_row['status']!='open' or source_row['session_generation']!=metadata['generation']
-                        or (metadata['stream'],metadata['generation']) in exemptions or source_override.get('enabled')
-                        or (directed and boundary.get('operator_id')!=directed['id'])
-                        or eligibility(a,metadata['provider'],metadata['pool_id'],now=self.clock())['code']!='account_pool_cap_reached'):
-                    raise AccountError('pool_notice_deferred')
-            assistant_reason="assistant_recipient" if (stream,generation) in exemptions else (
-                "assistant_sender" if auth.get("token_verified") is True and source in exemptions else None)
-            override=read(a,seat_key(stream,generation))
-            current_reason=reason or assistant_reason or ("seat_override" if override and override["enabled"] else None)
-            if not current_reason:
-                binding=row["account_binding"]
-                result=eligibility(a,binding["provider"],binding["pool_id"],now=self.clock())
-                if not result["eligible"]:
-                    code={"account_pool_blocked":"pool_blocked","account_pool_cap_reached":"pool_at_cap",
-                          "account_pool_meter_unavailable":"pool_usage_unknown"}[result.pop("code")]
-                    result.pop("eligible")
-                    raise AccountError(code,**result,submission_confirmed=False,delivery="not_landed",
-                        retryable=False,nonretryable=True,do_not_retry=True,queued_for_redelivery=False)
-            if claim and current_reason=="direct_operator_order":
-                from account_store import transaction
-                with transaction(a.conn):
-                    key=f"account.cap-seat:{stream}:{generation}"
-                    state=read(a,key) or {}
-                    state["operator_input"]={"id":str(message.get("tell_id") or message.get("request_id") or ""),
-                        "kind":"tell" if message.get("tell_id") else "send", "claimed_at":self.clock(),
-                        "reason":"direct_operator_order","generation":generation}
-                    write(a,key,state)
-            return current_reason
-        return await self.run(check,settle_on_cancel=claim)
+        from store_assistant_binding import _seat_conn
+        target=_seat_conn(a.conn,stream)
+        if not target or target.get("status")!="open" or target.get("session_generation")!=generation:
+            raise AccountError("account_seat_generation_stale")
+        exemptions=self._cap_exemptions_conn(a.conn)
+        if (message.get('_pool_notice_token') is NOTICE_TOKEN
+                and message.get('_pool_notice_kind') in {'account_cap_reminder','account_cap_blocker'}):
+            metadata=message['_pool_notice_metadata']
+            source_row=_seat_conn(a.conn,metadata['stream'])
+            state=read(a,f"account.cap-seat:{metadata['stream']}:{metadata['generation']}") or {}
+            directed=state.get('operator_input') or {}
+            boundary=state.get('idle_boundary') or {}
+            source_override=read(a,seat_key(metadata['stream'],metadata['generation'])) or {}
+            if (not source_row or source_row['status']!='open' or source_row['session_generation']!=metadata['generation']
+                    or (metadata['stream'],metadata['generation']) in exemptions or source_override.get('enabled')
+                    or (directed and boundary.get('operator_id')!=directed['id'])
+                    or eligibility(a,metadata['provider'],metadata['pool_id'],now=self.clock())['code']!='account_pool_cap_reached'):
+                raise AccountError('pool_notice_deferred')
+        assistant_reason="assistant_recipient" if (stream,generation) in exemptions else (
+            "assistant_sender" if auth.get("token_verified") is True and source in exemptions else None)
+        override=read(a,seat_key(stream,generation))
+        current_reason=reason or assistant_reason or ("seat_override" if override and override["enabled"] else None)
+        if not current_reason:
+            binding=row["account_binding"]
+            result=eligibility(a,binding["provider"],binding["pool_id"],now=self.clock())
+            if not result["eligible"]:
+                code={"account_pool_blocked":"pool_blocked","account_pool_cap_reached":"pool_at_cap",
+                      "account_pool_meter_unavailable":"pool_usage_unknown"}[result.pop("code")]
+                result.pop("eligible")
+                raise AccountError(code,**result,submission_confirmed=False,delivery="not_landed",
+                    retryable=False,nonretryable=True,do_not_retry=True,queued_for_redelivery=False)
+        if claim and current_reason=="direct_operator_order":
+            from account_store import transaction
+            with transaction(a.conn):
+                key=f"account.cap-seat:{stream}:{generation}"
+                state=read(a,key) or {}
+                state["operator_input"]={"id":str(message.get("tell_id") or message.get("request_id") or ""),
+                    "kind":"tell" if message.get("tell_id") else "send", "claimed_at":self.clock(),
+                    "reason":"direct_operator_order","generation":generation}
+                write(a,key,state)
+        return current_reason
 
     async def _front_desk(self,auth):
         composite=self.server.assistant_composite if self.server else None
