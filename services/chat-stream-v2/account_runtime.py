@@ -177,6 +177,17 @@ class AccountRuntime:
         from provider_cli_maintenance import assert_input
         await self.run(lambda a:assert_input(a,row))
 
+    async def maintenance_row(self,host,name):
+        """The seat's durable row with `maintenance_input` asserted on it, in one
+        read; None (nothing asserted) when the row is absent."""
+        from provider_cli_maintenance import assert_input
+        from store_specs import session_row_conn
+        def read(a):
+            row=session_row_conn(a.conn,host,name)
+            if row is not None: assert_input(a,row)
+            return row
+        return await self.run(read)
+
     @asynccontextmanager
     async def maintenance_guard(self,row,*,check=True):
         """Hold the seat home's input read; `check=False` leaves the maintenance
@@ -743,6 +754,19 @@ class AccountRuntime:
                 raise AccountError("pool_notice_stale" if decision.action=='terminal' else "pool_notice_deferred")
         if not row.get("account_binding"): return
         return await self.run(lambda a:self._cap_check(a,row,message,claim),settle_on_cancel=claim)
+
+    async def cap_ingress(self,host,name,message):
+        """`cap_input` (no claim) on the seat's durable row. Without a pool notice
+        nothing is awaited between the row and the decision, so both are one
+        snapshot read; a pool notice keeps its awaited guard in between."""
+        from account_pool_control import NOTICE_TOKEN
+        if message.get("_pool_notice_token") is NOTICE_TOKEN:
+            return await self.cap_input(await self.store.fetch_session(host,name) or {},message)
+        from store_specs import session_row_conn
+        def decide(a):
+            row=session_row_conn(a.conn,host,name)
+            return self._cap_check(a,row,message,False) if row else None
+        return await self.run(lambda a:_snapshot(a,lambda:decide(a)))
 
     def _cap_check(self,a,row,message,claim):
         """The synchronous cap decision of `cap_input`, after its notice guard."""

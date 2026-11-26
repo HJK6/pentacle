@@ -9,7 +9,10 @@ change in the number of sequential writer round trips fails here by name
 
 At bf3a1139 (and with the release-three auth commits) the plain send made 41
 and each extra physical-action guard 11 (10 for an Enter retry, which skips
-the cap check). Joining the account input checks makes that 30 and 3.
+the cap check). Joining the account input checks (slice 1) made that 30 and 3.
+Slice 2 (R-014 addendum 1) joins consecutive submits with nothing awaited
+between them, skips the QA target read without QA fields, and reuses one row
+read while the lifecycle and pane locks are both held: 21 and 2.
 """
 import asyncio
 import hashlib
@@ -118,10 +121,10 @@ def run_send(tmp_path, tmux, **extra):
     return asyncio.run(go())
 
 
-#: The account input guard around one physical action: the caller's target
-#: fetch, one preparation read and one locked recheck.
-GUARD = 3
-PLAIN = 30
+#: The account input guard around one physical action: one preparation read
+#: and one locked recheck (its row is the one read under the send's locks).
+GUARD = 2
+PLAIN = 21
 
 
 def test_plain_send_makes_the_counted_writer_round_trips(tmp_path):
@@ -148,7 +151,7 @@ def test_enter_retry_adds_one_proof_read_and_one_guard(tmp_path, monkeypatch):
 
 #: An operator send through Comms (dispatch adds no actor reads for operators):
 #: the guard keeps its direct-order cap write as its own settled submission.
-OPERATOR_COMMS = 26
+OPERATOR_COMMS = 18
 
 
 def test_operator_send_keeps_the_settled_cap_write_as_its_own_submission(tmp_path):

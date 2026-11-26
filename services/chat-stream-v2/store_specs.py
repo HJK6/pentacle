@@ -68,6 +68,11 @@ def _session_row(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str,
     out['capacity_retry'] = projection(conn, out)
     return out
 
+def session_row_conn(conn: sqlite3.Connection, host: str, session_name: str) -> dict[str, Any] | None:
+    """`Store.fetch_session` on the caller's connection, to join a larger read."""
+    return _session_row(conn, conn.execute(
+        "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)).fetchone())
+
 def normalize_spec_ids(spec_ids: object = None, spec_id: object = None) -> list[str]:
     """Return stable, ordered, de-duplicated canonical session identities."""
     values: list[object] = []

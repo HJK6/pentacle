@@ -566,9 +566,15 @@ class AssistantLaneRulings:
     async def _known_covered(self, key: str, auth: dict[str, Any]) -> bool:
         if not auth.get("token_verified"):
             return False
-        row = await self.store.submit(lambda conn: conn.execute(
+        return await self.store.submit(lambda conn: self._covered_conn(conn, key, auth))
+
+    @staticmethod
+    def _covered_conn(conn, key: str, auth: dict[str, Any]) -> bool:
+        if not auth.get("token_verified"):
+            return False
+        row = conn.execute(
             "SELECT requester_stream_id,requester_generation,covered FROM v2_assistant_lane_rulings WHERE request_key=?",
-            (key,)).fetchone())
+            (key,)).fetchone()
         return bool(row and row["covered"] and (row["requester_stream_id"], row["requester_generation"]) ==
                     (auth.get("stream_id"), auth.get("session_generation")))
 
@@ -887,12 +893,18 @@ class AssistantLaneRulings:
         composite = self._composite()
         auth = msg.get("_auth_context") or {}
         host, _, name = target.partition(":")
-        seat = await self.store.fetch_session(host, name)
+        def read(conn):
+            # The seat and its covered ruling on one submission; the key needs the seat's generation.
+            from store_specs import session_row_conn
+            seat = session_row_conn(conn, host, name)
+            if not seat:
+                return None, None, False
+            key = f"send:{target}:{seat.get('session_generation') or ''}:{msg.get('msg_id', 0)}"
+            return seat, key, self._covered_conn(conn, key, auth)
+        seat, key, known = await self.store.submit(read)
         if not seat:
             return None
         generation = str(seat.get("session_generation") or "")
-        key = f"send:{target}:{generation}:{msg.get('msg_id', 0)}"
-        known = await self._known_covered(key, auth)
         policy = getattr(self.server.sessions, "assistant", None)
         if not known and (composite is None or not composite.enabled or not composite.config.direct_primary
                 or auth.get("ruled_release") or msg.get("qa_spec_id") is not None
