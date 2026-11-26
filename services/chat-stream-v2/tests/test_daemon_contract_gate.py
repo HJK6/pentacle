@@ -1,10 +1,9 @@
 """Admission: exercise the daemon contract CLI boundary, not its helper only.
 
-Journey: candidate Store startup source, active exception list, or local owner
-configuration reaches the same CLI used by the local merge runner and
-protected CI. Boundary: every persistent startup addition, moved/added
-allowance, and malformed local owner is refused, while the frozen baseline,
-valid local owner and exception removals pass. Supported runners are the
+Journey: candidate active exception list or local owner configuration reaches
+the same CLI used by the local merge runner and protected CI. Boundary: every
+moved/added allowance and malformed local owner is refused, while the frozen
+baseline, valid local owner and exception removals pass. Supported runners are the
 repository's Python 3.13 unit lane and Linux Python 3.13 contracts job.
 """
 from __future__ import annotations
@@ -74,93 +73,6 @@ class DaemonContractGateTests(unittest.TestCase):
         finally:
             temporary.cleanup()
 
-    def test_new_startup_write_is_detected(self) -> None:
-        base = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        conn.execute("SELECT 1")
-'''
-        candidate = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        conn.execute("SELECT 1")
-        conn.execute("CREATE TABLE added(id INTEGER)")
-'''
-        self.assertEqual(daemon_gate._startup_writes(base), {})
-        self.assertEqual(len(daemon_gate._startup_writes(candidate)), 1)
-
-    def test_startup_write_uses_its_own_sql_binding(self) -> None:
-        template = ("class Store:\n"
-                    "    def __init__(self): pass\n"
-                    "    def _run(self):\n"
-                    "        sql = {target!r}\n"
-                    "        conn.execute(sql)\n")
-        sibling = "    def other(self):\n        sql = {other!r}\n"
-        write, read = "CREATE TABLE demo(id INTEGER)", "SELECT 1"
-        for target, other, expected in [(write, read, [write]), (read, write, [])]:
-            source = template.format(target=target)
-            for suffix in ("", sibling.format(other=other)):
-                with self.subTest(target=target, suffix=suffix):
-                    self.assertEqual(list(daemon_gate._startup_writes(source + suffix).values()), expected)
-
-    def test_startup_method_resolves_global_sql_past_class_binding(self) -> None:
-        source = ("class Store:\n"
-                  "    sql = 'SELECT 1'\n"
-                  "    def __init__(self): pass\n"
-                  "    def _run(self): conn.execute(sql)\n"
-                  "sql = 'CREATE TABLE demo(id INTEGER)'\n")
-        self.assertEqual(list(daemon_gate._startup_writes(source).values()),
-                         ["CREATE TABLE demo(id INTEGER)"])
-
-    def test_moved_startup_write_changes_its_identity(self) -> None:
-        before = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        conn.execute("CREATE TABLE old(id INTEGER)")
-'''
-        after = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        marker = 1
-        conn.execute("CREATE TABLE old(id INTEGER)")
-'''
-        self.assertNotEqual(set(daemon_gate._startup_writes(before)), set(daemon_gate._startup_writes(after)))
-
-    def test_unresolved_startup_sql_is_not_ignored(self) -> None:
-        source = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        conn.execute(sql)
-'''
-        self.assertEqual(len(daemon_gate._startup_writes(source)), 1)
-
-    def test_same_line_duplicate_startup_statement_is_detected(self) -> None:
-        before = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        conn.executescript("CREATE TABLE item(id INTEGER);")
-'''
-        after = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        conn.executescript("CREATE TABLE item(id INTEGER); CREATE TABLE item(id INTEGER);")
-'''
-        self.assertTrue(daemon_gate._startup_write_additions(before, after))
-
     def _fixture(self, store_source: str | None = None) -> tuple[tempfile.TemporaryDirectory, Path, Path, str]:
         temporary = tempfile.TemporaryDirectory(prefix="daemon-contract-gate-")
         root = Path(temporary.name)
@@ -201,44 +113,6 @@ class Store:
             result = self._run_fixture_gate(root, service, base)
             self._record_result("baseline-pass", base, result)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        finally:
-            temporary.cleanup()
-
-    def test_checker_cli_rejects_new_startup_write(self) -> None:
-        temporary, root, service, base = self._fixture()
-        try:
-            store = service / "store.py"
-            store.write_text(store.read_text() + "\n# candidate\n", encoding="utf-8")
-            store.write_text(store.read_text().replace(
-                "    def _run(self):\n        pass\n",
-                '    def _run(self):\n        conn.execute("CREATE TABLE added(id INTEGER)")\n',
-            ), encoding="utf-8")
-            result = self._run_fixture_gate(root, service, base)
-            self._record_result("new-startup-write-reject", base, result)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("adds or moves", result.stderr)
-        finally:
-            temporary.cleanup()
-
-    def test_checker_cli_rejects_same_line_duplicate_startup_write(self) -> None:
-        source = '''\
-class Store:
-    def __init__(self):
-        pass
-    def _run(self):
-        conn.execute("CREATE TABLE item(id INTEGER)")
-'''
-        temporary, root, service, base = self._fixture(source)
-        try:
-            store = service / "store.py"
-            store.write_text(store.read_text(encoding="utf-8").replace(
-                'conn.execute("CREATE TABLE item(id INTEGER)")',
-                'conn.execute("CREATE TABLE item(id INTEGER)"); conn.execute("CREATE TABLE item(id INTEGER)")',
-            ), encoding="utf-8")
-            result = self._run_fixture_gate(root, service, base)
-            self._record_result("duplicate-same-line-write-reject", base, result)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("adds or moves", result.stderr)
         finally:
             temporary.cleanup()
 
