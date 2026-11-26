@@ -1219,9 +1219,12 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     # Input first: refuse new input retryably, and let input already admitted
     # (its pre-input record may be committed) paste and record its outcome
     # while every dependency below still runs.
+    # It takes at most a third of the budget, and its own wait ends a little
+    # before its step does, so stuck input never starves the steps below.
     if hasattr(server, "drain_input"):
-        await budget.step("input-drain", server.drain_input(budget.remaining(SHUTDOWN_INPUT_DRAIN_S)),
-                          cap=SHUTDOWN_INPUT_DRAIN_S)
+        drain_s = min(SHUTDOWN_INPUT_DRAIN_S, budget.remaining() / 3)
+        await budget.step("input-drain", server.drain_input(max(0.0, drain_s - SERVER_CLOSE_MARGIN_S)),
+                          cap=drain_s)
     # Restart continuity: no new spawn admission once stopping, then hand every
     # in-flight admitted spawn to durable state while the store still runs.
     server.spawn_ready.clear()
