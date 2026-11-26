@@ -742,9 +742,11 @@ class ErrorAlerts:
     async def _notice_snapshot(self):
         """One notice read for the whole pass, in the shape _prune uses.
 
-        Returns (rows, notification ids covered, notice ids covered). A fact
-        reads the snapshot only to find it has nothing to do; before any
-        write that depends on its notices it reads its own rows fresh.
+        Returns (rows by notice id, notice ids by notification id, notification
+        ids covered, notice ids covered). Each row's metadata is decoded once
+        here, so a fact visits only its own rows. A fact reads the snapshot
+        only to find it has nothing to do; before any write that depends on
+        its notices it reads its own rows fresh.
         """
         facts = await self._error_rows()
         nids = list(dict.fromkeys(fact["notification_id"] for fact in facts))
@@ -752,7 +754,12 @@ class ErrorAlerts:
                                         for nid in (fact.get("error_context") or {}).get("notice_ids", ())))
         rows = {r["notice_id"]: r for r in await self.notice_rows(
             notice_ids=notice_ids, notification_ids=nids)}
-        return rows, set(nids), set(notice_ids)
+        by_fact = {}
+        for notice_id, notice in rows.items():
+            owner = metadata(notice).get("notification_id")
+            if owner:
+                by_fact.setdefault(owner, []).append(notice_id)
+        return rows, by_fact, set(nids), set(notice_ids)
 
     async def _reconcile_send(self, operation):
         data = operation["data"]
@@ -803,27 +810,19 @@ class ErrorAlerts:
         # The pass snapshot can only show a fact that it has nothing to do.
         # Every write below that depends on these rows first re-reads them,
         # as each fact did before (a fresh call takes no snapshot).
-        rows, covered_nids, covered_ids = snapshot or ({}, (), ())
+        rows, by_fact, covered_nids, covered_ids = snapshot or ({}, {}, (), ())
         stale = nid in covered_nids and set(ctx.get("notice_ids", ())) <= covered_ids
         if stale:
             notices = rows  # keyed by notice id, as _prune uses it
+            own = by_fact.get(nid, ())
         else:
             notices = {r["notice_id"]: r for r in await self.notice_rows(
                 notice_ids=ctx.get("notice_ids", ()), notification_ids=(nid,))}
+            own = [r["notice_id"] for r in notices.values()
+                   if metadata(r).get("notification_id") == nid]
         # A crash can commit enqueue before the cross-store link/watermark.
         # Recover those immutable rows before applying cancellation or policy.
-        ids = list(
-            dict.fromkeys(
-                [
-                    *ctx.get("notice_ids", []),
-                    *[
-                        r["notice_id"]
-                        for r in notices.values()
-                        if metadata(r).get("notification_id") == nid
-                    ],
-                ]
-            )
-        )
+        ids = list(dict.fromkeys([*ctx.get("notice_ids", []), *own]))
         if ids != ctx.get("notice_ids", []):
             if stale:
                 return await self._reconcile_fact(row, now)
@@ -854,6 +853,13 @@ class ErrorAlerts:
         transport_rows = [
             notices.get(metadata(r).get("folded_into_notice_id"), r) for r in linked
         ]
+        # Delivery can still suppress or fold a pending transport at any
+        # moment, which can call for a new alert; only a delivered or
+        # terminal latest transport is settled enough for the pass read.
+        if stale and transport_rows and not (
+            transport_rows[-1]["delivered_at"] or transport_rows[-1]["terminal_at"]
+        ):
+            return await self._reconcile_fact(row, now)
         # Claims and guards consume queue attempts without reaching input.
         # Only the existing pre-input tell record makes submission possible.
         attempted = any(

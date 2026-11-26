@@ -46,10 +46,13 @@ async def test_a_settled_pass_reads_notices_once_whatever_the_fact_count(
     subject, probe_family, monkeypatch, facts,
 ):
     s = subject
+    monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_S", "0")  # held rows fold
     for i in range(facts):
         await emit(s, f"e{i}")
     await s.service.reconcile()  # enqueues; acting facts read their own rows
     assert len(await s.notify._db.call("error_rows")) == facts
+    for _ in range(2):
+        await s.queue.drain_once()  # deliver and fold: a pending transport re-reads
     calls = count_reads(monkeypatch)
     await s.service.reconcile()
     # The pass read, the pending rebind read and the prune read; on the prior
@@ -323,7 +326,8 @@ async def test_a_row_inserted_mid_pass_is_linked_by_the_next_pass(
 ):
     """The bound of the pass read. No pass code inserts a row for another
     fact (only the fact itself, and the rebind after the fact loop), so this
-    writer is contrived: a successor inserted during the pass, unlinked. The
+    writer is contrived: a successor inserted during the pass, unlinked,
+    after the fact's alert was delivered (a pending transport re-reads). The
     fresh read links it in that pass; the pass read, which found nothing to
     do, links it in the next. No notice or alert differs at any point."""
     s = subject
@@ -331,6 +335,7 @@ async def test_a_row_inserted_mid_pass_is_linked_by_the_next_pass(
     a = await emit(s, "a")
     b = await emit(s, "b", code="probe_other")
     await s.service.reconcile()
+    await s.queue.drain_once()  # deliver both alerts: the transports settle
     (old,) = await notices_of(s, b)
     new = await rebind_to(s, "v2-next")
 
@@ -361,34 +366,107 @@ async def test_a_row_inserted_mid_pass_is_linked_by_the_next_pass(
 # drains, and pastes.
 BOUND = (
     ([
-        (0, 'error_alert', 'initial', False, False, 'superseded_binding'),
-        (0, 'error_alert', 'initial', False, False, None),
-        (1, 'error_alert', 'initial', False, False, 'superseded_binding'),
+        (0, 'error_alert', 'initial', False, True, None),
         (1, 'error_alert', 'initial', False, False, None),
+        (1, 'error_alert', 'initial', False, True, None),
     ],
      [
-        (0, 'active', None, 1, 1, 'initial', 2),
+        (0, 'active', None, 1, 1, 'initial', 1),
         (1, 'active', None, 1, 1, 'initial', 2),
     ]),
     ([
-        (0, 'error_alert', 'initial', False, False, 'superseded_binding'),
-        (0, 'error_alert', 'initial', False, False, None),
-        (1, 'error_alert', 'initial', False, False, 'superseded_binding'),
+        (0, 'error_alert', 'initial', False, True, None),
         (1, 'error_alert', 'initial', False, False, None),
+        (1, 'error_alert', 'initial', False, True, None),
     ],
      [
-        (0, 'active', None, 1, 1, 'initial', 2),
+        (0, 'active', None, 1, 1, 'initial', 1),
         (1, 'active', None, 1, 1, 'initial', 2),
     ]),
     ([
-        (0, 'error_alert', 'initial', False, False, 'superseded_binding'),
-        (0, 'error_alert', 'initial', False, False, None),
-        (1, 'error_alert', 'initial', False, False, 'superseded_binding'),
+        (0, 'error_alert', 'initial', False, True, None),
         (1, 'error_alert', 'initial', False, False, None),
+        (1, 'error_alert', 'initial', False, True, None),
     ],
      [
-        (0, 'active', None, 1, 1, 'initial', 2),
+        (0, 'active', None, 1, 1, 'initial', 1),
         (1, 'active', None, 1, 1, 'initial', 2),
     ]),
-    2,
+    3,
 )
+
+
+def initial_pastes_naming(s, nid):
+    return sum(f"BLOCKER probe.v1 probe_failed alert={nid}" in str(paste) for paste in s.provider.pastes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["batched", "fresh"])
+async def test_a_mixed_digest_rejected_mid_pass_still_alerts_the_active_member(
+    subject, probe_family, monkeypatch, mode,
+):
+    """A and B are folded into one digest and A recovers. Delivery rejects
+    the digest (suppressed_members_changed) just before B's turn in the
+    sweep's pass: B, still active, needs its replacement initial alert in
+    that pass, before it too can recover (review 329bbcf0, finding 1)."""
+    s = subject
+    use_mode(monkeypatch, mode)
+    monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_S", "0")
+    monkeypatch.setitem(error_alerts.POLICY, "effective_delivery_mode", "digest")
+    a = await emit(s, "a")
+    b = await emit(s, "b")
+    await s.service.reconcile()
+    await fold(s)
+    (digest,) = [r for r in await s.service.notice_rows() if metadata(r).get("typed_digest")]
+    assert set(metadata(digest)["members"]) == {a, b}
+    await emit(s, "a", condition="recovered")
+
+    async def reject():
+        await s.queue.deliver_now(digest["notice_id"])
+        (after,) = [r for r in await s.service.notice_rows() if r["notice_id"] == digest["notice_id"]]
+        assert after["terminal_reason"] == "suppressed_members_changed"
+
+    fired = before_turn_of(monkeypatch, b, reject)
+    await s.queue.drain_once()
+    assert fired == [True]
+    assert initial_pastes_naming(s, b) == 1
+    await emit(s, "b", condition="recovered")
+    for _ in range(3):
+        await s.queue.drain_once()
+    assert initial_pastes_naming(s, b) == 1
+
+
+def count_metadata(monkeypatch):
+    visits = [0]
+    original = error_alerts.metadata
+
+    def counted(row):
+        visits[0] += 1
+        return original(row)
+
+    monkeypatch.setattr(error_alerts, "metadata", counted)
+    return visits
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("facts", [4, 16, 32])
+async def test_a_settled_pass_visits_each_notice_a_bounded_number_of_times(
+    subject, probe_family, monkeypatch, facts,
+):
+    """Each fact sees only its own notices: metadata decodes in a settled
+    pass grow with facts plus notices, not with their product (review
+    329bbcf0, finding 2: 1,018 facts x 1,055 notices stalled the loop)."""
+    s = subject
+    monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_S", "0")  # held rows fold
+    for i in range(facts):
+        await emit(s, f"e{i}")
+    await s.service.reconcile()
+    for _ in range(2):
+        await s.queue.drain_once()  # deliver and fold: every transport settles
+    notices = len(await s.service.notice_rows())
+    visits = count_metadata(monkeypatch)
+    await s.service.reconcile()
+    # About 7 decodes per fact and notice (the pass read's closure, the
+    # index, each fact's own rows, the prune); 32 facts gave 1,244 when each
+    # fact scanned every notice.
+    assert visits[0] <= 8 * (facts + notices), (facts, notices, visits[0])
