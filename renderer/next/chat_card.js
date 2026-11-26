@@ -11,7 +11,7 @@ const NEW_CHAT = '__new__';
 // One card owns its DOM, recorder, form generation and PTY slot. The shared
 // store remains the source for transcript/status, and drafts stay per stream.
 function mountChatCard(stage, { key, slot, icons, node, button, sessions, store, cc, config,
-  drafts, history, paintTranscript, attachTranscript, requestHistory, catalogLoader,
+  drafts, history, paintTranscript, attachTranscript, transcriptPlace, catalogLoader,
   hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor, recorderOptions }) {
   const env = stage.ownerDocument.defaultView;
   const card = node('section', 'card chat-card', stage);
@@ -63,7 +63,6 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     terminalMount.replaceChildren();
   }
 
-  cc.onPtyData((number, data) => { if (number === slot && terminal) terminal.term.write(data); });
   async function openTerminal(s) {
     if (terminal || card.hidden || !s) return;
     const generation = ++terminalGeneration;
@@ -139,11 +138,8 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
       model.textContent = modelAndEffort(s);
       model.hidden = !model.textContent;
       statusButton.hidden = !s.status_card;
-      paintTranscript(inner, s.stream_id);
-      if (restoredScroll !== null && !card.hidden && mode === 'thread') {
-        body.scrollTop = restoredScroll;
-        restoredScroll = null;
-      }
+      const place = !card.hidden && mode === 'thread' ? restoredScroll : null;
+      if (paintTranscript(inner, s.stream_id, place)) restoredScroll = null;
       if (mode === 'status') renderStatus(s);
     }
   }
@@ -175,7 +171,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     const s = session();
     if (!s) return;
     const previous = mode;
-    if (previous === 'thread') history.set(selected, { scroll: body.scrollTop });
+    if (previous === 'thread') history.set(selected, { scroll: transcriptPlace(inner) });
     mode = nextMode(mode, requested);
     if (mode === 'terminal') void composer?.cancelRecording();
     if (previous === 'terminal' && mode !== 'terminal') disposeTerminal();
@@ -204,7 +200,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
 
   function saveHistory() {
     if (selected && selected !== NEW_CHAT) history.set(selected, {
-      scroll: mode === 'thread' && !card.hidden ? body.scrollTop : history.get(selected)?.scroll ?? null,
+      scroll: mode === 'thread' && !card.hidden ? transcriptPlace(inner) : history.get(selected)?.scroll ?? null,
     });
   }
 
@@ -235,7 +231,6 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     if (id === NEW_CHAT) void paintNewChat(selection);
     else if (id) {
       composer = mountComposer({ host: composerMount, transcript: voice, streamId: id, drafts, cc, chatStore: store, env, recorderOptions });
-      requestHistory(id);
     }
     render();
   }
@@ -243,7 +238,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   function setVisible(visible, solo) {
     const wasVisible = !card.hidden;
     if (wasVisible && !visible) {
-      if (selected && mode === 'thread') restoredScroll = body.scrollTop;
+      if (selected && mode === 'thread') restoredScroll = transcriptPlace(inner);
       void composer?.cancelRecording();
       disposeTerminal();
     }
@@ -262,6 +257,9 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   terminalButton.onclick = () => setMode('terminal');
 
   return { element: card, transcript: inner, title, render, setStream, setVisible, showWorking, session, saveHistory,
+    // After a layout pass: take a saved place that was waiting for final widths.
+    settle() { if (restoredScroll !== null) render(); },
+    writeTerminal(data) { terminal?.term.write(data); },
     focus() { composer?.focus(); }, get id() { return selected; } };
 }
 

@@ -69,10 +69,43 @@ if local storage is unavailable they last only for the page.
 
 The working row sits above the composer, uses the live elapsed clock or a
 chat's reported label, and leaves off the time if neither is known. The
-Assistant uses its own elapsed clock only. Reduced motion slows the working
+Assistant uses its own elapsed clock only. The first reported time sets the
+clock, which then counts in whole seconds in the browser. A later report
+moves it only when the two disagree by more than 2.5 seconds. Reduced motion slows the working
 ring, makes the Assistant's mark still, and stops the send chevrons. The queue
 line only offers Send now when the store permits it for that specific message.
 The shared transcript and ordinary desktop/web send behavior are unchanged.
+
+### Chat history and message formatting
+
+The Assistant and the chats in both cards are the store's focused streams, so
+traffic in other chats cannot evict their messages. `renderer/next/chat_history.js`
+applies the current web's history rules through `renderer/chat_events_lazy.js`.
+A chat is read once the daemon is connected and again after it returns to the
+screen or the connection is restored. A failed or empty read retries after 1,
+2, 4, 8 and 16 seconds. Until messages arrive the transcript says **Loading
+messages…** or **Reconnecting…**; when the retries are spent it offers
+**Retry**.
+
+A transcript opens on its latest 120 rows. **Show earlier messages** reveals 48
+more, asking the daemon for older pages when the store holds none, and scrolling
+up near the top does the same. The reader's place is kept when earlier rows are
+added, when new messages arrive further down, and while text is selected. A
+reader at the latest message stays there when the pane changes width or late
+content loads, but a row they open there is left where they clicked it. A card
+that was hidden or showed another chat returns to its reader's place once the
+stage has its final widths.
+
+Messages from other agents, daemon notices and child reports are compact rows
+that open to the full text and stay open across updates. Tables, code, commands,
+file changes and tool results have their own styles in the conversation section
+at the end of `renderer/next/style.css`. Text, code and agent rows wrap to the
+pane, so a chat never scrolls sideways. A table with more columns than fit
+scrolls inside its own frame.
+
+Terminal output reaches both cards through one listener in
+`renderer/next/entry.js`, because the web bridge keeps a single listener per
+event.
 
 ### Reading width, microphone and scrollbars
 

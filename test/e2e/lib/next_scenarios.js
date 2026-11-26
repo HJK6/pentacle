@@ -46,6 +46,59 @@ async function homeRail(ctx) {
   }
   await session.send('Emulation.clearDeviceMetricsOverride');
 }
+// Runs in the page. Real transcript rows that are wider than any pane: an unbroken
+// token, a five-column table, a long code line and opened agent rows.
+function wideTranscriptLayout() {
+  const inner = document.querySelector('.card .thread-inner'), thread = inner.parentElement;
+  const real = inner.innerHTML; // put back at the end, so no later render has to repaint mid-check
+  const long = 'x'.repeat(400);
+  const item = (id, text, extra = {}) => ({ id, text, displayRule: 'bubble:assistant', timestamp: '2026-01-01T00:00:00Z', ...extra });
+  const table = ['| Stage | What ships | Earliest date | Owner | Notes |', '|---|---|---|---|---|',
+    `| 0 | First switch of the release | Today, late morning | lead | ${long.slice(0, 60)} |`].join('\n');
+  inner.innerHTML = window.PentacleChatView.renderTranscriptTimelineHtml({ streamId: 'local:layout', transcriptItems: [
+    item('a', `A long token ${long}\n\n${table}\n\n\`\`\`\n${long}\n\`\`\``),
+    item('b', `GATE — ${long}`, { displayRule: 'bubble:agent', tone: 'agent', label: 'v2-abc123' }),
+    item('c', long, { displayRule: 'bubble:agent', tone: 'agent', label: 'Daemon' }),
+  ] });
+  for (const details of inner.querySelectorAll('details')) details.open = true;
+  const edge = inner.getBoundingClientRect().right + 1;
+  const wide = [...inner.querySelectorAll('*')].filter(el => !el.closest('.slot-chat-md-table') && el.getBoundingClientRect().right > edge)
+    .map(el => String(el.className || el.tagName));
+  const wrap = inner.querySelector('.slot-chat-md-table-wrap');
+  const result = { sideways: thread.scrollWidth - thread.clientWidth, wide, width: Math.round(inner.getBoundingClientRect().width),
+    table: !!wrap && getComputedStyle(wrap.querySelector('th')).borderBottomStyle === 'solid',
+    agents: inner.querySelectorAll('.slot-chat-v3-subagent').length,
+    agentRow: getComputedStyle(inner.querySelector('.slot-chat-v3-subagent > summary')).display };
+  inner.innerHTML = real;
+  return result;
+}
+// Runs in the page. A reader at the latest message opens a long agent row there:
+// the row they clicked stays where it was instead of the chat jumping to its end.
+async function openedRowStays() {
+  const inner = document.querySelector('.card .thread-inner'), thread = inner.parentElement;
+  const real = inner.innerHTML;
+  const frames = async count => { for (let i = 0; i < count; i++) await new Promise(resolve => requestAnimationFrame(resolve)); };
+  const item = (id, text, extra = {}) => ({ id, text, displayRule: 'bubble:assistant', timestamp: '2026-01-01T00:00:00Z', ...extra });
+  inner.innerHTML = window.PentacleChatView.renderTranscriptTimelineHtml({ streamId: 'local:layout', transcriptItems: [
+    item('a', Array.from({ length: 60 }, (_, i) => `Line ${i}`).join('\n\n') + '\n\n```\ncode\n```\n\n- item'),
+    item('b', Array.from({ length: 200 }, (_, i) => `Report line ${i}`).join('\n'), { displayRule: 'bubble:agent', tone: 'agent', label: 'v2-abc123' }),
+  ] });
+  thread.scrollTop = thread.scrollHeight;
+  await frames(3);
+  const summary = inner.querySelector('.slot-chat-v3-subagent > summary');
+  // A real update can repaint the transcript between frames; the caller then asks again.
+  if (!summary) return { repainted: true };
+  const gap = el => Math.round(el.getBoundingClientRect().top - el.previousElementSibling.getBoundingClientRect().bottom);
+  const result = { atLatest: thread.scrollHeight - thread.scrollTop - thread.clientHeight < 2, before: Math.round(summary.getBoundingClientRect().top),
+    codeGap: gap(inner.querySelector('.slot-chat-md-code')), listGap: gap(inner.querySelector('.slot-chat-md-list')) };
+  summary.click();
+  await frames(4);
+  result.after = Math.round(summary.getBoundingClientRect().top);
+  result.grew = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+  if (!summary.isConnected) return { repainted: true };
+  inner.innerHTML = real;
+  return result;
+}
 async function chatCard(ctx) {
   const { session, report } = ctx; await visit(ctx);
   await session.click('.chats-button');
@@ -66,6 +119,21 @@ async function chatCard(ctx) {
   await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
   report.ok('a second chat replaces the first after Assistant was last used', await session.eval("document.querySelector('.card .thread-inner').dataset.streamId === 'local:web-gate-survivor'"));
   await session.screenshot(path.join(report.dir, 'next-chat.png'));
+  for (const width of [1440, 760]) {
+    await session.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+    const layout = await session.eval(`(${wideTranscriptLayout})()`);
+    report.ok(`wide tables, code and agent rows fit the chat without sideways scroll at ${width}`,
+      layout.sideways === 0 && !layout.wide.length && layout.table && layout.agents === 2 && layout.agentRow === 'flex', layout);
+    if (width === 760) await session.screenshot(path.join(report.dir, 'next-chat-wide-content.png'));
+  }
+  await session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  let opened;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    opened = await session.eval(`(${openedRowStays})()`);
+    if (!opened.repainted) break;
+  }
+  report.ok('an agent row opened at the latest message stays where it was clicked', opened.atLatest && opened.grew > 400 && Math.abs(opened.after - opened.before) < 2, opened);
+  report.ok('code and lists stand apart from the text above them', opened.codeGap >= 8 && opened.listGap >= 8, opened);
   await session.click('[aria-label="Close"]'); report.ok('closing the card returns to Assistant', await session.eval("document.querySelector('.card').hidden && !document.querySelector('.pane').hidden"));
   await session.click('.chats-button'); report.ok('closing the card leaves the session in the list', await session.eval("!!document.querySelector('.popover [data-stream-id=\"local:web-gate-survivor\"]')"));
   report.ok('closing the card does not close its daemon session', await session.eval("window.cc.getChatStreamState().then(s=>(s.sessions||[]).some(x=>x.stream_id==='local:web-gate-survivor' && x.status!=='closed' && !x.closed_at))"));
@@ -335,6 +403,15 @@ async function terminalStatus(ctx) {
     await session.eval("window.cc.writePty(0, 'NEXT_TERMINAL_PROOF\\r'), true");
     await waitForOutput(() => ptyOutput.includes('NEXT_TERMINAL_PROOF'), 'sentinel output');
     report.ok('the new card displays a real tmux terminal', true);
+    // The frames prove delivery to the page, and the canvas renderer leaves no text to read.
+    // Reopen the terminal on the DOM renderer and require the output on screen.
+    await session.eval(`(() => { const original = HTMLCanvasElement.prototype.getContext; window.__nextRestoreContext = () => { HTMLCanvasElement.prototype.getContext = original; }; HTMLCanvasElement.prototype.getContext = function (type, ...rest) { return type === 'webgl2' ? null : original.call(this, type, ...rest); }; window.__nextPtyReady = false; return true; })()`);
+    await session.click('.card [aria-label="Terminal"]'); await session.click('.card [aria-label="Terminal"]');
+    await session.waitFor("window.__nextPtyReady === true && !!document.querySelector('.terminal .xterm-rows')", { timeoutMs:ctx.timeoutMs });
+    await session.eval("window.cc.writePty(0, 'NEXT_TERMINAL_SHOWN\\r'), true");
+    await session.waitFor("document.querySelector('.terminal .xterm-rows').textContent.includes('NEXT_TERMINAL_SHOWN')", { timeoutMs:ctx.timeoutMs, label:'the first card terminal shows its session output' });
+    report.ok('the terminal shows what its session printed', true);
+    await session.eval("window.__nextRestoreContext(), true");
     report.ok('terminal is inset and the composer is hidden', await session.eval("document.querySelector('.card .composer-host').hidden && getComputedStyle(document.querySelector('.terminal')).borderRadius === '14px' && parseFloat(getComputedStyle(document.querySelector('.terminal')).marginLeft) === 12"));
     await session.screenshot(path.join(report.dir, 'next-terminal.png'));
     await session.click('.card [aria-label="Status"]');

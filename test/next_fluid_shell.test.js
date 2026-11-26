@@ -40,7 +40,9 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   let notify = () => {}, frame = () => {};
   let sendNowAllowed = false, sendStage = '';
   let onData;
-  const ptyData = new Set();
+  let ptyData = null;
+  const focused = [];
+  const unread = new Set(); // chats whose messages the store does not hold yet
   class Term {
     cols = 72;
     rows = 24;
@@ -67,12 +69,14 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
     getWorkingElapsedMs: id => elapsed[id] ?? null,
     canSendQueuedNow: (id, oid) => id === 'fixture:a' && oid === 'receipt' && sendNowAllowed,
     sendQueuedNow: (...args) => calls.push(['queued-now', ...args]),
-    selectSessionDetail: id => { rendered.push(id); return id; }, applyFrame() {},
+    // A detail that holds a message and prints as its stream, so history counts as read.
+    selectSessionDetail: id => { rendered.push(id); return { transcriptItems: unread.has(id) ? [] : [{ id: 'row' }], toString: () => id }; }, applyFrame() {},
+    setFocusedChatStreams: ids => focused.push([...ids]),
     sendTurn: (...args) => calls.push(['send', ...args]),
   };
   window.cc = {
     getChatStreamState: async () => ({ connected:true, sessions: rows }), promptList: async () => ({ok:true,questions:[]}),
-    onChatStreamFrame(fn) { frame = fn; }, onPtyData(fn) { ptyData.add(fn); },
+    onChatStreamFrame(fn) { frame = fn; }, onPtyData(fn) { ptyData = fn; }, // the bridge keeps only the latest listener
     requestStreamEvents: async args => { calls.push(['history', args.streamId]); return { ok:true }; },
     createPty: async (...args) => { calls.push(['create', ...args]); return 'pty:'+args[0]; },
     killPty: async (...args) => { calls.push(['kill', ...args]); },
@@ -81,7 +85,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
     chatRename: async (...args) => { calls.push(['rename', ...args]); return {ok: false}; },
     chatClose: async (...args) => { calls.push(['close', ...args]); return {ok: true}; },
   };
-  onData = (slot, data) => { for (const fn of ptyData) fn(slot, data); };
+  onData = (slot, data) => ptyData?.(slot, data);
   window.Function('require', fs.readFileSync(entry,'utf8'))(id => {
     if (id === '../web_cc') return { installWebCc() {} };
     if (id.startsWith('@xterm/')) return { Terminal: Term, FitAddon: Addon, Unicode11Addon: Addon, WebglAddon: Addon };
@@ -89,11 +93,20 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   });
   const $ = css => window.document.querySelector(css);
   const choose = id => { $("button[aria-label^=Chats]").click(); $(`.popover [data-stream-id="fixture:${id}"]`).click(); };
-  return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts,
+  return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts, focused, unread,
     update: () => notify(),
     inventory: () => { frame({type:'session.inventory', sessions:rows}); notify(); },
     sendState: (stage, allowed) => { sendStage = stage; sendNowAllowed = allowed; notify(); },
     shown: () => [...window.document.querySelectorAll('.chat-card:not([hidden])')] };
+}
+
+// jsdom lays nothing out: give a pane in view 400 of height over 2000 of messages.
+// The returned function scrolls it as a reader does, scroll event included.
+function reader(shell, thread) {
+  const inView = () => !thread.closest('[hidden]');
+  Object.defineProperty(thread, 'clientHeight', { configurable: true, get: () => inView() ? 400 : 0 });
+  Object.defineProperty(thread, 'scrollHeight', { configurable: true, get: () => inView() ? 2000 : 0 });
+  return top => { thread.scrollTop = top; thread.dispatchEvent(new shell.window.Event('scroll')); };
 }
 
 function draft(shell, section, text) {
@@ -114,7 +127,8 @@ test('fluid shell uses two actual card controllers and preserves draft and scrol
   draft(s, '[data-pane=chat2]', 'B draft').focus();
   await flush();
   assert.ok(s.calls.some(([name,id,value])=>name==='send'&&id==='fixture:a'&&value==='A only'));
-  s.$('[data-pane=chat] .thread').scrollTop=37;
+  const scroll = reader(s, s.$('[data-pane=chat] .thread'));
+  scroll(1600); scroll(37);
   s.$('[data-pane=chat] [aria-label=Status]').click();
   assert.equal(s.$('[data-pane=chat] .status').hidden,false);
   s.choose('c');
@@ -202,6 +216,80 @@ test('storage denial falls back to a left rail and still starts the workspace', 
   assert.equal(s.$('[data-pane=assistant]').hidden, false);
   s.choose('a');
   assert.equal(s.shown()[0].querySelector('.thread-inner').dataset.streamId, 'fixture:a');
+});
+
+test('the chats on screen are the store\'s focused streams and each is read once, again after it returns', async t => {
+  const s = openShell(t);
+  await flush();
+  const reads = () => s.calls.filter(c => c[0] === 'history').map(c => c[1]);
+  assert.deepEqual(s.focused.at(-1), ['fixture:assistant']);
+  assert.deepEqual(reads(), ['fixture:assistant']);
+  s.choose('a'); s.choose('b');
+  await flush();
+  assert.deepEqual(s.focused.at(-1), ['fixture:assistant', 'fixture:a', 'fixture:b']);
+  s.update(); s.update();
+  assert.deepEqual(reads(), ['fixture:assistant', 'fixture:a', 'fixture:b'], 'a render does not read a chat again');
+  s.$('[data-pane=chat] [aria-label=Close]').click();
+  await flush();
+  assert.equal(s.focused.at(-1).includes('fixture:a'), false, 'a closed card releases its chat');
+  s.choose('a');
+  await flush();
+  assert.equal(reads().filter(id => id === 'fixture:a').length, 2, 'a chat that left the screen is read again');
+  assert.equal(reads().filter(id => id === 'fixture:assistant').length, 1);
+});
+
+test('a reader who moved up keeps their place through a hidden card and a chat switch', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const thread = s.$('[data-pane=chat] .thread');
+  const scroll = reader(s, thread);
+  scroll(1600); scroll(300);
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  assert.equal(thread.closest('.chat-card').hidden, true);
+  s.sendState('sending', false);
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  assert.equal(thread.scrollTop, 300, 'the card comes back where its reader left it');
+  s.sendState('queued', false);
+  assert.equal(thread.scrollTop, 300, 'a message that arrived out of view did not move the reader to the end');
+
+  const show = id => { s.$('[data-pane=chat] .next-chat-title').click(); s.$(`.popover:not([hidden]) [data-stream-id="fixture:${id}"]`).click(); };
+  show('c');
+  assert.equal(s.$('[data-pane=chat] .thread-inner').dataset.streamId, 'fixture:c');
+  show('a');
+  assert.equal(thread.scrollTop, 300, 'the returning chat opens at its saved place');
+  s.sendState('sending', false);
+  assert.equal(thread.scrollTop, 300, 'and stays there when the next message arrives');
+  scroll(1600);
+  s.sendState('queued', false);
+  assert.equal(thread.scrollTop, 2000, 'a reader back at the latest message follows new ones');
+
+  show('c'); show('a');
+  s.sendState('sending', false);
+  assert.equal(thread.scrollTop, 2000, 'a reader who left at the latest message still follows after the chat comes back');
+
+  scroll(300); show('c');
+  s.unread.add('fixture:a');
+  show('a');
+  assert.match(s.$('[data-pane=chat] .thread-inner').textContent, /Loading messages/);
+  s.unread.delete('fixture:a'); s.update();
+  assert.equal(thread.scrollTop, 300, 'the saved place waits for the messages it belongs to');
+
+  const paints = s.rendered.length;
+  s.window.dispatchEvent(new s.window.Event('resize'));
+  assert.equal(s.rendered.length, paints, 'a resize with no place to restore repaints no transcript');
+});
+
+test('a running time steps to the next second on its own, with no new report', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  const a = s.rows[1]; a.working = true;
+  s.elapsed[a.stream_id] = 7000;
+  s.update();
+  const timer = () => s.$('[data-pane=chat] .next-working-time').textContent;
+  assert.equal(timer(), '7s');
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal(timer(), '8s');
+  a.working = false; s.update();
 });
 
 test('U1: the Next working time uses authoritative elapsed, then the carried start, a label or zero', async t => {
@@ -309,7 +397,8 @@ test('title switching trades two sessions with draft and scroll, resetting both 
   const s = openShell(t);
   await flush(); s.choose('a'); s.choose('b');
   draft(s,'[data-pane=chat]','draft a'); draft(s,'[data-pane=chat2]','draft b');
-  s.$('[data-pane=chat2] .thread').scrollTop = 71;
+  const scroll = reader(s, s.$('[data-pane=chat2] .thread'));
+  scroll(1600); scroll(71);
   s.$('[data-pane=chat2] [aria-label=Status]').click();
   s.$('[data-pane=chat] .next-chat-title')?.click();
   const other = s.$('.popover:not([hidden]) [data-stream-id="fixture:b"]');
