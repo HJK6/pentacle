@@ -7,12 +7,13 @@ const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 
-const DEFAULTS = Object.freeze({ fileTimeoutMs: 60000, runTimeoutMs: 900000, termGraceMs: 250, killGraceMs: 1000 });
+const DEFAULTS = Object.freeze({ fileTimeoutMs: 60000, runTimeoutMs: 900000, termGraceMs: 10_000, killGraceMs: 20_000 });
 const SOURCE_IDENTITY_TIMEOUT_MS = 30_000;
+const CLEANUP_PROBE_MS = 20_000;
 const TAIL_BYTES = 65536;
 const FORWARD_BYTES = 1048576;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function socketHasNoListener(socket) {
+function socketHasNoListener(socket, timeoutMs) {
   return new Promise(resolve => {
     const connection = net.createConnection({path: socket});
     const finish = stopped => {
@@ -20,13 +21,13 @@ function socketHasNoListener(socket) {
       connection.destroy();
       resolve(stopped);
     };
-    const timer = setTimeout(() => finish(false), 500);
+    const timer = setTimeout(() => finish(false), timeoutMs);
     connection.once('connect', () => finish(false));
     connection.once('error', error => finish(['ECONNREFUSED', 'ENOENT'].includes(error.code)));
   });
 }
 
-async function stopOwnedTmux(home, env) {
+async function stopOwnedTmux(home, env, remaining) {
   if (typeof process.getuid !== 'function') return;
   const uid = process.getuid();
   const socketDir = path.join(home, `tmux-${uid}`);
@@ -38,10 +39,15 @@ async function stopOwnedTmux(home, env) {
     const entry = fs.lstatSync(socket, {throwIfNoEntry: false});
     if (!entry) continue;
     if (!entry.isSocket() || entry.uid !== uid) throw new Error('unexpected private tmux entry');
+    const timeout = () => {
+      const ms = Math.floor(Math.min(CLEANUP_PROBE_MS, remaining()));
+      if (ms < 1) throw new Error('owned tmux cleanup deadline exceeded');
+      return ms;
+    };
     try {
-      execFileSync('tmux', ['-S', socket, 'kill-server'], {env, stdio: 'ignore', timeout: 5000});
+      execFileSync('tmux', ['-S', socket, 'kill-server'], {env, stdio: 'ignore', timeout: timeout()});
     } catch (error) {
-      if (!await socketHasNoListener(socket)) throw error;
+      if (!await socketHasNoListener(socket, timeout())) throw error;
       const current = fs.lstatSync(socket, {throwIfNoEntry: false});
       if (current && (current.ino !== entry.ino || current.dev !== entry.dev)) throw error;
     }
@@ -106,10 +112,12 @@ function discover(repoRoot, patterns) {
   }).sort();
 }
 
-function groupMembers(pgid, timeoutMs = 250) {
+function groupMembers(pgid, timeoutMs = CLEANUP_PROBE_MS) {
   if (process.platform === 'linux') {
+    const scanDeadline = performance.now() + Math.min(CLEANUP_PROBE_MS, timeoutMs);
     const members = [];
     for (const name of fs.readdirSync('/proc')) {
+      if (performance.now() >= scanDeadline) throw Object.assign(new Error('owned process inspection timed out'), {code: 'ETIMEDOUT'});
       if (!/^[0-9]+$/.test(name)) continue;
       let stat;
       try { stat = fs.readFileSync(`/proc/${name}/stat`, 'utf8'); }
@@ -123,8 +131,8 @@ function groupMembers(pgid, timeoutMs = 250) {
     // Exact owned group filter. Bounded and injectable for unit tests; never a
     // process-name match or an SSH/daemon query.
     let output;
-    try { output = execFileSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: Math.min(250, timeoutMs), maxBuffer: 4 * 1024 * 1024 }); }
-    catch (error) { throw new Error(`owned process inspection unavailable (${error.code || error.name})`); }
+    try { output = execFileSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: Math.max(1, Math.floor(Math.min(CLEANUP_PROBE_MS, timeoutMs))), maxBuffer: 4 * 1024 * 1024 }); }
+    catch (error) { throw new Error(`owned process inspection unavailable (${error.code || error.name})`, {cause: error}); }
     const lines = output.trim().split('\n').filter(line => line.trim());
     if (!output.trim()) throw new Error('owned process inspection unavailable (incomplete ps output)');
     return lines.map(line => {
@@ -141,7 +149,7 @@ function groupMembers(pgid, timeoutMs = 250) {
 
 const SCAN_RECORD_LIMIT = 16;
 
-async function cleanupGroup(pgid, deps, limits) {
+async function cleanupGroup(pgid, deps, limits, deadline = Infinity) {
   // scans: per-inspection elapsed/error receipt (diagnostic only; first and last rows kept when bounded).
   const result = { status: 'clean', pgid, survivor_pids: [], zombie_pids: [], signals: [], errors: [], scans: [], scans_dropped: 0 };
   if (!Number.isSafeInteger(pgid) || pgid <= 1 || pgid === process.pid) {
@@ -151,15 +159,20 @@ async function cleanupGroup(pgid, deps, limits) {
     if (result.scans.length >= SCAN_RECORD_LIMIT) { result.scans.splice(SCAN_RECORD_LIMIT / 2, 1); result.scans_dropped += 1; }
     result.scans.push(row);
   };
-  const inspect = () => {
+  const inspect = (until = deadline) => {
     const start = deps.now();
     try {
-      const members = deps.groupMembers(pgid);
+      const remaining = until - start;
+      if (remaining < 1) throw new Error('owned process inspection deadline exceeded');
+      const members = deps.groupMembers(pgid, remaining);
+      if (deps.now() >= until) throw new Error('owned process inspection exceeded its deadline');
       record({ elapsed_ms: Math.round((deps.now() - start) * 1000) / 1000, members: members.length, error: null });
       return members;
     } catch (error) {
       record({ elapsed_ms: Math.round((deps.now() - start) * 1000) / 1000, members: null, error: error.code || error.message });
-      result.errors.push(`inspection: ${error.code || error.message}`);
+      const phaseTimeout = until < deadline && deps.now() >= until &&
+        (error.code === 'ETIMEDOUT' || error.cause?.code === 'ETIMEDOUT');
+      if (!phaseTimeout) result.errors.push(`inspection: ${error.code || error.message}`);
       return null;
     }
   };
@@ -171,18 +184,20 @@ async function cleanupGroup(pgid, deps, limits) {
   // Inspection failure is not success; still signal only this owned group.
   if (members === null || members.some(row => row.state !== 'Z')) {
     signal('SIGTERM');
-    const termEnd = deps.now() + limits.termGraceMs;
+    const termEnd = Math.min(deadline, deps.now() + limits.termGraceMs);
     while (deps.now() < termEnd) {
       await deps.sleep(Math.min(25, Math.max(1, termEnd - deps.now())));
-      members = inspect();
+      if (termEnd - deps.now() < 1) break;
+      members = inspect(termEnd);
       if (members && !members.some(row => row.state !== 'Z')) break;
     }
     if (members === null || members.some(row => row.state !== 'Z')) {
       signal('SIGKILL');
-      const killEnd = deps.now() + limits.killGraceMs;
+      const killEnd = Math.min(deadline, deps.now() + limits.killGraceMs);
       while (deps.now() < killEnd) {
         await deps.sleep(Math.min(25, Math.max(1, killEnd - deps.now())));
-        members = inspect();
+        if (killEnd - deps.now() < 1) break;
+        members = inspect(killEnd);
         if (members && !members.some(row => row.state !== 'Z')) break;
       }
     }
@@ -198,7 +213,7 @@ async function cleanupGroup(pgid, deps, limits) {
   return result;
 }
 
-async function operation(command, args, { repoRoot, env, deadline, fileDeadline, label }, deps, limits) {
+async function operation(command, args, { repoRoot, env, deadline, fileDeadline, cleanupDeadline = deadline, label }, deps, limits) {
   const start = deps.now();
   if (deps.abortSignal?.aborted) return { aborted: true, timedOut: false, exitCode: null, signal: null, duration_ms: 0, tail: '', cleanup: { status: 'not_started', survivor_pids: [] } };
   const remaining = Math.min(deadline, fileDeadline) - start;
@@ -234,7 +249,7 @@ async function operation(command, args, { repoRoot, env, deadline, fileDeadline,
       if (deps.abortSignal?.aborted) onAbort();
     } catch (error) { spawnError = error.code || error.name; settle({ exitCode: null, signal: null }); }
   });
-  const cleanup = child?.pid ? await cleanupGroup(child.pid, deps, limits) : { status: spawnError ? 'not_started' : 'incomplete', survivor_pids: [] };
+  const cleanup = child?.pid ? await cleanupGroup(child.pid, deps, limits, cleanupDeadline) : { status: spawnError ? 'not_started' : 'incomplete', survivor_pids: [] };
   // Leader exit does not imply pipe EOF: a descendant may have inherited it.
   child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref();
   const outputTail = (timeoutTail || tail).toString('utf8').split(/\r?\n/).slice(-20).join('\n');
@@ -252,9 +267,13 @@ async function run(repoRoot, options, injected = {}) {
   const onINT = () => interrupt('SIGINT'), onTERM = () => interrupt('SIGTERM');
   const limits = { ...DEFAULTS, ...options };
   const start = deps.now(), deadline = start + limits.runTimeoutMs;
+  // Stop subjects early enough to reap their group and then stop private tmux servers.
+  // Small caller-supplied budgets still leave most of the run for the subject.
+  const groupDeadline = deadline - Math.min(CLEANUP_PROBE_MS, limits.runTimeoutMs / 8);
+  const workDeadline = groupDeadline - Math.min(limits.termGraceMs + limits.killGraceMs, limits.runTimeoutMs / 8);
   const entries = discover(repoRoot, options.patterns);
   if (!entries.length) throw new Error('no tests matched');
-  const summary = { version: 1, repo_root: path.resolve(repoRoot), source_before: deps.sourceIdentity(repoRoot, deadline - deps.now()), files: [], discovered: entries, file_timeout_ms: limits.fileTimeoutMs, run_timeout_ms: limits.runTimeoutMs, cleanup_allowance_ms: limits.termGraceMs + limits.killGraceMs, duration_ms: 0, exit_code: 1, runner_errors: [], directory_cleanup_errors: [] };
+  const summary = { version: 1, repo_root: path.resolve(repoRoot), source_before: deps.sourceIdentity(repoRoot, workDeadline - deps.now()), files: [], discovered: entries, file_timeout_ms: limits.fileTimeoutMs, run_timeout_ms: limits.runTimeoutMs, cleanup_allowance_ms: limits.termGraceMs + limits.killGraceMs, duration_ms: 0, exit_code: 1, runner_errors: [], directory_cleanup_errors: [] };
   const cacheRoot = path.join(repoRoot, 'node_modules', '.cache');
   const priorFiles = new Set();
   let outDir, testHome, env;
@@ -275,12 +294,12 @@ async function run(repoRoot, options, injected = {}) {
       const row = { file, status: 'not_run', duration_ms: 0, cleanup: { status: 'not_started', survivor_pids: [] }, reason: null };
       summary.files.push(row);
       if (deps.abortSignal.aborted) { row.reason = 'runner_interrupted'; continue; }
-      if (fileStart >= deadline) { row.reason = 'whole_run_ceiling'; continue; }
+      if (fileStart >= workDeadline) { row.reason = 'whole_run_ceiling'; continue; }
       if (process.platform === 'win32') { row.reason = 'requires: POSIX owned process-group cleanup'; continue; }
       const fileDeadline = fileStart + limits.fileTimeoutMs;
       let target = path.resolve(repoRoot, file);
       if (!target.startsWith(path.resolve(repoRoot) + path.sep) || !/\.(js|ts)$/.test(file)) { row.status = 'fail'; row.reason = 'unsupported_test_path'; continue; }
-      const context = { repoRoot, env, deadline, fileDeadline, label: file };
+      const context = { repoRoot, env, deadline: workDeadline, cleanupDeadline: groupDeadline, fileDeadline, label: file };
       if (file.endsWith('.ts')) {
         const output = path.join(outDir, `${index}-${path.basename(file, '.ts')}.cjs`);
         const build = await operation(path.join(repoRoot, 'node_modules', '.bin', 'esbuild'), [target, '--bundle', '--platform=node', '--format=cjs', '--target=node18', '--external:node:*', '--external:jsdom', `--outfile=${output}`], context, deps, limits);
@@ -331,7 +350,7 @@ async function run(repoRoot, options, injected = {}) {
   } finally {
     let tmuxClean = true;
     if (testHome && env) {
-      try { await stopOwnedTmux(testHome, env); }
+      try { await stopOwnedTmux(testHome, env, () => deadline - deps.now()); }
       catch (error) { tmuxClean = false; summary.directory_cleanup_errors.push({ kind: 'tmux', error: error.code || error.name }); }
     }
     for (const [kind, directory] of [['test_home', testHome], ['bundle_output', outDir]]) {
@@ -342,9 +361,12 @@ async function run(repoRoot, options, injected = {}) {
     }
     process.removeListener('SIGINT', onINT); process.removeListener('SIGTERM', onTERM);
   }
-  summary.duration_ms = Math.round(deps.now() - start);
-  summary.generated_at = new Date().toISOString();
   summary.source_after = deps.sourceIdentity(repoRoot, deadline - deps.now());
+  const finished = deps.now();
+  summary.duration_ms = Math.round(finished - start);
+  summary.generated_at = new Date().toISOString();
+  if (deps.abortSignal.aborted) summary.runner_errors.push('runner_interrupted');
+  if (finished >= deadline) summary.runner_errors.push('whole_run_ceiling');
   summary.exit_code = summary.files.every(row => row.status === 'pass') && !summary.runner_errors.length && !summary.directory_cleanup_errors.length ? 0 : 1;
   deps.stderr.write('\nFILE\tSTATUS\tDURATION_MS\tCLEANUP\n');
   for (const row of summary.files) deps.stderr.write(`${row.file}\t${row.status}\t${row.duration_ms}\t${row.cleanup.status}${row.reason ? ` (${row.reason})` : ''}\n`);

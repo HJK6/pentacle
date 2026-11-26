@@ -40,10 +40,10 @@ address = sys.argv[1]
 listener = socket.socket()
 client = socket.socket()
 try:
-    listener.settimeout(2.0)
+    listener.settimeout(15.0)
     listener.bind((address, 0))
     listener.listen(1)
-    client.settimeout(2.0)
+    client.settimeout(15.0)
     client.connect(listener.getsockname())
     connection, _ = listener.accept()
     connection.close()

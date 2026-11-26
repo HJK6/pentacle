@@ -96,9 +96,14 @@ def changes(base, head, *, repo=None, timeout=None):
 def _collect_coverage(repo, revision, root, python, remaining, *, historical, errors):
     from gate_env import ensure_npm_env, group_alive, stop_group
 
+    def command_budget(available):
+        # Reserve two cleanup phases and keep short compare deadlines usable.
+        return available - min(40.0, available / 2)
+
     def run(argv, *, timeout, cwd=root, env=None, capture_output=True, text=True):
-        # Leave room for TERM/KILL and the Node collector's own abort cleanup.
-        bound = min(timeout, remaining() - 10)
+        available = remaining()
+        deadline = time.monotonic() + available
+        bound = min(timeout, command_budget(available))
         require(bound > 0, "coverage comparison timed out")
         with subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True, text=text,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
@@ -108,7 +113,7 @@ def _collect_coverage(repo, revision, root, python, remaining, *, historical, er
                 raise Invalid(f"{argv[0]} timed out after {bound:.1f}s") from exc
             finally:
                 if group_alive(proc.pid):
-                    stop_group(proc, grace=5)
+                    stop_group(proc, grace=min(20.0, max(0.0, deadline - time.monotonic()) / 2))
                     if group_alive(proc.pid):
                         raise Invalid(f"{argv[0]} collection process group did not stop")
             return subprocess.CompletedProcess(argv, proc.returncode, out, err)
@@ -208,7 +213,7 @@ collectNodeTests(process.cwd(), JSON.parse(process.argv[1]), {...options, abortS
   .then(rows => process.stdout.write(JSON.stringify(rows)))
   .catch(error => { console.error(error.message); process.exitCode = 1; });
 """
-        collection_bound = min(npm["timeout_s"], remaining() - 15)
+        collection_bound = min(npm["timeout_s"], command_budget(remaining()) - 5)
         require(collection_bound >= 0.001, "coverage comparison timed out before npm collection")
         options = {"runTimeoutMs": int(collection_bound * 1000),
                    "fileTimeoutMs": npm.get("test_file_timeout_ms", 60000)}
