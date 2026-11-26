@@ -33,7 +33,10 @@ from pathlib import Path
 SERVICE_DIR = Path(__file__).resolve().parents[2]
 STORAGE_EXIT = 73
 STAGE_EXIT = 74
-FAMILIES = {"archive_rows": "sessions", "archive_events": "session_event_tail"}
+# The innermost match names the commit: the archive identity index commits in
+# its own transaction inside the event stage.
+FAMILIES = {"archive_rows": "sessions", "archive_events": "session_event_tail",
+            "_build_identity_index": "identity_index"}
 
 
 def _receipt(path: Path, body: dict) -> None:

@@ -226,6 +226,12 @@ def test_storage_stop_between_file_commits(chat, tmp_path, table, archive_mode, 
         written = [next(iter(commit["files"])) for commit in body["commits"]
                    if commit["table"] == name and commit["files"]]
         assert written and written == ["archive", "hot"] * (len(written) // 2), (name, body["commits"])
+    # The control's archive starts without the identity index, which commits
+    # once, to the archive alone, before the pass's first event commit.
+    families = [commit["table"] for commit in body["commits"] if commit["files"]]
+    index = [commit for commit in body["commits"] if commit["table"] == "identity_index" and commit["files"]]
+    assert len(index) == 1 and list(index[0]["files"]) == ["archive"], body["commits"]
+    assert families.index("identity_index") < families.index(EVENTS), body["commits"]
     assert sum(stopped) >= 1, f"{table} row is in neither file after the stop: {stopped}"
     assert stopped == STORAGE[file]
     public_readback(chat, pair, hot_count=1)
