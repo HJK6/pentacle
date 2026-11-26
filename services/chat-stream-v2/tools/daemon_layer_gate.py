@@ -97,6 +97,23 @@ def _anchor_statement(scope: ast.AST, line: int) -> ast.AST | None:
                                           not isinstance(node, ast.stmt)))
 
 
+# The F5 inventory identifies this observer by its definition line. Its
+# frozen reachability read is the await at line 2169, before reservation.
+SPAWN_OBSERVER = Anchor("services/chat-stream-v2/spawnctl.py", 2143, "SpawnCtl._spawn_impl")
+
+
+def _frozen_selector(scope: ast.AST, anchor: Anchor) -> ast.AST | None:
+    return _anchor_statement(scope, 2169 if anchor == SPAWN_OBSERVER else anchor.line)
+
+
+def _spawn_entry_preserved(frozen: ast.AST, candidate: ast.AST) -> bool:
+    # Preserve the original executable entry through the remote-host fence.
+    # A matching await after a return or beneath a disabled branch proves nothing.
+    prefix = [stmt for stmt in frozen.body if stmt.lineno <= 2169]
+    return (len(candidate.body) >= len(prefix)
+            and all(_fingerprint(old) == _fingerprint(new) for old, new in zip(prefix, candidate.body)))
+
+
 def _fingerprint_counts(scope: ast.AST) -> dict[str, int]:
     counts: dict[str, int] = {}
     for node in ast.walk(scope):
@@ -415,7 +432,8 @@ def _compare_anchors(name: str, anchors: list[Anchor],
         if candidate_scope is None:
             errors.append(f"{name}: protected symbol is missing: {path}:{line} {symbol}")
             continue
-        baseline_node = _anchor_statement(baseline_scope, line)
+        anchor = Anchor(path, line, symbol)
+        baseline_node = _frozen_selector(baseline_scope, anchor)
         if baseline_node is None:
             errors.append(f"{name}: frozen AST anchor missing: {path}:{line} {symbol}")
             continue
@@ -431,6 +449,8 @@ def _compare_anchors(name: str, anchors: list[Anchor],
         mergebase_count = 0
         if mergebase_scope is not None:
             mergebase_count = _fingerprint_counts(mergebase_scope).get(fingerprint, 0)
+        if anchor == SPAWN_OBSERVER and not _spawn_entry_preserved(baseline_scope, candidate_scope):
+            errors.append(f"{name}: remote spawn observation entry path changed: {path}:{line} {symbol}")
         expected_count = max(baseline_count, mergebase_count)
         if candidate_count != expected_count:
             errors.append(f"{name}: protected AST selector count changed ({expected_count} to {candidate_count}): {path}:{line} {symbol}")
@@ -470,7 +490,7 @@ def _retired_selector_errors(base: str, active_anchors: list[Anchor]) -> list[st
     frozen_fingerprints: dict[tuple[str, str, int], str] = {}
     for anchor in frozen_anchors:
         scope = frozen_scopes.get((anchor.path, anchor.symbol))
-        node = _anchor_statement(scope, anchor.line) if scope else None
+        node = _frozen_selector(scope, anchor) if scope else None
         if node is not None:
             ident = _fingerprint(node)
             frozen_fingerprints[(anchor.path, anchor.symbol, anchor.line)] = ident

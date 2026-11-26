@@ -20,6 +20,15 @@ FROZEN = 'f153ca8adce2a38e0c5092b2dc98ff5aec16e06e'
 CORE = ('store.py', 'server.py', 'comms.py', 'sessions.py', 'ingest.py')
 CENSUS_PATH = SERVICE / 'daemon_contract/b04_core_imports.json'
 CENSUS_SHA256 = 'dc0907b598fb3f11a798d300ed25cc6a53773c9522a34b8aef5440722288a414'
+ADMISSIONS_PATH = SERVICE / 'daemon_contract/b04_f1_admissions.json'
+ADMISSIONS_SHA256 = '37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570'
+STORE_PATH = 'services/chat-stream-v2/store.py'
+
+
+def require_signature_python() -> None:
+    if sys.version_info[:2] != (3, 13):
+        version = '.'.join(map(str, sys.version_info[:3]))
+        raise ValueError(f'B04 admission signatures require the Python 3.13 AST format. Run with python3.13 (found {version})')
 
 
 def _owners() -> dict[str, list[str]]:
@@ -207,12 +216,86 @@ F1_PRIMITIVES = frozenset({
 })
 
 
-def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
+ADMITTABLE_KINDS = frozenset({
+    'submit', 'call:submit', 'run', 'call:run', 'protected-callback-call',
+    'protected-callback-statement', 'protected-callback-condition', 'recurring-call',
+})
+NEVER_ADMIT = F1_PRIMITIVES - {'submit', '_submit'}
+
+
+def admission_digest(payload: dict) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _one_line(value) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]
+
+
+def _production_path(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    path = Path(value)
+    return (path.as_posix() == value and '..' not in path.parts and path.suffix == '.py'
+            and (path.parts[:2] == ('services', 'chat-stream-v2') or value == 'services/_shared/specs_service.py')
+            and not {'tests', 'tools', 'deploy'}.intersection(path.parts))
+
+
+def _admission_counts(blocks: list) -> dict[str, Counter]:
+    if not isinstance(blocks, list):
+        raise ValueError('B04 F1 admissions must be a list')
+    result = {}
+    specs = set()
+    for block in blocks:
+        if not isinstance(block, dict) or set(block) != {'spec_id', 'spec_review_id', 'reason', 'scopes', 'sha256'}:
+            raise ValueError('invalid B04 F1 admission block fields')
+        payload = {k: v for k, v in block.items() if k != 'sha256'}
+        if admission_digest(payload) != block['sha256']:
+            raise ValueError('B04 F1 admission block digest mismatch')
+        if not all(_one_line(block[key]) for key in ('spec_id', 'spec_review_id', 'reason')):
+            raise ValueError('invalid B04 F1 admission metadata')
+        if block['spec_id'] in specs or not isinstance(block['scopes'], list) or not block['scopes']:
+            raise ValueError('duplicate or empty B04 F1 item')
+        specs.add(block['spec_id'])
+        scopes = set()
+        for row in block['scopes']:
+            if not isinstance(row, dict) or set(row) != {'path', 'scope', 'nodes'}:
+                raise ValueError('invalid B04 F1 admission scope fields')
+            path, scope, nodes = row['path'], row['scope'], row['nodes']
+            if not _production_path(path) or not _one_line(scope) or (path, scope) in scopes:
+                raise ValueError('invalid or duplicate B04 F1 scope')
+            scopes.add((path, scope))
+            if not isinstance(nodes, list) or not nodes:
+                raise ValueError('empty B04 F1 admission scope')
+            counts = Counter()
+            for node in nodes:
+                if not isinstance(node, dict) or set(node) != {'kind', 'sha256', 'count'}:
+                    raise ValueError(f'invalid B04 F1 admission node in {scope}')
+                kind, digest, count = node['kind'], node['sha256'], node['count']
+                if (not isinstance(kind, str) or kind not in ADMITTABLE_KINDS
+                        or not isinstance(digest, str) or len(digest) != 64
+                        or any(c not in '0123456789abcdef' for c in digest)
+                        or type(count) is not int or count < 1 or (scope, kind, digest) in counts):
+                    raise ValueError(f'invalid B04 F1 admission kind, fingerprint or count in {scope}')
+                counts[scope, kind, digest] = count
+            result.setdefault(path, Counter()).update(counts)
+    return result
+
+
+def _load_admissions() -> dict[str, Counter]:
+    raw = ADMISSIONS_PATH.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != ADMISSIONS_SHA256:
+        raise ValueError('B04 F1 admissions digest mismatch')
+    return _admission_counts(json.loads(raw))
+
+
+def _primitive_sites(source: str, path: str, *, admissible: set | None = None) -> Counter[tuple[str, str, str]]:
     tree = ast.parse(source, filename=path)
     output: Counter[tuple[str, str, str]] = Counter()
     scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
     definitions: dict[tuple[str, ...], ast.AST] = {}
     callbacks: set[tuple[str, ...]] = set()
+    writer_submits: dict[tuple[str, ...], set[tuple[str, str, str]]] = {}
 
     def account_wrapper(node: ast.AST) -> bool:
         if not isinstance(node, ast.Attribute) or node.attr != 'run':
@@ -351,7 +434,12 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                                    and (n.func.id if isinstance(n.func, ast.Name) else n.func.attr)
                                    in {'sleep', 'wait', 'call_later', 'call_at'} for n in loop_nodes):
                     for call in (n for n in loop_nodes if isinstance(n, ast.Call)):
-                        output[(label, 'recurring-call', ast.dump(call, include_attributes=False))] += 1
+                        site = (label, 'recurring-call', ast.dump(call, include_attributes=False))
+                        output[site] += 1
+                        target = call.func
+                        name = getattr(target, 'attr', None) or getattr(target, 'id', '')
+                        if admissible is not None and not ({name} | aliases.get(name, set())) & NEVER_ADMIT:
+                            admissible.add(site)
             if isinstance(item, ast.Call):
                 dynamic = dynamic_primitive(item)
                 if dynamic and dynamic != 'connect':
@@ -373,6 +461,12 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                                  'connect' in aliases.get(target.id, set()))))
                 if primitive in F1_PRIMITIVES or primitive in aliases or account_wrapper(target) or store_kv(target) or queue_put or thread_start or alternate:
                     output[(label, 'call:' + primitive, ast.dump(item, include_attributes=False))] += 1
+                if admissible is not None and account_wrapper(target):
+                    admissible.add((label, 'call:run', ast.dump(item, include_attributes=False)))
+                    admissible.add((label, 'run', ast.dump(target, include_attributes=False)))
+                store_write = (admissible is not None and path == STORE_PATH and scope[:1] == ('Store',)
+                               and primitive == 'submit' and isinstance(target, ast.Attribute)
+                               and isinstance(target.value, ast.Name) and target.value.id == 'self')
                 if item.args and possible & {'submit', '_submit', 'submit_chat', 'enqueue_chat', 'create_task', 'ensure_future', 'call_later', 'call_at', 'run'}:
                     for arg in item.args:
                         candidate = arg.func if isinstance(arg, ast.Call) else arg
@@ -387,9 +481,17 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
                                 key = (*scope[:length], name)
                                 if key in definitions:
                                     callbacks.add(key)
+                                    if (store_write and arg is item.args[0] and isinstance(arg, ast.Name)
+                                            and key == (*scope, arg.id) and isinstance(definitions[key], ast.FunctionDef)):
+                                        sites = writer_submits.setdefault(key, set())
+                                        sites.add((label, 'call:submit', ast.dump(item, include_attributes=False)))
+                                        sites.add((label, 'submit', ast.dump(target, include_attributes=False)))
                                     break
             if isinstance(item, ast.Attribute) and isinstance(item.ctx, ast.Load) and (item.attr in F1_PRIMITIVES or account_wrapper(item) or store_kv(item)):
-                output[(label, item.attr, ast.dump(item, include_attributes=False))] += 1
+                site = (label, item.attr, ast.dump(item, include_attributes=False))
+                output[site] += 1
+                if admissible is not None and account_wrapper(item):
+                    admissible.add(site)
             elif isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id in F1_PRIMITIVES:
                 output[(label, item.id, ast.dump(item, include_attributes=False))] += 1
         context = {'aliases': aliases, 'sqlite_names': sqlite_names, 'sqlite_connect': sqlite_connect,
@@ -399,28 +501,58 @@ def _primitive_sites(source: str, path: str) -> Counter[tuple[str, str, str]]:
             scan_scope(child, (*scope, name), context)
     scan_scope(tree, (), {'aliases': {}, 'sqlite_names': {'sqlite3'}, 'sqlite_connect': set(),
                           'queue_names': set(), 'thread_names': set()})
+    # A callback fingerprint must not turn an existing scheduling operation into
+    # an admissible writer operation merely by passing that callback to submit.
+    primitive_scopes = {scope for scope, _, _ in output} if writer_submits else set()
     for key in callbacks:
         callback = definitions[key]
+        label = '.'.join(key)
+        short_writer = key in writer_submits and not any(
+            scope == label or scope.startswith(label + '.') for scope in primitive_scopes)
+        if short_writer:
+            admissible.update(writer_submits[key])
         # Count callback operations individually: removing an admitted operation
         # must not look like a newly introduced whole-function fingerprint.
         for item in ast.walk(callback):
             if isinstance(item, ast.Call):
-                output[('.'.join(key), 'protected-callback-call', ast.dump(item, include_attributes=False))] += 1
+                kind = 'protected-callback-call'
             elif isinstance(item, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return, ast.Raise, ast.Expr, ast.Delete, ast.Assert)):
                 # The named scheduler list is compared per reference above.
                 if (isinstance(item, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'callbacks' for t in item.targets)
                         and isinstance(item.value, (ast.List, ast.Tuple))):
                     continue
-                output[('.'.join(key), 'protected-callback-statement', ast.dump(item, include_attributes=False))] += 1
+                kind = 'protected-callback-statement'
             elif isinstance(item, (ast.If, ast.While)):
-                output[('.'.join(key), 'protected-callback-condition', ast.dump(item.test, include_attributes=False))] += 1
+                kind = 'protected-callback-condition'
+                item = item.test
+            else:
+                continue
+            site = (label, kind, ast.dump(item, include_attributes=False))
+            output[site] += 1
+            if admissible is not None:
+                admissible.add(site)
     return output
 
-def new_primitives(frozen: str, base: str, candidate: str, path: str) -> list[str]:
-    old, merged, current = (_primitive_sites(text, path) for text in (frozen, base, candidate))
-    return [f'{path}:{scope}: new F1 primitive {kind}'
-            for (scope, kind, signature), count in sorted(current.items())
-            if count > max(old[(scope, kind, signature)], merged[(scope, kind, signature)])]
+def new_primitives(frozen: str, base: str, candidate: str, path: str, *, admissions=None) -> list[str]:
+    old = _primitive_sites(frozen, path)
+    merged = _primitive_sites(base, path)
+    remaining = Counter(admissions)
+    admissible = set() if remaining else None
+    current = _primitive_sites(candidate, path, admissible=admissible)
+    errors = []
+    for site, count in sorted(current.items()):
+        scope, kind, signature = site
+        allowance = 0
+        if admissible and site in admissible:
+            digest = hashlib.sha256(signature.encode('utf-8')).hexdigest()
+            allowance = remaining.pop((scope, kind, digest), 0)
+            if allowance and count < old[site] + allowance:
+                errors.append(f'{path}:{scope}: stale F1 admission count for {kind}')
+        if count > max(old[site] + allowance, merged[site]):
+            errors.append(f'{path}:{scope}: new F1 primitive {kind}')
+    for scope, kind, digest in sorted(remaining):
+        errors.append(f'{path}:{scope}: stale or ineligible F1 admission {kind} {digest}')
+    return errors
 
 
 # Named F2 bulk views and traced callers in the frozen F2 sidecar. Generic
@@ -903,6 +1035,12 @@ def _changed_production(base: str) -> set[str]:
 
 
 def check(base: str) -> list[str]:
+    require_signature_python()
+    admissions = _load_admissions()
+    for path in admissions:
+        target = ROOT / path
+        if not target.is_file() or target.resolve() != target:
+            return [f'{path}: stale F1 admissions for missing or redirected file']
     errors = validate_census()
     errors.extend(check_anchors(base))
     errors.extend(scheduler_grammar((SERVICE / "main.py").read_text(),
@@ -913,13 +1051,15 @@ def check(base: str) -> list[str]:
         candidate = (SERVICE / path).read_text()
         errors.extend(new_imports(frozen, merged, candidate, path))
         errors.extend(new_feature_references(frozen, merged, candidate, path))
-    for path in sorted(_changed_production(base)):
+    paths = _changed_production(base) | admissions.keys()
+    for path in sorted(paths):
         target = ROOT / path
         if target.is_file():
             frozen = _optional_git_source(FROZEN, path)
             merged = _optional_git_source(base, path)
             candidate = target.read_text()
-            errors.extend(new_primitives(frozen, merged, candidate, path))
+            errors.extend(new_primitives(frozen, merged, candidate, path,
+                                         admissions=admissions.get(path)))
             errors.extend(new_bulk_sites(frozen, merged, candidate, path))
             errors.extend(new_identity_sites(frozen, merged, candidate, path))
     return errors

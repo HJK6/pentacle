@@ -36,6 +36,33 @@ class DaemonLayerGateTests(unittest.TestCase):
                                      frozen, frozen,
                                      _scopes(path, after, symbol))
 
+    def test_spawn_observer_pins_the_reachability_read_in_its_own_scope(self) -> None:
+        anchor = gate.SPAWN_OBSERVER
+        call = '            await self.hosts.ensure_reachable(host, "spawn")\n'
+        fence = ('        if host != local_host:\n'
+                 '            if self.hosts is None:\n                raise ValueError(host)\n' + call)
+        before = ('\n' * 2141 + 'class SpawnCtl:\n    async def _spawn_impl(self, host):\n'
+                  + '\n' * 22 + fence)
+        scopes = lambda code: _scopes(anchor.path, code, anchor.symbol)
+        frozen = scopes(before)
+        actual = gate._frozen_selector(frozen[(anchor.path, anchor.symbol)], anchor)
+        self.assertIsInstance(actual, ast.Expr)
+        self.assertEqual(ast.unparse(actual), "await self.hosts.ensure_reachable(host, 'spawn')")
+        def errors(code):
+            return gate._compare_anchors("F5_observation", [anchor], frozen, frozen, scopes(code))
+        self.assertEqual(errors(before + '        cleanup()\n'), [])
+        for changed in (
+                before.replace(call, '            pass\n'),
+                before + call[4:],
+                before.replace('self.hosts.ensure_reachable', 'other.ensure_reachable'),
+                before.replace(call, '            if False:\n    ' + call),
+                before.replace(fence, '        return\n' + fence),
+                before.replace(fence, '        create_remote_seat()\n' + fence),
+                before.replace(call, '            async def nested():\n    ' + call),
+                before + '        probe = self.hosts.ensure_reachable\n        await probe(host, "spawn")\n'):
+            with self.subTest(changed=changed[-180:]):
+                self.assertTrue(errors(changed))
+
     def test_line_only_drift_preserves_ast_identity(self) -> None:
         before = "class Router:\n    def send(self, value):\n        self.deliver(value)\n"
         after = "# moved by comments only\n\n" + before

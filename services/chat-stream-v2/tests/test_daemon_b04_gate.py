@@ -7,6 +7,8 @@ changed exceptions. Controls: unchanged baseline and named clean mutations.
 Runner: Python 3.13 and pytest. Dependencies: Git and isolated temporary clones;
 no network, production database, daemon or web host.
 """
+import ast
+import hashlib
 import json
 import os
 import shutil
@@ -55,8 +57,8 @@ def checkout(tmp_path):
     subprocess.run(['git', 'clone', '--quiet', '--shared', str(ROOT), str(clone)], check=True)
     for name in ('daemon_import_census.py', 'daemon_b04_gate.py', 'daemon_b04_anchors.py'):
         shutil.copy2(ROOT / SERVICE / 'tools' / name, clone / SERVICE / 'tools' / name)
-    shutil.copy2(ROOT / SERVICE / 'daemon_contract/b04_core_imports.json',
-                 clone / SERVICE / 'daemon_contract/b04_core_imports.json')
+    for name in ('b04_core_imports.json', 'b04_f1_admissions.json'):
+        shutil.copy2(ROOT / SERVICE / 'daemon_contract' / name, clone / SERVICE / 'daemon_contract' / name)
     return clone
 
 
@@ -901,3 +903,124 @@ def test_cycle2_identity_ratchet_uses_per_site_maximum_and_allows_retirement(cyc
     assert cycle2_gate.new_identity_sites(site, '', doubled, 'fixture.py')
     other = site.replace('"x"', '"other"')
     assert cycle2_gate.new_identity_sites(site, site, other, 'fixture.py')
+
+
+@pytest.mark.parametrize('scenario,expected', [
+    ('admitted', None),
+    ('no-entry', 'new F1 primitive call:submit'),
+    ('wrong-signature', 'new F1 primitive call:submit'),
+    ('stale', 'stale or ineligible F1 admission'),
+    ('digest-mismatch', 'F1 admissions digest mismatch'),
+    ('scheduler', 'invalid B04 F1 admission kind'),
+])
+def test_reviewed_store_admission(checkout, scenario, expected):
+    store = checkout / SERVICE / 'store.py'
+    call = 'self.submit(_op)' if scenario != 'scheduler' else 'asyncio.create_task(_op)'
+    expression = ast.parse(call, mode='eval').body
+    scope = 'Store.reviewed_write'
+    def node(kind, tree):
+        signature = hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+        return {'kind': kind, 'sha256': signature, 'count': 1}
+
+    path = store.relative_to(checkout).as_posix()
+    rows = [
+        dict(path=path, scope=scope, nodes=[node('call:' + expression.func.attr, expression),
+                                           node(expression.func.attr, expression.func)]),
+        dict(path=path, scope=scope + '._op', nodes=[
+            node('protected-callback-statement', ast.parse('return None').body[0])]),
+    ]
+    if scenario != 'stale':
+        method = ("    async def reviewed_write(self):\n"
+                  "        def _op(conn):\n            return None\n"
+                  f"        return await {call}\n\n")
+        source = store.read_text()
+        marker = '    async def submit('
+        assert source.count(marker) == 1
+        store.write_text(source.replace(marker, method + marker))
+    if scenario == 'wrong-signature':
+        rows[0]['nodes'][0]['sha256'] = '0' * 64
+    if scenario != 'no-entry':
+        manifest = checkout / SERVICE / 'daemon_contract/b04_f1_admissions.json'
+        checker = checkout / SERVICE / 'tools/daemon_b04_gate.py'
+        prior = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        block = dict(spec_id='spec_fixture', spec_review_id='fixture-review', reason='Fixture Store write.', scopes=rows)
+        raw = json.dumps(block, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+        block['sha256'] = hashlib.sha256(raw).hexdigest()
+        manifest.write_text(json.dumps([block]) + '\n')
+        if scenario != 'digest-mismatch':
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            checker.write_text(checker.read_text().replace(prior, digest))
+    base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=checkout, text=True).strip()
+    result = run_gate(checkout, base)
+    assert result.returncode == (1 if expected else 0), result.stderr
+    if expected:
+        assert expected in result.stderr, result.stderr
+
+
+def test_unsupported_python_reports_only_the_signature_format(cycle2_gate, monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'version_info', (3, 12, 0))
+    monkeypatch.setattr(sys, 'argv', ['daemon_b04_gate.py', '--base', '0' * 40])
+    assert cycle2_gate.main() == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err.splitlines() == [
+        '[daemon-b04] FAIL: B04 admission signatures require the Python 3.13 AST format. Run with python3.13 (found 3.12.0)'
+    ]
+
+
+def test_merged_store_admission_cannot_pay_for_another_identical_site(cycle2_gate):
+    path = 'services/chat-stream-v2/store.py'
+    source = ('class Store:\n    async def reviewed_write(self):\n'
+              '        def _op(conn):\n            return None\n'
+              '        await self.submit(_op)\n')
+    admissions = {(scope, kind, hashlib.sha256(signature.encode()).hexdigest()): count
+                  for (scope, kind, signature), count in cycle2_gate._primitive_sites(source, path).items()}
+    check = cycle2_gate.new_primitives
+    assert not check('', source, source, path, admissions=admissions)
+    assert check('', source, source + '        await self.submit(_op)\n', path, admissions=admissions)
+    assert check('', source, '', path, admissions=admissions)
+    assert check(source, source, source, path, admissions=admissions)
+
+    # An existing scheduled callback cannot acquire another submit via an admission.
+    scheduler = source.replace('return None', 'time.sleep(1)')
+    submit_only = {key: 1 for key in admissions if key[1] in {'call:submit', 'submit'}}
+    assert check(scheduler, scheduler, scheduler + '        await self.submit(_op)\n', path,
+                 admissions=submit_only)
+
+
+def test_admission_block_digest_is_independent_of_other_items(cycle2_gate):
+    gate = cycle2_gate
+    key = 'a' * 64
+    def block(spec_id):
+        scope = {'path': 'services/chat-stream-v2/account_executor.py', 'scope': 'Worker.call',
+                 'nodes': [{'kind': 'run', 'sha256': key, 'count': 1}]}
+        item = dict(spec_id=spec_id, spec_review_id='accepted-spec', reason='Correct the operation.', scopes=[scope])
+        item['sha256'] = gate.admission_digest(item)
+        return item
+
+    a, b = block('item_a'), block('item_b')
+    path = a['scopes'][0]['path']
+    assert gate._admission_counts([a, b])[path]['Worker.call', 'run', key] == 2
+    assert gate._admission_counts([b, a]) == gate._admission_counts([a, b])
+    with pytest.raises(ValueError, match='duplicate'):
+        gate._admission_counts([a, a])
+    with pytest.raises(ValueError, match='block digest'):
+        gate._admission_counts([dict(a, reason='Different text.')])
+
+
+@pytest.mark.parametrize('primitive', sorted({
+    'create_task', 'ensure_future', 'call_later', 'call_at', 'Timer', 'Thread',
+    'sleep', 'put_nowait', 'submit_chat', 'enqueue_chat',
+}))
+def test_callback_admission_cannot_admit_a_new_scheduling_call(cycle2_gate, primitive):
+    gate = cycle2_gate
+    path = 'services/chat-stream-v2/account_executor.py'
+    source = ('async def operation(runtime):\n    async def complete():\n'
+              f'        queue.{primitive}(1)\n    await runtime.run(complete)\n')
+    eligible = set()
+    sites = gate._primitive_sites(source, path, admissible=eligible)
+    grants = {(scope, kind, hashlib.sha256(sig.encode()).hexdigest()): count
+              for (scope, kind, sig), count in sites.items() if (scope, kind, sig) in eligible}
+    assert any(kind == 'protected-callback-call' for _, kind, _ in grants)
+    assert any(f'new F1 primitive call:{primitive}' in e
+               for e in gate.new_primitives('', '', source, path, admissions=grants))
