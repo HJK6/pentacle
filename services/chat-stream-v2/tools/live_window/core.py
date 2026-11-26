@@ -360,8 +360,12 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
         token_path: Path,
         timeout: float,
         sent_frame_observer: Callable[[dict[str, object]], None] | None,
+        *,
+        snapshot: bool = True,
     ) -> None:
         self.url = url
+        # False asks the daemon for no snapshot; its `ready` frame ends the handshake.
+        self.request_snapshot = snapshot
         self.token_path = token_path
         self.timeout = timeout
         self.sent_frame_observer = sent_frame_observer
@@ -395,7 +399,7 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
                               f"first failure: {first['error']!r}")
 
     def _handshake(self, deadline: float) -> dict[str, Any] | None:
-        """Return None on snapshot, or the recorded hello.error with its socket aborted.
+        """Return None on snapshot (or `ready` when opted out), or the recorded hello.error with its socket aborted.
 
         Every step uses the positive remaining budget of one absolute deadline,
         and a frame that arrives at or after it is never acted on.
@@ -412,6 +416,8 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
             if welcome.get("type") != "welcome":
                 raise LiveWindowError(f"operator connection expected welcome: {welcome!r}")
             hello = operator_hello(self.token_path, welcome)
+            if not self.request_snapshot:
+                hello = {**hello, "subscribe": {**(hello.get("subscribe") or {}), "snapshot": False}}
             self._remaining(deadline)
             if self._peer_closing():
                 raise LiveWindowError("operator connection closed by peer before hello")
@@ -435,6 +441,9 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
                 if frame.get("type") == "snapshot":
                     self._promote(deadline)
                     self.snapshot = frame
+                    return None
+                if frame.get("type") == "ready" and not self.request_snapshot:
+                    self._promote(deadline)
                     return None
         except BaseException:
             self._abort()
@@ -536,14 +545,19 @@ def authenticated_operator_connection(
     url: str,
     token_path: Path,
     timeout: float,
+    *,
+    snapshot: bool = True,
 ) -> Any:
     """Yield one nonce-proof authenticated raw socket plus its snapshot.
+
+    ``snapshot=False`` is for RPC-only callers: the daemon sends no snapshot,
+    ``connection.snapshot`` stays None, and ``rpc`` works as usual.
 
     Legacy callers with specialized observation loops use this boundary instead
     of reimplementing the nonce/proof handshake.  New callers should use
     :class:`LiveWindow` so registry and teardown guarantees apply as well.
     """
-    connection = _OperatorConnection(url, token_path, timeout, None)
+    connection = _OperatorConnection(url, token_path, timeout, None, snapshot=snapshot)
     with connection:
         yield connection
 
