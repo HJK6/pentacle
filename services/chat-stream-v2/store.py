@@ -1893,6 +1893,11 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             conn.execute(ASSISTANT_LANE_OWNERSHIP_DDL)
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
+            # The single-lane route read (lead_reported_done_conn) matches the lane
+            # from the index, not by decoding route_json for every resolved route.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_composite_routes_lane "
+                         "ON v2_assistant_composite_routes(stream_id, routing_state, "
+                         "json_extract(COALESCE(NULLIF(route_json,''),'{}'),'$.lane_id'))")
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_event "
                          "ON v2_assistant_composite_publications(event_id)")
