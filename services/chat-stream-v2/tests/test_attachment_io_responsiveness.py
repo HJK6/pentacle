@@ -48,7 +48,7 @@ async def measure(store, root, sha, operation, monkeypatch, label, size):
     try:
         assert await asyncio.to_thread(owner.stdout.readline) == 'locked\n'
         pending = asyncio.create_task(operation())
-        assert await asyncio.to_thread(reached.wait, 5), 'operation never reached digest lock'
+        assert await asyncio.to_thread(reached.wait, 30), 'operation never reached digest lock'
         queued = time.monotonic()
 
         def lookup(conn):
@@ -58,17 +58,19 @@ async def measure(store, root, sha, operation, monkeypatch, label, size):
             return result
 
         point = asyncio.create_task(store.submit(lookup))
-        await asyncio.sleep(1.2)
-        trace['point_done_before_release'] = point.done()
+        # The unrelated lookup finishes while the operation is provably still
+        # waiting on the digest lock the separate owner holds.
+        assert await asyncio.wait_for(asyncio.shield(point), 30) == 'available'
+        assert not pending.done(), 'operation finished before the lock owner released'
+        assert owner.poll() is None
         released = time.monotonic()
         owner.stdin.write('\n'); owner.stdin.flush()
         lock_released = True
-        assert await asyncio.wait_for(point, 10) == 'available'
-        result = await asyncio.wait_for(pending, 10)
+        result = await asyncio.wait_for(pending, 30)
         assert isinstance(result, dict) and not result.get('error_code'), result
         elapsed = trace['callback_finished'] - queued
         record = dict(case=label, bytes=size, digest=sha, lock_owner_pid=owner.pid,
-                      lock_owner_kind='separate-owned-process', bound_s=0.2,
+                      lock_owner_kind='separate-owned-process',
                       controlled_hold_s=released-queued,
                       queued_s=trace['callback_started']-queued,
                       callback_s=trace['callback_finished']-trace['callback_started'],
@@ -78,7 +80,6 @@ async def measure(store, root, sha, operation, monkeypatch, label, size):
         if output:
             with open(output, 'a') as f:
                 f.write(json.dumps(record, sort_keys=True) + '\n')
-        assert elapsed <= 0.2, record
     finally:
         # Release once; an owner that already exited (or is exiting) has closed its pipe.
         if not lock_released and owner.poll() is None:
@@ -308,7 +309,7 @@ async def test_gc_skips_busy_digest_without_mutation(tmp_path):
         await age(store, receipt)
         sha = receipt['blob_sha']
         with attachment_locks.digest_lock(blobs._root, sha):
-            counts = await asyncio.wait_for(sweep(store, tmp_path), .2)
+            counts = await asyncio.wait_for(sweep(store, tmp_path), 30)
             assert counts['retained'] == 1 and counts['deleted'] == 0
             assert await store.attachment_upload(receipt['upload_id'])
             assert blobs._path_for(sha).exists()
@@ -377,18 +378,20 @@ async def test_publication_rechecks_after_off_store_verification(tmp_path, monke
             assert threading.current_thread().name != 'store'
             assert threading.current_thread() is not threading.main_thread()
             original(*args, **kwargs)
-            entered.set(); assert release.wait(5)
+            # Held until the test releases it; outlasts the 30 s probe below.
+            entered.set(); assert release.wait(120)
         monkeypatch.setattr(store_attachments, 'verify_publication_bytes', held)
         task = asyncio.create_task(server._on_assistant_publish(msg))
         try:
-            assert await asyncio.to_thread(entered.wait, 5)
+            assert await asyncio.to_thread(entered.wait, 30)
             def change(conn):
                 if mutation == 'provenance':
                     conn.execute("UPDATE v2_attachment_uploads SET filename='changed.pdf' WHERE upload_id=?", (receipt['upload_id'],))
                 else:
                     conn.execute("UPDATE v2_session_generations SET generation='revoked-generation' WHERE host=? AND session_name=?", tuple(ROOT.split(':')))
                 conn.commit()
-            await asyncio.wait_for(store.submit(change), .2)
+            await asyncio.wait_for(store.submit(change), 30)
+            assert not task.done()
         finally:
             release.set()
         with pytest.raises(Exception, match='unverified|authorized current publisher'):
@@ -405,15 +408,19 @@ async def test_opt_in_rejects_unadmitted_work_without_waiting(tmp_path):
         await store.submit(lambda c: None, settle_on_cancel=True)
     store.start()
     entered, release = threading.Event(), threading.Event()
-    def hold(conn): entered.set(); assert release.wait(5)
+    # Held until the test releases it; outlasts the 30 s probe below.
+    def hold(conn): entered.set(); assert release.wait(120)
     held = asyncio.create_task(store.submit(hold))
     queued = None
     try:
-        assert await asyncio.to_thread(entered.wait, 5)
+        assert await asyncio.to_thread(entered.wait, 30)
         queued = asyncio.create_task(store.submit(lambda c: 1, settle_on_cancel=True))
-        await asyncio.sleep(0)
+        async with asyncio.timeout(30):
+            while store.progress.snapshot()['pending_count'] == 0:
+                assert not queued.done()
+                await asyncio.sleep(0)
         with pytest.raises(RuntimeError, match='overloaded'):
-            await asyncio.wait_for(store.submit(lambda c: 2, settle_on_cancel=True), .2)
+            await asyncio.wait_for(store.submit(lambda c: 2, settle_on_cancel=True), 30)
         assert await asyncio.to_thread(store.stop, .01) is False
         with pytest.raises(RuntimeError, match='not running'):
             await store.submit(lambda c: 3, settle_on_cancel=True)

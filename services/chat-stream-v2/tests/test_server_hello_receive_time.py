@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 
 import pytest
 
@@ -19,19 +18,22 @@ def test_timely_hello_survives_eleven_second_ordering_wait(daemon, monkeypatch):
         async with connected(daemon, ScriptedSocket("192.0.2.20")) as (socket, welcome, _):
             _, hello = signed_hello(daemon, welcome)
             received = asyncio.Event()
-            receive_age = []
             original = daemon._diag_rx
             def observed(peer, raw):
                 original(peer, raw)
                 if json.loads(raw).get("type") == "hello":
-                    receive_age.append(time.time() - (welcome["auth"]["operator"]["expires_at"] - 10))
                     received.set()
             monkeypatch.setattr(daemon, "_diag_rx", observed)
+            # The product auth clock: one second after issuance at receipt, then
+            # eleven seconds later (past the ten-second nonce) while ordering waits.
+            expires = welcome["auth"]["operator"]["expires_at"]
+            now = [expires - 9]
+            monkeypatch.setattr(server_module.time, "time", lambda: now[0])
             async with daemon._host_stats_order_lock:
                 socket.feed(hello)
-                await asyncio.wait_for(received.wait(), 1)
-                assert receive_age[0] < 1
-                await asyncio.sleep(11)
+                # Received while the ordering lock is still held, before the wait.
+                await asyncio.wait_for(received.wait(), 30)
+                now[0] = expires + 2
             reply = await socket.receive()
             assert reply["type"] == "ready", reply
             assert daemon._operator_authenticated(socket)

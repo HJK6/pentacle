@@ -138,22 +138,25 @@ def test_partial_keep_records_real_gaps_and_no_audio_errors(tmp_path):
 
 def test_queue_overflow_is_nonblocking_and_gap_observable(tmp_path, monkeypatch):
     import threading
+    from concurrent.futures import ThreadPoolExecutor
     from audio_buffer import AudioBuffer
     entered, release = threading.Event(), threading.Event()
     buffer = AudioBuffer(tmp_path, sample_rate=4, chunk_seconds=1, queue_size=1)
+    submitter = ThreadPoolExecutor(max_workers=1)
     original = buffer._write
     def blocked(*args):
         entered.set()
-        assert release.wait(3)
+        assert release.wait(30)
         original(*args)
     monkeypatch.setattr(buffer, '_write', blocked)
     try:
         buffer.submit(np.zeros(4), started_at=100)
-        assert entered.wait(1)
+        assert entered.wait(30)
         buffer.submit(np.zeros(4), started_at=101)
-        start = time.monotonic()
-        buffer.submit(np.zeros(4), started_at=102)
-        assert time.monotonic()-start < .2
+        # The overflowing submit returns while the writer is provably still held.
+        overflow = submitter.submit(buffer.submit, np.zeros(4), started_at=102)
+        overflow.result(timeout=10)  # returns normally, or re-raises its exception
+        assert not release.is_set()
         assert buffer.snapshot()['dropped_frames'] == 4
         release.set()
         buffer.flush()
@@ -165,6 +168,7 @@ def test_queue_overflow_is_nonblocking_and_gap_observable(tmp_path, monkeypatch)
         assert manifest['chunks'][-1]['gap_before_frames'] == 4
     finally:
         release.set()
+        submitter.shutdown(wait=True)
         buffer.close()
 
 

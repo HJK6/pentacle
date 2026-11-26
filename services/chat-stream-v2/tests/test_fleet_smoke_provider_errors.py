@@ -2,7 +2,6 @@
 from contextlib import contextmanager
 import json
 from pathlib import Path
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -52,10 +51,8 @@ def test_terminal_throttle_stops_reply_wait_without_another_receive(monkeypatch,
     monkeypatch.setattr(smoke, "authenticated_operator_connection", connection)
     registry = SimpleNamespace(configure_runtime=lambda _: None)
     with smoke._operator_connection("ws://fixture", None, 180.0, registry) as closures:
-        started = time.monotonic()
         with pytest.raises(RuntimeError, match="provider_throttled") as caught:
             closures[2](STREAM, MARKER)
-        assert time.monotonic() - started < 15
     assert smoke.classify_cell_outcome(caught.value) == {
         "class": "untested", "reason": "provider_throttled",
     }

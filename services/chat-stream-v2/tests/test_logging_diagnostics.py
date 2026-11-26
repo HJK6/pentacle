@@ -495,12 +495,23 @@ async def test_request_store_diagnostics_do_not_borrow_concurrent_request(tmp_pa
     import asyncio
     import json
     import threading
+    import time
     from types import SimpleNamespace
     from server import Server
     from store import Store
     import server as server_module
+    import store as store_module
 
-    monkeypatch.setattr(server_module, 'REQUEST_STORE_DIAG_SLOW_SECONDS', 0)
+    class Clock:
+        """Store's module clock, advanced only by the test between phases."""
+        now = 0.0
+        def monotonic(self):
+            return self.now
+        def __getattr__(self, name):
+            return getattr(time, name)
+    clock = Clock()
+    monkeypatch.setattr(store_module, 'time', clock)
+    monkeypatch.setattr(server_module, 'REQUEST_STORE_DIAG_SLOW_SECONDS', -1)
 
     store = Store(str(tmp_path / 'request-timing.db'))
     store.start()
@@ -509,31 +520,43 @@ async def test_request_store_diagnostics_do_not_borrow_concurrent_request(tmp_pa
     server._connection_diagnostics = {p: SimpleNamespace(conn_id=str(i)) for i, p in enumerate(peers)}
     monkeypatch.setattr(server, '_diag_auth_finish', lambda _: None)
     entered, release = threading.Event(), threading.Event()
+    entered_second, release_second = threading.Event(), threading.Event()
     async def dispatch(raw, *, websocket=None):
         if websocket is peers[0]:
             def held(conn):
-                entered.set(); release.wait(3)
+                entered.set(); assert release.wait(30)
             await store.submit(held)
         else:
-            await store.get('empty')
+            def held_second(conn):
+                entered_second.set(); assert release_second.wait(30)
+            await store.submit(held_second)
         return []
     monkeypatch.setattr(server, '_dispatch_inner', dispatch)
     caplog.set_level('INFO', logger='chat_streamd_v2.server')
     try:
+        # Request 0: queued and started at 0 s, finished at 0.1 s.
         first = asyncio.create_task(server._dispatch('{}', websocket=peers[0]))
-        await asyncio.to_thread(entered.wait, 2)
+        assert await asyncio.to_thread(entered.wait, 30)
+        # Request 1: queued at 0.01 s behind it, started at 0.1 s, finished at 1 s.
+        clock.now = 0.01
+        queued_before = store.progress.enqueued_seq
         second = asyncio.create_task(server._dispatch('{}', websocket=peers[1]))
-        await asyncio.sleep(.04)
-        release.set(); await asyncio.gather(first, second)
+        while store.progress.enqueued_seq == queued_before:
+            assert not second.done()
+            await asyncio.sleep(0)
+        clock.now = 0.1
+        release.set()
+        assert await asyncio.to_thread(entered_second.wait, 30)
+        clock.now = 1.0
+        release_second.set(); await asyncio.gather(first, second)
         rows = {r['conn_id']: r for r in [json.loads(record.message.split(' ', 1)[1])
             for record in caplog.records if record.message.startswith('request_store_diag ')]}
         assert set(rows) == {'0', '1'}
-        assert rows['0']['store_calls'] == rows['1']['store_calls'] == 1
-        assert rows['0']['store_execution_ms'] >= 35
-        assert rows['1']['store_execution_ms'] < 20
-        assert rows['1']['store_queue_ms'] >= 35
+        # Each row carries exactly its own request's queue and execution intervals.
+        assert (rows['0']['store_calls'], rows['0']['store_queue_ms'], rows['0']['store_execution_ms']) == (1, 0.0, 100.0)
+        assert (rows['1']['store_calls'], rows['1']['store_queue_ms'], rows['1']['store_execution_ms']) == (1, 90.0, 900.0)
     finally:
-        release.set()
+        release.set(); release_second.set()
         server._connection_diagnostics.clear()
         store.stop()
 

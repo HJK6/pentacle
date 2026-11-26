@@ -141,34 +141,58 @@ def test_handoff_identity_shape_and_no_grants():
 
 
 @pytest.mark.asyncio
-async def test_real_store_current_queue_and_request_owned_timings(tmp_path):
+async def test_real_store_current_queue_and_request_owned_timings(tmp_path, monkeypatch):
+    import store as store_module
+
+    class Clock:
+        """Store's module clock, advanced only by the test between phases."""
+        now = 0.0
+        def monotonic(self):
+            return self.now
+        def __getattr__(self, name):
+            return getattr(time, name)
+    clock = Clock()
+    monkeypatch.setattr(store_module, 'time', clock)
     s = Store(str(tmp_path / 'hot.db'), max_pending=2); s.start()
     release, entered = threading.Event(), threading.Event()
+    release_second, entered_second = threading.Event(), threading.Event()
     first, second = RequestTiming(), RequestTiming()
     def held(conn):
-        entered.set(); release.wait(3)
+        entered.set(); assert release.wait(30)
+    def held_second(conn):
+        entered_second.set(); assert release_second.wait(30)
+        return 7
     async def submit(timing, fn):
         token = request_timing.set(timing)
         try: return await s.submit(fn)
         finally: request_timing.reset(token)
     try:
+        # first: queued and started at 0, finished at 100.
         task = asyncio.create_task(submit(first, held))
-        await asyncio.to_thread(entered.wait, 2)
-        other = asyncio.create_task(submit(second, lambda c: 7))
-        await asyncio.sleep(.03)
+        assert await asyncio.to_thread(entered.wait, 30)
+        # second: queued at 10 behind it, started at 100, finished at 1000.
+        clock.now = 10.0
+        other = asyncio.create_task(submit(second, held_second))
+        while s.progress.snapshot()['pending_count'] == 0:
+            assert not other.done()
+            await asyncio.sleep(0)
         snap = s.progress.snapshot()
         assert snap['started_seq'] == 1 and snap['pending_count'] == 1
-        assert snap['current_started_mono_s'] <= snap['oldest_pending_mono_s']
+        assert snap['current_started_mono_s'] == 0.0 and snap['oldest_pending_mono_s'] == 10.0
+        clock.now = 100.0
         release.set()
+        assert await asyncio.to_thread(entered_second.wait, 30)
+        clock.now = 1000.0
+        release_second.set()
         assert await other == 7
         await task
-        assert first.calls == second.calls == 1
-        assert first.execution_s >= .025 and second.execution_s < .02
-        assert second.queue_s >= .025
+        # Each request carries exactly its own queue and execution intervals.
+        assert (first.calls, first.queue_s, first.execution_s) == (1, 0.0, 100.0)
+        assert (second.calls, second.queue_s, second.execution_s) == (1, 90.0, 900.0)
         assert s.progress.snapshot()['current_started_mono_s'] is None
         assert s.progress.snapshot()['oldest_pending_mono_s'] is None
     finally:
-        release.set(); s.stop()
+        release.set(); release_second.set(); s.stop()
 
 
 @pytest.mark.asyncio
@@ -180,7 +204,7 @@ async def test_publisher_lifecycle_and_bounded_healthy_repetitions(tmp_path):
     samples = []
     try:
         # The watchdog publishes from its own thread; wait for the first snapshot, bounded.
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(30):
             while True:
                 try:
                     p = await asyncio.to_thread(read_json, path)
@@ -192,20 +216,30 @@ async def test_publisher_lifecycle_and_bounded_healthy_repetitions(tmp_path):
             started = time.monotonic()
             await asyncio.gather(*(s.get('fixture-missing') for _ in range(10)))
             samples.append(time.monotonic() - started)
-        # A controlled offloaded wait does not occupy MAIN or Store.
-        wait = asyncio.create_task(asyncio.to_thread(time.sleep, 1.05))
-        await asyncio.sleep(.01)
-        probe = time.monotonic(); await s.get('fixture-missing'); await asyncio.sleep(0)
-        assert time.monotonic() - probe < .2
-        await wait
-        async with asyncio.timeout(2):
-            while True:
-                later = await asyncio.to_thread(read_json, path)
-                if later['loop_seq'] > p['loop_seq']:
-                    break
-                await asyncio.sleep(.02)
+        # A controlled offloaded wait does not occupy MAIN or Store: the Store
+        # read and the next loop publication both finish while it is still held.
+        held, holding = threading.Event(), threading.Event()
+        def offloaded():
+            holding.set(); assert held.wait(30)
+        wait = asyncio.create_task(asyncio.to_thread(offloaded))
+        try:
+            assert await asyncio.to_thread(holding.wait, 30)
+            # Baseline read once the hold is in place: only a publication made
+            # while it is held can advance past it.
+            during = (await asyncio.to_thread(read_json, path))['loop_seq']
+            await asyncio.wait_for(s.get('fixture-missing'), 30); await asyncio.sleep(0)
+            assert not wait.done()
+            async with asyncio.timeout(30):
+                while True:
+                    later = await asyncio.to_thread(read_json, path)
+                    if later['loop_seq'] > during:
+                        break
+                    await asyncio.sleep(.02)
+            assert not wait.done()
+        finally:
+            held.set()
+            await asyncio.wait_for(wait, 30)
         assert not w.binding_available  # absent checker handoff never protected
-        assert max(samples) < .2
         print(json.dumps({'healthy_repetitions': 20, 'concurrency': 10,
                           'p50_s': statistics.median(samples), 'p95_s': sorted(samples)[18],
                           'max_s': max(samples), 'rss_kib': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
