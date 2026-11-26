@@ -89,6 +89,29 @@ class AccountStore:
         row=self.conn.execute("SELECT data FROM v2_account_bindings WHERE binding_key=?",(key,)).fetchone()
         return Binding(**json.loads(row[0])) if row else None
 
+    def health_revision(self,key):
+        row=self.conn.execute("SELECT health_revision FROM v2_account_bindings WHERE binding_key=?",(key,)).fetchone()
+        return row[0] if row is not None else None
+
+    def transition_relogin_auth_health(self,key,expected_revision):
+        """Caller owns the transaction; clear only the exact active auth-failed generation."""
+        row=self.conn.execute("SELECT data,health,health_revision,active FROM v2_account_bindings WHERE binding_key=?",
+            (key,)).fetchone()
+        if row is None:return {"outcome":"account_login_generation_stale"}
+        binding=Binding(**json.loads(row["data"]))
+        if not row["active"] or not binding.enabled:
+            return {"outcome":"account_login_generation_stale" if row["active"]==0 else "account_disabled"}
+        if row["health"]=="identity_conflict":return {"outcome":"account_health_not_auth_unhealthy"}
+        if row["health"]=="healthy":
+            return {"outcome":"healthy","applied_revision":row["health_revision"],"changed":False}
+        if row["health_revision"]!=expected_revision:return {"outcome":"account_health_revision_stale"}
+        if row["health"]!="auth_unhealthy":return {"outcome":"account_health_not_auth_unhealthy"}
+        changed=self.conn.execute("UPDATE v2_account_bindings SET health='healthy',health_revision=health_revision+1 "
+            "WHERE binding_key=? AND active=1 AND health='auth_unhealthy' AND health_revision=?",
+            (key,expected_revision)).rowcount
+        if changed!=1:return {"outcome":"account_health_revision_stale"}
+        return {"outcome":"healthy","applied_revision":expected_revision+1,"changed":True}
+
     def _available(self,row):
         if row is None: raise AccountError("account_unconfigured")
         binding=Binding(**json.loads(row["data"]))

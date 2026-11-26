@@ -196,6 +196,37 @@ def test_failed_observation_never_revalidates_or_retries(tmp_path, outcome):
     asyncio.run(journey())
 
 
+def test_auth_failure_after_identity_conflict_advances_revision_and_alerts(tmp_path):
+    async def journey():
+        store,runtime,account,calls=await fixture(tmp_path/'state.db')
+        alerts=[]
+        class Alerts:
+            async def error(self,fact,*,principal):
+                alerts.append((fact.code,principal))
+                return 'notice'
+        runtime.sessions.alerts=Alerts()
+        runtime.clock=lambda:NOW+1
+        async def failed(selected,action,operation_id,generation=None):
+            calls.append(action)
+            assert action=='observe-bound'
+            return {'outcome':'provider_auth_failed'}
+        runtime.executor.execute=failed
+        try:
+            before=await state(runtime,account)
+            message=await request(runtime,account,operation_id='auth-after-identity-conflict')
+            result=(await runtime.operation(message))['result']
+            after=await state(runtime,account)
+            assert result['outcome']=='provider_auth_failed' and result['applied_revision'] is None
+            assert after['health']=='identity_conflict'
+            assert after['health_revision']==before['health_revision']+1
+            assert after['last_failure']=={'kind':'auth','observed_at':NOW+1}
+            assert alerts==[('login_unavailable','system:host-a:codex:primary')]
+            assert calls==['observe-bound']
+        finally:
+            store.stop()
+    asyncio.run(journey())
+
+
 @pytest.mark.parametrize("corruption", ["pool", "provider", "auth_mode", "windows", "nan", "stamp"])
 def test_host_ok_requires_matched_daemon_observation_and_valid_windows(tmp_path, corruption):
     async def journey():

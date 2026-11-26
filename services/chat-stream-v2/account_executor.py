@@ -9,7 +9,18 @@ import uuid
 
 from account_store import transaction
 from provider_accounts import AccountError, Binding
-from account_revalidation import revalidate_health
+from account_revalidation import revalidate_health, _valid_observation
+
+_HOST_SUCCESS_OUTCOMES={"ok","healthy","recovered","success"}
+_HOST_FAILURE_OUTCOMES={
+    "provider_auth_failed", "provider_quota_blocked", "provider_capacity", "provider_transport_failed",
+    "provider_permission_denied", "provider_timeout", "provider_probe_failed", "provider_identity_changed",
+    "subscription_identity_unverified", "provider_identity_unavailable", "provider_identity_or_cache_unverified",
+    "provider_executable_changed", "provider_version_changed", "provider_cache_unavailable", "provider_cache_stale",
+    "provider_windows_invalid", "account_login_generation_stale", "provider_cli_pin_mismatch",
+    "provider_cli_pin_unavailable", "provider_cli_verification_unavailable", "account_repin_home_busy",
+    "account_repin_occupancy_unavailable",
+}
 
 
 class AccountExecutor:
@@ -47,14 +58,11 @@ class AccountExecutor:
         if (not isinstance(result, dict) or not isinstance(result.get("outcome"), str)
                 or re.fullmatch(r"[a-z][a-z0-9_]{0,79}", result["outcome"]) is None):
             raise AccountError("account_host_response_invalid")
-        if code and result["outcome"] not in {
-            "provider_auth_failed", "provider_quota_blocked", "provider_capacity", "provider_transport_failed",
-            "provider_permission_denied", "provider_timeout", "provider_probe_failed", "provider_identity_changed",
-            "subscription_identity_unverified", "provider_identity_unavailable", "provider_identity_or_cache_unverified",
-            "provider_executable_changed", "provider_version_changed", "provider_cache_unavailable", "provider_cache_stale", "provider_windows_invalid",
-            "account_login_generation_stale", "provider_cli_pin_mismatch", "provider_cli_pin_unavailable",
-            "provider_cli_verification_unavailable", "account_repin_home_busy", "account_repin_occupancy_unavailable"}:
-            raise AccountError(result["outcome"])
+        if code != 0:
+            if result["outcome"] in _HOST_SUCCESS_OUTCOMES:
+                raise AccountError("account_host_response_invalid")
+            if result["outcome"] not in _HOST_FAILURE_OUTCOMES:
+                raise AccountError(result["outcome"])
         return result
 
     async def verify_artifact(self,account,pin):
@@ -206,10 +214,30 @@ class AccountExecutor:
         if state.get("inflight"):
             # After an uncertain remote reply, only inspect the same generation.
             return await self._inspect_recovery(account,state)
+        # Keep the pre-probe revision only as the success transition's CAS input.
+        expected_revision = await self.runtime.run(lambda ledger: ledger.health_revision(account.key))
         # Confirm an actual auth failure before a requested re-login. A quota,
         # network or capacity failure never enters native enrollment.
-        probe = await self._observe_locked(account,recovery=True)
-        if probe["outcome"] == "ok": return {"outcome": "healthy"}
+        probe = await self._observe_locked(account,recovery=True,require_match=True)
+        if probe["outcome"] == "ok":
+            if not _valid_observation(account, probe.get("observation")):
+                return {"outcome": "provider_probe_failed"}
+            def complete_probe(ledger):
+                with transaction(ledger.conn):
+                    state_now=self._read_recovery(ledger,account.key)
+                    existing=state_now.get("receipts",{}).get(operation_id)
+                    if existing is not None:return existing
+                    transition=ledger.transition_relogin_auth_health(account.key,expected_revision)
+                    if transition["outcome"] != "healthy":
+                        return transition
+                    if not transition["changed"]:
+                        return {"outcome":"healthy"}
+                    receipt={"outcome":"healthy","operation_id":operation_id,
+                        "health_revision":transition["applied_revision"],"relogin_probe":"ok"}
+                    state_now.setdefault("receipts",{})[operation_id]=receipt
+                    self._write_recovery(ledger,account.key,state_now)
+                    return receipt
+            return await self.runtime.run(complete_probe,settle_on_cancel=True)
         if probe["outcome"] != "provider_auth_failed": return probe
         # Browser-attempt limits belong to the stable host/provider/account cell,
         # while operation receipts remain bound to their original generation.
@@ -297,7 +325,12 @@ class AccountExecutor:
                 (account.host, account.provider, account.alias, account.key)):
             state = json.loads(row["recovery"])
             owner = Binding(**json.loads(row["binding"]))
-            if operation_id in state.get("receipts", {}): return owner, state
+            receipt=state.get("receipts",{}).get(operation_id)
+            # A successful probe does not rotate generations. Its receipt is
+            # scoped to that binding key, so an accidental ID reuse on a later
+            # generation must not suppress the new generation's own probe.
+            if receipt and receipt.get("relogin_probe") == "ok": continue
+            if receipt: return owner, state
             if state.get("inflight"): pending = owner, state
         return pending
 

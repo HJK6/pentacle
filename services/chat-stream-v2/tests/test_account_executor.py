@@ -28,7 +28,7 @@ def AccountExecutor(runtime,hosts,*,execute):
             permit=permits[operation]
             assert reconcile=={"_clearance":permit["clearance_id"]}
             assert permit["expected_generation"]==account.generation and permit["generation"]==generation
-        return await execute(account,"observe" if action=="observe-bound" else action,operation,generation)
+        return await execute(account,action,operation,generation)
     return RealAccountExecutor(runtime,hosts,execute=guarded)
 
 
@@ -39,7 +39,7 @@ def test_healthy_probe_never_relogs_and_auth_repairs_only_bound_cell(tmp_path):
         account = binding(); calls = []; unhealthy = False
         async def execute(selected, action, operation_id, generation=None):
             calls.append((selected.key, action, operation_id, generation))
-            if action == "observe":
+            if action in {"observe", "observe-bound"}:
                 return {"outcome": "provider_auth_failed"} if unhealthy else {
                     "outcome": "ok", "binding_key": selected.key, "observation": observation(selected)}
             fresh = replace(account, generation=generation, home="/private-fixture/new-home")
@@ -85,7 +85,7 @@ def test_restart_after_remote_timeout_inspects_same_generation_without_new_login
     path = str(tmp_path / "state.db"); calls = []; state = {}
     async def execute(account, action, operation_id, generation=None):
         calls.append((action, operation_id, generation))
-        if action == "observe": return {"outcome": "provider_auth_failed"}
+        if action == "observe-bound": return {"outcome": "provider_auth_failed"}
         if action == "enroll":
             state["generation"] = generation
             raise AccountError("account_host_unreachable")
@@ -108,7 +108,7 @@ def test_restart_after_remote_timeout_inspects_same_generation_without_new_login
             assert (await executor.recover(binding(), relogin=True, operation_id="different"))["outcome"] == "recovered"
         finally: store.stop()
     asyncio.run(first()); asyncio.run(second())
-    assert [call[0] for call in calls] == ["observe", "enroll", "status"]
+    assert [call[0] for call in calls] == ["observe-bound", "enroll", "status"]
     assert calls[2][1:] == calls[1][1:]
 
 
@@ -118,7 +118,7 @@ def test_recovery_cooldown_attempt_cap_and_human_stop(tmp_path):
         runtime = AccountRuntime(store, Sessions(store), policy=policy(), clock=lambda: clock[0])
         async def execute(account, action, *args):
             calls.append(action)
-            return {"outcome": "provider_auth_failed"} if action == "observe" else {"state": "done", "outcome": outcome[0]}
+            return {"outcome": "provider_auth_failed"} if action in {"observe", "observe-bound"} else {"state": "done", "outcome": outcome[0]}
         executor = AccountExecutor(runtime, None, execute=execute)
         try:
             await runtime.run(lambda ledger: ledger.register(binding()))
@@ -147,7 +147,7 @@ def test_successful_generations_keep_cell_cooldown_and_hourly_cap(tmp_path):
         runtime=AccountRuntime(store,Sessions(store),policy=policy(),clock=lambda:clock[0])
         async def execute(account,action,operation_id,generation=None):
             calls.append((account.alias,action))
-            if action=="observe": return {"outcome":"provider_auth_failed"}
+            if action=="observe-bound":return {"outcome":"provider_auth_failed"}
             return {"state":"done","outcome":"ok","binding":replace(account,generation=generation,
                 home="/private-fixture/"+generation).public()}
         executor=AccountExecutor(runtime,None,execute=execute)
@@ -280,4 +280,346 @@ def test_direct_native_does_not_gain_a_release_pin_dependency(tmp_path,monkeypat
             value=await s.runtime.executor.verify_launchers(s.selected)
             assert value['missing']==[] and value['pin_digest']=='absent'
         finally:s.store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_probe_ok_clears_auth_health_with_revision_and_receipt(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding();calls=[]
+        async def execute(selected,action,operation_id,generation=None):
+            calls.append((action,operation_id))
+            assert action=='observe-bound'
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            before=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            result=await executor.recover(account,relogin=True,operation_id='sticky-auth-fixed')
+            after=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            recovery=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert result['outcome']=='healthy'
+            assert after['health']=='healthy' and after['health_revision']==before['health_revision']+1
+            assert after['generation']==account.generation and after['last_failure']['kind']=='auth'
+            assert recovery['receipts']['sticky-auth-fixed']['outcome']=='healthy'
+            assert len(calls)==1
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_probe_receipt_id_collision_is_scoped_to_binding_generation(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        old=binding();calls=[]
+        async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe-bound'
+            calls.append(selected.key)
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(old))
+            await runtime.record_failure(old,'auth')
+            first=await executor.recover(old,relogin=True,operation_id='reused-operation-id')
+            assert first['outcome']=='healthy'
+            current=replace(old,generation='login-two',home='/private-fixture/host-a/codex/primary/login-two')
+            await runtime.run(lambda ledger:ledger.register(current))
+            await runtime.record_failure(current,'auth')
+            second=await executor.recover(current,relogin=True,operation_id='reused-operation-id')
+            rows=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'])
+            assert second['outcome']=='healthy' and calls==[old.key,current.key]
+            assert next(row for row in rows if row['generation']==current.generation)['health']=='healthy'
+            assert next(row for row in rows if row['generation']==old.generation)['health']=='healthy'
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_nonzero_host_exit_with_success_payload_is_rejected(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding();commands=[]
+        class Hosts:
+            async def run_command(self,host,*argv,timeout):
+                commands.append((host,argv,timeout))
+                return 1,json.dumps({'outcome':'ok','binding_key':account.key,'observation':observation(account)})
+        executor=RealAccountExecutor(runtime,Hosts())
+        try:
+            runtime.policy['executors']={'host-a':{'python':'/fixture/python','script':'/fixture/host.py'}}
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            result=await executor.recover(account,relogin=True,operation_id='nonzero-success-label')
+            row=await runtime.run(lambda ledger:next(row for row in ledger.readback(now=NOW)['accounts'] if row['generation']==account.generation))
+            state=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert commands and commands[0][1][2]=='observe-bound'
+            assert result['outcome']=='account_host_response_invalid'
+            assert row['health']=='auth_unhealthy' and row['health_revision']==1
+            assert not state.get('receipts')
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_failed_collection_with_matching_identity_is_not_success(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding()
+        async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe-bound'
+            invalid=observation(selected)|{'collection':'failed'}
+            return {'outcome':'ok','binding_key':selected.key,'observation':invalid}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            result=await executor.recover(account,relogin=True,operation_id='failed-collection')
+            row=await runtime.run(lambda ledger:next(row for row in ledger.readback(now=NOW)['accounts'] if row['generation']==account.generation))
+            state=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert result['outcome']=='provider_probe_failed'
+            assert row['health']=='auth_unhealthy' and row['health_revision']==1
+            assert not state.get('receipts')
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_healthy_snapshot_cannot_override_auth_failure_during_probe(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding()
+        async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe-bound'
+            await runtime.record_failure(selected,'auth')
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            result=await executor.recover(account,relogin=True,operation_id='healthy-start-race')
+            row=await runtime.run(lambda ledger:next(row for row in ledger.readback(now=NOW)['accounts'] if row['generation']==account.generation))
+            state=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert result['outcome']=='account_health_revision_stale'
+            assert row['health']=='auth_unhealthy' and row['health_revision']==1
+            assert not state.get('receipts')
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_current_healthy_noop_does_not_write_receipt(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding()
+        async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe-bound'
+            def competing_completion(ledger):
+                with ledger.conn:
+                    ledger.conn.execute("UPDATE v2_account_bindings SET health='healthy',health_revision=health_revision+1 WHERE binding_key=?",
+                        (selected.key,))
+            await runtime.run(competing_completion)
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            result=await executor.recover(account,relogin=True,operation_id='losing-noop')
+            row=await runtime.run(lambda ledger:next(row for row in ledger.readback(now=NOW)['accounts'] if row['generation']==account.generation))
+            state=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert result=={'outcome':'healthy'}
+            assert row['health']=='healthy' and row['health_revision']==2
+            assert not state.get('receipts')
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_auth_failure_accounts_once_and_runs_existing_enrollment(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        clock=[NOW];runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:clock[0])
+        account=binding();calls=[]
+        alerts=[]
+        class Alerts:
+            async def error(self,fact,*,principal):
+                alerts.append((fact.code,principal))
+                return 'notice'
+        runtime.sessions.alerts=Alerts()
+        async def execute(selected,action,operation_id,generation=None):
+            calls.append(action)
+            if action=='observe-bound':return {'outcome':'provider_auth_failed'}
+            if action=='enroll':
+                fresh=replace(account,generation=generation,home='/private-fixture/new-home')
+                return {'state':'done','outcome':'ok','binding':fresh.public()}
+            return {'outcome':'ok','binding':account.public(),'code_identity':{},'mutation_clearance_required':True}
+        executor=AccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            before=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            alerts.clear();clock[0]=NOW+1
+            result=await executor.recover(account,relogin=True,operation_id='retry-enrollment')
+            after=await runtime.run(lambda ledger:next(row for row in ledger.readback(now=NOW)['accounts']
+                if row['generation']==account.generation))
+            recovery=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert result['outcome']=='recovered'
+            assert calls.count('enroll')==1
+            assert after['health']=='auth_unhealthy'
+            assert after['health_revision']==before['health_revision']+1
+            assert after['last_failure']=={'kind':'auth','observed_at':NOW+1}
+            assert after['generation']==account.generation
+            assert alerts==[('login_unavailable','system:host-a:codex:primary')]
+            assert not any(row.get('relogin_probe')=='ok' for row in recovery.get('receipts',{}).values())
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_does_not_clear_identity_conflict(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding()
+        async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe-bound'
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'identity')
+            before=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            await executor.recover(account,relogin=True,operation_id='identity-stays')
+            after=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            assert after['health']=='identity_conflict'
+            assert after['health_revision']==before['health_revision']
+            assert after['last_failure']==before['last_failure']
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_does_not_probe_or_clear_disabled_generation(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding();calls=[]
+        async def execute(selected,action,operation_id,generation=None):
+            calls.append(action)
+            def disable(ledger):
+                with ledger.conn:
+                    row=ledger.conn.execute('SELECT data FROM v2_account_bindings WHERE binding_key=?',(account.key,)).fetchone()
+                    data=json.loads(row['data']);data['enabled']=False
+                    ledger.conn.execute('UPDATE v2_account_bindings SET data=? WHERE binding_key=?',(json.dumps(data),account.key))
+            await runtime.run(disable)
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            result=await executor.recover(account,relogin=True,operation_id='disabled-stays-disabled')
+            after=await runtime.run(lambda ledger:next(row for row in ledger.readback(now=NOW)['accounts'] if row['generation']==account.generation))
+            stored=await runtime.run(lambda ledger:ledger.conn.execute(
+                'SELECT health,health_revision FROM v2_account_bindings WHERE binding_key=?',(account.key,)).fetchone())
+            assert result['outcome']=='account_disabled'
+            assert not after['enabled'] and tuple(stored)==('auth_unhealthy',1)
+            assert calls==['observe-bound']
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_refuses_stale_health_revision_after_probe_race(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding();calls=[]
+        async def execute(selected,action,operation_id,generation=None):
+            calls.append(action)
+            assert action=='observe-bound'
+            if len(calls)==1:await runtime.record_failure(account,'auth')
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            before=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            result=await executor.recover(account,relogin=True,operation_id='stale-auth-revision')
+            after=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            assert result['outcome']=='account_health_revision_stale'
+            assert after['health']=='auth_unhealthy'
+            assert after['health_revision']==before['health_revision']+1
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_health_transition_and_receipt_roll_back_together_on_interruption(tmp_path,monkeypatch):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding()
+        async def execute(selected,action,operation_id,generation=None):
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            def fail_receipt(*_):raise RuntimeError('simulated interruption before receipt commit')
+            monkeypatch.setattr(RealAccountExecutor,'_write_recovery',staticmethod(fail_receipt))
+            with pytest.raises(RuntimeError,match='simulated interruption'):
+                await executor.recover(account,relogin=True,operation_id='atomic-health-receipt')
+            row=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            recovery=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert row['health']=='auth_unhealthy'
+            assert not recovery.get('receipts')
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_ordinary_usage_observation_never_clears_auth_health(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding()
+        async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe'
+            return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            before=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            await executor.observe(account)
+            after=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            assert after['health']=='auth_unhealthy'
+            assert after['health_revision']==before['health_revision']
+            assert after['last_failure']==before['last_failure']
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_relogin_identity_disagreement_keeps_identity_conflict_record(tmp_path):
+    async def run():
+        store=Store(str(tmp_path/'state.db'));store.start()
+        runtime=AccountRuntime(store,Sessions(store,local_host='host-a'),policy=policy(),clock=lambda:NOW)
+        account=binding();alerts=[]
+        class Alerts:
+            async def error(self,fact,*,principal):
+                alerts.append((fact.code,principal))
+                return 'notice'
+        runtime.sessions.alerts=Alerts()
+        async def execute(selected,action,operation_id,generation=None):
+            assert action=='observe-bound'
+            mismatched=observation(selected)|{'provider_id':'other-provider'}
+            return {'outcome':'ok','binding_key':selected.key,'observation':mismatched}
+        executor=RealAccountExecutor(runtime,None,execute=execute)
+        try:
+            await runtime.run(lambda ledger:ledger.register(account))
+            await runtime.record_failure(account,'auth')
+            before=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            alerts.clear()
+            result=await executor.recover(account,relogin=True,operation_id='identity-disagreement')
+            after=await runtime.run(lambda ledger:ledger.readback(now=NOW)['accounts'][0])
+            recovery=await runtime.run(lambda ledger:executor._read_recovery(ledger,account.key))
+            assert result['outcome']=='provider_identity_or_cache_unverified'
+            assert after['health']=='identity_conflict'
+            assert after['health_revision']==before['health_revision']+1
+            assert alerts==[('identity_unverified','system:host-a:codex:primary')]
+            assert 'identity-disagreement' not in recovery.get('receipts',{})
+        finally:store.stop()
     asyncio.run(run())
