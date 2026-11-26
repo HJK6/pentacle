@@ -8,6 +8,8 @@ delivers once after boot. Real Server, websocket, Comms and Store, and the real
 `main.shutdown`; only the pane transport is synthetic.
 """
 import asyncio
+import os
+import signal
 import hashlib
 import json
 import pytest
@@ -181,4 +183,77 @@ def test_input_arriving_during_the_stop_is_refused_then_delivers_once_after_boot
         finally:
             listener.close()
             store.stop(timeout=3)
+    asyncio.run(run())
+
+
+def test_a_spawn_arriving_while_a_tell_holds_the_drain_open_is_not_admitted(tmp_path):
+    async def run():
+        store, provider, sessions, spawnctl, comms, daemon, listener = await _daemon(tmp_path / "spawn.db")
+        spawned = []
+
+        async def spawn(msg, _host):
+            spawned.append(msg["request_id"])
+            return {"type": "spawn.ok", "ok": True}
+        spawnctl.spawn = spawn
+        try:
+            await _seed(store, sessions)
+            prepared, resume = asyncio.Event(), asyncio.Event()
+            original = comms._prepare_tell_input
+
+            async def paused(*args, **kwargs):  # an admitted tell holds the drain open
+                await original(*args, **kwargs)
+                prepared.set()
+                await resume.wait()
+            comms._prepare_tell_input = paused
+            socket = await _socket(listener)
+            await socket.send(json.dumps(_tell("holding")))
+            await asyncio.wait_for(prepared.wait(), 5)
+            stopping = asyncio.ensure_future(_shutdown(daemon, spawnctl, store))
+            await until(lambda: daemon._input_stopping)
+            late = asyncio.ensure_future(daemon._dispatch(json.dumps({"type": "spawn", "request_id": "late-spawn"})))
+            await asyncio.sleep(0.1)
+            assert spawned == [] and not late.done(), "a spawn was admitted while shutdown drained input"
+            resume.set()
+            await asyncio.wait_for(stopping, 15)
+            late.cancel()
+            assert spawned == []
+        finally:
+            listener.close()
+            store.stop(timeout=3)
+    asyncio.run(run())
+
+
+class _StubSpawn:
+    def __init__(self):
+        self.calls = 0
+
+    async def spawn(self, msg, local_host):
+        self.calls += 1
+        return {"type": "spawn.ok", "ok": True}
+
+
+def test_a_signal_during_boot_closes_input_and_spawn_admission_that_boot_does_not_reopen():
+    async def run():
+        loop = asyncio.get_running_loop()
+        spawn = _StubSpawn()
+        server = Server(spawnctl=spawn, local_host="fixture")
+        server.spawn_ready.clear()  # boot window: reconciliation still running
+        stop = loop.create_future()
+        loop.add_signal_handler(signal.SIGTERM, daemon_main.stop_requester(server, stop))
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(stop, 3)
+            assert server.stopping  # set by the handler itself, before boot resumes
+            os.kill(os.getpid(), signal.SIGTERM)  # a repeat is harmless
+            await asyncio.sleep(0.05)
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+        daemon_main.open_spawn_gate(server)  # boot reaches its gate-opening step
+        assert not server.spawn_ready.is_set()
+        refused = await server._dispatch(json.dumps(_tell("during-boot")))
+        assert refused[0]["type"] == "tell.error" and refused[0]["error_code"] == "daemon_stopping", refused
+        late = asyncio.ensure_future(server._dispatch(json.dumps({"type": "spawn", "request_id": "boot-spawn"})))
+        await asyncio.sleep(0.05)
+        assert spawn.calls == 0 and not late.done()
+        late.cancel()
     asyncio.run(run())

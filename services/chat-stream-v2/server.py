@@ -1237,12 +1237,23 @@ class Server:
         assert self._ws_server is not None, "bind() must be called before serve_forever()"
         await self._ws_server.serve_forever()
 
-    async def drain_input(self, timeout: float) -> int:
-        """Refuse new input verbs, then wait up to `timeout` for admitted input
-        (each may already have committed its pre-input record) to finish its
-        paste and outcome record while the Store still runs. Returns how many
-        are still running; `close` keeps its own bounded wait for them."""
+    def begin_stopping(self) -> None:
+        """The stop transition, the one place the stopping flag is set: input
+        verbs are refused retryably from here on and spawn admission closes.
+        Synchronous, so the signal handler runs it the instant a stop is
+        requested, even mid-boot; boot never reopens either once it is set."""
         self._input_stopping = True
+        self.spawn_ready.clear()
+
+    @property
+    def stopping(self) -> bool:
+        return self._input_stopping
+
+    async def drain_input(self, timeout: float) -> int:
+        """Wait up to `timeout` for admitted input (each may already have
+        committed its pre-input record) to finish its paste and outcome record
+        while the Store still runs. Returns how many are still running; `close`
+        keeps its own bounded wait for them."""
         if self._detached_send_tasks:
             await asyncio.wait(tuple(self._detached_send_tasks), timeout=max(0.0, timeout))
         return len(self._detached_send_tasks)
