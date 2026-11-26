@@ -30,16 +30,17 @@ outcome stays `indeterminate`.
 
 Post-paste adoption polls until the 20 s adoption deadline (`ADOPTION_BOOT_DEADLINE_S`). When the receipt supports Store proof:
 
-Each pass observes in a fixed order and then decides once, from a single table, using only what that pass saw.
+Each pass observes in a fixed order and then decides once, from a single table. A pass decides from what it saw, with one carry-over: an expiry pass also counts a found transcript or a probe error from the window pass that crossed the deadline.
 
-- **Early lookup:** inside the window, a Store lookup is offered only when at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) remains. It can only prove delivery; any other answer is ignored.
-- **Transcript:** the probe runs up to the deadline. At the deadline, one more observation always runs, with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance measured from when it starts. An error from the probe is held until the decision.
-- **Pane liveness:** read on every pass, as alive, gone or unknown. Any error reading it (an SSH or tmux failure) counts as unknown, and unknown never produces a failure.
-- **Store sample:** one sample with its own 0.25 s grant follows the observations. A pass that reaches the deadline before or during that sample decides nothing. The expiry pass then observes again, keeping only a found transcript or a held error from the earlier pass.
-- **Decision:** a proven sample means delivered, ahead of a found transcript. A failure (`transcript_absent`, `pane_died_during_boot`, `agent_never_started`) needs a `pending` sample and a pane read as alive or gone. A timeout or an unreachable Store keeps the outcome `indeterminate` and the reservation retained. A held probe error is re-raised unless delivery is proven, so the reconcile pass defers.
+- **Early lookup:** for a receipt with Store proof only, inside the window, a Store lookup is offered while at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) remains. It can only prove delivery; any other answer is ignored.
+- **Transcript:** the probe runs up to the deadline. At the deadline, one more observation always runs, with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance measured from when it starts. Only that allowance running out counts as no transcript; any exception from the probe, a `TimeoutError` included, is held until the decision.
+- **Pane liveness:** read on every pass, as alive, gone or unknown. Any error reading it (an SSH or tmux failure) counts as unknown. With Store proof, unknown never produces a failure.
+- **Store sample:** one sample with its own 0.25 s grant follows the observations. A window pass that reaches the deadline before or during that sample decides nothing, unless the sample came back proven: then the pass delivers at once. Otherwise the expiry pass observes again, carrying over only a found transcript or a held error.
+- **Decision:** a proven sample means delivered, ahead of a found transcript. A found transcript otherwise delivers, even when the Store is unreachable or timed out. A held probe error is re-raised unless delivery is proven, so the reconcile pass defers. A failure (`transcript_absent`, `pane_died_during_boot`, `agent_never_started`) needs a `pending` sample and a pane read as alive or gone. Any other timeout or unreachable Store keeps the outcome `indeterminate` and the reservation retained.
 - **Added wait:** one full 0.25 s gate per window pass admitted before expiry, plus at most 3.25 s of transcript/Store grants on an unresolved expiry pass. This is not an end-to-end deadline. The early lookup, the liveness read (10 s transport timeout), scheduling delay and cancellation cleanup fall outside it. Startup settles intents one at a time, so these costs accrue for each unresolved intent with Store proof.
+- **Liveness on every pass:** a found transcript, a probe error and (without a saved watermark) an absent transcript used to end the pass before liveness was read. They now read it first, for receipts with and without Store proof. That adds a cancellation point and up to a 10 s transport wait per affected intent.
 
-Receipts without Store proof use the transcript alone, as before. They read pane liveness the same three-state way on every pass; an unknown pane keeps polling and defers at the deadline.
+Receipts without Store proof use the transcript alone, as before, and never enter the Store lookups. They read pane liveness the same three-state way on every pass, and an unknown pane keeps polling and defers at the deadline, with one exception: without a saved watermark, an absent transcript fails as `transcript_absent` whatever the pane reads, unknown included.
 
 The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 
