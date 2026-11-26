@@ -5373,6 +5373,7 @@ class Server:
                                     members_after=msg.get("members_after"), goal_filter=msg.get("goal_id"),
                                     sessions_by_stream=open_sessions, questions_by_spec=questions)
         except ValueError as exc:
+            log.warning("work_lanes.show refused lane=%s error=%s", lane_id, exc)
             raise VerbError(str(exc), "invalid lane detail request or oversized source projection") from None
 
     async def _on_work_lanes_adopt_preview(self, msg: dict[str, Any]) -> dict[str, Any]:
