@@ -296,6 +296,7 @@ def test_proof_reader_failure_after_paste_keeps_durable_input_custody(tmp_path, 
 
 
 def test_known_input_admission_refusal_creates_no_possible_input_receipt(tmp_path, monkeypatch):
+    import provider_cli_maintenance
     from provider_accounts import AccountError
     async def run():
         store, runtime, host, selected, target, row, native = await ready_fixture(tmp_path, monkeypatch)
@@ -303,12 +304,12 @@ def test_known_input_admission_refusal_creates_no_possible_input_receipt(tmp_pat
         comms = Comms(store, runtime.sessions, SpawnCtl(store, runtime.sessions, tmux=tmux))
         comms.account_runtime = runtime
         checks = 0
-        async def maintenance(_):
+        def maintenance(_a, _row):
             nonlocal checks
             checks += 1
             if checks > 1:
                 raise AccountError("provider_cli_input_maintenance")
-        runtime.maintenance_input = maintenance
+        monkeypatch.setattr(provider_cli_maintenance, "assert_input", maintenance)
         try:
             await runtime.sessions.refresh()
             with pytest.raises(VerbError) as refused:
