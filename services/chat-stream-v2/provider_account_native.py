@@ -50,16 +50,7 @@ def classify_error(value) -> str:
 
 def native_run(argv, *, input=None, capture_output=True, text=True, timeout=90, interrupt_cleanup=False, **kwargs):
     """Own and reap every native/probe descendant on all exits, including alarm."""
-    command = argv
-    if interrupt_cleanup:
-        # An ignored SIGINT survives exec. Restore it in the owned adapter child.
-        reset = (
-            "import os, signal, sys\n"
-            "signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
-            "os.execvp(sys.argv[1], sys.argv[1:])"
-        )
-        command = [sys.executable, "-I", "-S", "-c", reset, *argv]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+    process = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, **kwargs)
     try:
         stdout, stderr = process.communicate(input=input, timeout=timeout)

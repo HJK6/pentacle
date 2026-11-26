@@ -6,6 +6,12 @@
       "owner": "front desk",
       "reason": "Pane timeout in status parameter",
       "expires": "2026-12-09"
+    },
+    {
+      "id": "daemon::tests/test_account_observation_freshness.py::test_usage_timeout_reaps_owned_tmux_via_adapter_finally",
+      "owner": "front desk",
+      "reason": "Missing tmux cleanup marker in ozef2gky, run-gsdueg5x and 8476b58 unit-advisory. Cause unproven.",
+      "expires": "2026-12-02"
     }
   ]
 }
