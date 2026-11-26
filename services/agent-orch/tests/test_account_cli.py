@@ -307,6 +307,21 @@ def test_local_file_parse_error_keeps_failing_option_label(monkeypatch,capsys,tm
     assert response=={"type":"account.error","error_code":"account_request_invalid","option":"--pin-file"}
 
 
+def test_successful_first_file_does_not_keep_failure_attribution(monkeypatch,capsys,tmp_path):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"fixture-host:front-desk")
+    async def forbidden(*a,**k):pytest.fail("invalid file combination reached RPC")
+    monkeypatch.setattr(wsclient,"account_once",forbidden)
+    pin_file=tmp_path/"pin.json";pin_file.write_text(json.dumps({"schema":1,"revision":1}))
+    target_file=tmp_path/"target.json";target_file.write_text(json.dumps({"schema":1,"revision":1}))
+    args=cli.build_parser().parse_args(["account","pin-status","--pin-file",str(pin_file),
+        "--target-pin-file",str(target_file)])
+    assert args.func(args)==2
+    response=json.loads(capsys.readouterr().out)
+    assert response=={"type":"account.error","error_code":"account_request_invalid"}
+
+
 def test_report_failure_kind_remains_optional_like_main(monkeypatch):
     calls=_mock_account_rpc(monkeypatch)
     args=cli.build_parser().parse_args(["account","report-failure","--host","fixture-host",

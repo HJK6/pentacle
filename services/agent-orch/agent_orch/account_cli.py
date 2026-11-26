@@ -105,16 +105,22 @@ def execute(args):
             if args.action not in {"pin-set","pin-status"}: raise ValueError()
             input_option = "--pin-file"
             payload["pin"]=json.loads(Path(args.pin_file).read_text(),object_pairs_hook=unique)
+            input_option = None
         if getattr(args,"target_pin_file",None):
+            input_option = None
             if args.action!="repin" or args.expected_pin_revision!=0:raise ValueError()
             input_option = "--target-pin-file"
             payload["target_pin"]=json.loads(Path(args.target_pin_file).read_text(),object_pairs_hook=unique)
+            input_option = None
         if getattr(args,"initial_parked_cells_file",None):
+            input_option = None
             if args.action not in {"pin-set","pin-status"}:raise ValueError()
             input_option = "--initial-parked-cells-file"
             payload["initial_parked_cells"]=json.loads(Path(args.initial_parked_cells_file).read_text(),object_pairs_hook=unique)
             if not isinstance(payload["initial_parked_cells"],list):raise ValueError()
+            input_option = None
         if getattr(args,"local_admin_token_file",None):
+            input_option = None
             if args.action not in {"pin-set","pin-status"}: raise ValueError()
             input_option = "--local-admin-token-file"
             import os,stat
@@ -123,6 +129,7 @@ def execute(args):
             if (path.resolve()!=path.absolute() or not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid()
                     or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1): raise ValueError()
             payload["local_admin_token"]=path.read_text().strip()
+            input_option = None
     except (ValueError,OSError):
         response={"type":"account.error","error_code":"account_request_invalid"}
         if input_option is not None: response["option"]=input_option
