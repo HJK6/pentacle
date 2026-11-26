@@ -138,7 +138,8 @@ def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentine
                "os.kill(os.getpid(),signal.SIGTERM)"))
     async def go():
         tmux = Tmux(isolated_tmux_env)
-        sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        sentinel = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"],
+                                    stdin=subprocess.PIPE)
         try:
             await tmux.new_session("v2-owned", "exec " + shlex.join([sys.executable, "-c", code]))
             rc, _ = await tmux.run("set-option", "-w", "-t", "=v2-owned:", "remain-on-exit", "on")
@@ -153,7 +154,7 @@ def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentine
             assert rc == 0
             # Only the pane's own code exits or signals itself. No foreign PID reuse.
             marker.touch()
-            rc, _ = await tmux.run("wait-for", "owned-pane-exited")
+            rc, _ = await tmux.run("wait-for", "owned-pane-exited", timeout=120.0)
             assert rc == 0
             rc, out = await tmux.run("list-panes", "-s", "-t", "=v2-owned:", "-F",
                                      "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}")
@@ -167,7 +168,7 @@ def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentine
             assert sentinel.poll() is None
         finally:
             await tmux.run("kill-server")
-            sentinel.terminate()
+            sentinel.stdin.close()
             sentinel.wait(timeout=5)
     asyncio.run(go())
 
