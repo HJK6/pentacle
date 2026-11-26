@@ -88,9 +88,37 @@ def identified_db(directory: Path) -> Path:
     return path
 
 
+def first_event_move(monkeypatch, action) -> dict:
+    """Run `action` once, at the first event copy: after ATTACH and the index
+    step, before the copy transaction. Also records whether a transaction was
+    left open there."""
+    real, state = r._move_copies, {}
+
+    def wrapper(conn, archive_path, binding, table, *args, **kwargs):
+        if table == r.EVENT_TABLE and "seen" not in state:
+            state["open_transaction"] = conn.in_transaction
+            state["seen"] = action()
+        return real(conn, archive_path, binding, table, *args, **kwargs)
+    monkeypatch.setattr(r, "_move_copies", wrapper)
+    return state
+
+
 @pytest.fixture()
 def identified(tmp_path: Path) -> Path:
     return identified_db(tmp_path)
+
+
+def store_pass(db: Path, config: r.RetentionConfig, on_store_connection) -> r.PassResult:
+    """One pass through a real Store whose connection `on_store_connection` prepares."""
+    async def go():
+        store = Store(str(db))
+        store.start()
+        try:
+            await store.submit(on_store_connection)
+            return await r.RetentionJob(store, config).run_pass()
+        finally:
+            store.stop()
+    return asyncio.run(go())
 
 
 def unindexed_pair(db: Path) -> None:
@@ -108,16 +136,16 @@ def unindexed_pair(db: Path) -> None:
 
 def test_a_fresh_pair_has_the_index_before_its_first_event_copy(identified, monkeypatch):
     archive = archive_of(identified)
-    state = first_event_copy(monkeypatch, lambda: index_shape(archive))
+    state = first_event_move(monkeypatch, lambda: index_shape(archive))
     result = run_pass(identified, cfg())
     assert result.events_moved == 3
-    assert state["seen"] == SHAPE
+    assert state["seen"] == SHAPE and state["open_transaction"] is False
     version = schema_version(archive)
     run_pass(identified, cfg())
     assert index_shape(archive) == SHAPE and schema_version(archive) == version
 
 
-def test_an_existing_pair_gets_the_index_at_the_event_stage_only(identified, monkeypatch):
+def test_an_existing_pair_gets_the_index_in_the_event_stage_only(identified, monkeypatch):
     archive = archive_of(identified)
     unindexed_pair(identified)
 
@@ -135,15 +163,19 @@ def test_an_existing_pair_gets_the_index_at_the_event_stage_only(identified, mon
             seen["sessions"] = index_shape(archive)
     monkeypatch.setattr(r, "history_checkpoint", checkpoint)
     attempts = []
-    real_connection = r._archive_index_connection
-    monkeypatch.setattr(r, "_archive_index_connection",
-                        lambda path: attempts.append(path) or real_connection(path))
-    state = first_event_copy(monkeypatch, lambda: index_shape(archive))
-    result = run_pass(identified, cfg(batch_size=1))
+
+    def trace(statement):
+        if statement.startswith(f"CREATE INDEX IF NOT EXISTS arch.{INDEX}"):
+            attempts.append(statement)
+    entry = first_event_copy(monkeypatch, lambda: index_shape(archive))
+    state = first_event_move(monkeypatch, lambda: index_shape(archive))
+    result = store_pass(identified, cfg(batch_size=1), lambda conn: conn.set_trace_callback(trace))
 
     assert result.events_moved == 3
     assert seen["sessions"] is None, "the index was built before the event stage"
-    assert state["seen"] == SHAPE, "the index was missing at the first event copy"
+    assert entry["seen"] is None, "the index was built before the event stage attached the archive"
+    assert state["seen"] == SHAPE, "the index was not committed before the first copy transaction"
+    assert state["open_transaction"] is False
     assert len(attempts) == 1, f"{len(attempts)} index attempts in one pass"
     version = schema_version(archive)
     run_pass(identified, cfg())
@@ -255,24 +287,19 @@ def test_a_denied_index_build_keeps_the_pass_and_is_retried(identified, monkeypa
             fired.append(arg1)
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
-    real_connection = r._archive_index_connection
-
-    def denied(path):
-        conn = real_connection(path)
-        conn.set_authorizer(deny)
-        return conn
-    monkeypatch.setattr(r, "_archive_index_connection", denied)
+    state = first_event_move(monkeypatch, lambda: None)
     with caplog.at_level(logging.WARNING, logger=r.log.name):
-        got = outcome(identified, run_pass(identified, cfg()))
+        got = outcome(identified, store_pass(identified, cfg(), lambda conn: conn.set_authorizer(deny)))
+    assert state["open_transaction"] is False, "the index transaction was left open"
 
     assert fired == [INDEX], "the denial never fired"
     assert got[:3] == (1, 2, 1), "the pass must move events and keep the collision"
     assert got == expected
     assert index_shape(archive_of(identified)) is None
-    assert sum(INDEX_WARNING in m for m in caplog.messages) == 1
+    index_warnings = [m for m in caplog.messages if INDEX_WARNING in m]
+    assert len(index_warnings) == 1 and "not authorized" in index_warnings[0], index_warnings
     assert [m for m in caplog.messages if INDEX_WARNING not in m] == control_warnings
 
-    monkeypatch.setattr(r, "_archive_index_connection", real_connection)
     run_pass(identified, cfg())
     assert index_shape(archive_of(identified)) == SHAPE
 
@@ -302,12 +329,158 @@ def failure(db: Path, monkeypatch) -> tuple:
 
 def test_a_persistent_outage_keeps_todays_failure_and_rows(identified, monkeypatch):
     baseline = identified_db(identified.parent / "baseline")
-    real_ensure = r.ensure_event_identity_index
-    monkeypatch.setattr(r, "ensure_event_identity_index", lambda path, ev, **kw: r.ensure_archive_table(
-        path, ev.create_sql, ev.table, require_existing=kw.get("require_existing", False)))
+    real_build = r._build_identity_index
+    monkeypatch.setattr(r, "_build_identity_index", lambda *args: None)
     expected = failure(baseline, monkeypatch)
-    assert r.ensure_event_identity_index is real_ensure
+    assert r._build_identity_index is real_build
     got = failure(identified, monkeypatch)
     assert got == expected
     assert "locked" in got[1], got[1]
     assert len(got[2]) == 3 and got[3] == [], "an event moved during the outage"
+
+
+def test_a_lock_held_across_only_the_index_step_keeps_the_copy(identified, monkeypatch, caplog):
+    # A writer holds the archive from just before the first event chunk and
+    # lets go as soon as the index step gives up, so only that step meets it.
+    import store_usage
+    collision_fixture(identified)
+    archive = archive_of(identified)
+    real_prune, held = store_usage.prune_generation_history_conn, []
+
+    def between(conn, now):
+        result = real_prune(conn, now)
+        holder_conn = sqlite3.connect(archive, isolation_level=None, check_same_thread=False)
+        holder_conn.execute("BEGIN IMMEDIATE")
+        held.append(holder_conn)
+        return result
+    monkeypatch.setattr(store_usage, "prune_generation_history_conn", between)
+    state = first_event_move(monkeypatch, lambda: None)
+
+    class Release(logging.Handler):
+        def emit(self, record):
+            if INDEX_WARNING in record.getMessage():
+                for conn in held:
+                    conn.rollback()
+                    conn.close()
+                held.clear()
+    release = Release()
+    r.log.addHandler(release)
+    try:
+        with caplog.at_level(logging.WARNING, logger=r.log.name):
+            result = run_pass(identified, cfg())
+    finally:
+        r.log.removeHandler(release)
+        for conn in held:
+            conn.rollback()
+            conn.close()
+    index_warnings = [m for m in caplog.messages if INDEX_WARNING in m]
+    assert len(index_warnings) == 1 and "locked" in index_warnings[0], index_warnings
+    assert (result.events_moved, result.events_retained) == (2, 1), "the copy did not proceed"
+    assert state["open_transaction"] is False, "the index transaction was left open"
+    assert index_shape(archive) is None
+    with closing(attached(archive)) as conn:
+        assert conn.execute("PRAGMA arch.integrity_check").fetchone()[0] == "ok"
+    monkeypatch.undo()
+    run_pass(identified, cfg())
+    assert index_shape(archive) == SHAPE
+
+
+# --------------------------------------------------------------------------- #
+# a refused archive is never written
+# --------------------------------------------------------------------------- #
+
+
+def catalog(archive: Path) -> dict:
+    with closing(sqlite3.connect(archive.absolute().as_uri() + "?mode=ro", uri=True)) as conn:
+        return {"schema_version": conn.execute("PRAGMA schema_version").fetchone()[0],
+                "indexes": sorted(n for n, in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"))}
+
+
+def relocate(db: Path, archive: Path) -> Path:
+    """A supported relocation of the pair to a copy of its archive."""
+    relocated = db.parent / "relocated.db"
+    with closing(sqlite3.connect(archive)) as src, closing(sqlite3.connect(relocated)) as dst:
+        src.backup(dst)
+    with closing(sqlite3.connect(db, factory=r.HistoryConnection, check_same_thread=False)) as other:
+        other.row_factory = sqlite3.Row
+        r.bind_history_archive(other, relocated)
+    return relocated
+
+
+@pytest.mark.parametrize("boundary", ["before_first_chunk", "after_attach"])
+@pytest.mark.parametrize("change,refusal", [
+    ("rebind", "history archive rebound; no hot rows deleted"),
+    ("wrong_pair", "history archive pair mismatch"),
+])
+def test_an_archive_refused_before_the_first_event_copy_is_not_indexed(
+        identified, monkeypatch, change, refusal, boundary):
+    # A supported relocation, or a pair marker that no longer matches, between
+    # session archival and the first event chunk, or between the event
+    # stage's ATTACH and its index transaction.
+    import store_usage
+    collision_fixture(identified)
+    archive = archive_of(identified)
+    hot = rows(identified, r.EVENT_TABLE, "1 ORDER BY event_id")
+    seen = {}
+
+    def apply():
+        if change == "rebind":
+            relocate(identified, archive)
+        else:
+            write(archive, "UPDATE v2_receipt_route_archive SET pair_id='unrelated-pair'")
+        seen["before"] = catalog(archive)
+    if boundary == "before_first_chunk":
+        real_prune = store_usage.prune_generation_history_conn
+
+        def between(conn, now):
+            result = real_prune(conn, now)
+            apply()
+            return result
+        monkeypatch.setattr(store_usage, "prune_generation_history_conn", between)
+    else:
+        real_build = r._build_identity_index
+
+        def after_attach(*args):
+            apply()
+            return real_build(*args)
+        monkeypatch.setattr(r, "_build_identity_index", after_attach)
+    with pytest.raises(r.RetentionError) as raised:
+        run_pass(identified, cfg())
+    assert str(raised.value) == refusal
+    assert catalog(archive) == seen["before"], "the refused archive was written"
+    assert INDEX not in seen["before"]["indexes"]
+    assert rows(identified, r.EVENT_TABLE, "1 ORDER BY event_id") == hot
+
+
+def test_a_rebind_after_the_index_commits_leaves_it_on_the_former_archive(identified, monkeypatch):
+    # The guarantee is that a stale binding cannot receive the index write. A
+    # rebind after the index commit may leave a valid index on the former
+    # archive; the copy then lands there as it does today and the delete
+    # refuses. The next pass targets the new pair.
+    collision_fixture(identified)
+    archive = archive_of(identified)
+    hot = rows(identified, r.EVENT_TABLE, "1 ORDER BY event_id")
+    real_build, order, where = r._build_identity_index, [], {}
+
+    def then_rebind(*args):
+        real_build(*args)
+        order.append(("index committed", index_shape(archive) == SHAPE))
+        where["relocated"] = relocate(identified, archive)
+        order.append(("rebound", True))
+    monkeypatch.setattr(r, "_build_identity_index", then_rebind)
+    with pytest.raises(r.RetentionError) as raised:
+        run_pass(identified, cfg())
+    assert str(raised.value) == "history archive rebound; no hot rows deleted"
+    assert order == [("index committed", True), ("rebound", True)]
+    assert rows(identified, r.EVENT_TABLE, "1 ORDER BY event_id") == hot
+    former = {row["event_id"] for row in rows(archive, r.EVENT_TABLE)}
+    relocated = where["relocated"]
+    assert {e["event_id"] for e in hot[1:]} <= former, "the copy did not land on the former archive"
+    assert not {e["event_id"] for e in hot} & {row["event_id"] for row in rows(relocated, r.EVENT_TABLE)}
+
+    monkeypatch.undo()
+    result = run_pass(identified, cfg())
+    assert (result.events_moved, result.events_retained) == (2, 1)
+    assert index_shape(relocated) == SHAPE
+    assert {e["event_id"] for e in hot[1:]} <= {row["event_id"] for row in rows(relocated, r.EVENT_TABLE)}
