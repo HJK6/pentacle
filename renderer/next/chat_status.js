@@ -21,13 +21,35 @@ function isWorking(session, draft, phase = 'idle') {
   return hasConfirmedWork(session, draft, phase) || (!!session && !composite(session) && phase === 'pending');
 }
 
+// Each daemon report restates the turn's start to within a heartbeat's delay.
+// The first one sets the clock, which then counts on its own. A later report
+// replaces the start only when it disagrees by more than that delay.
+const RESYNC_MS = 2500;
+
 function workingClock() {
   const starts = new Map();
+  const steady = (previous, reported) =>
+    previous?.reported && Math.abs(previous.start - reported) < RESYNC_MS ? previous.start : reported;
   return {
     retain(ids) { for (const id of starts.keys()) if (!ids.has(id)) starts.delete(id); },
+    // Milliseconds until a shown time next changes, or null when none is running.
+    untilNextSecond(now) {
+      let wait = null;
+      for (const { start, shown } of starts.values()) {
+        if (shown !== now) continue;
+        const next = 1000 - ((now - start) % 1000 + 1000) % 1000;
+        wait = wait === null ? next : Math.min(wait, next);
+      }
+      return wait;
+    },
     elapsed(session, draft, turn, elapsed, now) {
       const id = session?.stream_id;
-      if (composite(session)) return session.working ? formatElapsed(elapsed) : '';
+      if (composite(session)) {
+        if (!session.working || !Number.isFinite(elapsed)) { starts.delete(id); return ''; }
+        const start = steady(starts.get(id), now - elapsed);
+        starts.set(id, { start, reported: true, shown: now });
+        return formatElapsed(now - start);
+      }
       if (!id || !hasConfirmedWork(session, draft, turn?.phase)) { starts.delete(id); return ''; }
 
       const generation = session.session_generation;
@@ -38,9 +60,10 @@ function workingClock() {
       const sameTurn = previous?.generation === generation && previous?.endedAt === endedAt
         && (previous?.turnStart == null || previous.turnStart === turnStart)
         && previous?.optimisticId === optimisticId;
-      const start = elapsed != null ? now - elapsed : (sameTurn ? previous?.start : undefined) ??
+      const start = elapsed != null ? steady(sameTurn ? previous : null, now - elapsed) : (sameTurn ? previous?.start : undefined) ??
         now - 1000 * (parseWorkingSeconds(draft?.raw?.working_label) ?? parseWorkingSeconds(session.working_label) ?? 0);
-      starts.set(id, { generation, turnStart, optimisticId, endedAt, start });
+      starts.set(id, { generation, turnStart, optimisticId, endedAt, start, shown: now,
+        reported: elapsed != null || (sameTurn && !!previous?.reported) });
       return formatElapsed(now - start);
     },
   };
@@ -140,4 +163,12 @@ function decorateSendLines(element, store) {
   }
 }
 
-module.exports = { SEEN_KEY, formatElapsed, isWorking, hasConfirmedWork, workingClock, modelAndEffort, createSeenMarks, sendLine, mountWorkingRow, decorateSendLines };
+// Daemon notices and child reports arrive as agent rows; name each kind for its look.
+function decorateAgentRows(element) {
+  for (const id of element.querySelectorAll('.slot-chat-v3-agent-id')) {
+    const row = id.closest('.slot-chat-v3-subagent');
+    if (row) row.dataset.agentKind = id.textContent === 'Daemon' ? 'daemon' : id.textContent === 'Subagent activity' ? 'report' : 'agent';
+  }
+}
+
+module.exports = { SEEN_KEY, formatElapsed, isWorking, hasConfirmedWork, workingClock, modelAndEffort, createSeenMarks, sendLine, mountWorkingRow, decorateSendLines, decorateAgentRows };

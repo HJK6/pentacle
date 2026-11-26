@@ -30,6 +30,25 @@ edge('ordinary elapsed carries the authoritative start and resets across turn, i
   assert.equal(clock.elapsed({...row, session_generation:'b'}, null, undefined, null, 11000), '0s');
 });
 
+edge('a running time counts from its first report and ignores heartbeat jitter, but follows a real correction', () => {
+  const {workingClock} = status;
+  const clock = workingClock();
+  const row = {stream_id:'fixture:a', session_generation:'a', working:true};
+  assert.equal(clock.elapsed(row, null, undefined, 478600, 100000), '7m 58s');
+  assert.equal(clock.untilNextSecond(100000), 400, 'the next step lands on the whole second');
+  // Heartbeats restate the start up to 0.4 s either way; the shown second keeps its own pace.
+  assert.equal(clock.elapsed(row, null, undefined, 483100 + 400, 104500), '8m 03s');
+  assert.equal(clock.elapsed(row, null, undefined, 488600 - 400, 110000), '8m 08s');
+  assert.equal(clock.untilNextSecond(110000), 400);
+  assert.equal(clock.elapsed(row, null, undefined, null, 111400), '8m 10s', 'a missing report keeps counting');
+  assert.equal(clock.elapsed(row, null, undefined, 4000, 120000), '4s', 'a new turn restarts it');
+  const composite = {stream_id:'fixture:c', session_kind:'assistant_composite', working:true};
+  assert.equal(clock.elapsed(composite, null, undefined, 9000, 1000), '9s');
+  assert.equal(clock.elapsed(composite, null, undefined, 10300, 2000), '10s', 'the assistant time is steady too');
+  assert.equal(clock.elapsed(composite, null, undefined, null, 3000), '', 'and still has no fallback');
+  assert.equal(workingClock().untilNextSecond(0), null, 'nothing running needs no wake');
+});
+
 edge('seen marks key by stream, survive temporary absence and reload, collapse identical messages and drop explicit closes', () => {
   const {createSeenMarks} = status;
   const a={stream_id:'f:a',last_kind:'ASSIST',last_text:'a'};

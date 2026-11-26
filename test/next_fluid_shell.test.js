@@ -40,7 +40,8 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   let notify = () => {}, frame = () => {};
   let sendNowAllowed = false, sendStage = '';
   let onData;
-  const ptyData = new Set();
+  let ptyData = null;
+  const focused = [];
   class Term {
     cols = 72;
     rows = 24;
@@ -67,12 +68,14 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
     getWorkingElapsedMs: id => elapsed[id] ?? null,
     canSendQueuedNow: (id, oid) => id === 'fixture:a' && oid === 'receipt' && sendNowAllowed,
     sendQueuedNow: (...args) => calls.push(['queued-now', ...args]),
-    selectSessionDetail: id => { rendered.push(id); return id; }, applyFrame() {},
+    // A detail that holds a message and prints as its stream, so history counts as read.
+    selectSessionDetail: id => { rendered.push(id); return { transcriptItems: [{ id: 'row' }], toString: () => id }; }, applyFrame() {},
+    setFocusedChatStreams: ids => focused.push([...ids]),
     sendTurn: (...args) => calls.push(['send', ...args]),
   };
   window.cc = {
     getChatStreamState: async () => ({ connected:true, sessions: rows }), promptList: async () => ({ok:true,questions:[]}),
-    onChatStreamFrame(fn) { frame = fn; }, onPtyData(fn) { ptyData.add(fn); },
+    onChatStreamFrame(fn) { frame = fn; }, onPtyData(fn) { ptyData = fn; }, // the bridge keeps only the latest listener
     requestStreamEvents: async args => { calls.push(['history', args.streamId]); return { ok:true }; },
     createPty: async (...args) => { calls.push(['create', ...args]); return 'pty:'+args[0]; },
     killPty: async (...args) => { calls.push(['kill', ...args]); },
@@ -81,7 +84,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
     chatRename: async (...args) => { calls.push(['rename', ...args]); return {ok: false}; },
     chatClose: async (...args) => { calls.push(['close', ...args]); return {ok: true}; },
   };
-  onData = (slot, data) => { for (const fn of ptyData) fn(slot, data); };
+  onData = (slot, data) => ptyData?.(slot, data);
   window.Function('require', fs.readFileSync(entry,'utf8'))(id => {
     if (id === '../web_cc') return { installWebCc() {} };
     if (id.startsWith('@xterm/')) return { Terminal: Term, FitAddon: Addon, Unicode11Addon: Addon, WebglAddon: Addon };
@@ -89,7 +92,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   });
   const $ = css => window.document.querySelector(css);
   const choose = id => { $("button[aria-label^=Chats]").click(); $(`.popover [data-stream-id="fixture:${id}"]`).click(); };
-  return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts,
+  return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts, focused,
     update: () => notify(),
     inventory: () => { frame({type:'session.inventory', sessions:rows}); notify(); },
     sendState: (stage, allowed) => { sendStage = stage; sendNowAllowed = allowed; notify(); },
@@ -202,6 +205,70 @@ test('storage denial falls back to a left rail and still starts the workspace', 
   assert.equal(s.$('[data-pane=assistant]').hidden, false);
   s.choose('a');
   assert.equal(s.shown()[0].querySelector('.thread-inner').dataset.streamId, 'fixture:a');
+});
+
+test('the chats on screen are the store\'s focused streams and each is read once, again after it returns', async t => {
+  const s = openShell(t);
+  await flush();
+  const reads = () => s.calls.filter(c => c[0] === 'history').map(c => c[1]);
+  assert.deepEqual(s.focused.at(-1), ['fixture:assistant']);
+  assert.deepEqual(reads(), ['fixture:assistant']);
+  s.choose('a'); s.choose('b');
+  await flush();
+  assert.deepEqual(s.focused.at(-1), ['fixture:assistant', 'fixture:a', 'fixture:b']);
+  s.update(); s.update();
+  assert.deepEqual(reads(), ['fixture:assistant', 'fixture:a', 'fixture:b'], 'a render does not read a chat again');
+  s.$('[data-pane=chat] [aria-label=Close]').click();
+  await flush();
+  assert.equal(s.focused.at(-1).includes('fixture:a'), false, 'a closed card releases its chat');
+  s.choose('a');
+  await flush();
+  assert.equal(reads().filter(id => id === 'fixture:a').length, 2, 'a chat that left the screen is read again');
+  assert.equal(reads().filter(id => id === 'fixture:assistant').length, 1);
+});
+
+test('a reader who moved up keeps their place through a hidden card and a chat switch', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const thread = s.$('[data-pane=chat] .thread');
+  // jsdom lays nothing out: a pane in view is 400 tall with 2000 of messages, one out of view has no size.
+  const inView = () => !thread.closest('[hidden]');
+  Object.defineProperty(thread, 'clientHeight', { get: () => inView() ? 400 : 0 });
+  Object.defineProperty(thread, 'scrollHeight', { get: () => inView() ? 2000 : 0 });
+  const scroll = top => { thread.scrollTop = top; thread.dispatchEvent(new s.window.Event('scroll')); };
+  scroll(1600); scroll(300);
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  assert.equal(thread.closest('.chat-card').hidden, true);
+  s.sendState('sending', false);
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  assert.equal(thread.scrollTop, 300, 'the card comes back where its reader left it');
+  s.sendState('queued', false);
+  assert.equal(thread.scrollTop, 300, 'a message that arrived out of view did not move the reader to the end');
+
+  s.$('[data-pane=chat] [aria-label=Status]').click();
+  s.choose('c');
+  assert.equal(s.$('[data-pane=chat] .thread-inner').dataset.streamId, 'fixture:c');
+  s.$('[data-pane=chat2] [data-next-message]').focus();
+  s.choose('a');
+  assert.equal(thread.scrollTop, 300, 'the returning chat opens at its saved place');
+  s.sendState('sending', false);
+  assert.equal(thread.scrollTop, 300, 'and stays there when the next message arrives');
+  scroll(1600);
+  s.sendState('queued', false);
+  assert.equal(thread.scrollTop, 2000, 'a reader back at the latest message follows new ones');
+});
+
+test('a running time steps to the next second on its own, with no new report', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  const a = s.rows[1]; a.working = true;
+  s.elapsed[a.stream_id] = 7000;
+  s.update();
+  const timer = () => s.$('[data-pane=chat] .next-working-time').textContent;
+  assert.equal(timer(), '7s');
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal(timer(), '8s');
+  a.working = false; s.update();
 });
 
 test('U1: the Next working time uses authoritative elapsed, then the carried start, a label or zero', async t => {

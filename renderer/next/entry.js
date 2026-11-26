@@ -32,11 +32,12 @@ const { applyVersionedConnectionState } = require('../chat_stream_connection_sta
 const { mountChatList } = require('./chat_list');
 const { isProtectedAssistant } = require('../chat_presentation');
 const { configuredAssistantRole } = require('../assistant_role');
-const { isWorking, hasConfirmedWork, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines } = require('./chat_status');
+const { isWorking, hasConfirmedWork, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines, decorateAgentRows } = require('./chat_status');
 const { createReadingWidth } = require('./reading_width');
 const { createMicrophonePreference } = require('./microphone');
 const { mountSettingsFields } = require('./settings_fields');
 const { trackScroll } = require('./scroll_activity');
+const { FIRST_ROWS, PAGE_ROWS, newTailRows, createChatHistory } = require('./chat_history');
 const store = window.PentacleChatStore;
 const view = window.PentacleChatView;
 const core = window.PentacleChatCore;
@@ -45,6 +46,7 @@ const config = window.__PENTACLE_CONFIG__ || {};
 const catalogLoader = createSpawnCatalogLoader(() => cc.chatSpawnCatalog());
 const root = document.getElementById('app');
 const drafts = new Map();
+const panes = new WeakMap();
 let laneInventory = core.emptyWorkLanesInventory();
 let laneInventoryCurrent = false;
 let pendingLaneLink = new URLSearchParams(location.search).get('lane');
@@ -133,13 +135,16 @@ const assistantComposer = node('div', 'composer-host', assistant);
 const showAssistantWorking = mountWorkingRow(assistantComposer);
 const chatHistory = new Map();
 const usePane = key => { state.layout = layout.markUsed(state.layout, key); };
+const historyReads = createChatHistory({ cc, store, onChange: () => render(), setTimer: (fn, ms) => window.setTimeout(fn, ms) });
 const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, mountChatCard(stage, {
   key, slot, icons, node, button, sessions, store, cc, config, drafts, history: chatHistory,
-  paintTranscript, attachTranscript, requestHistory, catalogLoader, hostPresentation,
+  paintTranscript, attachTranscript, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
   onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions,
 })]));
+// The bridge keeps one listener per event, so both cards' terminals are fed from here.
+cc.onPtyData((slot, data) => Object.values(cards)[slot]?.writeTerminal(data));
 const designCard = node('section', 'card design-card', stage); designCard.hidden = true;
 designCard.setAttribute('aria-label', 'Design');
 designCard.dataset.pane = 'dash';
@@ -276,16 +281,21 @@ function paintChatStatus() {
   paintWorking();
   if (chatList) paintChatList();
 }
+let workingTimer = 0;
 function paintWorking() {
   const a = assistantSession();
+  const now = Date.now();
   brand.classList.toggle('assistant-working', !!working(a));
   const tick = (s, draw) => {
-    const now = Date.now();
     draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnState?.(s.stream_id) : undefined,
       s ? store.getWorkingElapsedMs?.(s.stream_id, now) : null, now));
   };
   tick(a, showAssistantWorking);
   for (const card of Object.values(cards)) tick(card.session(), card.showWorking);
+  // Wake just past the next whole second of a running time, so it steps evenly.
+  window.clearTimeout(workingTimer);
+  const wait = clock.untilNextSecond(now);
+  if (wait !== null) workingTimer = window.setTimeout(paintWorking, wait + 15);
 }
 function paintChatList() {
   const selected = switchSeat ? [cards[switchSeat].id] : Object.values(cards).filter(c => !c.element.hidden).map(c => c.id);
@@ -316,7 +326,6 @@ function chooseChat(id) {
   render();
 }
 function assistantSession() { return uniqueAssistantComposite(sessions()); }
-function requestHistory(id) { if (id) cc.requestStreamEvents({ streamId: id }).catch(() => {}); }
 function laneNameTargets() {
   return laneInventory.lanes.flatMap(lane => {
     const detail = laneReads.getRead(lane.lane_id, 'goals').reply;
@@ -329,22 +338,77 @@ function openLaneTarget(laneId, goalId) {
   if (goalId) lanesControl.openGoal(laneId, goalId); else lanesControl.openLane(laneId);
   state.layout = layout.show(state.layout, 'lanes', true, innerWidth); syncLayout();
 }
-function paintTranscript(element, id) {
-  if (element.dataset.streamId !== (id || '')) delete element.dataset.rendered;
+function paneFor(element) {
+  let pane = panes.get(element);
+  if (!pane) panes.set(element, pane = { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true });
+  return pane;
+}
+function selecting(element) {
+  const selection = document.getSelection?.();
+  return !!selection && !selection.isCollapsed && (element.contains(selection.anchorNode) || element.contains(selection.focusNode));
+}
+const atLatest = scroller => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+// The line above the messages: why there are none yet, or the way to earlier ones.
+function historyNote(id, detail) {
+  const status = historyReads.status(id);
+  if (status.message) return `<div class="next-history-note" role="status">${status.message}${status.retry
+    ? '<button type="button" class="next-history-retry">Retry</button>' : ''}</div>`;
+  if (!(detail?.remainingCount > 0) && !historyReads.hasOlder(id)) return '';
+  return historyReads.loadingOlder(id) ? '<div class="next-history-note" role="status">Loading earlier messages…</div>'
+    : '<button type="button" class="next-history-earlier">Show earlier messages</button>';
+}
+// `place` is a saved scroll offset to return to: always for a chat just opened
+// here, and for one coming back into view only if its reader had moved up.
+// It is taken (true) once the stage has its final widths, since text reflows with them.
+let layingOut = false;
+function paintTranscript(element, id, place = null) {
+  const pane = paneFor(element), scroller = element.parentElement;
+  paintRows(element, id);
+  if (!id || layingOut) return false;
+  const opened = pane.opened;
+  pane.opened = false;
+  if (place === null) return false;
+  if (opened || !pane.pinned) {
+    scroller.scrollTop = place;
+    pane.pinned = atLatest(scroller);
+  } else scroller.scrollTop = scroller.scrollHeight;
+  return true;
+}
+function paintRows(element, id) {
+  const pane = paneFor(element);
+  if (element.dataset.streamId !== (id || '')) {
+    delete element.dataset.rendered;
+    Object.assign(pane, { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true });
+  }
   element.dataset.streamId = id || '';
   if (!id) { element.textContent = 'Loading chat…'; return; }
-  const detail = store.selectSessionDetail(id, { visibleCount: 120, includeDraft: false });
-  const html = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true });
+  // Repainting would drop a selection the reader is still making.
+  if (element.dataset.rendered !== undefined && selecting(element)) { pane.deferred = true; return; }
+  pane.deferred = false;
+  const scroller = element.parentElement;
+  // A pane out of view has no height to measure, so it keeps what its reader last chose.
+  const stick = !element.dataset.rendered || pane.pinned || (scroller.clientHeight > 0 && atLatest(scroller));
+  const select = () => store.selectSessionDetail(id, { visibleCount: pane.rows, includeDraft: false });
+  let detail = select();
+  // Further up the chat, new messages extend the window instead of sliding it.
+  const arrived = stick ? 0 : newTailRows(detail?.transcriptItems, pane.tail);
+  if (arrived) { pane.rows += arrived; detail = select(); }
+  pane.tail = detail?.transcriptItems?.at(-1)?.id ?? null;
+  const transcript = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true });
+  const note = historyNote(id, detail);
+  const html = note + (transcript || (note ? '' : '<div class="empty">No messages yet.</div>'));
   const targets = element === assistantInner ? laneNameTargets() : [];
   const linkVersion = JSON.stringify(targets);
   if (element.dataset.rendered === html && element.dataset.linkVersion === linkVersion) {
     decorateSendLines(element, store);
+    pane.anchor = null;
     return;
   }
-  const scroller = element.parentElement;
-  const stick = !element.dataset.rendered || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
-  element.innerHTML = html || '<div class="empty">No messages yet.</div>';
+  // Open agent and tool rows stay open across a repaint.
+  if (view.replaceTranscriptHtml) view.replaceTranscriptHtml(element, html);
+  else element.innerHTML = html;
   decorateSendLines(element, store);
+  decorateAgentRows(element);
   element.dataset.rendered = html;
   element.dataset.linkVersion = linkVersion;
   if (element === assistantInner) {
@@ -359,9 +423,59 @@ function paintTranscript(element, id) {
   hydrateDesignPreviews(element, key => cc.chatFetchBlob(key));
   imageAttachments.hydrate(element);
   void view.hydrateFileAttachments(element);
-  if (stick) scroller.scrollTop = scroller.scrollHeight;
+  if (pane.anchor) {
+    // Earlier messages were added above; keep the reader's place.
+    scroller.scrollTop = Math.max(0, pane.anchor.top + scroller.scrollHeight - pane.anchor.height);
+    pane.anchor = null;
+  } else if (stick) scroller.scrollTop = scroller.scrollHeight;
+  pane.pinned = stick;
 }
-function attachTranscript(transcript, source) { transcript.addEventListener('click', event => {
+async function showEarlier(element) {
+  const pane = paneFor(element), id = element.dataset.streamId, scroller = element.parentElement;
+  if (!id || pane.loading) return;
+  const remaining = () => store.selectSessionDetail(id, { visibleCount: pane.rows, includeDraft: false })?.remainingCount || 0;
+  if (!remaining()) {
+    if (!historyReads.hasOlder(id)) return;
+    pane.loading = true;
+    try { await historyReads.loadOlder(id, () => remaining() > 0); }
+    catch (error) { console.warn('[next] earlier messages failed:', error?.message || error); }
+    finally { pane.loading = false; }
+    if (element.dataset.streamId !== id) return;
+  }
+  const more = remaining();
+  if (more && !selecting(element)) {
+    pane.anchor = { top: scroller.scrollTop, height: scroller.scrollHeight };
+    pane.rows += Math.min(PAGE_ROWS, more);
+  }
+  paintTranscript(element, id);
+}
+function attachTranscript(transcript, source) {
+  const scroller = transcript.parentElement;
+  const pane = paneFor(transcript);
+  let lastTop = 0;
+  scroller.addEventListener('scroll', () => {
+    // Only the reader moving up lets go of the latest message; a pane that grows or narrows does not.
+    if (!scroller.clientHeight) return;
+    const top = scroller.scrollTop, up = top < lastTop;
+    lastTop = top;
+    if (atLatest(scroller)) pane.pinned = true;
+    else if (up) pane.pinned = false;
+    if (up && top < 160 && transcript.querySelector('.next-history-earlier')) void showEarlier(transcript);
+  }, { passive: true });
+  // Late pictures, a new width or a returning card change the height; a reader at the latest message stays there.
+  // A row the reader just opened is theirs to read, so that growth does not move them.
+  if (window.ResizeObserver) new ResizeObserver(() => {
+    if (!pane.pinned || pane.anchor || !scroller.clientHeight) return;
+    if (Date.now() - pane.touched < 500) pane.pinned = atLatest(scroller);
+    else scroller.scrollTop = scroller.scrollHeight;
+  }).observe(transcript);
+  transcript.addEventListener('click', event => {
+  pane.touched = Date.now();
+  const historyButton = event.target.closest('.next-history-retry,.next-history-earlier');
+  // A selection holds the transcript still; asking for history lets go of it.
+  if (historyButton && selecting(transcript)) document.getSelection().removeAllRanges();
+  if (historyButton?.matches('.next-history-retry')) { historyReads.retry(transcript.dataset.streamId); render(); return; }
+  if (historyButton) { void showEarlier(transcript); return; }
   const designLink = event.target.closest('[data-next-design-link]');
   if (designLink) {
     followDesignLink(source, designLink.dataset.nextDesignLink);
@@ -383,12 +497,17 @@ function attachTranscript(transcript, source) { transcript.addEventListener('cli
   const laneUpdate = event.target.closest('.slot-chat-lane-update[data-lane-id]');
   if (laneUpdate && transcript === assistantInner) { openLaneTarget(laneUpdate.dataset.laneId); return; }
   const copy = event.target.closest('.slot-chat-copy-btn');
-  if (copy) void navigator.clipboard.writeText(copy.dataset.copyText || '');
+  if (copy) {
+    void navigator.clipboard.writeText(copy.dataset.copyText || '');
+    copy.textContent = 'Copied';
+    setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
+  }
   const retry = event.target.closest('.slot-chat-send-retry');
   if (retry) store.retryOptimisticSend(retry.dataset.optimisticId);
   const sendNow = event.target.closest('.slot-chat-send-now');
   if (sendNow && store.canSendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId)) store.sendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId);
-}); }
+  });
+}
 attachTranscript(assistantInner, 'assistant');
 assistantInner.addEventListener('keydown', event => { const update = event.target.closest('.slot-chat-lane-update[data-lane-id]'); if (update && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openLaneTarget(update.dataset.laneId); } });
 function renderPopover() {
@@ -470,7 +589,9 @@ function renderPopover() {
   }
 }
 function render() {
-  const a = assistantSession(); paintTranscript(assistantInner, a?.stream_id); mountAssistantComposer(a?.stream_id);
+  const a = assistantSession();
+  historyReads.focus([a?.stream_id, ...Object.values(cards).map(card => card.id).filter(id => id !== NEW_CHAT)]);
+  paintTranscript(assistantInner, a?.stream_id); mountAssistantComposer(a?.stream_id);
   const assistantName = a?.assistant_display_name || a?.display_name || a?.title || 'Assistant'; brand.setAttribute('aria-label', assistantName); brand.title = assistantName;
   assistantTitle.textContent = assistantName;
   keepButton.setAttribute('aria-label', `Keep ${assistantName} on screen`);
@@ -490,6 +611,7 @@ function syncLayout(admitted = null) {
   assistant.classList.toggle('assistant-overlay', overlay);
   keepButton.hidden = !overlay;
   for (const [key, card] of Object.entries(cards)) if (card.id !== state.layout[key]) card.saveHistory();
+  layingOut = true;
   for (const [key, card] of Object.entries(cards)) {
     const id = state.layout[key];
     card.setStream(id, id && admitted?.stream_id === id ? admitted : null);
@@ -527,6 +649,8 @@ function syncLayout(admitted = null) {
   lanesCard.hidden = !visible.cards.includes('lanes');
   lanesCard.classList.toggle('alone', !lanesCard.hidden && visible.cards.length === 1 && assistant.hidden);
   stageLayout.paint();
+  layingOut = false;
+  for (const card of Object.values(cards)) card.render();
   brand.classList.toggle('on', visible.assistant || overlay);
   brand.setAttribute('aria-pressed', String(visible.assistant || overlay));
   chatsButton.classList.toggle('on', visible.cards.some(key => key === 'chat' || key === 'chat2'));
@@ -721,7 +845,6 @@ for (const dashboard of [designCard, melodyCard]) {
   dashboard.addEventListener('focusin', () => { state.layout = layout.markUsed(state.layout, 'dash'); });
 }
 const theme = readSetting('pentacle.next.theme'); if (['dark','light','cosmic'].includes(theme)) document.documentElement.dataset.theme = theme;
-let assistantHistory = null;
 questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, getInventory: () => laneInventory, getNotifications: () => questionNotifications.values(), getSessions: sessions, retryQuestionIdentity: () => questionNotifications.refreshIdentities(), questionReadFailed: () => questionNotifications.readFailed(),
   onOpenSpec: specId => { const placement = questionsControl.getSnapshot().list.find(item => item.placement?.specId === specId)?.placement; closePopover(); if (placement?.laneId) { openLaneTarget(placement.laneId, placement.goalId); lanesControl?.openSpec(placement.laneId, placement.goalId, specId); } },
   onOpenChat: streamId => { closePopover(); openChat(streamId); } });
@@ -729,25 +852,24 @@ let laneRenderPending = false;
 questionsControl.subscribe(snapshot => { questionsButton.dataset.count = String(snapshot.openCount); questionsButton.setAttribute('aria-label', snapshot.openCount ? `Questions (${snapshot.openCount})` : 'Questions'); if (lanesControl && !laneRenderPending) { laneRenderPending = true; queueMicrotask(() => { laneRenderPending = false; lanesControl?.render(); }); } });
 lanesControl = mountLanesCard(lanesCard, { getState: () => ({ inventory: laneInventory, current: laneInventoryCurrent }), reads: laneReads, questions: questionsControl,
   navigation: { onClose: () => { state.layout = layout.shut(state.layout, 'lanes', innerWidth); syncLayout(); } } });
-store.subscribe(() => { const id = assistantSession()?.stream_id; if (id && id !== assistantHistory) { assistantHistory = id; requestHistory(id); } questionsControl.update({ sessions: sessions() }); render(); });
+store.subscribe(() => { questionsControl.update({ sessions: sessions() }); render(); });
 laneListeners.add(() => { questionsControl.update({ inventory: laneInventory }); lanesControl?.render(); render(); });
 laneReads.subscribe(() => render());
 let recoveryEpoch = null; let recoveryPending = false; let readySignals = 0;
-cc.onChatStreamFrame(frame => { beforeStoreFrame(frame); store.applyFrame(frame); applyLaneFrame(frame); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
+cc.onChatStreamFrame(frame => { beforeStoreFrame(frame); store.applyFrame(frame); applyLaneFrame(frame); historyReads.setConnected(laneConnection.connected); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
 async function loadSnapshot() {
   if (recoveryPending) return; recoveryPending = true;
   const signal = readySignals;
   try {
     const connection = cc.webConnectionState?.(); const snapshot = await cc.getChatStreamState();
     const current = cc.webConnectionState?.(); if (connection && (!current?.open || current.epoch !== connection.epoch)) return;
-    state.connected = !!snapshot?.connected; state.hosts = snapshot?.hosts_stats || {}; const snapshotFrame = { type: 'snapshot', ...(snapshot || {}) }; beforeStoreFrame(snapshotFrame); store.applyFrame(snapshotFrame); applyLaneFrame({ type: 'snapshot', ...(snapshot || {}) }); questionNotifications.frame(snapshot);
+    state.connected = !!snapshot?.connected; state.hosts = snapshot?.hosts_stats || {}; const snapshotFrame = { type: 'snapshot', ...(snapshot || {}) }; beforeStoreFrame(snapshotFrame); store.applyFrame(snapshotFrame); applyLaneFrame({ type: 'snapshot', ...(snapshot || {}) }); historyReads.setConnected(laneConnection.connected); questionNotifications.frame(snapshot);
     void questionNotifications.refreshIdentities();
     if (typeof cc.notificationList === 'function') void cc.notificationList({ states: ['open'] }).then(reply => { if (Array.isArray(reply?.notifications)) questionNotifications.ingest(reply.notifications); }).catch(() => {});
     if (snapshot?.connected && recoveryEpoch !== null && current?.epoch === recoveryEpoch) {
       const unresolved = Object.values(store.getState().optimisticSends || {}).filter(send => ['queued','dispatched','indeterminate'].includes(send.status));
       for (const id of new Set(unresolved.map(send => send.stream_id))) { const result = await cc.requestStreamEvents({ streamId:id, limit:1 }); if (!result?.ok) return; }
       if (cc.webConnectionState?.()?.epoch === recoveryEpoch) { store.webHostReady?.(recoveryEpoch); recoveryEpoch = null; }
-      if (assistantSession()?.stream_id) requestHistory(assistantSession().stream_id); for (const card of Object.values(cards)) if (card.id && card.id !== NEW_CHAT) requestHistory(card.id);
     }
     render();
   } finally { recoveryPending = false; if (recoveryEpoch !== null && readySignals !== signal && cc.webConnectionState?.()?.open) void loadSnapshot().catch(() => {}); }
@@ -757,6 +879,7 @@ cc.onDisconnect?.(({ epoch }) => {
   laneInventoryCurrent = false;
   laneConnection.connected = false;
   laneConnection.stateVersion = null;
+  historyReads.setConnected(false);
   lanesControl?.render();
   store.webHostDisconnected?.(epoch);
 });
@@ -766,5 +889,5 @@ if (designRoute) openDesign(designRoute.target);
 else if (location.hash === '#melody') openMelody();
 else syncLayout();
 document.addEventListener('visibilitychange', paintChatStatus);
-window.setInterval(paintWorking, 1000);
+document.addEventListener('selectionchange', () => { if (transcripts.some(transcript => paneFor(transcript).deferred && !selecting(transcript))) render(); });
 void loadSnapshot().catch(() => render());
