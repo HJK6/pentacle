@@ -42,6 +42,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   let onData;
   let ptyData = null;
   const focused = [];
+  const unread = new Set(); // chats whose messages the store does not hold yet
   class Term {
     cols = 72;
     rows = 24;
@@ -69,7 +70,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
     canSendQueuedNow: (id, oid) => id === 'fixture:a' && oid === 'receipt' && sendNowAllowed,
     sendQueuedNow: (...args) => calls.push(['queued-now', ...args]),
     // A detail that holds a message and prints as its stream, so history counts as read.
-    selectSessionDetail: id => { rendered.push(id); return { transcriptItems: [{ id: 'row' }], toString: () => id }; }, applyFrame() {},
+    selectSessionDetail: id => { rendered.push(id); return { transcriptItems: unread.has(id) ? [] : [{ id: 'row' }], toString: () => id }; }, applyFrame() {},
     setFocusedChatStreams: ids => focused.push([...ids]),
     sendTurn: (...args) => calls.push(['send', ...args]),
   };
@@ -92,11 +93,20 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   });
   const $ = css => window.document.querySelector(css);
   const choose = id => { $("button[aria-label^=Chats]").click(); $(`.popover [data-stream-id="fixture:${id}"]`).click(); };
-  return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts, focused,
+  return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts, focused, unread,
     update: () => notify(),
     inventory: () => { frame({type:'session.inventory', sessions:rows}); notify(); },
     sendState: (stage, allowed) => { sendStage = stage; sendNowAllowed = allowed; notify(); },
     shown: () => [...window.document.querySelectorAll('.chat-card:not([hidden])')] };
+}
+
+// jsdom lays nothing out: give a pane in view 400 of height over 2000 of messages.
+// The returned function scrolls it as a reader does, scroll event included.
+function reader(shell, thread) {
+  const inView = () => !thread.closest('[hidden]');
+  Object.defineProperty(thread, 'clientHeight', { configurable: true, get: () => inView() ? 400 : 0 });
+  Object.defineProperty(thread, 'scrollHeight', { configurable: true, get: () => inView() ? 2000 : 0 });
+  return top => { thread.scrollTop = top; thread.dispatchEvent(new shell.window.Event('scroll')); };
 }
 
 function draft(shell, section, text) {
@@ -117,7 +127,8 @@ test('fluid shell uses two actual card controllers and preserves draft and scrol
   draft(s, '[data-pane=chat2]', 'B draft').focus();
   await flush();
   assert.ok(s.calls.some(([name,id,value])=>name==='send'&&id==='fixture:a'&&value==='A only'));
-  s.$('[data-pane=chat] .thread').scrollTop=37;
+  const scroll = reader(s, s.$('[data-pane=chat] .thread'));
+  scroll(1600); scroll(37);
   s.$('[data-pane=chat] [aria-label=Status]').click();
   assert.equal(s.$('[data-pane=chat] .status').hidden,false);
   s.choose('c');
@@ -231,11 +242,7 @@ test('a reader who moved up keeps their place through a hidden card and a chat s
   const s = openShell(t);
   await flush(); s.choose('a'); s.choose('b');
   const thread = s.$('[data-pane=chat] .thread');
-  // jsdom lays nothing out: a pane in view is 400 tall with 2000 of messages, one out of view has no size.
-  const inView = () => !thread.closest('[hidden]');
-  Object.defineProperty(thread, 'clientHeight', { get: () => inView() ? 400 : 0 });
-  Object.defineProperty(thread, 'scrollHeight', { get: () => inView() ? 2000 : 0 });
-  const scroll = top => { thread.scrollTop = top; thread.dispatchEvent(new s.window.Event('scroll')); };
+  const scroll = reader(s, thread);
   scroll(1600); scroll(300);
   s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
   assert.equal(thread.closest('.chat-card').hidden, true);
@@ -245,17 +252,31 @@ test('a reader who moved up keeps their place through a hidden card and a chat s
   s.sendState('queued', false);
   assert.equal(thread.scrollTop, 300, 'a message that arrived out of view did not move the reader to the end');
 
-  s.$('[data-pane=chat] [aria-label=Status]').click();
-  s.choose('c');
+  const show = id => { s.$('[data-pane=chat] .next-chat-title').click(); s.$(`.popover:not([hidden]) [data-stream-id="fixture:${id}"]`).click(); };
+  show('c');
   assert.equal(s.$('[data-pane=chat] .thread-inner').dataset.streamId, 'fixture:c');
-  s.$('[data-pane=chat2] [data-next-message]').focus();
-  s.choose('a');
+  show('a');
   assert.equal(thread.scrollTop, 300, 'the returning chat opens at its saved place');
   s.sendState('sending', false);
   assert.equal(thread.scrollTop, 300, 'and stays there when the next message arrives');
   scroll(1600);
   s.sendState('queued', false);
   assert.equal(thread.scrollTop, 2000, 'a reader back at the latest message follows new ones');
+
+  show('c'); show('a');
+  s.sendState('sending', false);
+  assert.equal(thread.scrollTop, 2000, 'a reader who left at the latest message still follows after the chat comes back');
+
+  scroll(300); show('c');
+  s.unread.add('fixture:a');
+  show('a');
+  assert.match(s.$('[data-pane=chat] .thread-inner').textContent, /Loading messages/);
+  s.unread.delete('fixture:a'); s.update();
+  assert.equal(thread.scrollTop, 300, 'the saved place waits for the messages it belongs to');
+
+  const paints = s.rendered.length;
+  s.window.dispatchEvent(new s.window.Event('resize'));
+  assert.equal(s.rendered.length, paints, 'a resize with no place to restore repaints no transcript');
 });
 
 test('a running time steps to the next second on its own, with no new report', async t => {
@@ -376,7 +397,8 @@ test('title switching trades two sessions with draft and scroll, resetting both 
   const s = openShell(t);
   await flush(); s.choose('a'); s.choose('b');
   draft(s,'[data-pane=chat]','draft a'); draft(s,'[data-pane=chat2]','draft b');
-  s.$('[data-pane=chat2] .thread').scrollTop = 71;
+  const scroll = reader(s, s.$('[data-pane=chat2] .thread'));
+  scroll(1600); scroll(71);
   s.$('[data-pane=chat2] [aria-label=Status]').click();
   s.$('[data-pane=chat] .next-chat-title')?.click();
   const other = s.$('.popover:not([hidden]) [data-stream-id="fixture:b"]');

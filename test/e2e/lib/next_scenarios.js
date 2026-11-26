@@ -50,6 +50,7 @@ async function homeRail(ctx) {
 // token, a five-column table, a long code line and opened agent rows.
 function wideTranscriptLayout() {
   const inner = document.querySelector('.card .thread-inner'), thread = inner.parentElement;
+  const real = inner.innerHTML; // put back at the end, so no later render has to repaint mid-check
   const long = 'x'.repeat(400);
   const item = (id, text, extra = {}) => ({ id, text, displayRule: 'bubble:assistant', timestamp: '2026-01-01T00:00:00Z', ...extra });
   const table = ['| Stage | What ships | Earliest date | Owner | Notes |', '|---|---|---|---|---|',
@@ -68,13 +69,14 @@ function wideTranscriptLayout() {
     table: !!wrap && getComputedStyle(wrap.querySelector('th')).borderBottomStyle === 'solid',
     agents: inner.querySelectorAll('.slot-chat-v3-subagent').length,
     agentRow: getComputedStyle(inner.querySelector('.slot-chat-v3-subagent > summary')).display };
-  delete inner.dataset.rendered; // the next render repaints the real transcript
+  inner.innerHTML = real;
   return result;
 }
 // Runs in the page. A reader at the latest message opens a long agent row there:
 // the row they clicked stays where it was instead of the chat jumping to its end.
 async function openedRowStays() {
   const inner = document.querySelector('.card .thread-inner'), thread = inner.parentElement;
+  const real = inner.innerHTML;
   const frames = async count => { for (let i = 0; i < count; i++) await new Promise(resolve => requestAnimationFrame(resolve)); };
   const item = (id, text, extra = {}) => ({ id, text, displayRule: 'bubble:assistant', timestamp: '2026-01-01T00:00:00Z', ...extra });
   inner.innerHTML = window.PentacleChatView.renderTranscriptTimelineHtml({ streamId: 'local:layout', transcriptItems: [
@@ -84,6 +86,8 @@ async function openedRowStays() {
   thread.scrollTop = thread.scrollHeight;
   await frames(3);
   const summary = inner.querySelector('.slot-chat-v3-subagent > summary');
+  // A real update can repaint the transcript between frames; the caller then asks again.
+  if (!summary) return { repainted: true };
   const gap = el => Math.round(el.getBoundingClientRect().top - el.previousElementSibling.getBoundingClientRect().bottom);
   const result = { atLatest: thread.scrollHeight - thread.scrollTop - thread.clientHeight < 2, before: Math.round(summary.getBoundingClientRect().top),
     codeGap: gap(inner.querySelector('.slot-chat-md-code')), listGap: gap(inner.querySelector('.slot-chat-md-list')) };
@@ -91,7 +95,8 @@ async function openedRowStays() {
   await frames(4);
   result.after = Math.round(summary.getBoundingClientRect().top);
   result.grew = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
-  delete inner.dataset.rendered; // the next render repaints the real transcript
+  if (!summary.isConnected) return { repainted: true };
+  inner.innerHTML = real;
   return result;
 }
 async function chatCard(ctx) {
@@ -122,7 +127,11 @@ async function chatCard(ctx) {
     if (width === 760) await session.screenshot(path.join(report.dir, 'next-chat-wide-content.png'));
   }
   await session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-  const opened = await session.eval(`(${openedRowStays})()`);
+  let opened;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    opened = await session.eval(`(${openedRowStays})()`);
+    if (!opened.repainted) break;
+  }
   report.ok('an agent row opened at the latest message stays where it was clicked', opened.atLatest && opened.grew > 400 && Math.abs(opened.after - opened.before) < 2, opened);
   report.ok('code and lists stand apart from the text above them', opened.codeGap >= 8 && opened.listGap >= 8, opened);
   await session.click('[aria-label="Close"]'); report.ok('closing the card returns to Assistant', await session.eval("document.querySelector('.card').hidden && !document.querySelector('.pane').hidden"));

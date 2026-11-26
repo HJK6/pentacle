@@ -138,7 +138,7 @@ const usePane = key => { state.layout = layout.markUsed(state.layout, key); };
 const historyReads = createChatHistory({ cc, store, onChange: () => render(), setTimer: (fn, ms) => window.setTimeout(fn, ms) });
 const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, mountChatCard(stage, {
   key, slot, icons, node, button, sessions, store, cc, config, drafts, history: chatHistory,
-  paintTranscript, attachTranscript, catalogLoader, hostPresentation,
+  paintTranscript, attachTranscript, transcriptPlace, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
   onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions,
@@ -340,7 +340,7 @@ function openLaneTarget(laneId, goalId) {
 }
 function paneFor(element) {
   let pane = panes.get(element);
-  if (!pane) panes.set(element, pane = { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true });
+  if (!pane) panes.set(element, pane = { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true, waiting: false, lastTop: 0 });
   return pane;
 }
 function selecting(element) {
@@ -348,9 +348,10 @@ function selecting(element) {
   return !!selection && !selection.isCollapsed && (element.contains(selection.anchorNode) || element.contains(selection.focusNode));
 }
 const atLatest = scroller => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+// A move made here is not the reader's, so it is not later read as them scrolling up.
+function moveTo(scroller, pane, top) { scroller.scrollTop = top; pane.lastTop = scroller.scrollTop; }
 // The line above the messages: why there are none yet, or the way to earlier ones.
-function historyNote(id, detail) {
-  const status = historyReads.status(id);
+function historyNote(id, detail, status) {
   if (status.message) return `<div class="next-history-note" role="status">${status.message}${status.retry
     ? '<button type="button" class="next-history-retry">Retry</button>' : ''}</div>`;
   if (!(detail?.remainingCount > 0) && !historyReads.hasOlder(id)) return '';
@@ -359,26 +360,29 @@ function historyNote(id, detail) {
 }
 // `place` is a saved scroll offset to return to: always for a chat just opened
 // here, and for one coming back into view only if its reader had moved up.
-// It is taken (true) once the stage has its final widths, since text reflows with them.
+// It is taken (true) once the stage has its final widths, since text reflows
+// with them, and once the chat's messages are there to return to.
 let layingOut = false;
+// Where a reader further up the chat is; null for one following the latest message.
+function transcriptPlace(element) { return paneFor(element).pinned ? null : element.parentElement.scrollTop; }
 function paintTranscript(element, id, place = null) {
   const pane = paneFor(element), scroller = element.parentElement;
   paintRows(element, id);
-  if (!id || layingOut) return false;
+  if (!id || layingOut || pane.waiting) return false;
   const opened = pane.opened;
   pane.opened = false;
   if (place === null) return false;
   if (opened || !pane.pinned) {
-    scroller.scrollTop = place;
+    moveTo(scroller, pane, place);
     pane.pinned = atLatest(scroller);
-  } else scroller.scrollTop = scroller.scrollHeight;
+  } else moveTo(scroller, pane, scroller.scrollHeight);
   return true;
 }
 function paintRows(element, id) {
   const pane = paneFor(element);
   if (element.dataset.streamId !== (id || '')) {
     delete element.dataset.rendered;
-    Object.assign(pane, { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true });
+    Object.assign(pane, { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true, waiting: false, lastTop: 0 });
   }
   element.dataset.streamId = id || '';
   if (!id) { element.textContent = 'Loading chat…'; return; }
@@ -395,7 +399,9 @@ function paintRows(element, id) {
   if (arrived) { pane.rows += arrived; detail = select(); }
   pane.tail = detail?.transcriptItems?.at(-1)?.id ?? null;
   const transcript = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true });
-  const note = historyNote(id, detail);
+  const status = historyReads.status(id);
+  pane.waiting = !!status.message;
+  const note = historyNote(id, detail, status);
   const html = note + (transcript || (note ? '' : '<div class="empty">No messages yet.</div>'));
   const targets = element === assistantInner ? laneNameTargets() : [];
   const linkVersion = JSON.stringify(targets);
@@ -425,9 +431,9 @@ function paintRows(element, id) {
   void view.hydrateFileAttachments(element);
   if (pane.anchor) {
     // Earlier messages were added above; keep the reader's place.
-    scroller.scrollTop = Math.max(0, pane.anchor.top + scroller.scrollHeight - pane.anchor.height);
+    moveTo(scroller, pane, Math.max(0, pane.anchor.top + scroller.scrollHeight - pane.anchor.height));
     pane.anchor = null;
-  } else if (stick) scroller.scrollTop = scroller.scrollHeight;
+  } else if (stick) moveTo(scroller, pane, scroller.scrollHeight);
   pane.pinned = stick;
 }
 async function showEarlier(element) {
@@ -452,12 +458,11 @@ async function showEarlier(element) {
 function attachTranscript(transcript, source) {
   const scroller = transcript.parentElement;
   const pane = paneFor(transcript);
-  let lastTop = 0;
   scroller.addEventListener('scroll', () => {
     // Only the reader moving up lets go of the latest message; a pane that grows or narrows does not.
     if (!scroller.clientHeight) return;
-    const top = scroller.scrollTop, up = top < lastTop;
-    lastTop = top;
+    const top = scroller.scrollTop, up = top < pane.lastTop;
+    pane.lastTop = top;
     if (atLatest(scroller)) pane.pinned = true;
     else if (up) pane.pinned = false;
     if (up && top < 160 && transcript.querySelector('.next-history-earlier')) void showEarlier(transcript);
@@ -467,10 +472,10 @@ function attachTranscript(transcript, source) {
   if (window.ResizeObserver) new ResizeObserver(() => {
     if (!pane.pinned || pane.anchor || !scroller.clientHeight) return;
     if (Date.now() - pane.touched < 500) pane.pinned = atLatest(scroller);
-    else scroller.scrollTop = scroller.scrollHeight;
+    else moveTo(scroller, pane, scroller.scrollHeight);
   }).observe(transcript);
   transcript.addEventListener('click', event => {
-  pane.touched = Date.now();
+  if (event.target.closest('summary')) pane.touched = Date.now();
   const historyButton = event.target.closest('.next-history-retry,.next-history-earlier');
   // A selection holds the transcript still; asking for history lets go of it.
   if (historyButton && selecting(transcript)) document.getSelection().removeAllRanges();
@@ -650,7 +655,7 @@ function syncLayout(admitted = null) {
   lanesCard.classList.toggle('alone', !lanesCard.hidden && visible.cards.length === 1 && assistant.hidden);
   stageLayout.paint();
   layingOut = false;
-  for (const card of Object.values(cards)) card.render();
+  for (const card of Object.values(cards)) card.settle();
   brand.classList.toggle('on', visible.assistant || overlay);
   brand.setAttribute('aria-pressed', String(visible.assistant || overlay));
   chatsButton.classList.toggle('on', visible.cards.some(key => key === 'chat' || key === 'chat2'));
