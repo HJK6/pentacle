@@ -167,6 +167,57 @@ class DaemonLayerGateTests(unittest.TestCase):
                 errors = gate._check_candidate_policy("HEAD")
             self.assertEqual(errors, [f"F3_policy: new named policy call in {runtime}:example (admit)"])
 
+    def test_imported_pin_read_does_not_count_as_a_policy_call(self) -> None:
+        source = ("def observe(ledger):\n"
+                  "    from provider_cli_pin import check\n"
+                  "    def record(): return check(ledger)\n"
+                  "    return (lambda: check(ledger)), record\n"
+                  "import provider_cli_pin as pin\n"
+                  "def qualified(): return pin.check()\n"
+                  "def other(check): return check()\n")
+        self.assertEqual(gate._policy_signatures(source), [("other", "call", "check")])
+        self.assertIn(("<module>", "attribute", "pin.check"),
+                      gate._policy_signatures(source + "reference = pin.check\n"))
+
+    def test_unproved_check_bindings_retain_their_policy_signatures(self) -> None:
+        sources = [
+            "from elsewhere import check\ncheck()",
+            "from .provider_cli_pin import check\ncheck()",
+            "check()",
+            "from provider_cli_pin import check\ncheck = substitute\ncheck()",
+            "from provider_cli_pin import check\n(lambda check: check())(substitute)",
+            "if flag:\n    from provider_cli_pin import check\ncheck()",
+            "import provider_cli_pin as pin\npin = substitute\npin.check()",
+            "import provider_cli_pin as pin\npin.check = substitute\npin.check()",
+            "from provider_cli_pin import check\ndef change():\n    global check\n    check = substitute\ncheck()",
+            "from provider_cli_pin import check\nclass C:\n    def f(self, check): return check()",
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertTrue(any(kind == "call" for _, kind, _ in gate._policy_signatures(source)))
+
+    def test_class_private_binding_keeps_named_policy_call(self) -> None:
+        base = ("import provider_cli_pin as __pin\n"
+                "import unrelated_module as _C__pin\nclass C:\n    pass\n")
+        added = "    def effect(self): return __pin.check()\n"
+        self.assertIn(("C.effect", "call", "__pin.check"),
+                      gate._added_policy_decisions(base, base, base + added, "runtime.py"))
+
+    def test_rebound_member_keeps_calls_through_other_imports(self) -> None:
+        base = "import provider_cli_pin as pin\npin.check = named_policy\n"
+        for statement, target in (("from provider_cli_pin import check", "check"),
+                                  ("import provider_cli_pin as other", "other.check")):
+            with self.subTest(target=target):
+                source = f"{base}{statement}\ndef effect(): return {target}()\n"
+                self.assertIn(("effect", "call", target),
+                              gate._added_policy_decisions(base, base, source, "runtime.py"))
+
+    def test_old_pin_read_cannot_offset_new_policy_check(self) -> None:
+        pin = "def effect():\n    from provider_cli_pin import check\n    return check()\n"
+        policy = pin.replace("provider_cli_pin", "other_module")
+        self.assertEqual(gate._added_policy_decisions(pin, pin, policy, "runtime.py"),
+                         [("effect", "call", "check")])
+
     def test_unanchored_optional_policy_decision_fails_with_clean_control(self) -> None:
         base = "def ordinary(value):\n    return value\n"
         candidate = ("def ordinary(value):\n    return value\n\n"
