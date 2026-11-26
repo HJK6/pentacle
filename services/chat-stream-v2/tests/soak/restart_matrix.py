@@ -144,33 +144,47 @@ class RestartDaemon:
                 pass
             time.sleep(0.1)
 
-    def stop(self, sig: signal.Signals, on_signal: Callable[[], Any] | None = None) -> dict[str, Any]:
+    def stop(self, sig: signal.Signals, on_signal: Callable[[], Any] | None = None, *,
+             before_signal: Callable[[], Any] | None = None,
+             after_exit: Callable[[], Any] | None = None) -> dict[str, Any]:
         """launchd semantics (`kickstart -k`): `sig` to the job's PID, SIGKILL after
         ExitTimeOut (20 s), then the rest of the job's process group is killed
-        (AbandonProcessGroup=false)."""
+        (AbandonProcessGroup=false). `before_signal` observes immediately before
+        delivery, `on_signal` after it, and `after_exit` once the job has exited
+        and before the group is killed; the group is killed regardless."""
         assert self.proc is not None
         proc, started = self.proc, time.monotonic()
         pgid = os.getpgid(proc.pid)
-        os.kill(proc.pid, sig)
-        at_signal = on_signal() if on_signal is not None else None
+        before = None
+        at_signal = after = None
         escalated = False
         try:
-            proc.wait(timeout=LAUNCHD_EXIT_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            escalated = True
-            os.kill(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=10)
-        try:
-            os.killpg(pgid, signal.SIGKILL)  # stragglers (blocked tmux wrappers)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            # Darwin can report EPERM until terminal group members are reaped.
-            if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
-                raise
-        self.proc = None
+            before = before_signal() if before_signal is not None else None
+            os.kill(proc.pid, sig)
+            at_signal = on_signal() if on_signal is not None else None
+            try:
+                proc.wait(timeout=LAUNCHD_EXIT_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                escalated = True
+                os.kill(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=10)
+            after = after_exit() if after_exit is not None else None
+        finally:
+            if proc.returncode is None:  # an observation failed before exit
+                os.kill(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=10)
+            try:
+                os.killpg(pgid, signal.SIGKILL)  # stragglers (blocked tmux wrappers)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                # Darwin can report EPERM until terminal group members are reaped.
+                if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
+                    raise
+            self.proc = None
         return {"signal": sig.name, "rc": proc.returncode, "exit_s": round(time.monotonic() - started, 3),
-                "escalated_to_sigkill": escalated, "at_signal": at_signal}
+                "escalated_to_sigkill": escalated, "at_signal": at_signal,
+                "before_signal": before, "after_exit": after}
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -715,7 +729,14 @@ def run_pre_intent_sigterm(root: Path, evidence: Path) -> dict[str, Any]:
                               failed_checks=[k for k, ok in barrier_checks.items() if not ok])
                 return record
             log_offset = cell.daemon.logpath.stat().st_size
-            stop = cell.daemon.stop(signal.SIGTERM, on_signal=lambda: {"barrier_held": _pid_alive(int(ack["pid"]))})
+            # Held at delivery: a paused wrapper is released only by a signal and
+            # the daemon is not yet signalled. Reaped by the daemon: gone once
+            # the daemon has exited, before the harness kills the group.
+            stop = cell.daemon.stop(
+                signal.SIGTERM,
+                before_signal=lambda: {"barrier_held": _pid_alive(int(ack["pid"]))},
+                after_exit=lambda: {"barrier_gone": not _pid_alive(int(ack["pid"]))},
+            )
             cell.note("daemon_stopped", **stop)
             with open(cell.daemon.logpath, "r", errors="replace") as fh:
                 fh.seek(log_offset)
@@ -723,10 +744,10 @@ def run_pre_intent_sigterm(root: Path, evidence: Path) -> dict[str, Any]:
             pre = cell.snapshot("pre-restart", name)
             (cell.control / "hold_has_session").unlink()
             checks: dict[str, bool] = {
-                "held_through_signal": bool((stop.get("at_signal") or {}).get("barrier_held")),
+                "held_through_signal": bool((stop.get("before_signal") or {}).get("barrier_held")),
                 "graceful_exit": stop["rc"] == 0 and not stop["escalated_to_sigkill"],
                 "drained_one_unfinished_zero": "drained in-flight spawns at shutdown: cancelled=1 unfinished=0" in shutdown_log,
-                "barrier_released_by_cancellation": not _pid_alive(int(ack["pid"])),
+                "barrier_released_by_cancellation": bool((stop.get("after_exit") or {}).get("barrier_gone")),
                 "no_tmux_timeout": "tmux_timeout" not in shutdown_log,
                 "store_running_at_teardown": "store is not running" not in shutdown_log,
                 "no_handle_before_restart": not pre["reservations"],
@@ -756,7 +777,10 @@ def run_pre_intent_sigterm(root: Path, evidence: Path) -> dict[str, Any]:
                           repeat={k: repeat.get(k) for k in ("type", "state", "stream_id", "replayed")})
             failed = [k for k, ok in checks.items() if not ok]
             record["failed_checks"] = failed
-            record["classification"] = PRODUCT_FAIL if failed else PASS
+            # An expired hold (the transport's own tmux timeout ends the
+            # wrapper) is no cancellation proof: the cell did not run.
+            record["classification"] = (HARNESS_ERROR if not checks["no_tmux_timeout"]
+                                        else PRODUCT_FAIL if failed else PASS)
         residue = subprocess.run(["pgrep", "-f", str(root)], capture_output=True, text=True).stdout.split()
         record["cleanup"] = "ok" if not residue else {"residual_pids": residue}
         if residue and record.get("classification") == PASS:
