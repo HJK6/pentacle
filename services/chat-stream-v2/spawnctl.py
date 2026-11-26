@@ -5046,6 +5046,7 @@ class SpawnCtl:
         predate the absolute-deadline keyword.  The outer wait still bounds
         those doubles to the same deadline.
         """
+        allowance: asyncio.Timeout | None = None
         if allowance_s is not None:
             remaining = float(allowance_s)
             deadline = time.monotonic() + remaining
@@ -5063,9 +5064,14 @@ class SpawnCtl:
                 if "absolute_deadline" not in str(exc):
                     raise
                 probe = self._transcript_status(name, needle, host=host, tmux=tmux)
-            return await asyncio.wait_for(probe, timeout=remaining)
-        except asyncio.TimeoutError:
-            return "no_transcript"
+            async with asyncio.timeout(remaining) as allowance:
+                return await probe
+        except TimeoutError:
+            # Only this wrapper's own allowance elapsing means no transcript;
+            # a TimeoutError raised by the source is the source's error.
+            if allowance is not None and allowance.expired():
+                return "no_transcript"
+            raise
 
     _ADOPTION_DELIVERED_EVENT = (
         "delivered",

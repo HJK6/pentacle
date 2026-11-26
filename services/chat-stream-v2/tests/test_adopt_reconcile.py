@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from submission_store_stub import SubmissionReadStoreStub
 import asyncio
+import errno
 import json
 import os
 import shutil
@@ -2002,13 +2003,23 @@ def test_unknown_liveness_with_a_pending_store_defers(monkeypatch: pytest.Monkey
                       "pane_liveness_unknown: adoption reconciliation deferred")
 
 
-def test_positive_store_after_a_transcript_exception_is_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
+# A source's own TimeoutError (or an OSError carrying ETIMEDOUT, which Python
+# constructs as a TimeoutError) is T error, exactly like any other OSError.
+TRANSCRIPT_FAULTS = {
+    "os_error": lambda: OSError("synthetic pane PID read failure"),
+    "source_timeout": lambda: TimeoutError("synthetic pane PID read timed out"),
+    "etimedout": lambda: OSError(errno.ETIMEDOUT, "synthetic socket read timed out"),
+}
+
+
+@pytest.mark.parametrize("fault", list(TRANSCRIPT_FAULTS))
+def test_positive_store_after_a_transcript_exception_is_delivered(monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
     clock = SettleClock()
     proof = CostedProof(clock, cost_s=0.0, user_from_s=19.99)
 
     async def transcript(*_a: object, **_kw: object) -> str:
         if clock.rel() >= SETTLE_EXPIRY_S:
-            raise OSError("synthetic pane PID read failure")
+            raise TRANSCRIPT_FAULTS[fault]()
         clock.now = clock.start + SETTLE_EXPIRY_S
         return "no_transcript"
 
@@ -2016,20 +2027,155 @@ def test_positive_store_after_a_transcript_exception_is_delivered(monkeypatch: p
     assert result[:2] == ("delivered", "event_store"), (result, proof.calls)
 
 
-def test_transcript_exception_without_store_proof_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("fault", list(TRANSCRIPT_FAULTS))
+def test_transcript_exception_without_store_proof_propagates(monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
     clock = SettleClock()
     proof = CostedProof(clock, cost_s=0.0)
+    error = TRANSCRIPT_FAULTS[fault]()
 
     async def transcript(*_a: object, **_kw: object) -> str:
         if clock.rel() >= SETTLE_EXPIRY_S:
-            raise OSError("synthetic pane PID read failure")
+            raise error
         clock.now = clock.start + SETTLE_EXPIRY_S
         return "no_transcript"
 
-    with pytest.raises(OSError):
+    with pytest.raises(OSError) as caught:
         _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    assert caught.value is error
     assert _decisive(proof)["at"] >= SETTLE_EXPIRY_S and _decisive(proof)["timeout_s"] == SETTLE_STORE_FLOOR_S
 
+
+# -- Ports of the third-read probes: only the wrapper's own allowance is none.
+
+@pytest.mark.parametrize("proven", [False, True])
+def test_a_source_timeout_is_held_until_the_gate(monkeypatch: pytest.MonkeyPatch, proven: bool) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0, user_from_s=SETTLE_EXPIRY_S if proven else None)
+    error = TimeoutError("immediate transcript-source error")
+    grants: list[float] = []
+
+    async def transcript(*_a: object, absolute_deadline: float, **_kw: object) -> str:
+        grants.append(absolute_deadline - clock.now)
+        if clock.rel() == 0:
+            clock.now += SETTLE_EXPIRY_S
+            return "no_transcript"
+        raise error
+
+    if proven:
+        result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+        assert result[:2] == ("delivered", "event_store")
+    else:
+        with pytest.raises(TimeoutError) as caught:
+            _settle_at_expiry(monkeypatch, proof, transcript, clock)
+        assert caught.value is error
+    assert grants == [SETTLE_EXPIRY_S, SETTLE_TRANSCRIPT_ALLOWANCE_S]
+    assert proof.calls[-1]["timeout_s"] == SETTLE_STORE_FLOOR_S
+
+
+@pytest.mark.parametrize("fault", ["source_timeout", "etimedout"])
+def test_a_source_timeout_at_expiry_keeps_the_reservation(monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
+    clock = SettleClock()
+    monkeypatch.setattr(spawnctl_mod, "time", clock)
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", SETTLE_EXPIRY_S)
+
+    async def run() -> None:
+        db = Store(":memory:")
+        db.start()
+        try:
+            host, name, request = "hosta", "source-timeout", "r-source-timeout"
+            pane = AdoptTmux(alive=True, pane_pid=DEAD_PID)
+            proof = DurableUserEventProof(db, local_host=host)
+            ctl = SpawnCtl(db, Sessions(db, tmux=pane, local_host=host), tmux=pane, submission_proof=proof)
+            trace: list[tuple] = []
+            real_source, real_pid, real_lookup = ctl._transcript_status, pane.pane_pid, proof.lookup
+            in_probe = False
+
+            async def nonce(*_args: object) -> tuple[bool, str]:
+                return True, "TEST"
+
+            async def source(*a: object, **kw: object) -> str:
+                nonlocal in_probe
+                in_probe = True
+                try:
+                    return await real_source(*a, **kw)
+                finally:
+                    in_probe = False
+
+            async def pane_pid(*a: object, **kw: object) -> str | None:
+                # The real source's first step. Reads by reconcile itself,
+                # outside the probe, are untouched.
+                if not in_probe:
+                    return await real_pid(*a, **kw)
+                trace.append(("transcript-pid", clock.rel()))
+                if clock.rel() == 0:
+                    clock.now += SETTLE_EXPIRY_S
+                    return None
+                raise TRANSCRIPT_FAULTS[fault]()
+
+            async def lookup(*a: object, **kw: object) -> EventProof:
+                result = await real_lookup(*a, **kw)
+                trace.append(("store", clock.rel(), kw["timeout_s"], result.state))
+                return result
+
+            ctl._tmux_nonce = nonce  # type: ignore[method-assign]
+            ctl._transcript_status = source  # type: ignore[method-assign]
+            pane.pane_pid = pane_pid  # type: ignore[method-assign]
+            proof.lookup = lookup  # type: ignore[method-assign]
+            assert await db.reserve_stream_id(host, name, ttl_s=30, request_id=request, nonce="TEST")
+            assert await db.record_spawn_intent(host, name, {
+                "open_fields": {"objective": "Source timeout", "provider": "claude"},
+                "brief": "synthetic brief", "delivery_receipt": dict(LEGACY_RECEIPT)})
+            await db.mark_tmux_created(host, name, pane_pid=DEAD_PID)
+            await asyncio.wait_for(ctl.reconcile_spawn_intents(), 30)  # stuck detector only
+            row = await db.get_spawn_outcome(host, name) or {}
+            kept = [r["request_id"] for r in await db.reservations(include_expired=True)]
+            assert trace[-2:] == [("transcript-pid", SETTLE_EXPIRY_S),
+                                  ("store", SETTLE_EXPIRY_S, SETTLE_STORE_FLOOR_S, "pending")], trace
+            assert pane.pasted == []
+            assert kept == [request] and row.get("state") != "failed", row
+        finally:
+            db.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault", ["source_timeout", "etimedout"])
+def test_the_wrapper_re_raises_a_source_timeout(fault: str) -> None:
+    async def run() -> None:
+        ctl = SpawnCtl.__new__(SpawnCtl)
+        error = TRANSCRIPT_FAULTS[fault]()
+
+        async def source(*_a: object, **_kw: object) -> str:
+            raise error
+
+        ctl._transcript_status = source  # type: ignore[method-assign]
+        with pytest.raises(TimeoutError) as caught:
+            await ctl._bounded_adoption_transcript_status(
+                "n", "needle", host=None, tmux=None, allowance_s=3.0)  # type: ignore[arg-type]
+        assert caught.value is error
+
+    asyncio.run(run())
+
+
+def test_the_wrappers_own_elapsed_allowance_is_no_transcript() -> None:
+    async def run() -> None:
+        ctl = SpawnCtl.__new__(SpawnCtl)
+        cancelled: list[bool] = []
+
+        async def source(*_a: object, **_kw: object) -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return "found"
+
+        ctl._transcript_status = source  # type: ignore[method-assign]
+        assert await ctl._bounded_adoption_transcript_status(
+            "n", "needle", host=None, tmux=None, allowance_s=0.05) == "no_transcript"  # type: ignore[arg-type]
+        assert cancelled == [True]
+
+    asyncio.run(run())
 
 def test_short_window_fixture_with_an_injected_floor_reads_an_unreachable_store(
     monkeypatch: pytest.MonkeyPatch,
@@ -2401,7 +2547,8 @@ def test_every_transcript_only_row_of_the_decision_table() -> None:
             assert got == "F_ABSENT"  # located without the brief, whatever the pane (O6, O18, O30)
 
 
-SHAPE_TRANSCRIPTS = ["found", "absent", "none", "error"]
+# "source_timeout" is a source raising TimeoutError itself: T error, like OSError.
+SHAPE_TRANSCRIPTS = ["found", "absent", "none", "error", "source_timeout"]
 SHAPE_PANES = ["alive", "gone", "unreachable", "verb_error", "os_error"]
 SHAPE_STORES = ["proven", "pending", "unavailable"]
 
@@ -2436,6 +2583,8 @@ class ShapeRig:
     def _answer(self) -> str:
         if self.t == "error":
             raise OSError("synthetic transcript failure")
+        if self.t == "source_timeout":
+            raise TimeoutError("synthetic transcript source timeout")
         return {"none": "no_transcript"}.get(self.t, self.t)
 
     def target_pane(self) -> bool:
@@ -2495,7 +2644,8 @@ def test_each_pass_observes_in_order_then_decides_from_the_table(
     proof = ShapeProof(rig)
     tmux = ShapeTmux(rig)
     lane = pane if pane in {"alive", "gone"} else "unknown"
-    expected = SpawnCtl._decide_adoption(t, lane, store, False, role == "expiry")
+    expected = SpawnCtl._decide_adoption("error" if t == "source_timeout" else t, lane, store, False,
+                                         role == "expiry")
     if expected == "RAISE":
         with pytest.raises(OSError):
             _settle_at_expiry(monkeypatch, proof, rig.transcript, clock, tmux=tmux)  # type: ignore[arg-type]
