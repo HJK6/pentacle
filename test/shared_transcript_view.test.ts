@@ -877,8 +877,24 @@ test('markdown: GFM table renders as escaped table DOM with per-column alignment
   assert.ok(html.includes('<th style="text-align:left">Name</th>'), html);
   assert.ok(html.includes('<th style="text-align:right">Score</th>'), html);
   assert.ok(html.includes('<th style="text-align:center">Note</th>'), html);
-  assert.ok(html.includes('<td style="text-align:left"><strong>Ada</strong></td>'), html);
-  assert.ok(html.includes('<td style="text-align:center"><code class="slot-chat-md-icode">&lt;ok&gt;</code></td>'), html);
+  assert.ok(html.includes('<td class="is-short" style="text-align:left"><strong>Ada</strong></td>'), html);
+  assert.ok(html.includes('<td class="is-short" style="text-align:center"><code class="slot-chat-md-icode">&lt;ok&gt;</code></td>'), html);
+});
+
+test('markdown: table cells whose shown text is 18 characters or fewer are marked short', () => {
+  const html = assistantHtml([
+    '| Stage | Owner | Note |',
+    '|---|---|---|',
+    '| **First switch** | [lead](https://example.invalid/a/very/long/path) | Today, late morning |',
+    '| 0 | `x < y` | eighteen chars ok |',
+  ].join('\n'));
+  assert.ok(html.includes('<td class="is-short"><strong>First switch</strong></td>'), 'markup does not count');
+  assert.match(html, /<td class="is-short"><a [^>]*>lead<\/a><\/td>/, 'a link counts its label, not its address');
+  assert.ok(html.includes('<td>Today, late morning</td>'), '19 characters is not short');
+  assert.ok(html.includes('<td class="is-short">0</td>'), html);
+  assert.ok(html.includes('<td class="is-short"><code class="slot-chat-md-icode">x &lt; y</code></td>'), 'an entity is one character');
+  assert.ok(html.includes('<td class="is-short">eighteen chars ok</td>'), html);
+  assert.ok(html.includes('<th>Stage</th>'), 'headers carry no mark; they never wrap in the Next Web');
 });
 
 test('markdown escape-first: HTML payload is escaped, never injected', () => {

@@ -266,8 +266,14 @@ function renderMarkdownBlocksHtml(blocks: MdBlock[]): string {
           const header = block.header
             .map((cell, idx) => `<th${alignStyle(idx)}>${renderMarkdownInlineHtml(cell)}</th>`)
             .join('');
+          // A cell showing 18 characters or fewer is short: a layout may keep it on one line.
+          const cellHtml = (cell: string, idx: number) => {
+            const inner = renderMarkdownInlineHtml(cell);
+            const shown = inner.replace(/<[^>]*>/g, '').replace(/&[#\w]+;/g, '_').trim();
+            return `<td${shown.length <= 18 ? ' class="is-short"' : ''}${alignStyle(idx)}>${inner}</td>`;
+          };
           const rows = block.rows
-            .map((row) => `<tr>${row.map((cell, idx) => `<td${alignStyle(idx)}>${renderMarkdownInlineHtml(cell)}</td>`).join('')}</tr>`)
+            .map((row) => `<tr>${row.map(cellHtml).join('')}</tr>`)
             .join('');
           return `<div class="slot-chat-md-table-wrap"><table class="slot-chat-md-table"><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`;
         }

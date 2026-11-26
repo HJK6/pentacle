@@ -43,6 +43,24 @@ async function homeRail(ctx) {
       { ...info, expectedCount });
     if (width === 1440) await session.screenshot(path.join(report.dir, 'next-home.png'));
     if (width === 440) await session.screenshot(path.join(report.dir, 'next-phone-home.png'));
+    // The host now serves a newer build: one more control, above Limits, until the host serves this page's build again.
+    const served = build => session.eval(`window.cc.getBuild = async () => ({ buildId: ${build} }); document.dispatchEvent(new Event('visibilitychange')); true`);
+    await served("'a-newer-build'");
+    await session.waitFor("!!document.querySelector('.rail .update-button')", { timeoutMs: ctx.timeoutMs, label: `update control appears at ${width}` });
+    const update = await session.eval(`(() => {
+      const rail = document.querySelector('.rail'), control = rail.querySelector('.update-button'), box = control.getBoundingClientRect(), frame = rail.getBoundingClientRect();
+      return { names: [...rail.querySelectorAll('.rail-button')].map(button => button.getAttribute('aria-label')),
+        next: control.nextElementSibling?.getAttribute('aria-label'), accent: (() => {
+          const probe = document.createElement('i'); probe.style.color = 'var(--accent)'; rail.append(probe);
+          const same = getComputedStyle(probe).color === getComputedStyle(control).color; probe.remove(); return same; })(),
+        inside: box.left >= frame.left && box.right <= frame.right && box.top >= frame.top && box.bottom <= frame.bottom && box.width > 0,
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+    })()`);
+    report.ok(`a newer build adds an eighth rail control above Limits at ${width}`, update.names.length === 8 && update.names.includes('Load the latest version')
+      && update.next === 'Limits and machines' && update.accent && update.inside && !update.overflow, update);
+    if (width === 440) await session.screenshot(path.join(report.dir, 'next-phone-update.png'));
+    await served('window.__PENTACLE_CONFIG__.buildId');
+    await session.waitFor("!document.querySelector('.rail .update-button') && document.querySelectorAll('.rail-button').length === 7", { timeoutMs: ctx.timeoutMs, label: `update control leaves at ${width}` });
   }
   await session.send('Emulation.clearDeviceMetricsOverride');
 }
@@ -68,7 +86,25 @@ function wideTranscriptLayout() {
   const result = { sideways: thread.scrollWidth - thread.clientWidth, wide, width: Math.round(inner.getBoundingClientRect().width),
     table: !!wrap && getComputedStyle(wrap.querySelector('th')).borderBottomStyle === 'solid',
     agents: inner.querySelectorAll('.slot-chat-v3-subagent').length,
-    agentRow: getComputedStyle(inner.querySelector('.slot-chat-v3-subagent > summary')).display };
+    agentRow: getComputedStyle(inner.querySelector('.slot-chat-v3-subagent > summary')).display,
+    agentTime: getComputedStyle(inner.querySelector('.slot-chat-v3-subagent > summary time')).display };
+  // Headers and short cells keep to one line while the table's frame is wider than 520 px.
+  // A cell stretches to its row, so count the line boxes of its text instead.
+  const lines = el => { const range = document.createRange(); range.selectNodeContents(el); return new Set([...range.getClientRects()].map(box => Math.round(box.top))).size; };
+  const short = [...wrap.querySelectorAll('td.is-short')];
+  Object.assign(result, { frame: wrap.clientWidth, short: short.map(td => td.textContent),
+    headLines: Math.max(...[...wrap.querySelectorAll('th')].map(lines)), shortLines: Math.max(...short.map(lines)),
+    shortWrap: short.map(td => getComputedStyle(td).whiteSpace) });
+  inner.innerHTML = real;
+  return result;
+}
+// Runs in the page. "Loading messages…" alone in a chat sits mid-pane, not at the foot.
+function loneHistoryLine() {
+  const inner = document.querySelector('.card .thread-inner'), thread = inner.parentElement;
+  const real = inner.innerHTML;
+  inner.innerHTML = '<div class="next-history-note" role="status">Loading messages…</div>';
+  const note = inner.firstElementChild.getBoundingClientRect(), pane = thread.getBoundingClientRect();
+  const result = { offset: Math.round((note.top + note.bottom) / 2 - (pane.top + pane.bottom) / 2), pane: Math.round(pane.height) };
   inner.innerHTML = real;
   return result;
 }
@@ -99,6 +135,8 @@ async function openedRowStays() {
   inner.innerHTML = real;
   return result;
 }
+const shortCells = layout => JSON.stringify(layout.short) === JSON.stringify(['0', 'lead']) && layout.headLines === 1 && layout.shortLines === 1
+  && layout.shortWrap.every(value => value === (layout.frame > 520 ? 'nowrap' : 'normal'));
 async function chatCard(ctx) {
   const { session, report } = ctx; await visit(ctx);
   await session.click('.chats-button');
@@ -119,13 +157,22 @@ async function chatCard(ctx) {
   await session.click('.chats-button'); await session.click('.popover [data-stream-id="local:web-gate-survivor"]');
   report.ok('a second chat replaces the first after Assistant was last used', await session.eval("document.querySelector('.card .thread-inner').dataset.streamId === 'local:web-gate-survivor'"));
   await session.screenshot(path.join(report.dir, 'next-chat.png'));
-  for (const width of [1440, 760]) {
+  for (const width of [1440, 760, 440]) {
     await session.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
     const layout = await session.eval(`(${wideTranscriptLayout})()`);
     report.ok(`wide tables, code and agent rows fit the chat without sideways scroll at ${width}`,
       layout.sideways === 0 && !layout.wide.length && layout.table && layout.agents === 2 && layout.agentRow === 'flex', layout);
+    report.ok(`table headers and short words stay whole, and short cells may wrap only in a narrow frame, at ${width}`, shortCells(layout) && (width > 440 || layout.frame <= 520), layout);
+    report.ok(`agent row times show on wide screens and hide on a phone at ${width}`, width < 600 ? layout.agentTime === 'none' : layout.agentTime !== 'none', layout);
     if (width === 760) await session.screenshot(path.join(report.dir, 'next-chat-wide-content.png'));
   }
+  await session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await session.click('.card [aria-label="Full screen"]');
+  const full = await session.eval(`(${wideTranscriptLayout})()`);
+  report.ok('in a frame wider than 520 px, short table cells keep to one line', full.frame > 520 && shortCells(full), full);
+  await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
+  const lone = await session.eval(`(${loneHistoryLine})()`);
+  report.ok('a history line alone in a chat sits mid-pane', lone.pane > 300 && Math.abs(lone.offset) < 24, lone);
   await session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   let opened;
   for (let attempt = 0; attempt < 3; attempt++) {

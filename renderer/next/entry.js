@@ -22,6 +22,7 @@ const { mountComposer } = require('./composer');
 const { mountChatCard, NEW_CHAT } = require('./chat_card');
 const { mountStageLayout } = require('./stage_layout');
 const { mountLimitsView } = require('./limits_view');
+const { createUpdateCheck } = require('./update_notice');
 const hostPresentation = require('../host_presentation');
 const { createLaneReads } = require('./lane_reads');
 const { linkAssistantNames } = require('./lane_links');
@@ -109,6 +110,7 @@ const icons = {
   chats: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 5h12a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H9l-4 3v-3a3 3 0 0 1-2-3V8a3 3 0 0 1 1-3Z"/><path d="M19 9h1a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2v2l-3-2"/></svg>',
   limits: '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="11" width="4" height="8" rx="2"/><rect x="10" y="6" width="4" height="13" rx="2"/><rect x="17" y="14" width="4" height="5" rx="2"/></svg>',
   settings: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16M9 4v6m6 4v6"/></svg>',
+  update: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>',
   close: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   full: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 9V4h5m6 0h5v5M20 15v5h-5M9 20H4v-5"/></svg>',
   terminal: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="4.5" width="17" height="15" rx="1"/><path d="m7 9 3 3-3 3m5 0h4"/></svg>',
@@ -818,6 +820,14 @@ chatsButton.onclick = () => togglePopover('chats');
 questionsButton.onclick = () => togglePopover('questions');
 limitsButton.onclick = () => togglePopover('limits');
 settingsButton.onclick = () => togglePopover('settings');
+// A newer build on the host adds one control above Limits that reloads into it.
+// Nothing reloads by itself: a reload resets open cards and the pane layout.
+const updateButton = button('Load the latest version', icons.update, 'rail-button update-button');
+updateButton.onclick = () => cc.reloadApp();
+const updates = createUpdateCheck({ ownId: config.buildId, getBuild: () => cc.getBuild(),
+  onChange: available => { if (available) rail.insertBefore(updateButton, limitsButton); else updateButton.remove(); } });
+const checkForUpdate = () => { void updates.check(); };
+setInterval(checkForUpdate, 10 * 60 * 1000);
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && state.popover && chatList) {
     if (chatList.escape()) return;
@@ -888,11 +898,12 @@ cc.onDisconnect?.(({ epoch }) => {
   lanesControl?.render();
   store.webHostDisconnected?.(epoch);
 });
-cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); });
+cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); checkForUpdate(); });
 const designRoute = initialDesignRoute(window, 'workspace');
 if (designRoute) openDesign(designRoute.target);
 else if (location.hash === '#melody') openMelody();
 else syncLayout();
 document.addEventListener('visibilitychange', paintChatStatus);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
 document.addEventListener('selectionchange', () => { if (transcripts.some(transcript => paneFor(transcript).deferred && !selecting(transcript))) render(); });
 void loadSnapshot().catch(() => render());
