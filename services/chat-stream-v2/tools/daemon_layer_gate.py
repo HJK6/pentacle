@@ -296,8 +296,85 @@ def _observation_accesses(source: str, path: str = "<fixture>") -> list[tuple[st
     return output
 
 
+def _pin_check_callees(tree: ast.Module) -> set[ast.expr]:
+    """Prove only direct imported pin reads. Ambiguous bindings keep their F3 signatures."""
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "provider_cli_pin":
+            imports.extend((node, a, a.asname or "check", False) for a in node.names if a.name == "check")
+        elif isinstance(node, ast.Import):
+            imports.extend((node, a, a.asname or a.name, True) for a in node.names if a.name == "provider_cli_pin")
+    if not imports:
+        return set()
+
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    # A member write can reach the shared module through any import spelling.
+    if any(isinstance(node, ast.Attribute) and node.attr == "check"
+           and isinstance(node.ctx, (ast.Store, ast.Del)) for node in parents):
+        return set()
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+    def scope(node: ast.AST) -> ast.AST:
+        parameter = isinstance(node, ast.arg)
+        while node in parents:
+            parent = parents[node]
+            if isinstance(parent, scopes):
+                # Defaults, annotations, bases and decorators execute outside the body.
+                body = [parent.body] if isinstance(parent, ast.Lambda) else parent.body
+                if parameter or node in body:
+                    return parent
+            node = parent
+        return tree
+
+    proven = set()
+    for stmt, imported, name, qualified in imports:
+        # Leave class-private names and their mangled spellings to the ordinary scan.
+        if name.startswith("_") and "__" in name:
+            continue
+        owner = scope(stmt)
+        if isinstance(owner, ast.ClassDef):
+            continue  # A class-local import is not captured by its methods.
+        blocked = set()
+        for node in parents:
+            if node is imported:
+                continue
+            if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+                blocked.add(owner)
+            elif isinstance(node, ast.alias) and node.name == "*":
+                blocked.add(owner)
+            else:
+                if isinstance(node, ast.alias):
+                    binding = node.asname or node.name.split(".")[0]
+                elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                    binding = node.id
+                elif isinstance(node, ast.arg):
+                    binding = node.arg
+                else:
+                    # Definitions, except targets and pattern captures bind strings.
+                    binding = getattr(node, "name", None) or getattr(node, "rest", None)
+                if binding == name:
+                    blocked.add(scope(node))
+        if owner in blocked:
+            continue
+        # Only subsequent statements in the same suite are dominated by this import.
+        suite = next(value for _, value in ast.iter_fields(parents[stmt])
+                     if isinstance(value, list) and stmt in value)
+        target = name + ".check" if qualified else name
+        for sibling in suite[suite.index(stmt) + 1:]:
+            for call in ast.walk(sibling):
+                if not isinstance(call, ast.Call) or _resolved_expr(call.func, {}) != target:
+                    continue
+                visible = scope(call)
+                while visible is not owner and visible not in blocked:
+                    visible = scope(visible)
+                if visible is owner:
+                    proven.add(call.func)
+    return proven
+
+
 def _policy_signatures(source: str, path: str = "<fixture>") -> list[tuple[str, str, str]]:
     tree = ast.parse(source, filename=path)
+    pin_callees = _pin_check_callees(tree)
     parents: dict[int, str] = {}
 
     def record(node: ast.AST, prefix: tuple[str, ...] = ()) -> None:
@@ -325,12 +402,16 @@ def _policy_signatures(source: str, path: str = "<fixture>") -> list[tuple[str, 
             if any(token in module for token in POLICY_IMPORT_TOKENS):
                 signatures.append((scope, "import", module))
         elif isinstance(node, ast.Call):
+            if node.func in pin_callees:
+                continue
             target = _resolved_expr(node.func, {})
             if target and (node.func and isinstance(node.func, (ast.Name, ast.Attribute))):
                 terminal = target.rsplit(".", 1)[-1]
                 if terminal in POLICY_CALL_NAMES or any(token in target.lower() for token in POLICY_TOKENS):
                     signatures.append((scope, "call", target.lower()))
         elif isinstance(node, ast.Attribute):
+            if node in pin_callees:
+                continue
             target = _resolved_expr(node, {})
             if target and (node.attr.lower() in POLICY_CALL_NAMES
                            or any(token in target.lower() for token in POLICY_TOKENS)):
