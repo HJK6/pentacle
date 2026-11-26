@@ -234,6 +234,10 @@ def test_external_packet_and_mail_writes_request_a_lane_reconcile():
         assert len(requests) == 3, "a same-state set changes no packet"
         assert (await mail(rig, 'fixture', at=int(rig.now) - 60))['ok']
         assert len(requests) == 3, "an older mail skips its write"
+        rows = await rig.rows('v2_external_work_packets')
+        assert (await mail(rig, 'fixture'))['ok']
+        assert await rig.rows('v2_external_work_packets') == rows
+        assert len(requests) == 3, "a replay of the identical mail writes nothing"
         for i in range(32):
             assert (await mail(rig, f'unlinked-{i:02}'))['stored']
         assert len(requests) == 35

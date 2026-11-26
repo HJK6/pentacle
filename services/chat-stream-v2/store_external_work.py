@@ -375,7 +375,8 @@ class _ExternalWorkStoreMixin:
             row = conn.execute("SELECT * FROM v2_external_work_packets WHERE watch_id=? AND tag=?",
                                (config.watch_id, tag)).fetchone()
             if row is not None:
-                if at >= row["evidence_at"]:
+                # A replay of the same mail at the same time changes nothing.
+                if at > row["evidence_at"] or at == row["evidence_at"] and mail_id != row["mail_id"]:
                     conn.execute("UPDATE v2_external_work_packets SET evidence_at=?,mail_id=? WHERE watch_id=? AND tag=?",
                                  (at, mail_id, config.watch_id, tag))
                 changed.append(conn.total_changes != before)
