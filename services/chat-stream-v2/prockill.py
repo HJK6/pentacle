@@ -87,23 +87,35 @@ async def terminate_and_reap(proc: object) -> None:
             pass
 
 
-async def _ps() -> str:
+class ProcessTableUnavailable(OSError):
+    """`ps` could not enumerate the process table."""
+
+
+async def _ps(*, strict: bool = False) -> str:
     """One `ps` exec, off the loop. Empty string on any failure — a caller that
-    cannot enumerate the tree falls back to the root pid alone."""
+    cannot enumerate the tree falls back to the root pid alone. With `strict`,
+    anything but exit 0 (a partial listing with a failing exit included)
+    raises ProcessTableUnavailable carrying the exit status and stderr."""
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "ps", "-eo", "pid=,ppid=",
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE if strict else asyncio.subprocess.DEVNULL,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
     except asyncio.CancelledError:
         await terminate_and_reap(proc)
         raise
-    except (asyncio.TimeoutError, OSError):
+    except (asyncio.TimeoutError, OSError) as exc:
         await terminate_and_reap(proc)
+        if strict:
+            raise ProcessTableUnavailable(f"ps could not run: {type(exc).__name__}") from exc
         return ""
+    if strict and proc.returncode != 0:
+        diagnostic = (err or b"").decode("utf-8", "replace").strip()
+        raise ProcessTableUnavailable(f"ps exited {proc.returncode}: {diagnostic}")
     return (out or b"").decode("utf-8", "replace")
 
 
@@ -264,13 +276,17 @@ def identity_proof(
     }
 
 
-async def process_tree(root_pid: str) -> list[str]:
+async def process_tree(root_pid: str, *, strict: bool = False) -> list[str]:
     """`root_pid` plus every descendant pid. The agent CLI (and the transcript
-    it holds open) is a descendant of the pane's shell, not the pane pid."""
+    it holds open) is a descendant of the pane's shell, not the pane pid.
+    When `ps` fails the tree falls back to the root alone, or with `strict`
+    raises ProcessTableUnavailable."""
     if not root_pid:
         return []
-    out = await _ps()
+    out = await (_ps(strict=True) if strict else _ps())
     if not out:
+        if strict:
+            raise ProcessTableUnavailable("ps could not enumerate the process table")
         return [root_pid]
     children: dict[str, list[str]] = {}
     for line in out.splitlines():

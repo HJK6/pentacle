@@ -65,8 +65,23 @@ class FencedProof:
         return await self.lookup(stream_id, expected_text=expected_text, watermark=watermark)
 
 
+def _enumerated_no_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful synthetic enumeration: the pane's process tree is listed
+    and holds no provider transcript. The negative assertions below assume
+    exactly this, not whatever the runner's own ps and lsof can do."""
+    async def process_tree(pid: str, **_kw: object) -> list[str]:
+        return [pid]
+
+    async def no_transcripts(_pids: list[str], **_kw: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(spawnctl_mod, "process_tree", process_tree)
+    monkeypatch.setattr(SpawnCtl, "_open_transcripts", staticmethod(no_transcripts))
+
+
 def _settle(event_present: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str, str]:
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.3)
+    _enumerated_no_transcript(monkeypatch)
 
     async def run() -> tuple[str, str, str]:
         db = Store(":memory:")
@@ -132,6 +147,7 @@ def _settle_real(monkeypatch, events):
     """Adoption against the REAL durable proof: events = [(kind, text, generation)]
     where generation is "current" or "prior"."""
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.3)
+    _enumerated_no_transcript(monkeypatch)
     stream = f"localhost:{NAME}"
 
     async def run():

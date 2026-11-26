@@ -62,8 +62,8 @@ async def reconcile_across_deadline(root):
         await sessions.refresh()
         ctl = SpawnCtl(store, sessions, tmux=pane, owner_instance_id="new-instance")
 
-        async def process_tree(pid): return [pid]
-        async def no_transcript(pids): return []
+        async def process_tree(pid, **_kw): return [pid]
+        async def no_transcript(pids, **_kw): return []
         spawnctl.process_tree = process_tree
         ctl._open_transcripts = no_transcript
         spawnctl.ADOPTION_BOOT_DEADLINE_S = DEADLINE_S

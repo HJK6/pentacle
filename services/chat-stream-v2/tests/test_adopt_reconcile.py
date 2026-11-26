@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 import spawnctl as spawnctl_mod  # noqa: E402
+import tmux_transport  # noqa: E402
 from sessions import Sessions, VerbError  # noqa: E402
 from spawnctl import SpawnCtl  # noqa: E402
 from store import Store  # noqa: E402
@@ -458,15 +459,16 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
         finally:
             db.stop()
 
-    calls = asyncio.run(run())
-    assert settled[0][:2] == ("failed", "agent_never_started")
+    with pytest.raises(spawnctl_mod.TranscriptInconclusive):
+        asyncio.run(run())
+    assert settled == []  # the unfinished expiry observation is an error: the caller defers
     # Asserted on what was observed, never on how many probes a remainder
     # admitted: every probe that started was cancelled by its own bound and
     # none completed, and the final Store read, with a full grant, came after
     # the last one started. An abandoned or awaited probe cannot produce this.
     assert probe_started and order.count("probe_cancelled") == len(probe_started), order
     assert "probe_completed" not in order and order[-1] == "store_lookup", order
-    assert calls[-1][0] >= probe_started[-1] and calls[-1][1] > 0
+    assert len(order) >= 3 and order[-2] == "probe_cancelled", order
 
 
 def test_final_store_slice_survives_advisory_probe_scheduler_overrun(
@@ -1787,7 +1789,7 @@ def test_full_store_grant_after_an_exhausted_observation(monkeypatch: pytest.Mon
     assert result[:2] == ("failed", "agent_never_started")
 
 
-def test_expiry_observation_that_times_out_counts_as_no_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_expiry_observation_that_times_out_is_inconclusive(monkeypatch: pytest.MonkeyPatch) -> None:
     # The allowance is scaled down so its real timeout fires quickly; the
     # held probe is the expiry observation and nothing else.
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S", 0.05)
@@ -1807,10 +1809,11 @@ def test_expiry_observation_that_times_out_counts_as_no_transcript(monkeypatch: 
             raise
         raise AssertionError("held probe returned")
 
-    result = _settle_at_expiry(monkeypatch, proof, transcript, clock)
+    # Unfinished is not "no transcript": T error, so a pending gate re-raises.
+    with pytest.raises(spawnctl_mod.TranscriptInconclusive):
+        _settle_at_expiry(monkeypatch, proof, transcript, clock)
     assert held == ["held", "cancelled"]
     assert _decisive(proof)["at"] >= SETTLE_EXPIRY_S and _decisive(proof)["timeout_s"] == SETTLE_STORE_FLOOR_S
-    assert result[:2] == ("failed", "agent_never_started")
 
 
 def test_a_transcript_only_pass_never_enters_the_early_proof_seam(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2236,7 +2239,11 @@ def test_the_wrapper_re_raises_a_source_timeout(fault: str) -> None:
     asyncio.run(run())
 
 
-def test_the_wrappers_own_elapsed_allowance_is_no_transcript() -> None:
+@pytest.mark.parametrize("role", ["window", "expiry"])
+def test_the_wrappers_own_elapsed_allowance(role: str) -> None:
+    # A window observation cut by its deadline saw nothing; an expiry
+    # observation that did not finish inside its allowance never ran to
+    # completion, so it is an error, never "no transcript" (amendment E).
     async def run() -> None:
         ctl = SpawnCtl.__new__(SpawnCtl)
         cancelled: list[bool] = []
@@ -2250,8 +2257,13 @@ def test_the_wrappers_own_elapsed_allowance_is_no_transcript() -> None:
             return "found"
 
         ctl._transcript_status = source  # type: ignore[method-assign]
-        assert await ctl._bounded_adoption_transcript_status(
-            "n", "needle", host=None, tmux=None, allowance_s=0.05) == "no_transcript"  # type: ignore[arg-type]
+        if role == "window":
+            assert await ctl._bounded_adoption_transcript_status(
+                "n", "needle", host=None, tmux=None, deadline=time.monotonic() + 0.05) == "no_transcript"  # type: ignore[arg-type]
+        else:
+            with pytest.raises(spawnctl_mod.TranscriptInconclusive):
+                await ctl._bounded_adoption_transcript_status(
+                    "n", "needle", host=None, tmux=None, allowance_s=0.05)  # type: ignore[arg-type]
         assert cancelled == [True]
 
     asyncio.run(run())
@@ -3272,3 +3284,291 @@ def test_a_gate_admission_read_equal_to_the_deadline_counts_as_expiry(
     assert [c["at"] for c in transcript.calls] == [0.0, SETTLE_EXPIRY_S], transcript.calls
     assert result[:2] == ("failed", "agent_never_started")
     assert len([r for r in caplog.records if "agent_never_started" in r.getMessage()]) == 1
+
+
+# -- Amendment E: transcript none only from an enumeration that provably ran to
+# completion (exit 0, or lsof's no-match exit 1 with no diagnostic). Anything
+# else at the adoption expiry observation is an error: RAISE, handle kept. The
+# window observation and every other caller keep the degrade contract.
+
+LSOF_FILES = "p{pid}\nfcwd\nn/\n"
+PS_DIAGNOSTIC = "ps: fault injected"
+SSH_DIAGNOSTIC = "ssh: connect to host hostc port 22: Operation timed out"
+
+# Local cases drive fake ps/lsof executables on PATH, so the real strict
+# execution (exit status and stderr) is under test. Each answer is the fake
+# tool's shell body at the expiry observation; None is a clean answer.
+LOCAL_ENUMERATIONS = {
+    # name: (ps at expiry, lsof at expiry, outcome: kept / failed / delivered)
+    "local-ps-exit1": (f'echo "{PS_DIAGNOSTIC}" >&2; exit 1', None, "kept"),
+    "local-ps-exit2-partial-listing": ('echo "1 0"; echo "ps: read error" >&2; exit 2', None, "kept"),
+    "local-lsof-missing": (None, "missing", "kept"),  # no executable at all: the spawn fails
+    "local-lsof-exit127": (None, 'echo "lsof: not found" >&2; exit 127', "kept"),
+    "local-lsof-exit127-silent": (None, "exit 127", "kept"),
+    "local-lsof-exit1-diagnostic": (None, 'echo "lsof: WARNING: can\'t stat() fs" >&2; exit 1', "kept"),
+    # Cancelled by the observation timer while listing a matching transcript.
+    "local-lsof-unfinished": (None, "unfinished", "kept"),
+    # Controls: the enumeration ran to completion.
+    "local-lsof-lists-transcript": (None, "transcript", "delivered"),
+    "local-lsof-no-match": (None, "exit 1", "failed"),
+    "local-ran-no-transcript": (None, None, "failed"),
+}
+# Remote cases answer through the Hosts seam: (rc, stdout, stderr), "raise"
+# (the transport timed out at once) or "spent" (it used the whole allowance).
+REMOTE_ENUMERATIONS = {
+    "remote-ps-timeout": ("raise", None, "kept"),
+    "remote-ps-ssh255": ((255, SSH_DIAGNOSTIC + "\n", SSH_DIAGNOSTIC), None, "kept"),
+    "remote-ps-unfinished": ("spent", None, "kept"),
+    "remote-lsof-timeout": (None, "raise", "kept"),
+    "remote-lsof-ssh255": (None, (255, SSH_DIAGNOSTIC + "\n", SSH_DIAGNOSTIC), "kept"),
+    "remote-lsof-ssh255-silent": (None, (255, "", ""), "kept"),
+    "remote-lsof-127": (None, (127, "sh: lsof: command not found\n", "sh: lsof: command not found"), "kept"),
+    "remote-lsof-exit1-diagnostic": (None, (1, "", "lsof: WARNING: can't stat() fs"), "kept"),
+    # Controls.
+    "remote-lsof-no-match": (None, (1, "", ""), "failed"),
+    "remote-lsof-exit0-warning": (None, (0, LSOF_FILES, "lsof: WARNING: can't stat() fs"), "failed"),
+    "remote-ran-no-transcript": (None, None, "failed"),
+}
+
+
+def _fake_tools(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, Path]:
+    """ps and lsof on PATH that run the body in <tool>.mode, else the real tool."""
+    real = {"ps": shutil.which("ps") or "/bin/ps", "lsof": shutil.which("lsof") or "/usr/sbin/lsof"}
+    bindir = root / "bin"
+    bindir.mkdir()
+    modes = {}
+    for tool, path in real.items():
+        modes[tool] = root / f"{tool}.mode"
+        modes[tool].write_text("")
+        script = bindir / tool
+        script.write_text(f'#!/bin/sh\nif [ -s "{modes[tool]}" ]; then . "{modes[tool]}"; fi\nexec "{path}" "$@"\n')
+        script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return modes
+
+
+def _enumeration_journey(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str) -> tuple[dict, list, list, list]:
+    """Real reconcile, real transcript source and Store proof (pending), an
+    alive pane. The window observation enumerates cleanly and steps product
+    time to expiry; the expiry observation meets the case's answer."""
+    local = case in LOCAL_ENUMERATIONS
+    ps_answer, lsof_answer, _kept = (LOCAL_ENUMERATIONS if local else REMOTE_ENUMERATIONS)[case]
+    host = "hosta" if local else "hostc"
+    clock = SettleClock()
+    monkeypatch.setattr(spawnctl_mod, "time", clock)
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", SETTLE_EXPIRY_S)
+    brief = "synthetic brief"
+    live_pid = str(os.getpid())  # the probe's local pane shell; only ever signalled with 0
+    transcript = tmp_path / ".claude" / "projects" / "seat.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({"text": brief}) + "\n")
+    modes = _fake_tools(monkeypatch, tmp_path)
+    seen: list[str] = []
+    deadline = [float("inf")]
+    phase = [""]  # the observation in flight: window or expiry; "" outside the probe
+
+    def local_modes(which: str) -> None:
+        ps = f'echo "{live_pid} 1"; exit 0'
+        lsof = "printf '" + LSOF_FILES.format(pid=live_pid).replace("\n", "\\n") + "'; exit 0"
+        if which == "expiry":
+            ps = ps_answer or ps
+            if lsof_answer == "unfinished":
+                lsof = f"printf 'p{live_pid}\\nn{transcript}\\n'; exec sleep 60"
+            elif lsof_answer == "transcript":
+                lsof = f"printf 'p{live_pid}\\nn{transcript}\\n'; exit 0"
+            elif lsof_answer not in {None, "missing"}:
+                lsof = lsof_answer
+        modes["ps"].write_text(ps if which else "")
+        modes["lsof"].write_text(lsof if which else "")
+
+    real_which = shutil.which
+
+    def which(cmd: str, *a: object, **kw: object) -> str | None:
+        # lsof is not installed: resolution falls back to a path that is absent.
+        if phase[0] == "expiry" and lsof_answer == "missing" and cmd == "lsof":
+            return str(tmp_path / "no-such-lsof")
+        return real_which(cmd, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(tmux_transport.shutil, "which", which)
+
+    def remote_answer(step: str, value: object, ok: tuple[int, str, str]) -> tuple[int, str, str]:
+        seen.append(f"{phase[0]}-{step}")
+        if phase[0] == "window":
+            if step == "ps":
+                clock.now = deadline[0]  # the window's tree read steps product time to expiry
+            return ok
+        if value == "raise":
+            raise asyncio.TimeoutError
+        if value == "spent":
+            clock.now += spawnctl_mod.ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S
+            raise asyncio.TimeoutError
+        return value if isinstance(value, tuple) else ok  # type: ignore[return-value]
+
+    class PeerHosts:
+        local_host = "hosta"
+        peers = {"hostc": object()}
+
+        def is_online(self, candidate: str) -> bool:
+            return candidate in {"hosta", "hostc"}
+
+        def tmux_for(self, candidate: str) -> AdoptTmux:
+            return pane
+
+        async def run_command(self, candidate: str, *argv: str, checked: bool = False, **_kw: object):
+            if argv[:2] == ("ps", "-o") or not phase[0]:
+                answer = (1, "", "")  # reconcile's own reads: no readable process birth or tree
+            elif argv[:1] == ("ps",):
+                answer = remote_answer("ps", ps_answer, (0, "", ""))
+            elif argv[:1] == ("lsof",):
+                answer = remote_answer("lsof", lsof_answer, (0, LSOF_FILES.format(pid=DEAD_PID), ""))
+            else:
+                raise AssertionError(f"unexpected peer command {argv[:1]}")
+            return answer if checked else answer[:2]
+
+    pane = AdoptTmux(alive=True, pane_pid=DEAD_PID)
+
+    async def run() -> tuple[dict, list, list]:
+        db = Store(":memory:")
+        db.start()
+        try:
+            hosts = PeerHosts()
+            proof = DurableUserEventProof(db, local_host="hosta")
+            ctl = SpawnCtl(db, Sessions(db, tmux=pane, local_host="hosta", hosts=hosts), tmux=pane,
+                           hosts=hosts, submission_proof=proof)
+            name, request = "enumeration", "r-enumeration"
+            real_source, real_pid, real_lookup = ctl._transcript_status, pane.pane_pid, proof.lookup
+            samples: list[tuple] = []
+
+            async def nonce(*_args: object) -> tuple[bool, str]:
+                return True, "TEST"
+
+            async def source(*a: object, **kw: object) -> str:
+                # The first observation is the window's, bounded by the deadline.
+                if not deadline[0] < float("inf"):
+                    deadline[0] = kw["absolute_deadline"]  # type: ignore[assignment]
+                    phase[0] = "window"
+                else:
+                    phase[0] = "expiry"
+                if local:
+                    local_modes(phase[0])
+                    seen.append(phase[0])
+                try:
+                    status = await real_source(*a, **kw)
+                    if local and phase[0] == "window":
+                        clock.now = deadline[0]  # the window observation steps product time to expiry
+                    return status
+                finally:
+                    phase[0] = ""
+                    if local:
+                        local_modes("")
+
+            async def pane_pid(*a: object, **kw: object) -> str:
+                # The probe's local pane shell is live; reconcile's own reads are untouched.
+                return live_pid if phase[0] and local else await real_pid(*a, **kw)
+
+            async def lookup(*a: object, **kw: object) -> EventProof:
+                result = await real_lookup(*a, **kw)
+                samples.append((clock.rel(), kw["timeout_s"], result.state))
+                return result
+
+            ctl._tmux_nonce = nonce  # type: ignore[method-assign]
+            ctl._transcript_status = source  # type: ignore[method-assign]
+            pane.pane_pid = pane_pid  # type: ignore[method-assign]
+            proof.lookup = lookup  # type: ignore[method-assign]
+            assert await db.reserve_stream_id(host, name, ttl_s=30, request_id=request, nonce="TEST")
+            assert await db.record_spawn_intent(host, name, {
+                "open_fields": {"objective": "Enumeration", "provider": "claude"},
+                "brief": brief, "delivery_receipt": dict(LEGACY_RECEIPT)})
+            await db.mark_tmux_created(host, name, pane_pid=DEAD_PID)
+            await asyncio.wait_for(ctl.reconcile_spawn_intents(), 30)  # stuck detector only
+            row = await db.get_spawn_outcome(host, name) or {}
+            kept = [r["request_id"] for r in await db.reservations(include_expired=True)]
+            return row, kept, samples
+        finally:
+            db.stop()
+
+    row, kept, samples = asyncio.run(run())
+    assert pane.pasted == []
+    return row, kept, samples, seen
+
+
+@pytest.mark.parametrize("case", [*LOCAL_ENUMERATIONS, *REMOTE_ENUMERATIONS])
+def test_only_a_completed_enumeration_at_expiry_can_release_the_reservation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str,
+) -> None:
+    row, kept, samples, seen = _enumeration_journey(monkeypatch, tmp_path, case)
+    assert seen[0].startswith("window") and any(s.startswith("expiry") for s in seen), seen
+    assert samples[-1][1:] == (SETTLE_STORE_FLOOR_S, "pending"), samples  # a pending gate decided
+    outcome = {**LOCAL_ENUMERATIONS, **REMOTE_ENUMERATIONS}[case][2]
+    if outcome == "kept":
+        assert kept == ["r-enumeration"] and row.get("state") != "failed", (row, seen)
+    elif outcome == "delivered":
+        assert (row.get("state"), row.get("delivery_evidence")) == ("delivered", "transcript"), (row, seen)
+    else:
+        assert kept == [] and (row.get("state"), row.get("delivery_evidence")) == (
+            "failed", "agent_never_started"), (row, seen)
+
+
+def _failed_enumeration_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str,
+                              role: str) -> list[str]:
+    """Every enumeration fails at once: the local ps and lsof exit with a
+    diagnostic, and the remote transport times out. Returns the answers of
+    the plain source and the observation in ``role``, or its error type."""
+    modes = _fake_tools(monkeypatch, tmp_path)
+    modes["ps"].write_text('echo "ps: fault" >&2; exit 1')
+    modes["lsof"].write_text('echo "lsof: fault" >&2; exit 1')
+
+    class FailingHosts:
+        async def run_command(self, *_a: object, **_kw: object) -> tuple[int, str]:
+            raise asyncio.TimeoutError
+
+    async def run() -> list[str]:
+        db = Store(":memory:")
+        db.start()
+        try:
+            pane = AdoptTmux(alive=True, pane_pid=str(os.getpid()))
+            ctl = SpawnCtl(db, Sessions(db, tmux=pane, local_host="hosta"), tmux=pane, hosts=FailingHosts())
+            source = host if host != "hosta" else None
+            plain = await ctl._transcript_status("n", "needle", host=source, tmux=pane)
+            bound = ({"deadline": time.monotonic() + 3.0} if role == "window"
+                     else {"allowance_s": 3.0})
+            try:
+                observed = await ctl._bounded_adoption_transcript_status(
+                    "n", "needle", host=source, tmux=pane, **bound)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001 - the error type is the answer
+                observed = type(exc).__name__
+            return [plain, observed]
+        finally:
+            db.stop()
+
+    return asyncio.run(run())
+
+
+@pytest.mark.parametrize("host", ["hosta", "hostc"])
+@pytest.mark.parametrize("role", ["window", "expiry"])
+def test_only_the_expiry_observation_raises_on_a_failed_enumeration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str, role: str,
+) -> None:
+    expected = "no_transcript" if role == "window" else "TranscriptInconclusive"
+    assert _failed_enumeration_probe(monkeypatch, tmp_path, host, role) == ["no_transcript", expected]
+
+
+def test_the_strict_execution_keeps_exit_status_and_stderr(tmp_path: Path) -> None:
+    import prockill
+
+    tool = tmp_path / "tool"
+    marker = tmp_path / "pid"
+    tool.write_text(f'#!/bin/sh\necho "$$" > "{marker}"\n[ "$1" = hang ] && exec sleep 60\n'
+                    'echo out; echo "tool: diagnostic" >&2; exit 3\n')
+    tool.chmod(0o755)
+
+    async def run() -> None:
+        assert await tmux_transport._exec_checked(str(tool)) == (3, "out\n", "tool: diagnostic\n")
+        assert await tmux_transport._exec(str(tool)) == (3, "out\n")  # the default folds stderr away
+        with pytest.raises(OSError):
+            await tmux_transport._exec_checked(str(tmp_path / "missing"))
+        with pytest.raises(TimeoutError):
+            await tmux_transport._exec_checked(str(tool), "hang", timeout=0.2)
+        assert not prockill.pid_alive(marker.read_text().strip())  # the hung child was killed
+
+    asyncio.run(run())

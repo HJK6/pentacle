@@ -655,15 +655,9 @@ class Tmux:
 
 
 
-async def _exec(*args: str, timeout: float = 10.0) -> tuple[int, str]:
-    """Run an arbitrary binary off the event loop, tolerating every failure.
-
-    Used for the transcript probe's `ps`/`lsof` (QA #16) and the host probe's
-    `ssh ... true` (hosts.py). `lsof` is resolved from PATH, then its standard
-    system locations, so a restricted daemon PATH still discovers transcripts.
-    A missing executable is logged and returns a distinct result; timeout and
-    non-zero exit remain inconclusive without raising into the probe loop. A
-    timed-out child is KILLED before returning so a hung `ssh` never leaks."""
+def _resolve_executable(args: tuple[str, ...]) -> tuple[str, ...]:
+    """`lsof` is resolved from PATH, then its standard system locations, so a
+    restricted daemon PATH still discovers transcripts."""
     if args and args[0] == "lsof":
         executable = shutil.which("lsof")
         if executable is None:
@@ -676,6 +670,18 @@ async def _exec(*args: str, timeout: float = 10.0) -> tuple[int, str]:
                 "lsof",
             )
         args = (executable, *args[1:])
+    return args
+
+
+async def _exec(*args: str, timeout: float = 10.0) -> tuple[int, str]:
+    """Run an arbitrary binary off the event loop, tolerating every failure.
+
+    Used for the transcript probe's `ps`/`lsof` (QA #16) and the host probe's
+    `ssh ... true` (hosts.py). `lsof` is resolved as `_resolve_executable` says.
+    A missing executable is logged and returns a distinct result; timeout and
+    non-zero exit remain inconclusive without raising into the probe loop. A
+    timed-out child is KILLED before returning so a hung `ssh` never leaks."""
+    args = _resolve_executable(args)
     try:
         proc = await asyncio.create_subprocess_exec(
             *args, stdin=asyncio.subprocess.DEVNULL,
@@ -695,6 +701,25 @@ async def _exec(*args: str, timeout: float = 10.0) -> tuple[int, str]:
         await terminate_and_reap(proc)
         return 1, ""
     return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
+
+
+async def _exec_checked(*args: str, timeout: float = 10.0) -> tuple[int, str, str]:
+    """Run a binary for a caller that must tell a run from a failure to run.
+
+    Returns `(rc, stdout, stderr)`. A missing executable or a failed spawn
+    raises OSError; a timeout raises TimeoutError after the child is killed."""
+    args = _resolve_executable(args)
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except BaseException:
+        await terminate_and_reap(proc)
+        raise
+    return (proc.returncode or 0, (out or b"").decode("utf-8", "replace"),
+            (err or b"").decode("utf-8", "replace"))
 
 
 def _search_transcripts(paths: list[str], needle: str) -> bool:

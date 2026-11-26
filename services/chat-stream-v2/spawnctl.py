@@ -70,7 +70,7 @@ from boot_ready import (
     codex_reset_interstitial_visible,
     codex_tui_readiness,
 )
-from prockill import canonical_start, process_records, process_tree
+from prockill import ProcessTableUnavailable, canonical_start, process_records, process_tree
 from session_names import is_ephemeral_probe_session
 from sessions import VerbError
 from seat_token_telemetry import SeatTokenTelemetry
@@ -223,6 +223,19 @@ class BootReadyOutcome(NamedTuple):
     elapsed_s: float
     polls: int
     reason: str | None = None
+
+
+class TranscriptInconclusive(Exception):
+    """The adoption expiry observation could not enumerate the provider
+    transcript (ps or lsof failed before its allowance ran out): no evidence
+    either way, so the observation is an error, never "no transcript"."""
+
+
+def _enumeration_ran(tool: str, rc: int, stderr: str) -> bool:
+    """The allowlist: an enumeration provably ran only on exit 0, or on lsof's
+    documented no-match exit 1 with no diagnostic. Anything else (127, ssh
+    255, any other exit, stderr diagnostics) could not enumerate."""
+    return rc == 0 or (tool == "lsof" and rc == 1 and not stderr.strip())
 
 
 class SpawnQueueTimeout(VerbError):
@@ -5038,13 +5051,15 @@ class SpawnCtl:
         """Run the advisory transcript probe inside the adoption deadline.
 
         With ``allowance_s`` the probe gets that full allowance measured from
-        this invocation and its source is always invoked. Otherwise it runs to
-        the absolute ``deadline``; a deadline already spent returns
+        this invocation and its source is always invoked; an observation that
+        did not finish inside that allowance, or an enumeration that did not
+        provably run, raises TranscriptInconclusive. Otherwise it runs
+        to the absolute ``deadline``; a deadline already spent returns
         ``unobserved`` without invoking the source.
 
         The fallback invocation preserves injected transcript doubles that
-        predate the absolute-deadline keyword.  The outer wait still bounds
-        those doubles to the same deadline.
+        predate the absolute-deadline and inconclusive keywords.  The outer
+        wait still bounds those doubles to the same deadline.
         """
         allowance: asyncio.Timeout | None = None
         if allowance_s is not None:
@@ -5054,22 +5069,28 @@ class SpawnCtl:
             remaining = float(deadline) - time.monotonic()
             if remaining <= 0:
                 return "unobserved"
+        keywords: dict[str, Any] = {"absolute_deadline": deadline}
+        if allowance_s is not None:
+            keywords["inconclusive_raises"] = True
         try:
-            try:
-                probe = self._transcript_status(
-                    name, needle, host=host, tmux=tmux,
-                    absolute_deadline=deadline,
-                )
-            except TypeError as exc:
-                if "absolute_deadline" not in str(exc):
-                    raise
-                probe = self._transcript_status(name, needle, host=host, tmux=tmux)
+            while True:
+                try:
+                    probe = self._transcript_status(name, needle, host=host, tmux=tmux, **keywords)
+                    break
+                except TypeError as exc:
+                    rejected = next((key for key in keywords if key in str(exc)), None)
+                    if rejected is None:
+                        raise
+                    del keywords[rejected]
             async with asyncio.timeout(remaining) as allowance:
                 return await probe
         except TimeoutError:
             # Only this wrapper's own allowance elapsing means no transcript;
-            # a TimeoutError raised by the source is the source's error.
+            # a TimeoutError raised by the source is the source's error. An
+            # expiry observation that did not finish never ran to completion.
             if allowance is not None and allowance.expired():
+                if allowance_s is not None:
+                    raise TranscriptInconclusive("the expiry observation did not finish inside its allowance")
                 return "no_transcript"
             raise
 
@@ -5424,6 +5445,7 @@ class SpawnCtl:
     async def _transcript_status(
         self, name: str, needle: str, *, host: str | None = None,
         tmux: tmux_transport.Tmux | None = None, absolute_deadline: float | None = None,
+        inconclusive_raises: bool = False,
     ) -> str:
         """Where the brief stands in the provider's durable session log:
 
@@ -5436,7 +5458,10 @@ class SpawnCtl:
 
         pane pid -> process tree (the agent CLI descends from the pane shell) ->
         the open `.jsonl` (lsof) -> a worker-thread tail read. Every step degrades
-        to `no_transcript` rather than raising (QA #16 ruling)."""
+        to `no_transcript` rather than raising (QA #16 ruling). With
+        `inconclusive_raises` (the adoption expiry observation only), a ps or
+        lsof enumeration that did not provably run (`_enumeration_ran`) before
+        `absolute_deadline` raises TranscriptInconclusive instead."""
         if not needle:
             return "no_transcript"
         target_tmux = tmux or self.tmux
@@ -5446,8 +5471,16 @@ class SpawnCtl:
         if host and host != self.sessions.local_host:
             return await self._remote_transcript_status(
                 host, pane_pid, needle, absolute_deadline=absolute_deadline,
+                inconclusive_raises=inconclusive_raises,
             )
-        paths = await self._open_transcripts(await process_tree(pane_pid))
+        if inconclusive_raises:
+            try:
+                pids = await process_tree(pane_pid, strict=True)
+            except ProcessTableUnavailable as exc:
+                raise TranscriptInconclusive("ps could not enumerate the pane's process tree") from exc
+            paths = await self._open_transcripts(pids, strict=True)
+        else:
+            paths = await self._open_transcripts(await process_tree(pane_pid))
         if not paths:
             return "no_transcript"
         loop = asyncio.get_running_loop()
@@ -5456,13 +5489,18 @@ class SpawnCtl:
 
     async def _remote_transcript_status(
         self, host: str, pane_pid: str, needle: str, *,
-        absolute_deadline: float | None = None,
+        absolute_deadline: float | None = None, inconclusive_raises: bool = False,
     ) -> str:
         """Read remote provider transcript evidence through the Hosts seam."""
         if self.hosts is None:
             return "no_transcript"
 
-        async def run_bounded(*args: str) -> tuple[int, str] | None:
+        def not_enumerated(step: str) -> str:
+            if inconclusive_raises:
+                raise TranscriptInconclusive(f"remote {step} did not enumerate to completion")
+            return "no_transcript"
+
+        async def run_bounded(*args: str) -> tuple[int, str, str] | None:
             remaining = (
                 absolute_deadline - time.monotonic()
                 if absolute_deadline is not None else REMOTE_EVENT_LOOKUP_BOUND_S
@@ -5470,20 +5508,21 @@ class SpawnCtl:
             if remaining <= 0:
                 return None
             timeout = min(REMOTE_EVENT_LOOKUP_BOUND_S, remaining)
+            checked = {"checked": True} if inconclusive_raises else {}
             try:
-                return await asyncio.wait_for(
-                    self.hosts.run_command(host, *args, timeout=timeout),
+                result = await asyncio.wait_for(
+                    self.hosts.run_command(host, *args, timeout=timeout, **checked),
                     timeout=timeout,
                 )
             except Exception:  # noqa: BLE001 - remote evidence is fail-closed
                 return None
+            # (rc, output) folds stderr away; checked runs add it.
+            return (result[0], result[1], result[2] if len(result) > 2 else "")
 
         result = await run_bounded("ps", "-eo", "pid=,ppid=")
-        if result is None:
-            return "no_transcript"
-        rc, ps_out = result
-        if rc != 0:
-            return "no_transcript"
+        if result is None or result[0] != 0:
+            return not_enumerated("ps")
+        _rc, ps_out, _err = result
         children: dict[str, list[str]] = {}
         for line in ps_out.splitlines():
             fields = line.split()
@@ -5498,9 +5537,9 @@ class SpawnCtl:
             pids.append(pid)
             pending.extend(children.get(pid, []))
         result = await run_bounded("lsof", "-p", ",".join(pids), "-Fn")
-        if result is None:
-            return "no_transcript"
-        _lsof_rc, lsof_out = result
+        if result is None or (inconclusive_raises and not _enumeration_ran("lsof", result[0], result[2])):
+            return not_enumerated("lsof")
+        _lsof_rc, lsof_out, _err = result
         paths = sorted({
             line[1:] for line in lsof_out.splitlines()
             if line.startswith("n") and line[1:].endswith(".jsonl")
@@ -5511,19 +5550,30 @@ class SpawnCtl:
         result = await run_bounded("tail", "-c", str(tmux_transport.MAX_TRANSCRIPT_BYTES), *paths)
         if result is None:
             return "no_transcript"
-        tail_rc, tail_out = result
+        tail_rc, tail_out, _err = result
         if tail_rc != 0 and not tail_out:
             return "no_transcript"
         return "found" if needle in tmux_transport.collapse_ws(tail_out) else "absent"
 
     @staticmethod
-    async def _open_transcripts(pids: list[str]) -> list[str]:
+    async def _open_transcripts(pids: list[str], *, strict: bool = False) -> list[str]:
         """The provider `.jsonl` logs those pids hold open, per lsof. `-Fn`
         prints one `n<path>` field per open file; keep the transcript ones.
-        lsof exits non-zero when some pid has no files — parse stdout anyway."""
+        lsof exits non-zero when some pid has no files — parse stdout anyway.
+        With `strict`, an lsof that did not provably run (`_enumeration_ran`)
+        raises TranscriptInconclusive instead."""
         if not pids:
             return []
-        _rc, out = await tmux_transport._exec("lsof", "-p", ",".join(pids), "-Fn")
+        argv = ("lsof", "-p", ",".join(pids), "-Fn")
+        if not strict:
+            _rc, out = await tmux_transport._exec(*argv)
+        else:
+            try:
+                rc, out, err = await tmux_transport._exec_checked(*argv)
+            except (OSError, TimeoutError) as exc:
+                raise TranscriptInconclusive(f"lsof could not run: {type(exc).__name__}") from exc
+            if not _enumeration_ran("lsof", rc, err):
+                raise TranscriptInconclusive(f"lsof exited {rc} without enumerating")
         paths = {
             line[1:] for line in out.splitlines()
             if line.startswith("n") and line[1:].endswith(".jsonl")
