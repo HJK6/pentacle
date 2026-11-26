@@ -524,3 +524,66 @@ def test_daemon_stopping_is_returned_unretried_for_a_verb_that_is_not_retry_safe
     response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), payload, prefix="send", timeout=5))
 
     assert response["error_code"] == "daemon_stopping" and len(sent) == 1
+
+
+class SilentSocket(ReplyingSocket):
+    """A transmitted attempt whose outcome is unknown: no reply before the wait ends."""
+
+    def __init__(self, sent: list[dict]) -> None:
+        super().__init__("unused")
+        self.sent = sent
+
+    async def recv(self) -> str:
+        await asyncio.sleep(STUCK_S)
+        raise AssertionError("unreachable")
+
+
+STOP_PAYLOADS = [
+    {"type": "tell", "request_id": "tell-exhaust", "tell_id": "tell-exhaust", "to_stream_id": "testhost:child",
+     "text": "x"},
+    {"type": "send", "request_id": "send-exhaust", "stream_id": "testhost:child", "msg_id": 7, "text": "x"},
+]
+
+
+@pytest.mark.parametrize("payload", STOP_PAYLOADS, ids=["tell", "send"])
+def test_exhaustion_after_only_definite_refusals_returns_the_refusal(monkeypatch, tmp_path, payload):
+    """A daemon_stopping refusal sends nothing: when every transmitted attempt
+    was refused, retry exhaustion returns that definite retryable refusal, not
+    a delivered-awaiting-result or indeterminate outcome."""
+    fast_retry(monkeypatch)
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", "3")
+    sent = []
+
+    async def connect(config, **_kwargs):
+        return StoppingThenReplyingSocket("unused", [99], sent)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), dict(payload), prefix=payload["type"], timeout=5))
+
+    assert len(sent) == 3
+    assert response["type"] == f"{payload['type']}.error" and response["error_code"] == "daemon_stopping", response
+    assert response["retryable"] is True and response["action_committed"] is False
+
+
+@pytest.mark.parametrize("payload,unknown", [
+    (STOP_PAYLOADS[0], "tell.indeterminate"), (STOP_PAYLOADS[1], "transmit_delivered_awaiting_result")],
+    ids=["tell", "send"])
+def test_exhaustion_keeps_the_indeterminate_result_after_an_unknown_attempt(monkeypatch, tmp_path, payload, unknown):
+    """The first transmitted attempt got no reply (its outcome is unknown);
+    later attempts were refused. The result stays indeterminate."""
+    fast_retry(monkeypatch)
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", "3")
+    connects, sent = [0], []
+
+    async def connect(config, **_kwargs):
+        connects[0] += 1
+        if connects[0] == 1:
+            return SilentSocket(sent)
+        return StoppingThenReplyingSocket("unused", [99], sent)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), dict(payload), prefix=payload["type"],
+                                                  timeout=0.2))
+
+    assert len(sent) == 3
+    assert unknown in (response["type"], response.get("outcome")), response
