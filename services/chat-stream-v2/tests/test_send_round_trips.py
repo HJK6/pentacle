@@ -227,16 +227,25 @@ def test_cancel_while_the_locked_recheck_is_queued_records_no_operator_input(tmp
     asyncio.run(go())
 
 
-def test_maintenance_and_input_keep_both_barrier_orderings(tmp_path, monkeypatch):
-    """An existing maintenance slot refuses input inside the joined locked read;
-    an admitted input holds the home reader, so maintenance begin waits for it."""
-    from provider_accounts import AccountError
+def test_admitted_input_holds_the_home_reader_so_maintenance_waits(tmp_path, monkeypatch):
+    """Maintenance begin's home writer arrives while an admitted input holds
+    the reader, and waits behind it until that physical action ends."""
+    from provider_accounts import Binding
     from test_loopback_privileged_rpc import rpc
     from test_provider_cli_maintenance import ready_daemon
 
     async def go():
         async with ready_daemon(tmp_path, monkeypatch, serving_seat=True) as (daemon, store, runtime, host, selected, row, request):
-            admitted, finish = asyncio.Event(), asyncio.Event()
+            home = runtime.home_inputs(Binding.from_public(row["account_binding"]))
+            admitted, finish, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            readers_at_arrival = []
+            write = home.write
+
+            def arriving():  # the real home writer, observed as it arrives
+                readers_at_arrival.append(home.readers)
+                arrived.set()
+                return write()
+            home.write = arriving
 
             async def physical():
                 async with runtime.input_guard(row):
@@ -245,15 +254,44 @@ def test_maintenance_and_input_keep_both_barrier_orderings(tmp_path, monkeypatch
             first = asyncio.ensure_future(physical())
             await admitted.wait()
             freezing = asyncio.ensure_future(rpc(daemon, "spawn_freeze", **request))
-            for _ in range(20):
-                await asyncio.sleep(0)
-            assert not freezing.done(), "maintenance began while an admitted input held the home"
+            await arrived.wait()
+            assert readers_at_arrival == [1], "maintenance arrived with no admitted input holding the home"
+            while not home.waiting_writers:
+                await asyncio.sleep(0.005)
+            assert not home.writer and not freezing.done()
             finish.set()
             await first
             assert (await freezing)["type"] == "spawn_freeze.ok"
-            refused = []
-            with pytest.raises(AccountError, match="provider_cli_input_maintenance"):
+    asyncio.run(go())
+
+
+def test_maintenance_begun_after_preparation_refuses_at_the_locked_recheck(tmp_path, monkeypatch):
+    """Input paused after a successful preparation read, maintenance begins and
+    completes, then the locked recheck refuses before the physical action."""
+    from provider_accounts import AccountError
+    from test_loopback_privileged_rpc import rpc
+    from test_provider_cli_maintenance import ready_daemon
+
+    async def go():
+        async with ready_daemon(tmp_path, monkeypatch, serving_seat=True) as (daemon, store, runtime, host, selected, row, request):
+            prepared, resume = asyncio.Event(), asyncio.Event()
+            original = runtime.before_input
+
+            async def paused(*args, **kwargs):
+                await original(*args, **kwargs)
+                prepared.set()
+                await resume.wait()
+            runtime.before_input = paused
+            inside = []
+
+            async def physical():
                 async with runtime.input_guard(row):
-                    refused.append(True)
-            assert refused == [] and not runtime.pin_lock.locked()
+                    inside.append(True)
+            task = asyncio.ensure_future(physical())
+            await prepared.wait()
+            assert (await rpc(daemon, "spawn_freeze", **request))["type"] == "spawn_freeze.ok"
+            resume.set()
+            with pytest.raises(AccountError, match="provider_cli_input_maintenance"):
+                await task
+            assert inside == [] and not runtime.pin_lock.locked()
     asyncio.run(go())
