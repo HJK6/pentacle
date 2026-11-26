@@ -409,9 +409,10 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
 
     result, calls, probe_started = asyncio.run(run())
     assert result[:2] == ("failed", "agent_never_started")
-    # The deadline cancelled the slow probe before the final Store read; an
+    # The deadline cancelled the slow probe, and the expiry observation's own
+    # allowance cancelled the second, before the final Store read; an
     # abandoned or awaited probe cannot produce this order.
-    assert order == ["store_lookup", "probe_cancelled", "store_lookup"]
+    assert order == ["store_lookup", "probe_cancelled", "probe_cancelled", "store_lookup"]
     assert len(calls) == 2
     assert calls[1][0] >= probe_started
     assert calls[1][1] > 0
