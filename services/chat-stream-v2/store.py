@@ -4134,6 +4134,42 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
         return await self.submit(_op)
 
+    async def settle_spawn_claim(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str,
+    ) -> str:
+        """Settle an interrupted spawn's own claim without a confirmed outcome.
+
+        Queued behind any intent write this spawn submitted, so the row it reads
+        is the committed truth. Only a match on host, name, request id, nonce
+        and current owner is mutated: a retained intent keeps its payload and
+        binding and only its owner is cleared; an empty, unbound claim is
+        deleted. A missing, foreign, tombstoned or bound empty row is untouched.
+        Returns ``retained``, ``released`` or ``untouched``."""
+        def _op(conn: sqlite3.Connection) -> str:
+            res = _spawn_reservation(conn, host, session_name, request_id, nonce)
+            if res is None or str(res.get("owner_instance_id") or "") != owner_instance_id or not nonce:
+                return "untouched"
+            fence = (host, session_name, request_id, nonce, owner_instance_id)
+            if res.get("payload") is not None:
+                cursor = conn.execute(
+                    "UPDATE v2_stream_reservations SET owner_instance_id=NULL "
+                    "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=? "
+                    "AND nonce=? AND COALESCE(owner_instance_id, '')=? AND payload IS NOT NULL", fence,
+                )
+                conn.commit()
+                return "retained" if cursor.rowcount == 1 else "untouched"
+            cursor = conn.execute(
+                "DELETE FROM v2_stream_reservations "
+                "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=? "
+                "AND nonce=? AND COALESCE(owner_instance_id, '')=? AND payload IS NULL "
+                "AND tmux_created = 0 AND pane_pid IS NULL", fence,
+            )
+            conn.commit()
+            return "released" if cursor.rowcount == 1 else "untouched"
+
+        return await self.submit(_op)
+
     async def reservations(self, *, include_expired: bool = False) -> list[dict[str, Any]]:
         """Live reservations; `include_expired` is for boot reconciliation,
         which must see intents whose TTL lapsed while the daemon was down."""

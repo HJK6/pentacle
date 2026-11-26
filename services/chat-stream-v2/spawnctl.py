@@ -2529,42 +2529,52 @@ class SpawnCtl:
         # Reserve the stream and its creation identity before any pane exists.
         # The existing atomic claim still decides concurrent NEW same-key fires.
         nonce = uuid.uuid4().hex
-        if idempotency_key:
-            # Atomic check+claim: exactly one concurrent same-key caller wins
-            # `claimed`; the rest `replay` the winner's session (no second pane).
-            claim = await self.store.atomic_claim_or_replay(
-                host, name, idempotency_key=idempotency_key,
-                request_payload_hash=payload_hash, ttl_s=RESERVATION_TTL_S,
-                request_id=request_id, nonce=nonce, owner_instance_id=self.instance_id,
-                refuse_if_held=True,
-                **({"qualification_message": qualification} if qualification is not None else {}),
-            )
-            status = claim["status"]
-            if status == "replay":
-                return await self._reply_from_replay(
-                    host, request_id, claim["kind"], claim["row"], idempotency_key
+        # A claim interrupted after its commit and before it returns may hold
+        # this nonce's row; only a returned refusal or replay proves it does not.
+        claim_owned = True
+        try:
+            if idempotency_key:
+                # Atomic check+claim: exactly one concurrent same-key caller wins
+                # `claimed`; the rest `replay` the winner's session (no second pane).
+                claim = await self.store.atomic_claim_or_replay(
+                    host, name, idempotency_key=idempotency_key,
+                    request_payload_hash=payload_hash, ttl_s=RESERVATION_TTL_S,
+                    request_id=request_id, nonce=nonce, owner_instance_id=self.instance_id,
+                    refuse_if_held=True,
+                    **({"qualification_message": qualification} if qualification is not None else {}),
                 )
-            if status == "conflict":
-                raise VerbError(
-                    "idempotency_key_conflict",
-                    f"idempotency_key already bound to a different spawn payload on {host}",
-                )
-            # The hold is enforced INSIDE the atomic claim (QA cycle-3 astra-[3]),
-            # so a freeze set after the pre-check above cannot slip a new seat in.
-            if status == "frozen":
-                raise VerbError("spawn_frozen", self._frozen_reason(host, hold))
-            if status != "claimed":
+                status = claim["status"]
+                claim_owned = status == "claimed"
+                if status == "replay":
+                    return await self._reply_from_replay(
+                        host, request_id, claim["kind"], claim["row"], idempotency_key
+                    )
+                if status == "conflict":
+                    raise VerbError(
+                        "idempotency_key_conflict",
+                        f"idempotency_key already bound to a different spawn payload on {host}",
+                    )
+                # The hold is enforced INSIDE the atomic claim (QA cycle-3 astra-[3]),
+                # so a freeze set after the pre-check above cannot slip a new seat in.
+                if status == "frozen":
+                    raise VerbError("spawn_frozen", self._frozen_reason(host, hold))
+                if status != "claimed":
+                    raise VerbError("stream_id_unavailable", f"{host}:{name} is live or already reserved")
+                await self._record_protected_handoff(msg, host, name, idempotency_key)
+            elif not await self.store.reserve_stream_id(
+                host, name, ttl_s=RESERVATION_TTL_S, request_id=request_id,
+                nonce=nonce, owner_instance_id=self.instance_id, refuse_if_held=True,
+            ):
+                claim_owned = False
+                # Keyless NEW admission: the reservation is refused in-txn if held; a
+                # sticky hold re-read only picks the error (spawn_frozen vs unavailable).
+                if await self.store.get_spawn_admission_hold(host) is not None:
+                    raise VerbError("spawn_frozen", self._frozen_reason(host, None))
                 raise VerbError("stream_id_unavailable", f"{host}:{name} is live or already reserved")
-            await self._record_protected_handoff(msg, host, name, idempotency_key)
-        elif not await self.store.reserve_stream_id(
-            host, name, ttl_s=RESERVATION_TTL_S, request_id=request_id,
-            nonce=nonce, owner_instance_id=self.instance_id, refuse_if_held=True,
-        ):
-            # Keyless NEW admission: the reservation is refused in-txn if held; a
-            # sticky hold re-read only picks the error (spawn_frozen vs unavailable).
-            if await self.store.get_spawn_admission_hold(host) is not None:
-                raise VerbError("spawn_frozen", self._frozen_reason(host, None))
-            raise VerbError("stream_id_unavailable", f"{host}:{name} is live or already reserved")
+        except BaseException:
+            if claim_owned:
+                await self._settle_unresolved_spawn(host, name, request_id, nonce)
+            raise
 
         # A reservation does not prove tmux ownership; never kill an ambiguous pane.
         # The persisted open-row columns: v1's base fields, then the resolved
@@ -2597,6 +2607,9 @@ class SpawnCtl:
         boot_semaphore: asyncio.Semaphore | None = None
         keep_reservation = False
         intent_recorded = False
+        # An exit without a confirmed disposition: the in-memory flag may lag a
+        # committed intent, so teardown settles through the Store instead.
+        unresolved = False
         # Preserve prompt intent across failures before `_prepare_brief`.
         delivery_receipt: dict[str, Any] = {
             "state": "requested" if self._prompt_requested(msg) else "not_requested"
@@ -2822,6 +2835,9 @@ class SpawnCtl:
                 return reply
             raise RuntimeError("prompt spawn retry loop exhausted without an outcome")
         except Exception as exc:
+            # Until this handler reaches one of its deliberate exits, a cancel
+            # or Store failure inside it leaves the disposition unconfirmed.
+            unresolved = True
             # Daemon settlement is scoped below to this intent/request and its
             # created generation. A retired initiator cannot disable rollback.
             from store_host_transfer import actor_context
@@ -2835,6 +2851,7 @@ class SpawnCtl:
                     for res in await self.store.reservations(include_expired=True):
                         if (res["host"], res["session_name"], res.get("request_id")) == (host, name, request_id):
                             await self._cleanup_cancelled_spawn(res)
+                unresolved = False
                 return {
                     "type": "spawn.cancelled", "ok": False, "state": "cancelled",
                     "stream_id": f"{host}:{name}", "request_id": request_id,
@@ -2897,6 +2914,7 @@ class SpawnCtl:
                         "stream_id": f"{host}:{name}",
                         "initial_prompt_delivery": blocked_receipt,
                     })
+                unresolved = False
                 raise
             if creation_uncertain[0] and not created[0]:
                 # `tmux new-session` timed out and its follow-up liveness probe
@@ -2911,6 +2929,7 @@ class SpawnCtl:
                     await self.store.mark_tmux_created(host, name, request_id=request_id)
                 except Exception:  # noqa: BLE001 - retain the already-durable intent
                     log.exception("could not mark creation-uncertain pane %s:%s", host, name)
+                unresolved = False
                 raise VerbError(
                     "spawn_launch_unconfirmed",
                     f"{reason}: creation unconfirmed before durable admission",
@@ -3010,6 +3029,7 @@ class SpawnCtl:
                         bootstrap_state="starting",
                     )
                 if row is None:
+                    unresolved = False
                     return self._starting_spawn_reply(
                         host, name, request_id,
                         "prompt_delivery_failed: lifecycle advanced",
@@ -3027,6 +3047,7 @@ class SpawnCtl:
                     request_payload_hash=payload_hash or None,
                 )
                 await self._publish_spawn_state(host, name, "starting")
+                unresolved = False
                 return self._starting_spawn_reply(
                     host, name, request_id, proof_pending_reason, delivery_receipt,
                 )
@@ -3045,6 +3066,7 @@ class SpawnCtl:
                         await self.store.mark_tmux_created(host, name, request_id=request_id)
                     except Exception:  # noqa: BLE001 - retain the already-durable intent
                         log.exception("could not mark rollback-unconfirmed pane %s:%s", host, name)
+                    unresolved = False
                     return self._starting_spawn_reply(
                         host, name, request_id, f"{reason}: rollback unconfirmed", delivery_receipt
                     )
@@ -3112,6 +3134,7 @@ class SpawnCtl:
                 exc.extra.setdefault(
                     "initial_prompt_delivery", outcome_fields["delivery_receipt"]
                 )
+            unresolved = False
             raise exc
         except BaseException:
             # INV-3: `asyncio.CancelledError` (and any other `BaseException`) is
@@ -3119,9 +3142,9 @@ class SpawnCtl:
             # Exception` cleanup above. Once a durable spawn intent exists, a
             # teardown must RETAIN the reservation + intent as the recovery
             # handle: the shielded spawn task can leave a live pane whose only
-            # addressable record is this reservation. Never blind-release it.
-            if intent_recorded:
-                keep_reservation = True
+            # addressable record is this reservation. Never blind-release it:
+            # a false `intent_recorded` does not prove the write did not commit.
+            unresolved = True
             # Defect 1 (spawn_outcomes coverage/semantics spec): a bare
             # BaseException (asyncio.CancelledError, etc.) skips the `except
             # Exception` outcome write above entirely. If admission already
@@ -3157,8 +3180,11 @@ class SpawnCtl:
             # authoritative, on a confirmed failure the id becomes reusable at
             # once, and on an indeterminate remote outcome (or a mid-spawn
             # cancellation) the reservation is retained as the durable
-            # reconciliation handle.
-            if not keep_reservation:
+            # reconciliation handle. Without a confirmed disposition the Store
+            # settles this spawn's own claim from the committed row.
+            if unresolved:
+                await self._settle_unresolved_spawn(host, name, request_id, nonce)
+            elif not keep_reservation:
                 await self._release_spawn_reservation(host, name, request_id)
             elif intent_recorded and self.instance_id:
                 # Durable-only adoptability: once this in-process obligation
@@ -4377,6 +4403,22 @@ class SpawnCtl:
         self, host: str, name: str, request_id: str,
     ) -> bool:
         return await self.store.release_stream_id_fenced(host, name, request_id)
+
+    async def _settle_unresolved_spawn(
+        self, host: str, name: str, request_id: str, nonce: str,
+    ) -> None:
+        """Settle an interrupted spawn's own claim; never fall back.
+
+        If the settle fails or is itself cancelled, its outcome is unknown: no
+        delete, pane action or outcome is invented, the original interruption
+        propagates, and a distinct instance reconciles the surviving row."""
+        try:
+            await self.store.settle_spawn_claim(
+                host, name, request_id=request_id, nonce=nonce,
+                owner_instance_id=self.instance_id,
+            )
+        except Exception:  # noqa: BLE001 - never mask the original interruption
+            log.exception("could not settle interrupted spawn claim %s:%s", host, name)
 
     async def reconcile_spawn_intents(
         self, *, limit: int | None = None, recurring: bool = False,
