@@ -13,8 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from machines import resolve_ssh_control_path
 
 
+PROBE_TIMEOUT_S = 15
+
+
 def command(args):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=3)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f'exit {result.returncode}')
     return result.stdout
@@ -23,7 +26,7 @@ def command(args):
 def main():
     operation = 'process enumeration'
     try:
-        with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)', 'gate-owned-probe']) as child:
+        with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', 'gate-owned-probe']) as child:
             try:
                 table = command(['ps', '-axo', 'pid='])
                 output = command(['ps', '-ww', '-p', str(child.pid), '-o', 'lstart=', '-o', 'args='])
@@ -31,7 +34,7 @@ def main():
                     raise RuntimeError('owned child start/argv unavailable')
             finally:
                 child.terminate()
-                child.wait(timeout=3)
+                child.wait(timeout=PROBE_TIMEOUT_S)
         operation = 'ssh executable'
         command(['ssh', '-V'])
         operation = 'ssh control socket'
@@ -48,12 +51,12 @@ def main():
             target = str(Path(folder) / 's')
             args = ['tmux', '-f', os.devnull, '-S', target]
             try:
-                command(args + ['new-session', '-d', '-s', 'probe', 'sleep', '30'])
+                command(args + ['new-session', '-d', '-s', 'probe', 'sleep', '60'])
                 command(args + ['has-session', '-t', '=probe'])
             finally:
                 if Path(target).exists():
                     command(args + ['kill-server'])
-                check = subprocess.run(args + ['has-session', '-t', '=probe'], capture_output=True, text=True, timeout=3)
+                check = subprocess.run(args + ['has-session', '-t', '=probe'], capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
                 if check.returncode == 0:
                     raise RuntimeError('owned tmux session remains after cleanup')
     except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:

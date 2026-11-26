@@ -39,7 +39,7 @@ UNIT_SEPARATE_MARKERS = ("repin_exhaustive",)
 DEFAULT_TIMEOUTS = {"contract": 300.0, "unit": 18000.0, "smoke": 600.0, "soak": 7200.0}
 MERGE_TIERS = ("contract", "unit", "smoke")
 # Component bounds for the --deadline-seconds envelope. The reserve covers this
-# runner's own terminate (2x5s), reader drain (READER_JOIN_S), reap and evidence writes.
+# runner's own terminate (5s TERM, 20s final reap), reader drain (READER_JOIN_S), reap and evidence writes.
 USAGE_BOUND_S = 30.0
 DEFAULT_RESERVE_S = 60.0
 READER_JOIN_S = 10.0
@@ -157,17 +157,17 @@ def _process_group_exists(pgid: int) -> bool:
     except PermissionError:
         return True
     return True
-def terminate_process_group(proc: subprocess.Popen[str], *, timeout: float = 5.0) -> None:
+def terminate_process_group(proc: subprocess.Popen[str], *, timeout: float | None = None) -> None:
     pgid = _process_group_id(proc)
     _signal_process_group(proc, signal.SIGTERM, pgid=pgid)
     try:
-        proc.wait(timeout=timeout)
+        proc.wait(timeout=5.0 if timeout is None else timeout)
     except subprocess.TimeoutExpired:
         pass
     if pgid is not None and _process_group_exists(pgid):
         _signal_process_group(proc, signal.SIGKILL, pgid=pgid)
     if proc.poll() is None:
-        proc.wait(timeout=timeout)
+        proc.wait(timeout=20.0 if timeout is None else timeout)
 def _mark_active() -> bool:
     return bool(_ACTIVE_MANIFEST_PATH and mark_owner_stopping(_ACTIVE_MANIFEST_PATH))
 def _owner_signal_handler(signum: int, _frame: object) -> None:
