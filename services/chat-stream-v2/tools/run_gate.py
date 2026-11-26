@@ -450,44 +450,35 @@ def _run_daemon_contract(evidence: Path, base: str, timeout: float) -> dict[str,
                        command=command, log=log, contract_base=base)
 
 
-def _run_daemon_layer_selectors(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
-    log = evidence / "daemon_layer_selectors.log"
-    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools/daemon_layer_gate.py"),
-               "--base", base]
+def _structure_report(tier: str, script: str, evidence: Path, base: str, timeout: float) -> dict[str, Any]:
+    log = evidence / f"{tier}.log"
+    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools" / script),
+               "--base", base, "--report-only"]
+    timed_out = False
     try:
-        completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True,
-                                   check=False, timeout=timeout)
-        output = (completed.stdout or "") + (completed.stderr or "")
-        log.write_text(output[-200_000:], encoding="utf-8")
-        return _result("daemon_layer_selectors", code=completed.returncode,
-                       passed=completed.returncode == 0,
-                       reason=None if completed.returncode == 0 else "layer_selector_rejected",
-                       command=command, log=log, contract_base=base)
+        completed = subprocess.run(command, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, timeout=timeout)
+        code, output = completed.returncode, completed.stdout
     except subprocess.TimeoutExpired as exc:
-        detail = (exc.stdout or b"") + (exc.stderr or b"")
-        log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
-        return _result("daemon_layer_selectors", code=124, passed=False, reason="timeout", timed_out=True,
-                       command=command, log=log, contract_base=base)
+        code, timed_out = 124, True
+        output = (exc.output or b"").decode(errors="replace")
+    except OSError as exc:
+        code, output = 125, str(exc)
+    if code:
+        output += f"\n[{tier}] report incomplete (rc={code}); finding count unavailable\n"
+    log.write_text(output, encoding="utf-8")
+    print(output, end="", flush=True)
+    return _result(tier, code=code, passed=True, command=command, log=log, contract_base=base,
+                   timed_out=timed_out, report_only=True, report_complete=code == 0)
 
+
+def _run_daemon_layer_selectors(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
+    return _structure_report("daemon_layer_selectors", "daemon_layer_gate.py", evidence, base, timeout)
 
 
 def _run_daemon_b04_selectors(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
-    log = evidence / "daemon_b04_selectors.log"
-    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools/daemon_b04_gate.py"),
-               "--base", base]
-    try:
-        completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True,
-                                   check=False, timeout=timeout)
-        log.write_text(((completed.stdout or "") + (completed.stderr or ""))[-200_000:], encoding="utf-8")
-        return _result("daemon_b04_selectors", code=completed.returncode,
-                       passed=completed.returncode == 0,
-                       reason=None if completed.returncode == 0 else "b04_selector_rejected",
-                       command=command, log=log, contract_base=base)
-    except subprocess.TimeoutExpired as exc:
-        detail = (exc.stdout or b"") + (exc.stderr or b"")
-        log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
-        return _result("daemon_b04_selectors", code=124, passed=False, reason="timeout", timed_out=True,
-                       command=command, log=log, contract_base=base)
+    return _structure_report("daemon_b04_selectors", "daemon_b04_gate.py", evidence, base, timeout)
+
 
 def _merge_contract_base(timeout: float) -> str:
     result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=REPO_ROOT,

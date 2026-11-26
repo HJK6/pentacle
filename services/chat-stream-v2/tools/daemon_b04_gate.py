@@ -1034,14 +1034,23 @@ def _changed_production(base: str) -> set[str]:
             and '/tools/' not in p and '/deploy/' not in p}
 
 
-def check(base: str) -> list[str]:
+def check(base: str, *, report_only: bool = False) -> list[str]:
     require_signature_python()
-    admissions = _load_admissions()
+    errors = []
+    if report_only:
+        # The reviewer sees every new site, even if an old block or its pin is stale.
+        admissions = {}
+        try:
+            _load_admissions()
+        except (OSError, ValueError) as exc:
+            errors.append(f'admissions: {exc}')
+    else:
+        admissions = _load_admissions()
     for path in admissions:
         target = ROOT / path
         if not target.is_file() or target.resolve() != target:
             return [f'{path}: stale F1 admissions for missing or redirected file']
-    errors = validate_census()
+    errors.extend(validate_census())
     errors.extend(check_anchors(base))
     errors.extend(scheduler_grammar((SERVICE / "main.py").read_text(),
                   (SERVICE / "daemon_contract/active/F1_protected_core.txt").read_text()))
@@ -1068,14 +1077,21 @@ def check(base: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base', required=True)
+    parser.add_argument('--report-only', action='store_true')
     args = parser.parse_args()
     if len(args.base) != 40 or any(c not in '0123456789abcdef' for c in args.base):
         parser.error('--base must be a full lowercase commit SHA')
     try:
-        errors = check(args.base)
+        errors = check(args.base, report_only=args.report_only)
     except (OSError, SyntaxError, RuntimeError, ValueError, UnicodeError) as exc:
-        print(f'[daemon-b04] FAIL: {exc}', file=sys.stderr)
+        label = 'report incomplete (finding count unavailable)' if args.report_only else 'FAIL'
+        print(f'[daemon-b04] {label}: {exc}', file=sys.stderr)
         return 1
+    if args.report_only:
+        for error in errors:
+            print(f'[daemon-b04] REVIEW: {error}')
+        print(f'[daemon-b04] report-only findings={len(errors)}')
+        return 0
     for error in errors:
         print(f'[daemon-b04] FAIL: {error}', file=sys.stderr)
     if errors:

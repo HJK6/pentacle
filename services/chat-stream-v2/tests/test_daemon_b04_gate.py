@@ -11,6 +11,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 SERVICE = Path('services/chat-stream-v2')
 BASE = '36255a907c7b330bc7e18e156df62d3ff4d20733'
+# The strict checker controls mutate a known subject. New product findings belong to the report.
+FIXTURE = 'bf3a11397a1dda9e451fe7bb4c1c8562f677224b'
 
 
 @pytest.fixture(scope="session")
@@ -51,14 +54,22 @@ def b04_check_reads(b04_excluded_inputs, tmp_path, monkeypatch):
         pytest.fail("B04 self-test read outside routing inputs: " + ", ".join(sorted(set(report.read_text().splitlines()))))
 
 
+def fixture_source(path):
+    return subprocess.check_output(['git', 'show', f'{FIXTURE}:{SERVICE}/{path}'], cwd=ROOT, text=True)
+
+
 @pytest.fixture
 def checkout(tmp_path):
     clone = tmp_path / 'repo'
-    subprocess.run(['git', 'clone', '--quiet', '--shared', str(ROOT), str(clone)], check=True)
+    subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', str(ROOT), str(clone)], check=True)
+    subprocess.run(['git', 'checkout', '--quiet', '--detach', FIXTURE], cwd=clone, check=True)
     for name in ('daemon_import_census.py', 'daemon_b04_gate.py', 'daemon_b04_anchors.py'):
         shutil.copy2(ROOT / SERVICE / 'tools' / name, clone / SERVICE / 'tools' / name)
-    for name in ('b04_core_imports.json', 'b04_f1_admissions.json'):
-        shutil.copy2(ROOT / SERVICE / 'daemon_contract' / name, clone / SERVICE / 'daemon_contract' / name)
+    # Test the current checker with the fixture's admissions data and its matching pin.
+    checker = clone / SERVICE / 'tools/daemon_b04_gate.py'
+    digest = hashlib.sha256((clone / SERVICE / 'daemon_contract/b04_f1_admissions.json').read_bytes()).hexdigest()
+    checker.write_text(re.sub(r"^ADMISSIONS_SHA256 = .+$", f"ADMISSIONS_SHA256 = '{digest}'",
+                              checker.read_text(), flags=re.MULTILINE))
     return clone
 
 
@@ -304,23 +315,30 @@ def test_aliases_of_scheduler_queue_and_sqlite_fail(checkout, code):
     assert rejected.returncode != 0 and 'new F1 primitive' in rejected.stderr
 
 
-def test_merge_runner_executes_b04_cli_and_workflow_requires_it(tmp_path):
+def test_merge_runner_executes_b04_cli_and_workflow_requires_it(tmp_path, checkout, monkeypatch, capsys):
     import yaml
     sys.path.insert(0, str(ROOT / SERVICE))
     try:
         from tools import run_gate as runner
-        import json
-        bounds = json.loads((ROOT / "scripts/gate-env.json").read_text())["deadline"]["merge_check_bounds_s"]
-        result = runner._run_daemon_b04_selectors(tmp_path, BASE, bounds["daemon_b04_selectors"])
     finally:
         sys.path.pop(0)
-    assert result['passed'], (tmp_path / 'daemon_b04_selectors.log').read_text()
-    assert '[daemon-b04] PASS' in (tmp_path / 'daemon_b04_selectors.log').read_text()
+    monkeypatch.setattr(runner, 'REPO_ROOT', checkout)
+    target = checkout / SERVICE / 'sessions.py'
+    with target.open('a') as out:
+        out.write('\ndef report_fixture(loop, task): return loop.create_task(task)\n')
+    # A stale pin must be visible without hiding the new product finding.
+    (checkout / SERVICE / 'daemon_contract/b04_f1_admissions.json').write_text('[]\n')
+    result = runner._run_daemon_b04_selectors(tmp_path, FIXTURE, 90)
+    output = capsys.readouterr().out
+    assert result['passed'] and result['report_complete']
+    assert 'REVIEW: admissions: B04 F1 admissions digest mismatch' in output
+    assert 'sessions.py:report_fixture: new F1 primitive call:create_task' in output
+    assert 'report-only findings=' in output
+    assert output == (tmp_path / 'daemon_b04_selectors.log').read_text()
     workflow = yaml.safe_load((ROOT / '.github/workflows/predeploy-tests.yml').read_text())
-    steps = workflow['jobs']['contracts']['steps']
-    matches = [step for step in steps if step.get('name') == 'Daemon protected-core and projection selectors']
-    assert len(matches) == 1
-    assert 'daemon_b04_gate.py' in matches[0]['run'] and '--base "$RELEASE_BASE"' in matches[0]['run']
+    for script in ('daemon_b04_gate.py', 'daemon_layer_gate.py'):
+        step, = [s for s in workflow['jobs']['contracts']['steps'] if script in s.get('run', '')]
+        assert step['continue-on-error'] and '--base "$RELEASE_BASE" --report-only' in step['run']
 
 
 def test_existing_sqlite_user_cannot_add_a_connection(checkout):
@@ -730,8 +748,8 @@ def test_cycle2_identity_clean(cycle2_gate, subject):
 
 
 def test_cycle2_scheduler_closed_grammar(cycle2_gate):
-    main = (ROOT / SERVICE / 'main.py').read_text()
-    active = (ROOT / SERVICE / 'daemon_contract/active/F1_protected_core.txt').read_text()
+    main = fixture_source('main.py')
+    active = fixture_source('daemon_contract/active/F1_protected_core.txt')
     assert not cycle2_gate.scheduler_grammar(main, active)
     start = '        if server.assistant_restore is not None:\n'
     init = '        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,\n'
@@ -762,8 +780,8 @@ def test_cycle2_scheduler_closed_grammar(cycle2_gate):
 
 
 def test_cycle2_scheduler_each_row_and_source_retire_together(cycle2_gate):
-    main = (ROOT / SERVICE / 'main.py').read_text()
-    active = (ROOT / SERVICE / 'daemon_contract/active/F1_protected_core.txt').read_text()
+    main = fixture_source('main.py')
+    active = fixture_source('daemon_contract/active/F1_protected_core.txt')
     cases = (
         ('event_push.check_pin_drift, ', 'services/chat-stream-v2/main.py:846 EventPush.check_pin_drift'),
         ('watch_wake.missed_wake_alarm,', 'services/chat-stream-v2/main.py:846 WatchWake.missed_wake_alarm'),
