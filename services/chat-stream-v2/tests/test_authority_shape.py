@@ -289,7 +289,6 @@ def test_real_spawnctl_preserves_service_generation_and_delivers_brief(tmp_path,
 
 
 def test_real_spawnctl_restart_adopts_delivered_started_seat(tmp_path):
-    from types import SimpleNamespace
     from spawnctl import SpawnCtl
     from test_spawn_cancel_fence_holes import ReconTmux
     import tmux_transport
@@ -314,18 +313,27 @@ def test_real_spawnctl_restart_adopts_delivered_started_seat(tmp_path):
             assert await store.record_spawn_intent('fixture-advisor', name,
                 {'open_fields': fields, 'brief': payload['initial_prompt'],
                  'delivery_receipt': {'state': 'indeterminate', 'transport': 'direct',
-                                      'proof_watermark': 1, 'proof_watermark_state': 'reachable'}},
+                                      'proof_watermark': 0, 'proof_watermark_state': 'reachable'}},
                 request_id=episode['spawn_key'], nonce=nonce)
             await store.mark_tmux_created('fixture-advisor', name, request_id=episode['spawn_key'])
+            # The delivered brief: once adoption has opened the seat's session,
+            # ingest records one matching USER event after the saved watermark,
+            # and the real Store proof reads it.
+            stream = 'fixture-advisor:' + name
             proofs = []
-            async def proof(stream_id, text, receipt, **kwargs):
-                # Reached only for a proof-capable receipt: its saved watermark.
-                assert text == 'brief'
-                proofs.append(ctl._adoption_receipt_watermark(stream_id, receipt))
-                return SimpleNamespace(proven=True)
+            real_proof = ctl._adoption_event_proof
+            async def proof(*args, **kwargs):
+                if not proofs:
+                    await store.append_session_event(stream, {'stream_id': stream, 'kind': 'USER',
+                        'text': payload['initial_prompt'], 'timestamp': '2026-10-02T00:00:00Z'},
+                        identity='adopted-brief', limit=500)
+                proofs.append(await real_proof(*args, **kwargs))
+                return proofs[-1]
             ctl._adoption_event_proof = proof
             assert (await ctl.reconcile_spawn_intents(recurring=False))['adopted'] == 1
-            assert proofs and proofs[0] is not None and proofs[0].daemon_seq == 1
+            assert [p.proven for p in proofs] == [True], proofs  # the early lookup proved it
+            outcome = await store.get_spawn_outcome('fixture-advisor', name)
+            assert (outcome['state'], outcome['delivery_evidence']) == ('delivered', 'event_store')
             row = await store.fetch_session('fixture-advisor', name)
             assert row['session_generation'] == episode['attempt_generation'] and row['bootstrap_state'] == 'started'
             await restore.run()
