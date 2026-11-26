@@ -23,9 +23,8 @@ def merge_checks(monkeypatch):
     # stages explicitly so the receipt still exercises the merge sequence.
     monkeypatch.setattr(run_gate, "_merge_contract_base", lambda timeout: "b" * 40)
     monkeypatch.setitem(sys.modules, "select_tests", SimpleNamespace(check_coverage=lambda *args, **kwargs: None))
-    for name in ("_run_daemon_contract", "_run_daemon_layer_selectors", "_run_daemon_b04_selectors"):
-        monkeypatch.setattr(run_gate, name, lambda evidence, base, timeout, stage=name:
-                            run_gate._result(stage.removeprefix("_run_"), code=0, passed=True))
+    monkeypatch.setattr(run_gate, "_run_daemon_contract", lambda evidence, base, timeout:
+                        run_gate._result("daemon_contract", code=0, passed=True))
 
 
 @pytest.mark.parametrize("failure", [pytest.param(None, id="True"),
@@ -81,7 +80,7 @@ def test_gate_retains_unresolved_cleanup_and_original_failure(tmp_path, monkeypa
     assert run_gate.main() != 0
     data = json.loads((evidence / "v2-merge-evidence.json").read_text())
     assert [(r["tier"], r["reason"]) for r in data["tiers"]] == [
-        ("daemon_contract", None), ("daemon_layer_selectors", None), ("daemon_b04_selectors", None),
+        ("daemon_contract", None),
         ("contract", None), ("unit", "original_assertion"), ("smoke", "original_assertion"),
         ("cleanup", "cleanup_failed"),
     ]

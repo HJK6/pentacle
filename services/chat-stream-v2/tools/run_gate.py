@@ -292,47 +292,10 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
         # The subject looked green but its evidence is partial: never a green verdict.
         primary = "evidence_incomplete"
     return primary, reporting
-B04_TEST_FILE = "tests/test_daemon_b04_gate.py"
-
-
-def _b04_input(path: str) -> bool:
-    if path.startswith("services/_shared/") and path.endswith(".py"):
-        return True
-    if path in {".github/workflows/predeploy-tests.yml", "scripts/gate-env.json",
-                "scripts/quarantine_list.py", "scripts/quarantine_plugin.py", "scripts/quarantine-v2.json"}:
-        return True
-    service = "services/chat-stream-v2/"
-    if not path.startswith(service):
-        return False
-    name = path[len(service):]
-    if name.startswith(("daemon_contract/", "tests/fixtures/b04_reads/")):
-        return True
-    if name in {B04_TEST_FILE, "pytest.ini", "tests/conftest.py", "tools/daemon_b04_gate.py",
-                "tools/daemon_b04_anchors.py", "tools/daemon_import_census.py", "tools/run_gate.py",
-                "tools/gate_owner_manifest.py", "tools/gate_progress.py", "tools/gate_temp.py",
-                "tools/source_integrity.py", "tools/gate_shard.py"}:
-        return True
-    return name.endswith(".py") and not {"deploy", "tools", "tests"}.intersection(name.split("/")[:-1])
-
-
-def _run_b04_self_tests(base: str | None, head: str) -> bool:
-    """Keep full coverage for daily self-comparisons and unavailable diffs."""
-    reason = "full unit selection"
-    if base == head:
-        reason = "base and head are identical"
-    elif base and re.fullmatch(r"[0-9a-f]{40}", base):
-        diff = subprocess.run(["git", "diff", "--name-only", "-z", "--no-relative", "--no-ext-diff",
-                               "--no-renames", base, head], cwd=SERVICE_DIR, stdout=subprocess.PIPE, timeout=30)
-        if diff.returncode == 0 and not any(_b04_input(path) for path in os.fsdecode(diff.stdout).split("\0")):
-            print(f"[v2-gate] skipping {B04_TEST_FILE}: B04 subject unchanged", flush=True)
-            return False
-        reason = "B04 subject changed" if diff.returncode == 0 else "base diff unavailable"
-    print(f"[v2-gate] running {B04_TEST_FILE}: {reason}", flush=True)
-    return True
 
 
 def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1,
-              shard_index: int | None = None, shard_count: int | None = None, skip_b04_tests: bool = False) -> dict[str, Any]:
+              shard_index: int | None = None, shard_count: int | None = None) -> dict[str, Any]:
     started = time.monotonic()
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
@@ -341,7 +304,6 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     junit.unlink(missing_ok=True)
     journal.unlink(missing_ok=True)
     env, soak = os.environ.copy(), None
-    env.pop("PENTACLE_B04_BASE", None)
     if tier == "contract":
         env = {key: value for key, value in env.items() if not key.startswith("PYTEST_")}
     env[MANIFEST_ENV] = str(manifest)
@@ -358,8 +320,6 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
         except ValueError as exc:
             return _result(tier, code=2, passed=False, reason="invalid_soak_tier", junit=junit, log=log, soak={"error": str(exc)})
     command = _tier_command(tier, junit, basetemp)
-    if skip_b04_tests:
-        command.append(f"--ignore={B04_TEST_FILE}")
     if tier != "contract":
         quarantine_manifest = evidence / f'{tier}.quarantine.json'
         scope_args = [f'--quarantine-separate-marker={name}' for name in UNIT_SEPARATE_MARKERS] if tier == 'unit' else []
@@ -448,36 +408,6 @@ def _run_daemon_contract(evidence: Path, base: str, timeout: float) -> dict[str,
         log.write_bytes(detail[-200_000:] if isinstance(detail, bytes) else str(detail).encode()[-200_000:])
         return _result("daemon_contract", code=124, passed=False, reason="timeout", timed_out=True,
                        command=command, log=log, contract_base=base)
-
-
-def _structure_report(tier: str, script: str, evidence: Path, base: str, timeout: float) -> dict[str, Any]:
-    log = evidence / f"{tier}.log"
-    command = [sys.executable, str(REPO_ROOT / "services/chat-stream-v2/tools" / script),
-               "--base", base, "--report-only"]
-    timed_out = False
-    try:
-        completed = subprocess.run(command, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, timeout=timeout)
-        code, output = completed.returncode, completed.stdout
-    except subprocess.TimeoutExpired as exc:
-        code, timed_out = 124, True
-        output = (exc.output or b"").decode(errors="replace")
-    except OSError as exc:
-        code, output = 125, str(exc)
-    if code:
-        output += f"\n[{tier}] report incomplete (rc={code}); finding count unavailable\n"
-    log.write_text(output, encoding="utf-8")
-    print(output, end="", flush=True)
-    return _result(tier, code=code, passed=True, command=command, log=log, contract_base=base,
-                   timed_out=timed_out, report_only=True, report_complete=code == 0)
-
-
-def _run_daemon_layer_selectors(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
-    return _structure_report("daemon_layer_selectors", "daemon_layer_gate.py", evidence, base, timeout)
-
-
-def _run_daemon_b04_selectors(evidence: Path, base: str, timeout: float) -> dict[str, Any]:
-    return _structure_report("daemon_b04_selectors", "daemon_b04_gate.py", evidence, base, timeout)
 
 
 def _merge_contract_base(timeout: float) -> str:
@@ -671,20 +601,15 @@ def main() -> int:
             if refusal:
                 results.append(refusal)
             if not results:
-                b04_base = os.environ.get("PENTACLE_B04_BASE") if args.shard_index is not None else None
                 if args.gate == "merge":
                     try:
                         base = _merge_contract_base(merge_bounds["merge_base"])
-                        b04_base = base
                         from select_tests import check_coverage
                         try:
                             check_coverage(REPO_ROOT, base, sha, python=_python_bin(), timeout=merge_bounds['coverage'])
                         except RuntimeError as exc:
                             results.append(_result('coverage', code=1, passed=False, reason='coverage_loss' if str(exc).startswith('Coverage loss undeclared:') else 'coverage_inconclusive', error=str(exc)))
-                        for name, check in (("daemon_contract", _run_daemon_contract),
-                                            ("daemon_layer_selectors", _run_daemon_layer_selectors),
-                                            ("daemon_b04_selectors", _run_daemon_b04_selectors)):
-                            results.append(check(evidence, base, merge_bounds[name]))
+                        results.append(_run_daemon_contract(evidence, base, merge_bounds["daemon_contract"]))
                     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                         results.append(_result("daemon_contract", code=125, passed=False,
                                                reason="contract_base_unavailable", error=type(exc).__name__))
@@ -699,8 +624,6 @@ def main() -> int:
                     options = {}
                     if args.shard_index is not None:
                         options.update(shard_index=args.shard_index, shard_count=args.shard_count)
-                    if tier == "unit" and not _run_b04_self_tests(b04_base, sha):
-                        options["skip_b04_tests"] = True
                     results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest,
                                              unit_workers=args.unit_workers, **options))
                     if tier == "contract" and not results[-1]["passed"]:

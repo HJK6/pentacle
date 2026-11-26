@@ -292,10 +292,8 @@ jobs:
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
     - name: Daemon unit partition
-      env:
-        PENTACLE_B04_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       run: |
-        python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/daemon" --target v2-unit-ci-shard --pass-env PENTACLE_B04_BASE --shard-index "${{ matrix.shard }}" --shard-count 6 --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon-unit-${{ matrix.shard }}" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
+        python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/daemon" --target v2-unit-ci-shard --shard-index "${{ matrix.shard }}" --shard-count 6 --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon-unit-${{ matrix.shard }}" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
     - name: Source integrity at gate end
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
       if: ${{ always() }}
@@ -430,14 +428,6 @@ jobs:
       env:
         RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       run: python3 services/chat-stream-v2/tools/daemon_contract_gate.py --base "$RELEASE_BASE"
-    - name: Daemon protected-core and projection selectors
-      env:
-        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-      run: python3 services/chat-stream-v2/tools/daemon_b04_gate.py --base "$RELEASE_BASE" --report-only
-    - name: Daemon policy, observation, and delivery selectors
-      env:
-        RELEASE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-      run: python3 services/chat-stream-v2/tools/daemon_layer_gate.py --base "$RELEASE_BASE" --report-only
     - name: System packages
       timeout-minutes: 10
       run: |
