@@ -1,4 +1,4 @@
-"""Lane reads find observations and routes by index, not by decoding every row (R-020).
+"""Lane reads find observations by index, not by decoding every row (R-020).
 
 Each test traces the real statement, reads its plan, and proves the statement
 returns the same rows with and without its index (the R-018 pattern).
@@ -8,8 +8,7 @@ import json
 
 from store import Store
 from store_work_index import effective_membership_ids_conn
-from store_work_lane_episodes import lead_reported_done_conn, resolved_route_dispatch_map
-from store_work_lanes import unblocks_conn, work_lane_rows_conn
+from store_work_lanes import unblocks_conn
 
 LANES = ("lane-a", "lane-b")
 STREAM = "fixture:assistant"
@@ -45,20 +44,6 @@ def _seed(conn):
                      "updated_at,work_state,owner_kind,title,members_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                      (lane_id, STREAM, "execution", "", 1, "2026-11-26T00:00:00Z", "2026-11-26T00:00:00Z",
                       "active", "fd", lane_id, json.dumps(["spec_c__unscoped"])))
-    routes = (("r1", "resolved", {"lane_id": "lane-a"}), ("r2", "resolved", {"lane_id": "lane-b"}),
-              ("r3", "queued", {"lane_id": "lane-a"}), ("r4", "resolved", None), ("r5", "resolved", {}),
-              ("r6", "resolved", {"lane_id": "lane-a"}))
-    for n, (route_id, state, route) in enumerate(routes):
-        conn.execute("INSERT INTO v2_assistant_composite_routes (route_id,stream_id,input_identity,payload_digest,"
-                     "input_request_id,body,routing_state,dispatch_id,route_json,created_at,updated_at) "
-                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                     (route_id, STREAM if route_id != "r6" else "other:assistant", f"in-{n}", "d", f"q-{n}", "b",
-                      state, f"dispatch-{route_id}", "" if route is None else json.dumps(route),
-                      "2026-11-26T00:00:00Z", "2026-11-26T00:00:00Z"))
-    # A lane.admit receipt binds r4's dispatch to lane-b although its route names no lane.
-    conn.execute("INSERT INTO v2_assistant_composite_operations (operation_id,stream_id,dispatch_id,lane_id,"
-                 "operation,payload_digest,created_at) VALUES ('op-1',?,'dispatch-r4','lane-b','lane.admit','d',"
-                 "'2026-11-26T00:00:00Z')", (STREAM,))
     conn.commit()
 
 
@@ -75,10 +60,6 @@ def _traced(conn, read):
 def _plan(conn, statements, marker):
     statement = next(s for s in statements if marker in s)
     return [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + statement)]
-
-
-def _per_lane_routes(conn, lane_id):
-    return lead_reported_done_conn(conn, {"stream_id": STREAM, "lane_id": lane_id, "completion_report_id": None})
 
 
 def _with_and_without(index, read, marker):
@@ -114,17 +95,42 @@ def test_unblocks_read_searches_the_status_index_and_returns_the_same_entries():
     assert set(indexed) == {"spec_b__one", "spec_a__one", "spec_a__two"}
 
 
-def test_single_lane_route_read_searches_the_lane_index_and_matches_the_pass_map():
+MALFORMED = '{"member": {"status": "blocked"'
+
+
+def _malformed(indexed, *, existing):
+    """Write one malformed record_json and read the lanes, with or without the two indexes.
+
+    ``existing`` writes the row before the indexes are built, as an older store would hold it.
+    """
     def run(conn):
+        import sqlite3
+        from store_work_index import ensure_work_index_schema
         _seed(conn)
-        route_map = resolved_route_dispatch_map(conn)
-        statements = {lane_id: next(s for s in _traced(conn, lambda: _per_lane_routes(conn, lane_id))[1]
-                                    if "AS r WHERE r.stream_id=" in s) for lane_id in LANES}
-        plans = {[row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + s)][0] for s in statements.values()}
-        indexed = {lane_id: {r[0] for r in conn.execute(s)} for lane_id, s in statements.items()}
-        conn.execute("DROP INDEX idx_v2_assistant_composite_routes_lane")
-        unindexed = {lane_id: {r[0] for r in conn.execute(s)} for lane_id, s in statements.items()}
-        return route_map, plans, indexed, unindexed
+        conn.execute("DROP INDEX v2_work_item_observations_epic")
+        conn.execute("DROP INDEX v2_work_item_observations_status")
+        outcome = {}
+
+        def attempt(name, fn):
+            try:
+                fn()
+                outcome[name] = "ok"
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                outcome[name] = str(exc)
+        write = lambda: (conn.execute("INSERT INTO v2_work_item_observations VALUES ('spec_x__bad',?)", (MALFORMED,)),
+                         conn.commit())
+        if existing:
+            attempt("write", write)
+        if indexed:
+            attempt("build", lambda: ensure_work_index_schema(conn))
+        if not existing:
+            attempt("write", write)
+        attempt("membership read", lambda: effective_membership_ids_conn(conn))
+        attempt("unblocks read", lambda: unblocks_conn(conn))
+        outcome["indexes"] = sorted(r[1] for r in conn.execute("PRAGMA index_list(v2_work_item_observations)")
+                                    if not r[1].startswith("sqlite_autoindex"))
+        return outcome
 
     async def go():
         store = Store(":memory:"); store.start()
@@ -132,27 +138,19 @@ def test_single_lane_route_read_searches_the_lane_index_and_matches_the_pass_map
             return await store.submit(run)
         finally:
             store.stop()
-    route_map, plans, indexed, unindexed = asyncio.run(go())
-    assert plans == {"SEARCH r USING INDEX idx_v2_assistant_composite_routes_lane (stream_id=? AND routing_state=?)"}
-    assert indexed == unindexed == {"lane-a": {"dispatch-r1"}, "lane-b": {"dispatch-r2", "dispatch-r4"}}
-    # The per-lane statement associates the same resolved dispatches as the multi-lane pass map.
-    assert indexed == {lane_id: route_map.get((STREAM, lane_id), set()) for lane_id in LANES}
+    return asyncio.run(go())
 
 
-def test_a_single_lane_read_runs_no_global_route_scan():
-    def run(conn):
-        _seed(conn)
-        _, one = _traced(conn, lambda: work_lane_rows_conn(conn, lane_id="lane-a"))
-        _, every = _traced(conn, lambda: work_lane_rows_conn(conn))
-        return one, every
-
-    async def go():
-        store = Store(":memory:"); store.start()
-        try:
-            return await store.submit(run)
-        finally:
-            store.stop()
-    one, every = asyncio.run(go())
-    global_scan = "FROM v2_assistant_composite_routes AS r WHERE r.routing_state='resolved'"
-    assert not any(global_scan in s for s in one)
-    assert any(global_scan in s for s in every), "the multi-lane pass keeps its one map"
+def test_a_malformed_record_json_on_write_and_on_read_with_and_without_the_indexes():
+    """Only the index apply writes record_json, always json.dumps; this pins the behavior anyway."""
+    bad = "malformed JSON"
+    # Today (no indexes): the write succeeds, then both lane reads fail on it.
+    assert _malformed(False, existing=False) == {
+        "write": "ok", "membership read": bad, "unblocks read": bad, "indexes": []}
+    # With the indexes: the write is refused, and the reads stay healthy.
+    assert _malformed(True, existing=False) == {
+        "build": "ok", "write": bad, "membership read": "ok", "unblocks read": "ok",
+        "indexes": ["v2_work_item_observations_epic", "v2_work_item_observations_status"]}
+    # A store already holding a malformed row cannot build the indexes.
+    assert _malformed(True, existing=True) == {
+        "write": "ok", "build": bad, "membership read": bad, "unblocks read": bad, "indexes": []}
