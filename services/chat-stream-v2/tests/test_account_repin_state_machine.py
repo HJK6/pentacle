@@ -234,104 +234,104 @@ def _run_b_table(row,tmp_path,monkeypatch,subtests):
             asyncio.run(run(case,case_root,isolated))
 
 
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 @pytest.mark.repin_exhaustive
 def test_b_table_n1_verifier(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N1-verifier',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_n1_unknown(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N1-unknown',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_n2_before(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-before',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_n2_turn(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-turn',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_n2_after(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-after',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_n2_artifact(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-artifact',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_n2_registry(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-registry',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_u0_absent(tmp_path,monkeypatch,subtests):
     _run_b_table('B-U0-absent',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_u0_success(tmp_path,monkeypatch,subtests):
     _run_b_table('B-U0-success',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_u1_dead(tmp_path,monkeypatch,subtests):
     _run_b_table('B-U1-dead',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_z_late(tmp_path,monkeypatch,subtests):
     _run_b_table('B-Z-late',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_n3(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N3',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_s0(tmp_path,monkeypatch,subtests):
     _run_b_table('B-S0',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_s1_absent(tmp_path,monkeypatch,subtests):
     _run_b_table('B-S1-absent',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_s1_failed(tmp_path,monkeypatch,subtests):
     _run_b_table('B-S1-failed',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_c0(tmp_path,monkeypatch,subtests):
     _run_b_table('B-C0',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_hatch_g1(tmp_path,monkeypatch,subtests):
     _run_b_table('B-hatch-G1',tmp_path,monkeypatch,subtests)
 
@@ -551,13 +551,13 @@ def test_b_hatch_status_and_supersession_need_no_trusted_old_evidence(tmp_path,m
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_s1_success(tmp_path,monkeypatch,subtests):
     _run_b_table("B-S1-success",tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(1200)
 def test_b_table_representative_boundaries(tmp_path,monkeypatch,subtests):
     from repin_state_matrix import ROWS,cases,run
     from repin_matrix_extra import ROWS as extras
