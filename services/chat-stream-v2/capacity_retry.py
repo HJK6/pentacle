@@ -44,16 +44,17 @@ class CapacityRetry:
             return NoticeDecision.terminal("capacity_episode_retired", "inspect current seat status")
         return None
 
-    async def _transaction(self, fn):
+    async def _transaction(self, fn, *, then=None):
+        """Run `fn` in one transaction; `then` reads after its commit on the same submission."""
         def run(conn):
             conn.execute("BEGIN")
             try:
                 result = fn(conn)
                 conn.commit()
-                return result
             except BaseException:
                 conn.rollback()
                 raise
+            return result if then is None else then(conn)
         return await self.store.submit(run)
 
     @asynccontextmanager
@@ -64,7 +65,9 @@ class CapacityRetry:
 
     async def refresh(self, sid):
         host, name = self.sessions.split(sid)
-        row = await self.store.fetch_session(host, name)
+        await self._apply(sid, await self.store.fetch_session(host, name))
+
+    async def _apply(self, sid, row):
         if row:
             self.sessions.apply_durable(sid, expected_generation=row["session_generation"],
                                         capacity_retry=row.get("capacity_retry"))
@@ -74,8 +77,11 @@ class CapacityRetry:
 
     async def cancel_input(self, sid):
         """Called under Comms' input lock before any ordinary paste/Escape."""
-        await self._transaction(lambda conn: policy.cancel(conn, sid))
-        await self.refresh(sid)
+        from store_specs import session_row_conn
+        host, name = self.sessions.split(sid)
+        # The refresh read follows the committed cancel on the same submission.
+        await self._apply(sid, await self._transaction(lambda conn: policy.cancel(conn, sid),
+                                                       then=lambda conn: session_row_conn(conn, host, name)))
 
     async def interrupt(self, sid, generation):
         # Called under lifecycle then input lock; a hold survives uncertain Escape.

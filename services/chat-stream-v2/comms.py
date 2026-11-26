@@ -103,6 +103,9 @@ def is_codex_usage_command(value: object) -> bool:
 
 CODEX_INITIAL_PROMPT_PENDING = "initial_prompt_pending"
 _POOL_INPUT_MESSAGE = ContextVar("pool_input_message",default=None)
+# A one-entry list [(target, row)], the row read once while that target's lifecycle and pane locks are both
+# held; the account input guard reuses it instead of reading the row again.
+_LOCKED_ROW = ContextVar("locked_row",default=None)
 # Server-set route marker; recovery eligibility also needs its minted decision.
 _INGRESS_ROUTE = "_account_ingress_route"
 # These tells validate their destination inside the before-paste callback.
@@ -1143,13 +1146,17 @@ class Comms:
         # Read the authoritative row before any peer reachability/RPC probe.
         # A rejected Codex reset or unresolved initial prompt must not even
         # open the remote transport that would precede pane input.
-        row = await self.store.fetch_session(host, name)
-        if row is None:
-            row = self.sessions.get(target)
         runtime=getattr(self,"account_runtime",None)
-        if runtime is not None and row is not None:
+        if runtime is None:
+            row = await self.store.fetch_session(host, name) or self.sessions.get(target)
+        else:
             from provider_accounts import AccountError
-            try:await runtime.maintenance_input(row)
+            try:
+                # The durable row and its maintenance assertion are one read.
+                row = await runtime.maintenance_row(host, name)
+                if row is None:
+                    row = self.sessions.get(target)
+                    if row is not None: await runtime.maintenance_input(row)
             except AccountError as exc:
                 raise VerbError(str(exc),str(exc),**exc.context) from None
         if row is not None and str(row.get("status") or "") == "open":
@@ -1731,11 +1738,13 @@ class Comms:
 
     # -- send --------------------------------------------------------------
 
-    async def _assert_claude_send_ready(self, route: dict[str, Any]) -> None:
-        """Early V2 admission does not authorize input before bootstrap readiness."""
+    async def _assert_claude_send_ready(self, route: dict[str, Any], *, locked=None) -> None:
+        """Early V2 admission does not authorize input before bootstrap readiness.
+
+        `locked` is `(row,)` when the caller read the row under its lifecycle and pane locks."""
         target = str(route["final_target"])
         host, name = self.sessions.split(target)
-        row = await self.store.fetch_session(host, name)
+        row = locked[0] if locked is not None else await self.store.fetch_session(host, name)
         if row is None:
             row = self.sessions.get(target)
         if (row or {}).get("provider") == "claude" and (row or {}).get("bootstrap_state") in {
@@ -1860,7 +1869,7 @@ class Comms:
         if runtime is None: return
         from provider_accounts import AccountError
         try:
-            reason=await runtime.cap_input(await self.store.fetch_session(*self.sessions.split(target)) or {},message)
+            reason=await runtime.cap_ingress(*self.sessions.split(target),message)
             if reason=="direct_operator_order": message["_pool_input_reason"]=reason
             return reason
         except AccountError as exc:
@@ -1884,9 +1893,12 @@ class Comms:
         from provider_accounts import AccountError
         host,name=self.sessions.split(target)
         try:
-            account_guard = (runtime.input_guard(await self.store.fetch_session(host,name) or {},
-                message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim,
-                recovery_verb=recovery_verb) if runtime is not None else nullcontext())
+            account_guard=nullcontext()
+            if runtime is not None:
+                held=_LOCKED_ROW.get() or ()
+                row=held[0][1] if held and held[0][0]==target else await self.store.fetch_session(host,name)
+                account_guard=runtime.input_guard(row or {},message=_POOL_INPUT_MESSAGE.get(),phase=phase,
+                                                  claim=claim,recovery_verb=recovery_verb)
             # Provider preparation precedes this fence. Hold the graph only for
             # one physical action, never submission evidence or an Enter wait.
             async with account_guard, (self.sessions._graph_lock if execution else nullcontext()):
@@ -2169,19 +2181,24 @@ class Comms:
                         raise VerbError("assistant_binding_stale",
                                         "assistant binding changed before input; nothing was sent; retry",
                                         phase="not_started", retryable=True)
-                await self._assert_claude_send_ready(plan.route)
+                # With both locks actually held, one fresh row serves every
+                # check below and the physical action's account guard.
+                locked = ((await self.store.fetch_session(host, name),)
+                          if not isinstance(lifecycle, nullcontext) else None)
+                await self._assert_claude_send_ready(plan.route, locked=locked)
                 account_runtime = getattr(self, "account_runtime", None)
                 if account_runtime is not None:
                     from provider_accounts import AccountError
                     try: await account_runtime.before_input(
-                        await self.store.fetch_session(host,name) or {}, recovery_verb="send", message=plan.message)
+                        (locked[0] if locked is not None else await self.store.fetch_session(host,name)) or {},
+                        recovery_verb="send", message=plan.message)
                     except AccountError as exc:
                         raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
                 if self.capacity_retry is not None:
                     await self.capacity_retry.cancel_input(target)
                 # Persist the actual winning attempt's final-wire anchors before
                 # native input. Public/client metadata never supplies this key.
-                current = await self.store.fetch_session(host, name) or {}
+                current = (locked[0] if locked is not None else await self.store.fetch_session(host, name)) or {}
                 watermark = await self.submission_proof.watermark(target)
                 plan.meta["_input_proof"] = {
                     **self._tell_sender_provenance(plan.message),
@@ -2194,7 +2211,15 @@ class Comms:
                 }
                 await self._append_send_receipt(plan, request_id=request_id, receipt_id=receipt_id,
                     state="accepted", delivery="accepted", submission_confirmed=False, attempts=0)
-                confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
+                # A holder, not the row: clearing it in `finally` also cuts off
+                # any context copied from this task (a paste worker thread).
+                held = [(target, locked[0])] if locked is not None else []
+                row_token = _LOCKED_ROW.set(held)
+                try:
+                    confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
+                finally:
+                    held.clear()
+                    _LOCKED_ROW.reset(row_token)
                 provider_queued = (
                     not active_draft and pane_mode_reason is None
                     and await self._prompt_in_native_queue(target, provider, plan.wire_text)
@@ -2381,13 +2406,16 @@ class Comms:
             raise
         target = str(plan.route["final_target"])
         target_host, target_name = self.sessions.split(target)
-        target_row = await self.store.fetch_session(target_host, target_name) or {}
         # A composite backend turn already has immutable route, dispatch and
         # generation receipts.  It is never ordinary user QA/progress work.
         # The private marker is introduced only by send_assistant_backend;
         # Server strips it from all ordinary wire sends.
         commission = None
         if not bool(msg.get("_assistant_composite_backend_dispatch")):
+            # Without QA fields an existing reviewer's admission returns before
+            # it reads the row (qa_dispatch.admit), so that send skips the read.
+            target_row = (await self.store.fetch_session(target_host, target_name) or {}
+                          if any(msg.get(key) is not None for key in qa_dispatch.FIELDS) else {})
             commission = await qa_dispatch.admit(
                 self.store, msg, row=target_row, reviewer=target,
                 generation=target_row.get("session_generation", ""),
