@@ -686,6 +686,7 @@ class ErrorAlerts:
                 await self.finisher.reconcile_pass(now)
             except Exception:
                 log.warning("subsystem=error_alerts bug_ref=outbound_commit_v1 action=finisher_pass_failed")
+        snapshot = await self._notice_snapshot()
         # No new records are backfilled from old native outbox/legacy rows.
         for operation in await self.store.voice_list():
             operation = await self._reconcile_send(operation)
@@ -731,12 +732,27 @@ class ErrorAlerts:
             await self.store.voice_projected(
                 operation["principal"], operation["operation_id"], operation["revision"]
             )
-            await self._reconcile_fact(row, now)
+            await self._reconcile_fact(row, now, snapshot)
         for row in await self._error_rows():
             if row["error_context"]["family"] != VOICE:
-                await self._reconcile_fact(row, now)
+                await self._reconcile_fact(row, now, snapshot)
         await self._rebind_pending(now)
         await self._prune(now)
+
+    async def _notice_snapshot(self):
+        """One notice read for the whole pass, in the shape _prune uses.
+
+        Returns (rows, notification ids covered, notice ids covered). A fact
+        reads the snapshot only to find it has nothing to do; before any
+        write that depends on its notices it reads its own rows fresh.
+        """
+        facts = await self._error_rows()
+        nids = list(dict.fromkeys(fact["notification_id"] for fact in facts))
+        notice_ids = list(dict.fromkeys(nid for fact in facts
+                                        for nid in (fact.get("error_context") or {}).get("notice_ids", ())))
+        rows = {r["notice_id"]: r for r in await self.notice_rows(
+            notice_ids=notice_ids, notification_ids=nids)}
+        return rows, set(nids), set(notice_ids)
 
     async def _reconcile_send(self, operation):
         data = operation["data"]
@@ -779,13 +795,21 @@ class ErrorAlerts:
             outcome = "committed"
         return outcome
 
-    async def _reconcile_fact(self, row, now):
+    async def _reconcile_fact(self, row, now, snapshot=None):
         ctx = row["error_context"]
         nid = row["notification_id"]
         lane = ctx["family"] == WORK_LANE
         policy = _delivery_policy(ctx["family"], ctx.get("episode_id"))
-        notices = {r["notice_id"]: r for r in await self.notice_rows(
-            notice_ids=ctx.get("notice_ids", ()), notification_ids=(nid,))}
+        # The pass snapshot can only show a fact that it has nothing to do.
+        # Every write below that depends on these rows first re-reads them,
+        # as each fact did before (a fresh call takes no snapshot).
+        rows, covered_nids, covered_ids = snapshot or ({}, (), ())
+        stale = nid in covered_nids and set(ctx.get("notice_ids", ())) <= covered_ids
+        if stale:
+            notices = rows  # keyed by notice id, as _prune uses it
+        else:
+            notices = {r["notice_id"]: r for r in await self.notice_rows(
+                notice_ids=ctx.get("notice_ids", ()), notification_ids=(nid,))}
         # A crash can commit enqueue before the cross-store link/watermark.
         # Recover those immutable rows before applying cancellation or policy.
         ids = list(
@@ -801,6 +825,8 @@ class ErrorAlerts:
             )
         )
         if ids != ctx.get("notice_ids", []):
+            if stale:
+                return await self._reconcile_fact(row, now)
             await self.notify._db.call(
                 "error_patch",
                 nid,
@@ -819,6 +845,8 @@ class ErrorAlerts:
             and metadata(r).get("policy_mode") != policy["effective_delivery_mode"]
         ]
         if changed_policy:
+            if stale:
+                return await self._reconcile_fact(row, now)
             await self._suppress_unattempted(changed_policy, "suppressed_policy", now)
             for r in changed_policy:
                 r.update(terminal_at=iso(now), terminal_reason="suppressed_policy")
@@ -832,6 +860,8 @@ class ErrorAlerts:
             r.get("proof_envelope") or r["delivered_at"] for r in transport_rows
         )
         if recovering and not attempted:
+            if stale:
+                return await self._reconcile_fact(row, now)
             await self._suppress_unattempted(
                 linked, "suppressed_" + ctx["condition"], now
             )
@@ -881,6 +911,8 @@ class ErrorAlerts:
             and (not intent or intent.get("kind") != "recovery")
         )
         if desired == enqueued and (need_initial or need_recovery):
+            if stale:
+                return await self._reconcile_fact(row, now)
             desired += 1
             intent = {
                 "kind": "recovery" if need_recovery else "initial",
@@ -912,6 +944,8 @@ class ErrorAlerts:
             composite = self.composite
             if not composite or not composite.enabled:
                 return
+            if stale:
+                return await self._reconcile_fact(row, now)
             async with composite._binding_lock:
                 binding = await composite.binding()
                 if not binding.get("stream_id") or not binding.get("generation"):
