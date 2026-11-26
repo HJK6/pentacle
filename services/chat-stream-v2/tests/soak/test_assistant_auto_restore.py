@@ -258,7 +258,8 @@ def _manager_reparent(journey: Journey, as_name: str) -> dict[str, Any]:
 
 
 def test_logout_carries_the_lifecycle_grant_with_the_seat(tmp_path, evidence):
-    """R11: the grant on the dead bound seat follows the automatic restore."""
+    """R11: manager authority follows the restored binding (#455): the restore
+    copies no grant; the primary bind records one binding change."""
     rec: dict[str, Any] = {"cell": "R11"}
     with rm.cell_env(tmp_path / "env", evidence) as cell:
         j = Journey(cell, enabled=True, fast=False)
@@ -271,24 +272,23 @@ def test_logout_carries_the_lifecycle_grant_with_the_seat(tmp_path, evidence):
         generation = j.fd.generation("fd")
         episode = (j.episodes() or [{}])[-1]
         continuity = j.cell.sql(
-            "SELECT actor_identity,actor_generation,target_generation,old_revision,new_revision,result,"
-            "consent_id,request_id FROM v2_lifecycle_authority_audit WHERE action='restore_continuity'")
+            "SELECT id FROM v2_lifecycle_authority_audit WHERE action='restore_continuity'")
+        changes = j.cell.sql(
+            "SELECT actor_identity,target_stream_id,target_generation,prior_generation,result "
+            "FROM v2_lifecycle_authority_audit WHERE action='fd_binding_change' "
+            "AND actor_identity='daemon:assistant-restore'")
         allowed = _manager_reparent(j, "fd")
-        rec["grant"] = {"before": before, "after": after, "continuity": continuity,
+        rec["grant"] = {"before": before, "after": after, "continuity": continuity, "changes": changes,
                         "refused": refused["json"], "allowed": allowed["json"]}
         rec["checks"] = {
             **j.restored_checks(),
             "seat_without_the_grant_is_refused": refused["rc"] != 0,
-            "grant_moved_to_the_resumed_generation": len(after) == 1
-                and after[0]["stream_id"] == fm.sid("fd")
-                and after[0]["session_generation"] == generation != j.old_generation
-                and int(after[0]["revision"]) == int(before[0]["revision"]) + 1,
-            "one_continuity_audit_row_with_the_consent": [
-                (r["actor_identity"], r["actor_generation"], r["target_generation"], r["old_revision"],
-                 r["new_revision"], r["result"], r["consent_id"]) for r in continuity
-            ] == [("daemon:assistant-restore", j.old_generation, generation, 5, 6, "applied", "consent-soak-1")],
-            "episode_records_the_carry": episode.get("grant_carry") == "applied"
-                and episode.get("grant_generation") == j.old_generation,
+            "restore_copies_no_grant": continuity == [],
+            "one_restore_binding_change_audit_row": [
+                (r["target_stream_id"], r["target_generation"], r["prior_generation"], r["result"])
+                for r in changes
+            ] == [(fm.sid("fd"), generation, j.old_generation, "applied")] and generation != j.old_generation,
+            "episode_records_binding_derived": episode.get("grant_carry") == "binding_derived",
             "restored_seat_performs_a_manager_only_action": allowed["rc"] == 0,
         }
         finish(j, evidence, rec)
@@ -428,8 +428,19 @@ def test_reused_pid_counts_as_gone(tmp_path, evidence):
         finally:
             conn.close()
         j.restart()
-        j.wait_state("restored", timeout=240)
-        rec["checks"] = {"harness_pid_is_alive": os.getpid() > 0, **j.restored_checks()}
+        # Since 307d43c3 a live pid with a different start time is not death
+        # proof (a timezone change can alter the printed start): no replay.
+        status = j.wait_state("waiting_evidence", timeout=240)
+        time.sleep(PASSES_S)
+        rec["status"] = status
+        rec["checks"] = {
+            "harness_pid_is_alive": os.getpid() > 0,
+            "waiting_evidence": j.restore().get("state") == "waiting_evidence",
+            "reason_is_incomparable_identity": j.restore().get("reason") == "process_identity_incomparable",
+            "no_pane": cell.panes("fd") == [],
+            "binding_unchanged": j.fd.binding().get("generation") == j.before.get("generation")
+                and int(j.fd.binding().get("revision") or 0) == int(j.before.get("revision") or 0),
+        }
         finish(j, evidence, rec)
     assert_pass(rec)
 
@@ -1020,7 +1031,10 @@ def test_pane_before_generation_admission_is_bounded_and_visible(tmp_path, evide
             "exact_early_checkpoint": bool(reached) and prior_generation != episode.get("attempt_generation"),
             "bounded_recovery_or_degradation": terminal.get("state") in {"degraded", "restored"},
             "degradation_visible_once": terminal.get("state") == "restored" or len(warnings) == 1,
-            "one_admission_fallback": len(j.audit("parent_closed_resume_top_level")) == 1,
+            # One receipt per attempt: the restarted daemon may finish in a second attempt.
+            "one_admission_fallback_per_attempt": sorted(
+                r["attempt_seq"] for r in j.audit("parent_closed_resume_top_level"))
+                == sorted({r["attempt_seq"] for r in j.audit("attempt_started")}),
             "no_duplicate_pane": len(cell.panes("fd")) <= 1,
         }
         rec["warning_count"] = len(warnings)
