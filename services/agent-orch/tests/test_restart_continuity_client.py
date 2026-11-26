@@ -465,3 +465,62 @@ def test_helper_task_done_only_after_the_deadline_is_not_proof(monkeypatch, tmp_
         assert result["type"] == "spawn.indeterminate", result
     else:
         assert result["type"] == "spawn.ok" and result["state"] == "ready", result
+
+
+class StoppingThenReplyingSocket(ReplyingSocket):
+    """The daemon's input drain: refuse with nothing recorded, then deliver."""
+
+    def __init__(self, reply_type: str, refusals: list[int], sent: list[dict]) -> None:
+        super().__init__(reply_type)
+        self.refusals, self.sent = refusals, sent
+
+    async def recv(self) -> str:
+        request = self.sent[-1]
+        if self.refusals[0] > 0:
+            self.refusals[0] -= 1
+            verb = request["type"]
+            return json.dumps({"type": f"{verb}.error", "error_code": "daemon_stopping", "retryable": True,
+                               "action_committed": False, "request_id": request["request_id"]})
+        return json.dumps({"type": self.reply_type, "ok": True, "request_id": request["request_id"]})
+
+
+@pytest.mark.parametrize("payload,reply", [
+    ({"type": "tell", "request_id": "tell-stop", "tell_id": "tell-stop", "to_stream_id": "testhost:child",
+      "text": "x"}, "tell.ok"),
+    ({"type": "send", "request_id": "send-stop", "stream_id": "testhost:child", "msg_id": 7, "text": "x"},
+     "send.result"),
+])
+def test_input_refused_while_the_daemon_stops_is_retried_with_the_same_ids(monkeypatch, tmp_path, payload, reply):
+    """A restart: one refused connection, two daemon_stopping refusals, then
+    the same request (same ids) is delivered and its one reply returned."""
+    fast_retry(monkeypatch)
+    connects, refusals, sent = [0], [2], []
+
+    async def connect(config, **_kwargs):
+        connects[0] += 1
+        if connects[0] == 1:
+            raise ConnectionRefusedError(111, "Connect call failed")
+        return StoppingThenReplyingSocket(reply, refusals, sent)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), dict(payload), prefix=payload["type"], timeout=5))
+
+    assert response["type"] == reply and response["ok"] is True, response
+    assert connects[0] == 4 and len(sent) == 3
+    assert {frame["request_id"] for frame in sent} == {payload["request_id"]}
+    assert {frame.get("tell_id") for frame in sent} == {payload.get("tell_id")}
+
+
+def test_daemon_stopping_is_returned_unretried_for_a_verb_that_is_not_retry_safe(monkeypatch, tmp_path):
+    """A send without msg_id has no stable dedupe key: it is not retried."""
+    fast_retry(monkeypatch)
+    sent = []
+
+    async def connect(config, **_kwargs):
+        return StoppingThenReplyingSocket("send.result", [1], sent)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+    payload = {"type": "send", "request_id": "send-unsafe", "stream_id": "testhost:child", "text": "x"}
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), payload, prefix="send", timeout=5))
+
+    assert response["error_code"] == "daemon_stopping" and len(sent) == 1

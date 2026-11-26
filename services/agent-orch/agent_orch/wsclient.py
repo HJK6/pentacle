@@ -300,6 +300,11 @@ def _retry_next_delay(policy: RetryPolicy, deadline: float, attempt: int) -> tup
     return delay, ""
 
 
+class DaemonStopping(ConnectionError):
+    """The daemon refused input while restarting and recorded nothing, so the
+    same id is retried as a transport loss and delivers once after boot."""
+
+
 # A refused, reset or dropped socket (a daemon restart). Only these get the
 # deadline-bound reconnect; any other exception keeps the attempt bound.
 _TRANSPORT_LOSS_ERRORS: tuple[type[BaseException], ...] = (
@@ -1687,6 +1692,8 @@ async def _one_shot_rpc(
             sent_any = True
             response_deadline = time.monotonic() + wait_timeout + response_timeout_extra
             response = await _read_rpc_response(ws, request_id, prefix=prefix, deadline=response_deadline)
+            if retry_eligible and isinstance(response, dict) and response.get("error_code") == "daemon_stopping":
+                raise DaemonStopping("daemon_stopping")
             hook = _OWNER_RESPONSE_HOOK.get()
             if hook is not None:
                 hook(response)  # before the socket cleanup in `finally`

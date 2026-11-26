@@ -1206,6 +1206,8 @@ async def run(args: argparse.Namespace) -> int:
 
 #: How much earlier than its shutdown step Server.close's own waits must end.
 SERVER_CLOSE_MARGIN_S = 0.1
+#: How long shutdown lets admitted input finish before stopping anything else.
+SHUTDOWN_INPUT_DRAIN_S = 5.0
 
 
 async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composites, lane_rulings,
@@ -1214,6 +1216,12 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     every step gets min(its cap, what remains), and an overrunning step is
     abandoned, so the store stops before launchd's SIGKILL. Never touches
     panes (B10)."""
+    # Input first: refuse new input retryably, and let input already admitted
+    # (its pre-input record may be committed) paste and record its outcome
+    # while every dependency below still runs.
+    if hasattr(server, "drain_input"):
+        await budget.step("input-drain", server.drain_input(budget.remaining(SHUTDOWN_INPUT_DRAIN_S)),
+                          cap=SHUTDOWN_INPUT_DRAIN_S)
     # Restart continuity: no new spawn admission once stopping, then hand every
     # in-flight admitted spawn to durable state while the store still runs.
     server.spawn_ready.clear()
