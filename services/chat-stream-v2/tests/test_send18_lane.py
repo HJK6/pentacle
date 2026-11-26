@@ -42,6 +42,7 @@ def test_provisioning_form_matches_lane_admission():
     from itertools import product
     from spawnctl import SpawnCtl
     from test_account_schedule_journey import SPEC
+    from store_specs import UNASSIGNED
 
     class Store:
         async def lane_provisioning_allowed(self, _auth):
@@ -51,11 +52,14 @@ def test_provisioning_form_matches_lane_admission():
         store = Store()
         _prompt_requested = staticmethod(SpawnCtl._prompt_requested)
         _provisioning_form = SpawnCtl._provisioning_form
+        _provisioning_applies = SpawnCtl._provisioning_applies
 
     owner = Owner()
     prompts = [{}, {"initial_prompt": ""}, {"initial_prompt": "work"}, {"brief": "work"}]
     commands = [{}, {"command": " "}, {"command": "run"}]
-    for role, prompt, command in product(["lead", "nexus", "worker", "qa", None], prompts, commands):
-        msg = {"spec_id": SPEC, **prompt, **command}
-        privileged = asyncio.run(SpawnCtl._lane_admission(owner, msg, {"assigned_spec_id": SPEC}, role))
-        assert bool(privileged) == owner._provisioning_form(msg, role), (role, prompt, command)
+    bindings = [{"assigned_spec_id": SPEC}, {"spec_ids": [SPEC]}, None, {},
+                {"assigned_spec_id": UNASSIGNED, "spec_ids": [SPEC]}, {"spec_ids": [SPEC, SPEC + "_other"]}]
+    for role, prompt, command, binding in product(["lead", "nexus", "worker", "qa", None], prompts, commands, bindings):
+        msg = {**prompt, **command}
+        privileged = asyncio.run(SpawnCtl._lane_admission(owner, msg, binding, role))
+        assert bool(privileged) == owner._provisioning_applies(msg, binding, role), (role, prompt, command, binding)

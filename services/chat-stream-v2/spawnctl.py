@@ -837,17 +837,27 @@ class SpawnCtl:
         """At the selection owner, mark only when no replay, lane, QA, handoff
         or pool decision is pending.
 
-        A request in the lane provisioning form (_provisioning_form) still has
-        its privileged provisioning decision ahead of it.
+        A request to which lane provisioning applies (_provisioning_applies)
+        still has its privileged provisioning decision ahead of it.
         """
         runtime = getattr(self, "account_runtime", None)
         if runtime is None or not runtime.refusal_eligible(exc):
             return
         from account_runtime import pool_override_requested
         if (msg.get("_account_admitted_replay") or msg.get("provision_only") or msg.get("handoff")
-                or self._provisioning_form(msg, role)
                 or pool_override_requested(msg) or qa_dispatch.classified(msg, self._refusal_qa_row(msg, role))):
             return
+        if self._provisioning_form(msg, role):
+            if msg.get("resume_session_id") is not None:
+                return  # The retained row's assignment is resolved only in _spawn_impl.
+            try:
+                binding = await self._resolve_spec_binding(msg, host, name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return  # Unknown assignment: no signal; the refusal stands.
+            if self._provisioning_applies(msg, binding, role):
+                return
         key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
         if key:
             try:
@@ -866,6 +876,10 @@ class SpawnCtl:
         a test pins the two equal."""
         return (role in {"lead", "nexus"} and not self._prompt_requested(msg)
                 and not str(msg.get("command") or "").strip())
+
+    def _provisioning_applies(self, msg, binding, role):
+        """``_lane_admission`` decides provisioning only for an assigned binding."""
+        return bool(effective_assignment(binding)) and self._provisioning_form(msg, role)
 
     async def _lane_admission(self, msg, binding, role):
         """The same guard covers new work, supporting work, resume and scheduled fire."""
