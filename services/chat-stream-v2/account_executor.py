@@ -173,6 +173,7 @@ class AccountExecutor:
                 # lock acquisition.  Cancellation from this await onward spends
                 # the attempt and never retries it.
                 self.runtime._self_recovery_last_dispatch[mark_key]=self.runtime.monotonic()
+                self.runtime._index_self_recovery(mark_key)
                 dispatched=True
                 if pin is None:
                     result=await self.execute(account,"observe-bound",operation_id)
@@ -202,6 +203,7 @@ class AccountExecutor:
             self.runtime._self_recovery_marks[key]=revision
         elif self.runtime._self_recovery_marks[key]<revision:
             self.runtime._self_recovery_marks[key]=revision
+        self.runtime._index_self_recovery(key)
 
     @staticmethod
     def _observation_failure(account,outcome):
@@ -258,7 +260,7 @@ class AccountExecutor:
             if not (outcome=="provider_identity_or_cache_unverified"
                     and result.get("identity_evidence")=="contradiction"):
                 return self._observation_failure(account,outcome)
-            changed=await self._self_recovery_identity_failure(account,expected_revision)
+            changed=await self._self_recovery_identity_failure(account,expected_revision,pin_state)
             if not changed:
                 return self._observation_failure(account,"account_health_revision_stale")
             await self.runtime._alert(account,"identity_unverified")
@@ -317,10 +319,17 @@ class AccountExecutor:
             self._write_recovery(ledger,account.key,state)
             return receipt
 
-    async def _self_recovery_identity_failure(self,account,expected_revision):
+    async def _self_recovery_identity_failure(self,account,expected_revision,pin_state):
         changed=await self.runtime.run(lambda ledger:ledger.failure(account.key,"identity",
-            now=self.runtime.clock(),expected_revision=expected_revision),settle_on_cancel=True)
+            now=self.runtime.clock(),expected_revision=expected_revision,
+            fence=lambda fenced:self._self_recovery_pin_fence(fenced,pin_state)),settle_on_cancel=True)
         return bool(changed)
+
+    @staticmethod
+    def _self_recovery_pin_fence(ledger,pin_state):
+        # The positive winner's fence: evidence sampled under another pin is superseded.
+        if AccountExecutor._self_recovery_pin_keys(ledger)!=pin_state:
+            raise AccountError("provider_cli_pin_stale")
 
     async def _observe_locked(self, account, *, require_match=False, recovery=False):
         try:

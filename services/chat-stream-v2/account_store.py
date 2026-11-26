@@ -245,9 +245,10 @@ class AccountStore:
         self.conn.execute("INSERT OR REPLACE INTO v2_account_observations VALUES (?,?,?)",(key,json.dumps(allowed),now))
         return allowed["collection"]!="identity_conflict"
 
-    def failure(self,key,kind,*,now,expected_revision=None):
+    def failure(self,key,kind,*,now,expected_revision=None,fence=None):
         if kind not in {"auth","quota","capacity","network","permission","identity"}: raise AccountError("provider_signal_invalid")
         with transaction(self.conn):
+            if fence is not None: fence(self)
             binding=self.bound(key)
             if binding is None: raise AccountError("account_generation_unknown")
             if expected_revision is not None:

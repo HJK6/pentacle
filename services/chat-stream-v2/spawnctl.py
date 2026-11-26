@@ -837,20 +837,35 @@ class SpawnCtl:
         """At the selection owner, mark only when no replay, lane, QA, handoff
         or pool decision is pending.
 
-        Lane admission can refuse only a ``provision_only`` request (_lane_admission).
+        A request in the lane provisioning form (_provisioning_form) still has
+        its privileged provisioning decision ahead of it.
         """
         runtime = getattr(self, "account_runtime", None)
-        if runtime is None:
+        if runtime is None or not runtime.refusal_eligible(exc):
             return
         from account_runtime import pool_override_requested
         if (msg.get("_account_admitted_replay") or msg.get("provision_only") or msg.get("handoff")
+                or self._provisioning_form(msg, role)
                 or pool_override_requested(msg) or qa_dispatch.classified(msg, self._refusal_qa_row(msg, role))):
             return
         key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
-        if key and await self.store.spawn_record_for_key(host, key):
-            return  # A retained record is replay, never a fresh signal.
+        if key:
+            try:
+                if await self.store.spawn_record_for_key(host, key):
+                    return  # A retained record is replay, never a fresh signal.
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return  # Unknown replay state: no signal; the refusal stands.
         runtime.arm_ingress("spawn", f"{host}:{name}")
         runtime.signal_refusal(exc, "spawn", f"{host}:{name}")
+
+    def _provisioning_form(self, msg, role):
+        """The request form ``_lane_admission`` provisions: a promptless,
+        commandless lead. Its ``provision`` line is frozen, so this mirrors it;
+        a test pins the two equal."""
+        return (role in {"lead", "nexus"} and not self._prompt_requested(msg)
+                and not str(msg.get("command") or "").strip())
 
     async def _lane_admission(self, msg, binding, role):
         """The same guard covers new work, supporting work, resume and scheduled fire."""

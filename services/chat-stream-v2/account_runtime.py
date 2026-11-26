@@ -139,6 +139,8 @@ class AccountRuntime:
         # Last committed active enabled key per registered cell (None: none).
         # One entry per cell, never per generation.
         self._self_recovery_cells={}
+        # Mark and spacing keys per cell, so a commit retires only its own cell.
+        self._self_recovery_cell_keys={}
         # Store-thread handoff of committed registrations, keyed by cell, so it
         # is bounded by the number of cells and the latest commit wins.
         self._cell_commits={}
@@ -207,10 +209,15 @@ class AccountRuntime:
             commits,self._cell_commits=self._cell_commits,{}
         for cell,active in commits.items():
             self._self_recovery_cells[cell]=active
-            prefix=":".join(cell)+":"
-            for table in (self._self_recovery_marks,self._self_recovery_last_dispatch):
-                for key in [k for k in table if k[0].startswith(prefix) and k[0]!=active]:
-                    table.pop(key,None)
+            keys=self._self_recovery_cell_keys.pop(cell,set())
+            kept={key for key in keys if key[0]==active}
+            if kept: self._self_recovery_cell_keys[cell]=kept
+            for key in keys-kept:
+                self._self_recovery_marks.pop(key,None)
+                self._self_recovery_last_dispatch.pop(key,None)
+
+    def _index_self_recovery(self,key):
+        self._self_recovery_cell_keys.setdefault(tuple(key[0].split(":")[:3]),set()).add(key)
 
     def _self_recovery_live(self,key):
         """False once a committed registration retired this binding key."""
@@ -252,6 +259,7 @@ class AccountRuntime:
             await asyncio.gather(self._collector_task,return_exceptions=True)
         self._self_recovery_marks.clear()
         self._self_recovery_cells.clear()
+        self._self_recovery_cell_keys.clear()
         self._self_recovery_last_dispatch.clear()
         self._self_recovery_inflight.clear()
 
@@ -332,6 +340,7 @@ class AccountRuntime:
         prior=self._self_recovery_marks.get(key)
         if prior is None or revision>=prior:
             self._self_recovery_marks[key]=revision
+            self._index_self_recovery(key)
 
     async def enrolled(self,host,provider=None):
         return await self.run(lambda a:a.conn.execute(
@@ -537,11 +546,16 @@ class AccountRuntime:
     def reset_ingress(token):
         RECOVERY_INGRESS.reset(token)
 
+    @staticmethod
+    def refusal_eligible(exc):
+        """Pure: could this refusal ever publish a mark."""
+        return (str(exc)=="account_unavailable" and getattr(exc,"_health",None)=="auth_unhealthy"
+                and bool(getattr(exc,"_active",False)) and getattr(exc,"_binding",None) is not None)
+
     def signal_refusal(self,exc,verb,target,binding=None):
         """Publish one mark if this exact refusal is the route's first eligible one."""
-        snapshot=getattr(exc,"_binding",None)
-        if (str(exc)!="account_unavailable" or getattr(exc,"_health",None)!="auth_unhealthy"
-                or not getattr(exc,"_active",False) or snapshot is None): return
+        if not self.refusal_eligible(exc): return
+        snapshot=exc._binding
         if binding is not None and (binding.key,binding.generation)!=(snapshot.key,snapshot.generation): return
         if take_ingress(verb,target):
             self._mark_auth_self_recovery(snapshot,exc._health_revision)
