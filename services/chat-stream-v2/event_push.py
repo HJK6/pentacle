@@ -748,11 +748,6 @@ class EventPush:
                 except Exception as exc:  # noqa: BLE001 - existing best-effort observer
                     log.warning("routing-integrity remote observation failed sid=%s: %s", entry["stream_id"], exc)
 
-        if self.sessions is not None:
-            from store_capacity_retry import refresh_projection
-            for sid in snapshots:
-                await refresh_projection(self.store, self.sessions, sid)
-
         # Broadcast only after every submitted append has committed.  A replay
         # remains durable but has a None sequence and therefore never replays a
         # live frame.
@@ -781,6 +776,10 @@ class EventPush:
         except Exception as exc:  # noqa: BLE001 - never acknowledge a failed push
             log.warning("event.push broadcast failed host=%s: %s", host, exc)
             return err("ingest_failed")
+        if self.sessions is not None:
+            from store_capacity_retry import refresh_after_broadcast
+            for sid in snapshots:
+                await refresh_after_broadcast(self.store, self.sessions, sid)
         inserted = sum(seq is not None for seq in sequences)
         if inserted and self.inventory_emitter is not None:
             try:

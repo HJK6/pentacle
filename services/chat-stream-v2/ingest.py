@@ -1167,8 +1167,6 @@ class Ingest:
                     if seq is not None
                 ]
                 projected = await self.store.project_session_events(inserted)
-                from store_capacity_retry import refresh_projection
-                await refresh_projection(self.store, self.sessions, sid)
                 projected_index = 0
                 for entry, seq in zip(entries, sequences):
                     if seq is not None:
@@ -1181,6 +1179,8 @@ class Ingest:
                         })
                         await broadcast_assistant_mirror(self.store, self.broadcast, seq, sessions=self.sessions)
                         projected_index += 1
+                from store_capacity_retry import refresh_after_broadcast
+                await refresh_after_broadcast(self.store, self.sessions, sid)
                 if any(seq is not None for seq in sequences) and self.inventory_emitter is not None:
                     await self.inventory_emitter.emit_if_changed()
             except Exception as exc:  # noqa: BLE001 - never claim the failed batch
