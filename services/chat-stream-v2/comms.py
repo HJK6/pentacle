@@ -103,7 +103,7 @@ def is_codex_usage_command(value: object) -> bool:
 
 CODEX_INITIAL_PROMPT_PENDING = "initial_prompt_pending"
 _POOL_INPUT_MESSAGE = ContextVar("pool_input_message",default=None)
-# (target, row) read once while that target's lifecycle and pane locks are both
+# A one-entry list [(target, row)], the row read once while that target's lifecycle and pane locks are both
 # held; the account input guard reuses it instead of reading the row again.
 _LOCKED_ROW = ContextVar("locked_row",default=None)
 # Server-set route marker; recovery eligibility also needs its minted decision.
@@ -1893,11 +1893,12 @@ class Comms:
         from provider_accounts import AccountError
         host,name=self.sessions.split(target)
         try:
-            locked=_LOCKED_ROW.get()
-            row=locked[1] if locked is not None and locked[0]==target else await self.store.fetch_session(host,name)
-            account_guard = (runtime.input_guard(row or {},
-                message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim,
-                recovery_verb=recovery_verb) if runtime is not None else nullcontext())
+            account_guard=nullcontext()
+            if runtime is not None:
+                held=_LOCKED_ROW.get() or ()
+                row=held[0][1] if held and held[0][0]==target else await self.store.fetch_session(host,name)
+                account_guard=runtime.input_guard(row or {},message=_POOL_INPUT_MESSAGE.get(),phase=phase,
+                                                  claim=claim,recovery_verb=recovery_verb)
             # Provider preparation precedes this fence. Hold the graph only for
             # one physical action, never submission evidence or an Enter wait.
             async with account_guard, (self.sessions._graph_lock if execution else nullcontext()):
@@ -2210,10 +2211,14 @@ class Comms:
                 }
                 await self._append_send_receipt(plan, request_id=request_id, receipt_id=receipt_id,
                     state="accepted", delivery="accepted", submission_confirmed=False, attempts=0)
-                row_token = _LOCKED_ROW.set((target, locked[0]) if locked is not None else None)
+                # A holder, not the row: clearing it in `finally` also cuts off
+                # any context copied from this task (a paste worker thread).
+                held = [(target, locked[0])] if locked is not None else []
+                row_token = _LOCKED_ROW.set(held)
                 try:
                     confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
                 finally:
+                    held.clear()
                     _LOCKED_ROW.reset(row_token)
                 provider_queued = (
                     not active_draft and pane_mode_reason is None

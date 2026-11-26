@@ -298,3 +298,84 @@ def test_maintenance_begun_after_preparation_refuses_at_the_locked_recheck(tmp_p
                 await task
             assert inside == [] and not runtime.pin_lock.locked()
     asyncio.run(go())
+
+
+class ThreadPasteTmux(DraftTmux):
+    """A paste that, like the local tmux transport, hands work to a thread:
+    asyncio.to_thread copies the sending task's context into that worker."""
+
+    def __init__(self, entered, release, seen):
+        super().__init__()
+        self.entered, self.release, self.seen = entered, release, seen
+
+    async def paste(self, name, text):
+        def worker():
+            self.entered.set()
+            self.release.wait(10)
+            self.seen.append(comms_mod._LOCKED_ROW.get())
+        await asyncio.to_thread(worker)
+        await super().paste(name, text)
+
+
+def test_a_cancelled_send_leaves_no_locked_row_in_a_copied_worker_context(tmp_path):
+    """The reused row lives only for its attempt: a send cancelled while its
+    paste worker runs releases both locks, and the worker, which holds a copy
+    of the task's context, can no longer reach the row."""
+    import threading
+
+    async def go():
+        entered, release, seen = threading.Event(), threading.Event(), []
+        tmux = ThreadPasteTmux(entered, release, seen)
+        store, server, worker = await world(tmp_path, tmux)
+        sessions = server.sessions
+        try:
+            msg = {"type": "send", "request_id": "cancelled-send", "stream_id": worker["stream_id"],
+                   "message": "plain owned work", "from_stream_id": PEER, "stream_token": TOKEN}
+            send = asyncio.ensure_future(server._dispatch(json.dumps(msg), websocket=LocalPeer()))
+            assert await asyncio.to_thread(entered.wait, 10)
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+            assert not sessions._graph_lock.locked()
+            host, name = sessions.split(worker["stream_id"])
+            async with asyncio.timeout(2):
+                async with sessions._lifecycle_lock(host, name):
+                    pass
+            release.set()
+            async with asyncio.timeout(5):
+                while not seen:
+                    await asyncio.sleep(0.01)
+            held = seen[0]
+            assert not held, "the paste worker still reaches the locked row"
+        finally:
+            release.set()
+            store.stop()
+    asyncio.run(go())
+
+
+def test_without_account_runtime_the_graph_locked_guard_reads_no_row(tmp_path):
+    """With no AccountRuntime the execution guard only takes the graph lock,
+    as before slice 2: no Store submission."""
+    async def go():
+        store, server, worker = await world(tmp_path, FakeTmux())
+        comms = server.comms
+        comms.account_runtime = None
+        names: list[str] = []
+        original = store.submit
+        owner: list[asyncio.Task] = []
+
+        async def submit(fn, **options):
+            if owner and asyncio.current_task() is owner[0]:
+                names.append(store_call_diag.call_name(fn))
+            return await original(fn, **options)
+        store.submit = submit
+        try:
+            async def guarded():
+                owner.append(asyncio.current_task())
+                async with comms._account_input_guard(worker["stream_id"], execution=True):
+                    assert comms.sessions._graph_lock.locked()
+            await asyncio.ensure_future(guarded())
+            assert names == [], names
+        finally:
+            store.submit = original
+            store.stop()
+    asyncio.run(go())
