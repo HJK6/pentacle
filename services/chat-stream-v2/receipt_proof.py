@@ -141,7 +141,9 @@ def decide(rows, receipt, birth, claim, digest):
             event = json.loads(row["event_json"])
             if event.get("kind") != "USER" or float(row["recorded_at"]) < claim:
                 continue
-            key = row.get("identity") or (row.get("proof_store"), row["event_id"])
+            # Retention copies an event before deleting it, so one physical
+            # event (same id and bytes) can be found in both stores.
+            key = row.get("identity") or (row["event_id"], row["event_json"])
             groups.setdefault(key, []).append((row, event))
         except (ValueError, TypeError, KeyError):
             return False, "lookup_incomplete"

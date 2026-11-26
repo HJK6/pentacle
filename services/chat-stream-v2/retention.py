@@ -20,6 +20,7 @@ The existing cadence performs these bounded passes:
                         while the event tail held 1.18 GB + 208 MB of indexes.
   3. Receipt/route histories move with an independent durable archive commit,
      full equality verification, and a separate revalidated hot deletion.
+     Passes 1 and 2 move their batches in the same order (`_move_copies`).
      Per transaction: at most 500 rows / 1 MiB payload. Per pass: 2,000 keys
      examined across alternating families. Compaction is offline maintenance.
 
@@ -918,6 +919,132 @@ def ensure_archive(archive_path: Path, schema: Schema, *, require_existing: bool
     ensure_archive_table(archive_path, schema.create_sql, "sessions", require_existing=require_existing)
 
 
+def _attach_archive(conn: sqlite3.Connection, archive_path: Path, *, require_existing: bool) -> tuple:
+    """ATTACH the archive as `arch` and return the binding to re-check before deletion."""
+    # ATTACH is illegal inside a transaction, and the daemon's store connection
+    # is long-lived and shared with every other write.
+    conn.commit()
+    # Store enables URI handling, so mode=rw forbids creation even if the
+    # archive disappears after preflight or table preparation.
+    target = archive_path.absolute().as_uri() + '?mode=rw' if require_existing else str(archive_path.absolute())
+    conn.execute("ATTACH DATABASE ? AS arch", (target,))
+    return _archive_binding(conn, archive_path)
+
+
+def _archive_binding(conn: sqlite3.Connection, archive_path: Path) -> tuple:
+    """The archive file and history pair a move is bound to.
+
+    The configured path is the hot sequence row's, which `bind_history_archive`
+    changes in a hot write transaction; read under the hot write lock, it
+    cannot change before commit. A rename by a process that does not take that
+    lock is not serialized (see docs/retention.md).
+    """
+    row = _sequence(conn) if has_table(conn, "v2_send_receipt_sequence") else None
+    if row is not None and row["archive_path"] and \
+            Path(row["archive_path"]).absolute() != Path(archive_path).absolute():
+        raise RetentionError("history archive rebound; no hot rows deleted")
+    try:
+        stat = Path(archive_path).stat()
+    except OSError as exc:
+        raise RetentionError("history archive path unavailable") from exc
+    pair = None
+    if row is not None and row["archive_ready"]:
+        marker = conn.execute("SELECT 1 FROM arch.sqlite_master WHERE name='v2_receipt_route_archive'").fetchone()
+        pair = marker and conn.execute(
+            "SELECT pair_id FROM arch.v2_receipt_route_archive WHERE singleton=1").fetchone()
+        if not pair or pair[0] != row["pair_id"]:
+            raise RetentionError("history archive pair mismatch")
+        pair = pair[0]
+    return stat.st_dev, stat.st_ino, pair
+
+
+def _keys_in(keys: Sequence[str], count: int, alias: str = "") -> str:
+    names = [f'{alias}"{k}"' for k in keys]
+    if len(keys) == 1:
+        return f'{names[0]} IN ({",".join("?" for _ in range(count))})'
+    marks = "(" + ",".join("?" for _ in keys) + ")"
+    return f'({", ".join(names)}) IN (VALUES {",".join(marks for _ in range(count))})'
+
+
+def _flat(keys: Sequence[str], rows: Sequence) -> list:
+    """Key values of `rows` (dicts or key tuples) in `_keys_in` order."""
+    return [value for row in rows
+            for value in (row if isinstance(row, tuple) else (row[k] for k in keys))]
+
+
+def _identical(conn, table: str, keys: Sequence[str], columns: Sequence[str], rows: Sequence) -> set:
+    """Keys of `rows` whose current hot row equals its archived copy in every column."""
+    if not rows:
+        return set()
+    equal = " AND ".join(f'a."{c}" IS h."{c}"' for c in dict.fromkeys([*keys, *columns]))
+    selected = ", ".join(f'h."{k}"' for k in keys)
+    return {tuple(found) for found in conn.execute(
+        f'SELECT {selected} FROM main."{table}" h JOIN arch."{table}" a ON {equal} '
+        f'WHERE {_keys_in(keys, len(rows), "h.")}', _flat(keys, rows))}
+
+
+def _check_binding(conn, archive_path: Path, binding: tuple) -> None:
+    if _archive_binding(conn, archive_path) != binding:
+        raise RetentionError("history archive replaced; no hot rows deleted")
+
+
+def _move_copies(conn, archive_path, binding, table, keys, columns, candidates, *,
+                 current, place, conflicts=lambda rows: set(), unequal=lambda rows: None) -> int:
+    """Archive commit -> verify -> hot delete, as receipts and routes move.
+
+    `candidates` are key tuples a selection chose before either transaction;
+    nothing read then is trusted. Both transactions hold the hot write lock and
+    re-read the rows with `current`, which returns those present and eligible
+    now. The first copies them into `arch` with `place`, which returns the rows
+    the archive now holds; it changes only the archive, so its commit is the
+    archive file's alone, and it never touches an archive row whose hot source
+    is absent. The second checks the configured archive binding, re-reads the
+    rows, and deletes only those still eligible, equal to their archived copy
+    in every column and free of `conflicts`, checking the binding again just
+    before the delete. Every eligible row is checked for `conflicts`, and those
+    that are not equal also go to `unequal`, so a refusal that is a collision
+    is classified in this pass. A crash at any point leaves each row in the
+    hot file, the archive or both.
+    """
+    if not candidates:
+        return 0
+    key = lambda row: tuple(row[k] for k in keys)  # noqa: E731
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        copied = place(current(candidates))
+        history_checkpoint("archive_precommit", table, copied)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    if not copied:
+        return 0
+    history_checkpoint("archive_committed", table, copied)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _check_binding(conn, archive_path, binding)
+        rows = current([key(row) for row in copied])
+        same = _identical(conn, table, keys, columns, rows)
+        unequal([row for row in rows if key(row) not in same])
+        bad = conflicts(rows)
+        gone = [row for row in rows if key(row) in same and key(row) not in bad]
+        history_checkpoint("verified", table, gone)
+        _check_binding(conn, archive_path, binding)
+        if gone:
+            conn.execute(f'DELETE FROM main."{table}" WHERE {_keys_in(keys, len(gone))}',
+                         _flat(keys, gone))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    history_checkpoint("hot_deleted", table, gone)
+    return len(gone)
+
+
+def _stream_id(row: dict) -> str:
+    return row["stream_id"] if "stream_id" in row else f"{row['host']}:{row['session_name']}"
+
+
 def archive_rows(
     conn: sqlite3.Connection,
     schema: Schema,
@@ -930,9 +1057,13 @@ def archive_rows(
 ) -> int:
     """Move non-retained terminal rows to the archive DB, batch by batch.
 
-    Each batch is one transaction spanning both files (INSERT into archive,
-    DELETE from source) so a crash can at worst duplicate an already-archived
-    row -- which the INSERT OR REPLACE makes harmless on re-run.
+    Each batch commits the archive copy first, then deletes the unchanged,
+    still-eligible hot rows (`_move_copies`). Eligibility is read inside each
+    transaction: terminal status, not in `keep`, outside the lineage keep-set.
+    An identical archived row is a retry. A different archived row under the
+    same key is an older incarnation of a reused session name: the newer hot
+    row, present in the same transaction, replaces it, as before, but only in
+    this order, so the newer row is never in neither file.
 
     `max_rows` caps the call and is what makes this reusable as the daemon's
     bounded unit of work: the CLI leaves it None and drains the table, while the
@@ -940,21 +1071,39 @@ def archive_rows(
     is short and the remainder simply falls to the next call.
     """
     ensure_archive(archive_path, schema, require_existing=require_existing)
-    # ATTACH is illegal inside a transaction, and the daemon's store connection
-    # is long-lived and shared with every other write.
-    conn.commit()
-    # Store enables URI handling, so mode=rw forbids creation even if the
-    # archive disappears after preflight or table preparation.
-    target = archive_path.absolute().as_uri() + '?mode=rw' if require_existing else str(archive_path.absolute())
-    conn.execute("ATTACH DATABASE ? AS arch", (target,))
     cols = _q(schema.columns)
     keys = schema.key_columns
-    key_sel = _q(keys)
+    read = list(dict.fromkeys([*keys, *(c for c in ("stream_id", "host", "session_name")
+                                        if c in schema.columns)]))
     pred, params = _terminal_predicate(statuses)
     sid = schema.stream_id_expr
 
+    def current(candidates):
+        found = [dict(zip(read, row)) for row in conn.execute(
+            f"SELECT {_q(read)} FROM main.sessions WHERE {pred} AND {_keys_in(keys, len(candidates))}",
+            (*params, *_flat(keys, candidates)))]
+        if not (found and sid):
+            return found
+        kept = keep | lineage_keepset(conn, schema, statuses)
+        return [row for row in found if _stream_id(row) not in kept]
+
+    def place(rows):
+        same = _identical(conn, "sessions", keys, schema.columns, rows)
+        changed = [row for row in rows if tuple(row[k] for k in keys) not in same]
+        if changed:
+            flat = _flat(keys, changed)
+            for row in conn.execute(f"SELECT {_q(read)} FROM arch.sessions WHERE {_keys_in(keys, len(changed))}", flat):
+                log.info("retention: reused session name %s replaces its archived incarnation",
+                         _stream_id(dict(zip(read, row))))
+            conn.execute(f"DELETE FROM arch.sessions WHERE {_keys_in(keys, len(changed))}", flat)
+            conn.execute(f"INSERT INTO arch.sessions ({cols}) SELECT {cols} FROM main.sessions "
+                         f"WHERE {_keys_in(keys, len(changed))}", flat)
+        return rows
+
     moved = 0
+    cursor = 0
     try:
+        binding = _attach_archive(conn, archive_path, require_existing=require_existing)
         while max_rows is None or moved < max_rows:
             limit = batch_size if max_rows is None else min(batch_size, max_rows - moved)
             where = pred
@@ -963,28 +1112,31 @@ def archive_rows(
                 marks = ", ".join("?" for _ in keep)
                 where += f" AND ({sid}) NOT IN ({marks})"
                 args.extend(sorted(keep))
-            rows = conn.execute(
-                f"SELECT {key_sel} FROM sessions WHERE {where} LIMIT ?",
-                (*args, limit),
+            # Advance past rows a batch left hot so a batch of them cannot loop.
+            selected = conn.execute(
+                f"SELECT rowid, {_q(keys)} FROM sessions WHERE {where} AND rowid > ? "
+                f"ORDER BY rowid LIMIT ?",
+                (*args, cursor, limit),
             ).fetchall()
-            if not rows:
+            if not selected:
                 break
-            key_pred = " OR ".join(
-                "(" + " AND ".join(f'"{k}" IS ?' for k in keys) + ")" for _ in rows
-            )
-            flat = [v for r in rows for v in r]
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                f"INSERT OR REPLACE INTO arch.sessions ({cols}) "
-                f"SELECT {cols} FROM main.sessions WHERE {key_pred}",
-                flat,
-            )
-            conn.execute(f"DELETE FROM main.sessions WHERE {key_pred}", flat)
-            conn.commit()
-            moved += len(rows)
+            cursor = selected[-1][0]
+            moved += _move_copies(conn, archive_path, binding, "sessions", keys, schema.columns,
+                                  [tuple(row)[1:] for row in selected], current=current, place=place)
     finally:
         _detach(conn)
     return moved
+
+
+def composite_stream_ids(conn: sqlite3.Connection) -> set[str]:
+    """Open assistant composites, whose history is paged from the hot table."""
+    return {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT host || ':' || session_name FROM sessions "
+            "WHERE status='open' AND provider='composite'"
+        )
+    }
 
 
 def archive_events(
@@ -996,62 +1148,137 @@ def archive_events(
     max_rows: int | None = None,
     protected_stream_ids: set[str] | None = None,
     *, require_existing: bool = False,
+    statuses: Sequence[str] = TERMINAL_STATUSES,
+    retained: set | None = None,
 ) -> tuple[int, int]:
     """Move archivable event rows out. Requires temp.hot_streams loaded.
 
-    Returns (terminal_moved, tail_moved). Both passes are batched INSERT-then-
-    DELETE inside bounded transactions, so a 1 GiB table never becomes one
-    unbounded write; a crash mid-run leaves an already-inserted batch that the
-    INSERT OR REPLACE makes harmless on re-run.
+    Returns (terminal_moved, tail_moved). Both passes move bounded batches
+    archive commit -> verify -> hot delete (`_move_copies`), so a crash leaves
+    each event in the hot file, the archive or both, and a 1 GiB table never
+    becomes one unbounded write. Events keep their identity: an identical
+    archived row is already copied; a hot event whose current row collides with
+    a different archived event (same event id with other bytes, or another
+    event id with its event key / non-null identity within its stream and
+    birth) stays hot, is added to `retained` and is logged once.
 
     `max_rows` is a budget shared across BOTH passes, so a capped call spends it
     on terminal rows first and only then on trimming open sessions' tails.
     """
     ensure_archive_table(archive_path, ev.create_sql, ev.table, require_existing=require_existing)
-    conn.commit()  # see archive_rows: ATTACH cannot run inside a transaction
-    # Store enables URI handling, so mode=rw forbids creation even if the
-    # archive disappears after preflight or table preparation.
-    target = archive_path.absolute().as_uri() + '?mode=rw' if require_existing else str(archive_path.absolute())
-    conn.execute("ATTACH DATABASE ? AS arch", (target,))
-    cols = _q(ev.columns)
-    key = f'"{ev.row_key}"' if ev.row_key != "rowid" else "rowid"
+    key = ev.row_key
+    names = ev.columns if key in ev.columns else [key, *ev.columns]
     tbl = f'"{ev.table}"'
     remaining = max_rows
     protected_stream_ids = protected_stream_ids or set()
+    scope = [c for c in ("stream_id", "session_created_at") if c in ev.columns]
+    scope_eq = " AND ".join(f'"{c}" IS ?' for c in scope) or "1"
+    alternates = [c for c in ("event_key", "identity") if c in ev.columns]
+    read = list(dict.fromkeys([key, "stream_id", *ev.group_columns]))
+    grp_pred = " AND ".join(f'"{c}" IS ?' for c in ev.group_columns)
+
+    def hold(ids):
+        for event_id in ids:
+            if retained is None or event_id not in retained:
+                log.warning("retention: event %s collides with a different archived event; kept hot",
+                            event_id)
+                if retained is not None:
+                    retained.add(event_id)
+
+    def current(candidates):
+        found = [dict(zip(read, row)) for row in conn.execute(
+            f'SELECT {_q(read)} FROM main.{tbl} WHERE "{key}" IN ({",".join("?" for _ in candidates)})',
+            _flat([key], candidates))]
+        if not found:
+            return found
+        hot = hot_stream_ids(conn, Schema(conn), statuses)
+        protected = composite_stream_ids(conn)
+        cutoffs: dict[tuple, Any] = {}
+
+        def still(row):
+            if row["stream_id"] not in hot:
+                return True
+            if row["stream_id"] in protected:
+                return False
+            group = tuple(row[c] for c in ev.group_columns)
+            if group not in cutoffs:
+                last = conn.execute(
+                    f'SELECT "{key}" FROM main.{tbl} WHERE {grp_pred} '
+                    f'ORDER BY "{key}" DESC LIMIT 1 OFFSET ?', (*group, tail_keep - 1)).fetchone()
+                cutoffs[group] = last[0] if last else None
+            return cutoffs[group] is not None and row[key] < cutoffs[group]
+        return [row for row in found if still(row)]
+
+    def conflicts(rows):
+        """Current hot events whose event key or identity another archived event holds.
+
+        The archive has no identity index, so it is probed once per stream and
+        birth with the batch's current values rather than once per row.
+        """
+        ids = [row[key] for row in rows]
+        clash = set()
+        for column in alternates if ids else ():
+            groups: dict[tuple, dict] = {}
+            for event_id, *group, value in conn.execute(
+                    f'SELECT "{key}", {_q([*scope, column])} FROM main.{tbl} '
+                    f'WHERE "{key}" IN ({",".join("?" for _ in ids)}) AND "{column}" IS NOT NULL', ids):
+                groups.setdefault(tuple(group), {}).setdefault(value, set()).add(event_id)
+            for group, held in groups.items():
+                for value, holder in conn.execute(
+                        f'SELECT "{column}", "{key}" FROM arch.{tbl} WHERE {scope_eq} AND "{column}" IN '
+                        f'({",".join("?" for _ in held)})', [*group, *held]):
+                    clash.update(event_id for event_id in held[value] if event_id != holder)
+        hold(sorted(clash))
+        return {(event_id,) for event_id in clash}
+
+    def unequal(rows):
+        """A same-id archived event with other bytes is a collision now; a missing
+        archived row is not, and is copied again by the next pass."""
+        ids = [row[key] for row in rows]
+        if ids:
+            hold(sorted(found[0] for found in conn.execute(
+                f'SELECT "{key}" FROM arch.{tbl} WHERE "{key}" IN ({",".join("?" for _ in ids)})', ids)))
+
+    def place(rows):
+        if not rows:
+            return rows
+        ids = [row[key] for row in rows]
+        archived = {found[0] for found in conn.execute(
+            f'SELECT "{key}" FROM arch.{tbl} WHERE "{key}" IN ({",".join("?" for _ in ids)})', ids)}
+        changed = archived - {found[0] for found in _identical(conn, ev.table, [key], names, rows)}
+        hold(sorted(changed))
+        clash = {found[0] for found in conflicts(rows)} | changed
+        insert = [event_id for event_id in ids if event_id not in archived and event_id not in clash]
+        if insert:
+            conn.execute(f'INSERT INTO arch.{tbl} ({_q(names)}) SELECT {_q(names)} FROM main.{tbl} '
+                         f'WHERE "{key}" IN ({",".join("?" for _ in insert)})', insert)
+        return [row for row in rows if row[key] not in clash]
 
     def move(where: str, params: list) -> int:
         nonlocal remaining
         total = 0
-        while True:
+        cursor = None
+        while remaining is None or remaining > 0:
+            limit = batch_size if remaining is None else min(batch_size, remaining)
+            # Advance past rows left hot so a batch of them cannot loop.
+            after = "" if cursor is None else f' AND "{key}" > ?'
+            candidates = conn.execute(
+                f'SELECT "{key}" FROM main.{tbl} WHERE {where}{after} ORDER BY "{key}" LIMIT ?',
+                (*params, *(() if cursor is None else (cursor,)), limit),
+            ).fetchall()
+            if not candidates:
+                break
+            cursor = candidates[-1][0]
+            moved = _move_copies(conn, archive_path, binding, ev.table, [key], names,
+                                 [tuple(found) for found in candidates],
+                                 current=current, place=place, conflicts=conflicts, unequal=unequal)
+            total += moved
             if remaining is not None:
-                if remaining <= 0:
-                    return total
-                limit = min(batch_size, remaining)
-            else:
-                limit = batch_size
-            ids = [
-                r[0]
-                for r in conn.execute(
-                    f"SELECT {key} FROM main.{tbl} WHERE {where} LIMIT ?",
-                    (*params, limit),
-                )
-            ]
-            if not ids:
-                return total
-            marks = ", ".join("?" for _ in ids)
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                f"INSERT OR REPLACE INTO arch.{tbl} ({cols}) "
-                f"SELECT {cols} FROM main.{tbl} WHERE {key} IN ({marks})",
-                ids,
-            )
-            conn.execute(f"DELETE FROM main.{tbl} WHERE {key} IN ({marks})", ids)
-            conn.commit()
-            total += len(ids)
-            if remaining is not None:
-                remaining -= len(ids)
+                remaining -= moved
+        return total
 
     try:
+        binding = _attach_archive(conn, archive_path, require_existing=require_existing)
         terminal_moved = move(
             '"stream_id" NOT IN (SELECT stream_id FROM temp.hot_streams)', []
         )
@@ -1069,15 +1296,14 @@ def archive_events(
             if count <= tail_keep:
                 continue
             keys = list(row[:-1])
-            grp_pred = " AND ".join(f'"{c}" IS ?' for c in ev.group_columns)
             cutoff = conn.execute(
-                f"SELECT {key} FROM main.{tbl} WHERE {grp_pred} "
-                f"ORDER BY {key} DESC LIMIT 1 OFFSET ?",
+                f'SELECT "{key}" FROM main.{tbl} WHERE {grp_pred} '
+                f'ORDER BY "{key}" DESC LIMIT 1 OFFSET ?',
                 (*keys, tail_keep - 1),
             ).fetchone()
             if not cutoff:
                 continue
-            tail_moved += move(f"{grp_pred} AND {key} < ?", [*keys, cutoff[0]])
+            tail_moved += move(f'{grp_pred} AND "{key}" < ?', [*keys, cutoff[0]])
     finally:
         _detach(conn)
     return terminal_moved, tail_moved
@@ -1175,6 +1401,8 @@ class PassResult:
     sessions_moved: int = 0
     events_terminal_moved: int = 0
     events_tail_moved: int = 0
+    # Hot events kept because a different archived event holds their identity.
+    events_retained: int = 0
     vacuumed: bool = False
     vacuum_skip_reason: str = ""
     reclaimable_bytes: int = 0
@@ -1300,10 +1528,11 @@ class RetentionJob:
             result.schedule_blob_bytes_unreclaimed,
         ) = schedule_counts
 
-        # The lineage keep-set is computed ONCE per pass rather than per batch:
-        # it is a full scan of `sessions`, and re-deriving it for every 500-row
-        # chunk would make the pass quadratic. A session that closes mid-pass is
-        # simply picked up by the next pass.
+        # The keep-set that selects session candidates is computed once per
+        # pass. Each batch still re-derives eligibility, lineage included,
+        # inside its copy and its delete transactions (`archive_rows`), so a
+        # session that reopens or gains a live descendant mid-pass stays hot.
+        # A session that closes mid-pass is picked up by the next pass.
         prep = await self._submit(lambda conn: self._prepare(conn, cfg))
         keep, wants_events = prep
 
@@ -1326,27 +1555,24 @@ class RetentionJob:
         )
 
         if wants_events and budget > 0:
+            retained: set = set()
+
             def _events(conn: sqlite3.Connection, limit: int) -> tuple[int, int]:
                 # Rebuild the hot set each chunk: rows the sessions pass just
                 # archived are no longer in `sessions`, and their events must
                 # archive with them.
                 schema = Schema(conn)
                 _load_hot_table(conn, hot_stream_ids(conn, schema, cfg.statuses))
-                protected = {
-                    str(row[0])
-                    for row in conn.execute(
-                        "SELECT host || ':' || session_name FROM sessions "
-                        "WHERE status='open' AND provider='composite'"
-                    )
-                }
                 return archive_events(
                     conn, EventSchema(conn), archive_path, cfg.tail_keep,
-                    cfg.batch_size, max_rows=limit, protected_stream_ids=protected,
-                    require_existing=True,
+                    cfg.batch_size, max_rows=limit,
+                    protected_stream_ids=composite_stream_ids(conn),
+                    require_existing=True, statuses=cfg.statuses, retained=retained,
                 )
 
             ev_moved = await self._drain_pairs(budget, _events)
             result.events_terminal_moved, result.events_tail_moved = ev_moved
+            result.events_retained = len(retained)
             budget -= result.events_moved
 
         if cfg.blob_root is not None:
