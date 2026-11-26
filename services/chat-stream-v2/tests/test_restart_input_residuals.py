@@ -101,8 +101,8 @@ async def inspect_case(root, variant):
         ctl = SpawnCtl(store, sessions, tmux=pane, owner_instance_id="new-instance")
         # External process/transcript discovery only: real transcript searching
         # and the full adoption/event-proof decision machinery remain intact.
-        async def process_tree(pid): return [pid]
-        async def paths(pids):
+        async def process_tree(pid, **_kw): return [pid]
+        async def paths(pids, **_kw):
             return [] if variant == "no_transcript" else [str(root / "provider.jsonl")]
         original_tree = spawnctl.process_tree
         spawnctl.process_tree = process_tree

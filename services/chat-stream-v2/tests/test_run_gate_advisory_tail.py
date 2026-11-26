@@ -1,22 +1,10 @@
-import asyncio
 import json
-import os
 from pathlib import Path
 import sys
 
 import pytest
 
-from quarantine_scheduler import run_child
 from tools import run_gate
-
-
-def test_worker_exit_and_timeout_are_bounded():
-    async def exercise():
-        code = await run_child([sys.executable, '-c', 'raise SystemExit(3)'], dict(os.environ), timeout=3)
-        assert code == 3
-        with pytest.raises(asyncio.TimeoutError):
-            await run_child([sys.executable, '-c', 'import time; time.sleep(30)'], dict(os.environ), timeout=0.1)
-    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize('tier', ['unit', 'smoke', 'soak'])

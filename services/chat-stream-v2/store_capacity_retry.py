@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import datetime
+
+log = logging.getLogger(__name__)
 
 PREFIX = "codex.capacity."
 GLOBAL_KEY = PREFIX + "hold"
@@ -165,3 +168,11 @@ async def refresh_projection(store, sessions, sid):
     if row and hasattr(sessions, "apply_durable"):
         sessions.apply_durable(sid, expected_generation=row["session_generation"],
                                capacity_retry=row.get("capacity_retry"))
+
+
+async def refresh_after_broadcast(store, sessions, sid):
+    """Registry copy after the event frame; a miss is repaired by the next tick."""
+    try:
+        await refresh_projection(store, sessions, sid)
+    except Exception as exc:  # noqa: BLE001 - the batch is already committed and sent
+        log.warning("capacity projection refresh failed sid=%s: %s", sid, exc)

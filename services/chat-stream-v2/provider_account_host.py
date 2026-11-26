@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from provider_accounts import AccountError, Registry, _component, _mkdir, _private, environment, write_private_json
 from provider_account_native import (
-    adopt, claude_observation, codex_observation, enroll, native_login, verify_binary,
+    adopt, claude_identity, claude_observation, codex_observation, enroll, native_login, verify_binary,
     native_run, classify_error, minimal_turn,
 )
 
@@ -102,6 +102,17 @@ class NativeHost:
         if binding.provider == "codex": return codex_observation(binding, expected_email=cell.get("expected_email"))
         return claude_observation(binding, collect_usage=self._claude_usage, run=self.run,
             expected_email=cell.get("expected_email"), wait_for_refresh=wait_for_refresh)
+
+    def _identity_contradiction(self, binding, cell):
+        """One fresh native identity read: affirmative only when it is complete,
+        verified and names another login or pool than this binding."""
+        if binding.provider != "claude":
+            return False
+        try:
+            fresh = claude_identity(binding, run=self.run, expected_email=cell.get("expected_email"))
+        except AccountError:
+            return False
+        return fresh["provider_id"] != binding.provider_id or fresh["pool_id"] != binding.pool_id
 
     def _claude_usage(self, binding, env):
         cell = self._cell(binding.provider, binding.alias)
@@ -379,7 +390,12 @@ class NativeHost:
                     try: pin=validate(pin)
                     except ValueError: raise AccountError("provider_cli_pin_unavailable") from None
                     proof=verify(active,cell,pin,run=self.run)
-                result = self._probe_observation(active)
+                try:
+                    result = self._probe_observation(active)
+                except AccountError as exc:
+                    if action == "observe-bound" and str(exc) == "provider_identity_or_cache_unverified":
+                        exc.identity_contradiction = self._identity_contradiction(active, cell)
+                    raise
                 return {"outcome": "ok", "binding_key": active.key, "observation": result,
                         **({"artifact_proof":proof} if proof else {})}
             if action not in {"enroll", "adopt", "status"}: raise AccountError("account_action_invalid")
@@ -492,7 +508,9 @@ def main(argv=None):
         print(json.dumps(result))
         return 0
     except AccountError as exc:
-        print(json.dumps({"outcome": str(exc)})); return 1
+        evidence = ({"identity_evidence": "contradiction"}
+                    if args.action == "observe-bound" and getattr(exc, "identity_contradiction", False) is True else {})
+        print(json.dumps({"outcome": str(exc), **evidence})); return 1
     except Exception:
         print(json.dumps({"outcome": "account_host_failed"})); return 1
     finally:

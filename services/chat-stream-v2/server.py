@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover
 
 from _shared import operator_auth
 from _shared.asset_schema import hosted_dashboard_policy
-from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
+from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, _INGRESS_ROUTE, validate_send_attachments
 from tmux_transport import sanitize_injectable
 import store_lifecycle_authority as lifecycle_authority
 from loop_watchdog import RequestTiming, request_timing
@@ -2575,10 +2575,8 @@ class Server:
             if not self._is_loopback_client(websocket) and verb not in {
                 "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
             }:
-                if not any(auth.get(key) for key in (
-                    "operator_authenticated", "token_verified", "service_authenticated",
-                    "scoped_principal",
-                )) and not (verb == 'assistant.transfer' and auth.get('retired_transfer_owner')):
+                if not self._positively_authenticated(auth) and not (
+                        verb == 'assistant.transfer' and auth.get('retired_transfer_owner')):
                     code = "authentication_required"
             # Local bootstrap is retained for ordinary RPCs only before a
             # claimed proof is rejected on this connection. Minting a seat
@@ -2661,8 +2659,13 @@ class Server:
             if decision is not None and decision.websocket is websocket:
                 self._diag_auth_finish(decision)
         actor_reset = None
+        ingress_reset = None
+        account_runtime = getattr(self, "account_runtime", None)
         try:
             auth = dispatch_msg.get('_auth_context') or {}
+            if (account_runtime is not None and verb in {"tell", "send", "spawn"} and websocket is not None
+                    and self._recovery_ingress(auth, dispatch_msg)):
+                ingress_reset = account_runtime.mint_ingress(verb)
             if (auth.get('token_verified') and auth.get('session_generation')
                     and not auth.get('dot_principal') and verb not in {'assistant.transfer','hello','ping'}):
                 actor = (auth.get('stream_id'), auth.get('session_generation'))
@@ -2685,6 +2688,8 @@ class Server:
             log.error("handler failed")
             reply = {"type": f"{verb}.error", "error_code": "internal_error", "error": str(exc)}
         finally:
+            if ingress_reset is not None:
+                account_runtime.reset_ingress(ingress_reset)
             if actor_reset is not None:
                 host_transfer.actor_context.reset(actor_reset)
         # A streaming handler returns an async iterator; it sets `request_id` on
@@ -3687,6 +3692,24 @@ class Server:
         )
 
     @staticmethod
+    def _positively_authenticated(auth: dict[str, Any]) -> bool:
+        """The per-request principal proof; a loopback bootstrap supplies none."""
+        return any(auth.get(key) for key in (
+            "operator_authenticated", "token_verified", "service_authenticated",
+            "scoped_principal",
+        ))
+
+    @classmethod
+    def _recovery_ingress(cls, auth: dict[str, Any], msg: dict[str, Any]) -> bool:
+        if not cls._positively_authenticated(auth):
+            return False
+        if auth.get("token_verified") is True:
+            sender = str(auth.get("stream_id") or "")
+            supplied = msg.get("from_stream_id") or msg.get("actor_stream_id")
+            return bool(sender) and (supplied is None or str(supplied) == sender)
+        return True
+
+    @staticmethod
     def _is_loopback_client(websocket: Any) -> bool:
         """Bootstrap trusts local native tools, never browser-origin requests."""
         # Browsers can connect to loopback from unrelated websites. Presence
@@ -4431,7 +4454,7 @@ class Server:
                                               {**msg, "_fd_requested_to": target_stream_id})
         # Suppression is applied by Comms.tell, after its route/body/Codex guards
         # and under the tell_id idempotency ledger.
-        return await self.comms.tell(msg)
+        return await self.comms.tell({**msg, _INGRESS_ROUTE: True})
 
     async def _composite_tell(
         self, composite: Any, composite_stream_id: str, msg: dict[str, Any],
@@ -4464,7 +4487,7 @@ class Server:
             composite, composite_stream_id, from_stream_id, body, tell_id, str(msg.get("request_id") or ""),
             service_ingress_body=msg.get("_wmi_brief_ingress_body"),
             requested_to=str(msg.get("_fd_requested_to") or msg.get("to_stream_id") or composite_stream_id),
-            auth=auth,
+            auth=auth, ingress=True,
         )
         if delivered is not None:
             return delivered
@@ -4485,7 +4508,7 @@ class Server:
         self, composite: Any, composite_stream_id: str, from_stream_id: str,
         body: str, tell_id: str, request_id: str,
         *, service_ingress_body: str | None = None, requested_to: str | None = None,
-        auth: dict[str, Any] | None = None,
+        auth: dict[str, Any] | None = None, ingress: bool = False,
     ) -> dict[str, Any] | None:
         """Deliver one composite tell to the current bound pane.
 
@@ -4519,6 +4542,9 @@ class Server:
             logical = {"name": composite.config.name, "requested": requested_to or composite_stream_id,
                        "binding_revision": binding.get("revision"), "sender": verified or from_stream_id,
                        "aliases": await self.store.front_desk_aliases()}
+        if ingress and getattr(self, "account_runtime", None) is not None:
+            # Only the fresh external route, never a queue flush or notice.
+            self.account_runtime.arm_ingress("tell", target)
         reply = await self.comms.tell({
             "type": "tell", "to_stream_id": target, "host": host, "session_name": name,
             "from_stream_id": from_stream_id or composite_stream_id, "message": body,
@@ -4818,6 +4844,7 @@ class Server:
         # reaches ``Comms.send_assistant_backend`` directly.
         direct_msg = dict(msg)
         direct_msg.pop("_assistant_composite_backend_dispatch", None)
+        direct_msg[_INGRESS_ROUTE] = True
         # Routine backend-ingress suppression applies to a composite's hidden
         # backend seats (the primary's astra/luna); resolve the owning composite for the
         # target.  A direct-primary assistant (daff) has no such backends.

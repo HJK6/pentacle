@@ -4,7 +4,7 @@ failure.
 
 Real Store/Sessions/SpawnCtl after an owned SIGKILL at the pre-paste boundary
 (the same harness as test_restart_input_residuals). Only the fake pane's
-`has_session` is delayed, once, after the transcript probe has run, so the
+liveness read (`session_state`) is delayed, once, after the transcript probe has run, so the
 deadline is first observed after the saved-watermark unknown guard evaluated
 false.
 """
@@ -33,7 +33,7 @@ DEADLINE_S = 1.0
 
 
 class DeadlineCrossingPane(FakePane):
-    """Answers `has_session` truthfully, but the first call after the armed
+    """Answers `session_state` truthfully, but the first call after the armed
     transcript probe returns only once the adoption deadline has passed."""
 
     def __init__(self, root):
@@ -41,14 +41,15 @@ class DeadlineCrossingPane(FakePane):
         self.armed = False
         self.crossings = []
 
-    async def has_session(self, name):
-        alive = await super().has_session(name)
+    async def session_state(self, name):
+        state = await super().session_state(name)
+        alive = state == "alive"
         if self.armed:
             self.armed = False
             started = time.monotonic()
             await asyncio.sleep(DEADLINE_S + 0.25)
             self.crossings.append({"alive": alive, "delayed_s": time.monotonic() - started})
-        return alive
+        return state
 
 
 async def reconcile_across_deadline(root):
@@ -61,8 +62,8 @@ async def reconcile_across_deadline(root):
         await sessions.refresh()
         ctl = SpawnCtl(store, sessions, tmux=pane, owner_instance_id="new-instance")
 
-        async def process_tree(pid): return [pid]
-        async def no_transcript(pids): return []
+        async def process_tree(pid, **_kw): return [pid]
+        async def no_transcript(pids, **_kw): return []
         spawnctl.process_tree = process_tree
         ctl._open_transcripts = no_transcript
         spawnctl.ADOPTION_BOOT_DEADLINE_S = DEADLINE_S

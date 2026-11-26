@@ -65,6 +65,25 @@ def test_pool_setter_and_effective_readback_replace_informational_policy_cap():
     asyncio.run(run())
 
 
+def test_explicit_null_pair_clears_current_cap_through_account_rpc():
+    async def run():
+        store,runtime=await setup()
+        try:
+            await runtime.record_observation(binding(),observation(binding()))
+            await runtime.operation(setter())
+            clear=setter(expected_revision=1,operation_id="fixture-clear",blocked=False,stop_pct=None,window=None,
+                         supersedes_authority_ref="fixture-order",authority_ref="fixture-clear-order")
+            result=await runtime.operation(clear)
+            assert result["receipt"]["control"]["stop_pct"] is None
+            assert result["receipt"]["control"]["window"] is None
+            current=await runtime.operation({"action":"status","_auth_context":AUTH})
+            pool=next(p for p in current["quota_pools"] if p["pool_id"]=="pool-primary")
+            assert pool["cap"]["blocked"] is False
+            assert pool["cap"]["stop_pct"] is None and pool["cap"]["window"] is None
+        finally: store.stop()
+    asyncio.run(run())
+
+
 def test_at_cap_final_physical_input_guard_refuses_before_action():
     async def run():
         store,runtime=await setup(initialize_pin=False)

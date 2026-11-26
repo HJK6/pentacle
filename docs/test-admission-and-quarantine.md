@@ -23,8 +23,10 @@ notification carries the decision, two evidence links, coverage loss, and the
 bundle path and hash. Failed publication, relay, or notification remains
 retryable. Public writes belong to the existing relay.
 
-The daemon runs reconciliation when `PENTACLE_QUARANTINE_CONFIG` names an
-absolute JSON configuration path. The configuration names `sources` (the
+A scheduler outside the chat daemon runs reconciliation as
+`python -m agent_orch.quarantine_run --config <path>` with an absolute JSON
+configuration path, under a bounded run timeout, and sends the generic
+`flaky-test-quarantine` notice when a run fails, times out or cannot start. The configuration names `sources` (the
 scorecard source map), `memory_root`, `owner`, `epic`, `machine`, `checker`,
 `packet_root`, `ledger`, and `state`. Paths must be absolute. `checker` is the
 approved fleet-mode guard, and `packet_root`, `ledger`, and `state` are private

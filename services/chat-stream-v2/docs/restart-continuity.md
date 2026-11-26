@@ -19,14 +19,28 @@ paste, and finally the `v2_spawn_outcomes` row.
 
 | Interrupted after | Restart outcome |
 |---|---|
-| claim, before intent | Startup reconcile records `failed` and releases the claim. A same-key retry replays that failure; a fresh key spawns normally. The staged file is content-addressed and unreferenced. |
-| intent, before the pane | `failed spawn_interrupted`, released; same replay rules. |
+| claim, before intent | After a crash the empty claim survives; once its pane is confirmed gone, reconcile records `failed` (`spawn_interrupted: … before spawn intent was persisted`) and releases it. A completed graceful drain releases the empty claim itself and records nothing, so `spawn-status` for the request id finds nothing. Either way a same-key retry makes one fresh claim: a failed outcome is not replayed. The staged file is content-addressed and unreferenced. |
+| intent, before the pane | The reservation and intent are retained, by a crash or by a graceful drain, which only clears its owner. While retained, a same-key retry returns the original starting handle and creates nothing. Once the pane is confirmed gone, reconcile records `failed` (`spawn_interrupted: … before the session row was persisted`), which `spawn-status` returns for the request id, and releases it; a same-key retry then makes one fresh claim. |
 | pane and row, before the paste | The pane is adopted by nonce. The intent has no pre-paste watermark, which proves no paste happened, so adoption waits for provider readiness and pastes the brief once. It then proves that paste like any post-paste adoption. A provider that is still booting leaves the outcome `indeterminate` and the reservation retained; a later reconcile pass delivers it. |
 | paste, before the outcome | Adoption proves delivery from the post-watermark USER event or the provider transcript. It never pastes again. Without proof by the adoption deadline, a saved pre-paste watermark keeps the outcome `indeterminate` (`spawn_delivery_unknown`, `do_not_respawn`) rather than `failed`: the paste may have happened. |
 
 A seat whose prompt went in as a native launch argument (`native_argv`) is
 proof-only on adoption: its first USER event proves delivery, otherwise the
 outcome stays `indeterminate`.
+
+Post-paste adoption polls until the 20 s adoption deadline (`ADOPTION_BOOT_DEADLINE_S`). When the receipt supports Store proof:
+
+Each pass observes in a fixed order and then decides once, from a single table. A pass decides from what it saw, with one carry-over: an expiry pass also counts a found transcript or a probe error from the window pass that crossed the deadline.
+
+- **Early lookup:** for a receipt with Store proof only, inside the window, a Store lookup is offered while at least `ADOPTION_MIN_EVENT_LOOKUP_S` (0.25 s) remains. It can only prove delivery; any other answer is ignored.
+- **Transcript:** the probe runs up to the deadline. At the deadline, one more observation always runs, with its own `ADOPTION_EXPIRY_TRANSCRIPT_OBSERVATION_S` (3 s) allowance measured from when it starts. Any exception from the probe, a `TimeoutError` included, is held until the decision. At that expiry observation only, no transcript needs a `ps` and `lsof` enumeration that ran to completion: exit 0, or lsof's no-match exit 1 with nothing on stderr. Anything else is held as such an exception, not an absent transcript: an observation the allowance cut off, a transport error, ssh exit 255, a missing binary, another exit status, a diagnostic or a partial listing. A window observation that its deadline cuts off counts as no transcript.
+- **Pane liveness:** read on every pass, as alive, gone or unknown. Any error reading it (an SSH or tmux failure) counts as unknown. With Store proof, unknown never produces a failure.
+- **Store sample:** one sample with its own 0.25 s grant follows the observations. A window pass that reaches the deadline before or during that sample decides nothing, unless the sample came back proven: then the pass delivers at once. Otherwise the expiry pass observes again, carrying over only a found transcript or a held error.
+- **Decision:** a proven sample means delivered, ahead of a found transcript. A found transcript otherwise delivers, even when the Store is unreachable or timed out. A held probe error is re-raised unless delivery is proven, so the reconcile pass defers. A failure (`transcript_absent`, `pane_died_during_boot`, `agent_never_started`) needs a `pending` sample and a pane read as alive or gone. Any other timeout or unreachable Store keeps the outcome `indeterminate` and the reservation retained.
+- **Added wait:** one full 0.25 s gate per window pass admitted before expiry, plus at most 3.25 s of transcript/Store grants on an unresolved expiry pass. This is not an end-to-end deadline. The early lookup, the liveness read (10 s transport timeout), scheduling delay and cancellation cleanup fall outside it. Startup settles intents one at a time, so these costs accrue for each unresolved intent with Store proof.
+- **Liveness on every pass:** a found transcript, a probe error and (without a saved watermark) an absent transcript used to end the pass before liveness was read. They now read it first, for receipts with and without Store proof. That adds a cancellation point and up to a 10 s transport wait per affected intent.
+
+Receipts without Store proof use the transcript alone, as before, and never enter the Store lookups. They read pane liveness the same three-state way on every pass, and an unknown pane keeps polling and defers at the deadline, with one exception: without a saved watermark, an absent transcript fails as `transcript_absent` whatever the pane reads, unknown included.
 
 The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 
@@ -43,7 +57,26 @@ restart). It then cancels in-flight spawn tasks while the store is still running
 within at most 5 s (`SHUTDOWN_SPAWN_DRAIN_S`). When the drain completes
 (`unfinished=0` in its log line), each spawn has recorded its interruption handoff
 (retained intent, an `indeterminate` outcome for an admitted row, intent owner
-released) before the store stops. A nonzero `unfinished` count or an abandoned
+released) before the store stops. A cancelled spawn does not trust its own
+in-memory record of what it wrote: the cancel can land after the intent commits
+and before the write returns. Every exit without a confirmed outcome settles
+through one Store operation instead, queued behind any intent write the spawn
+submitted and matched on host, name, request id, creation nonce and current
+owner, in one write transaction. An empty claim with no pane binding is
+deleted, even when its request was cancelled (the cancellation record and the
+`cancelled` status stay). A committed intent keeps its payload and only its
+owner is cleared; under a cancellation only when the spawn had already decided
+to hand it off, and cancellation cleanup then decides the pane. Any other row
+(missing, foreign, or a bound empty claim) is left alone. If that settle itself fails or
+is cancelled, nothing falls back to a delete, a pane kill or an invented
+outcome; the next daemon instance reconciles the row it finds. A drain that
+lands once a spawn has started writing its confirmed failure takes the ordinary
+failure teardown instead and releases its reservation. In the clean pre-pane
+case a committed failure then frees the name for one fresh retry at once. If
+the spawn had already admitted its session row and the drain interrupts the
+close that follows the failure, that row stays open and refuses a retry until
+it is closed, as before this change. This settle is the only part of teardown matched on the creation
+nonce and owner; the other spawn writes are still addressed by name or request. A nonzero `unfinished` count or an abandoned
 drain step leaves that handoff unproven; check `spawn-status` before relying on
 restart recovery. One step is never cut: a spawn that has persisted its pre-paste
 watermark gets up to half the drain window to land its paste before it is

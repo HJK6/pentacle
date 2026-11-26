@@ -708,7 +708,10 @@ def test_alias_send_preserves_payload_fields_into_ordinary_send(tmp_path):
                            ("meta", {"example": True}), ("msg_id", 101), ("text", BODY),
                            ("from_stream_id", SENDER)):
             assert physical[key] == value, key
-        assert [key for key in physical if key.startswith("_")] == ["_auth_context", "_assistant_alias_binding"]
+        # The server-derived account ingress route marker of the ordinary send route.
+        assert [key for key in physical if key.startswith("_")] == [
+            "_auth_context", "_assistant_alias_binding", "_account_ingress_route"]
+        assert physical["_account_ingress_route"] is True
         assert physical["_assistant_alias_binding"]["stream_id"] == SEAT_A
         assert physical["_auth_context"]["operator_authenticated"] is False
     _run(tmp_path, body)

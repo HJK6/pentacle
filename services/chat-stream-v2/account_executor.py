@@ -137,7 +137,199 @@ class AccountExecutor:
 
     async def observe(self, account):
         async with self._host_locks.setdefault(account.host, asyncio.Lock()):
-            return await self._observe_locked(account)
+            mark_key=(account.key,account.generation)
+            revision=self.runtime._self_recovery_marks.get(mark_key)
+            now=self.runtime.monotonic()
+            last=self.runtime._self_recovery_last_dispatch.get(mark_key)
+            eligible=(revision is not None and mark_key not in self.runtime._self_recovery_inflight
+                and (last is None or now-last>=self.runtime.AUTH_HEALTH_SELF_RECOVERY_COOLDOWN_SECONDS))
+            if not eligible:
+                return await self._observe_locked(account)
+
+            # Claim synchronously while holding the host lock, before any await.
+            # A newer refusal can publish a fresh mark while this attempt runs.
+            if self.runtime._self_recovery_marks.get(mark_key)!=revision:
+                return await self._observe_locked(account)
+            self.runtime._self_recovery_marks.pop(mark_key,None)
+            self.runtime._self_recovery_inflight.add(mark_key)
+            dispatched=False
+            try:
+                try:
+                    pin,pin_state=await self.runtime.run(lambda ledger:self._self_recovery_pin_sample(ledger,account))
+                    current=await self.runtime.run(lambda ledger:self._self_recovery_mark_current(
+                        ledger,account,revision))
+                except asyncio.CancelledError:
+                    raise
+                except AccountError:
+                    # Let the ordinary path return its established typed pin
+                    # failure, and retain the mark for a later suitable visit.
+                    self._restore_self_recovery_mark(mark_key,revision)
+                    return await self._observe_locked(account)
+                if not current:
+                    return await self._observe_locked(account)
+
+                operation_id="account-self-recovery:"+uuid.uuid4().hex
+                # Cooldown starts at the actual host dispatch, not at marking or
+                # lock acquisition.  Cancellation from this await onward spends
+                # the attempt and never retries it.
+                self.runtime._self_recovery_last_dispatch[mark_key]=self.runtime.monotonic()
+                self.runtime._index_self_recovery(mark_key)
+                dispatched=True
+                if pin is None:
+                    result=await self.execute(account,"observe-bound",operation_id)
+                else:
+                    result=await self.execute(account,"observe-bound",operation_id,pin=pin)
+                return await self._finish_self_recovery_observation(
+                    account,revision,operation_id,pin,pin_state,result)
+            except asyncio.CancelledError:
+                if not dispatched:
+                    self._restore_self_recovery_mark(mark_key,revision)
+                raise
+            except AccountError as exc:
+                if not dispatched:
+                    self._restore_self_recovery_mark(mark_key,revision)
+                return self._observation_failure(account,str(exc))
+            except Exception:
+                if not dispatched:
+                    self._restore_self_recovery_mark(mark_key,revision)
+                return self._observation_failure(account,"provider_probe_failed")
+            finally:
+                self.runtime._self_recovery_inflight.discard(mark_key)
+
+    def _restore_self_recovery_mark(self,key,revision):
+        if not self.runtime._self_recovery_live(key[0]):
+            return
+        if key not in self.runtime._self_recovery_marks:
+            self.runtime._self_recovery_marks[key]=revision
+        elif self.runtime._self_recovery_marks[key]<revision:
+            self.runtime._self_recovery_marks[key]=revision
+        self.runtime._index_self_recovery(key)
+
+    @staticmethod
+    def _observation_failure(account,outcome):
+        return {"outcome":outcome,"host":account.host,"provider":account.provider,"account":account.alias}
+
+    @staticmethod
+    def _self_recovery_pin_sample(ledger,account):
+        """The full preflight plus the keyed pin state it was decided on."""
+        from provider_cli_pin import check
+        return check(ledger,account),AccountExecutor._self_recovery_pin_keys(ledger)
+
+    @staticmethod
+    def _self_recovery_pin_keys(ledger):
+        from provider_cli_pin import INITIALIZED,raw,raw_digest
+        marker=ledger.conn.execute("SELECT v FROM kv WHERE k=?",(INITIALIZED,)).fetchone()
+        return raw_digest(raw(ledger)),marker[0] if marker else None
+
+    @staticmethod
+    def _self_recovery_mark_current(ledger,account,revision):
+        row=ledger.conn.execute("SELECT active,health,health_revision,data FROM v2_account_bindings WHERE binding_key=?",
+            (account.key,)).fetchone()
+        current=ledger.bound(account.key)
+        return bool(row and row["active"] and current==account and current.enabled
+            and row["health"]=="auth_unhealthy" and row["health_revision"]==revision)
+
+    async def _finish_self_recovery_observation(self,account,expected_revision,operation_id,pin,pin_state,result):
+        if not isinstance(result,dict):
+            return self._observation_failure(account,"account_host_response_invalid")
+        outcome=result.get("outcome")
+        if outcome=="ok":
+            observation=result.get("observation")
+            if result.get("binding_key")!=account.key or not _valid_observation(account,observation):
+                return self._observation_failure(account,"provider_probe_failed")
+            proof=result.get("artifact_proof")
+            if pin is None:
+                if proof:
+                    return self._observation_failure(account,"provider_cli_pin_mismatch")
+            else:
+                try:
+                    self._validate_self_recovery_proof(account,pin,proof)
+                except AccountError as exc:
+                    return self._observation_failure(account,str(exc))
+            receipt=await self.runtime.run(lambda ledger:self._finish_self_recovery(
+                ledger,account,expected_revision,operation_id,pin_state,proof if pin is not None else None),
+                settle_on_cancel=True)
+            if receipt.get("outcome")!="healthy":
+                return self._observation_failure(account,receipt.get("outcome","account_health_revision_stale"))
+            return result
+        if outcome=="provider_auth_failed":
+            # Confirms the failure already counted at the marked revision.
+            return self._observation_failure(account,outcome)
+        if outcome in {"provider_identity_changed","subscription_identity_unverified",
+                       "provider_identity_or_cache_unverified"}:
+            if not (outcome=="provider_identity_or_cache_unverified"
+                    and result.get("identity_evidence")=="contradiction"):
+                return self._observation_failure(account,outcome)
+            changed=await self._self_recovery_identity_failure(account,expected_revision,pin_state)
+            if not changed:
+                return self._observation_failure(account,"account_health_revision_stale")
+            await self.runtime._alert(account,"identity_unverified")
+        else:
+            kinds={"provider_quota_blocked":"quota","provider_capacity":"capacity",
+                "provider_transport_failed":"network","provider_permission_denied":"permission"}
+            kind=kinds.get(outcome)
+            if kind:
+                changed=await self.runtime.run(lambda ledger:ledger.failure(account.key,kind,
+                    now=self.runtime.clock(),expected_revision=expected_revision),settle_on_cancel=True)
+                if not changed:
+                    return self._observation_failure(account,"account_health_revision_stale")
+        return self._observation_failure(account,outcome if isinstance(outcome,str) else "provider_probe_failed")
+
+    @staticmethod
+    def _validate_self_recovery_proof(account,pin,proof):
+        from provider_cli_pin import digest
+        from provider_cli_artifact import code_identity
+        artifact=pin["providers"][account.provider]["artifacts"].get(proof.get("platform") if isinstance(proof,dict) else None)
+        platform_matches=(str(proof.get("platform") or "").startswith("darwin-") if account.platform=="macos"
+                          else str(proof.get("platform") or "").startswith("linux-")) if isinstance(proof,dict) else False
+        if (not isinstance(proof,dict) or proof.get("outcome")!="ok" or proof.get("binding_key")!=account.key
+                or not platform_matches or not artifact or proof.get("artifact")!=artifact
+                or proof.get("pin_revision")!=pin["revision"] or proof.get("pin_digest")!=digest(pin)
+                or proof.get("code_identity")!=code_identity() or artifact.get("native_sha256")!=account.executable_sha256):
+            raise AccountError("provider_cli_verification_unavailable")
+
+    def _finish_self_recovery(self,ledger,account,expected_revision,operation_id,pin_state,proof):
+        """The one winning write: keyed rechecks, then proof, health and receipt together."""
+        with transaction(ledger.conn):
+            # Same-host fence and park writers hold this observation's host
+            # lock; a fleet pin change rewrites these two keyed values.
+            if self._self_recovery_pin_keys(ledger)!=pin_state:
+                return {"outcome":"provider_cli_pin_stale"}
+            row=ledger.conn.execute("SELECT active,health,health_revision,data FROM v2_account_bindings WHERE binding_key=?",
+                (account.key,)).fetchone()
+            current=ledger.bound(account.key)
+            if (row is None or not row["active"] or current!=account or not current.enabled
+                    or row["health"]!="auth_unhealthy" or row["health_revision"]!=expected_revision):
+                return {"outcome":"account_health_revision_stale"}
+            transition=ledger.transition_relogin_auth_health(account.key,expected_revision)
+            if transition.get("outcome")!="healthy" or not transition.get("changed"):
+                return transition
+            if proof is not None:
+                from provider_cli_pin import canonical
+                ledger.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",("provider_cli.verified:"+account.key,
+                    canonical({"proof":proof,"verified_at":self.runtime.clock()})))
+            state=self._read_recovery(ledger,account.key)
+            receipts=state.setdefault("receipts",{})
+            if operation_id in receipts:
+                return receipts[operation_id]
+            receipt={"outcome":"healthy","operation_id":operation_id,
+                "health_revision":transition["applied_revision"],
+                "provenance":"admission_signalled_self_recovery"}
+            receipts[operation_id]=receipt
+            self._write_recovery(ledger,account.key,state)
+            return receipt
+
+    async def _self_recovery_identity_failure(self,account,expected_revision,pin_state):
+        changed=await self.runtime.run(lambda ledger:ledger.failure(account.key,"identity",
+            now=self.runtime.clock(),expected_revision=expected_revision,
+            fence=lambda fenced:self._self_recovery_pin_fence(fenced,pin_state)),settle_on_cancel=True)
+        return bool(changed)
+
+    @staticmethod
+    def _self_recovery_pin_fence(ledger,pin_state):
+        # The positive winner's fence: evidence sampled under another pin is superseded.
+        if AccountExecutor._self_recovery_pin_keys(ledger)!=pin_state:
+            raise AccountError("provider_cli_pin_stale")
 
     async def _observe_locked(self, account, *, require_match=False, recovery=False):
         try:

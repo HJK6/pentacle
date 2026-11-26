@@ -63,6 +63,8 @@ def number(value):
 class AccountStore:
     def __init__(self, conn: sqlite3.Connection, policy: dict, *, initialize=True):
         self.conn,self.policy=conn,policy
+        #: Cells whose registration this connection call attempted.
+        self.registered_cells=set()
         if initialize: migrate(conn); conn.commit()
 
     def register(self,binding: Binding):
@@ -76,6 +78,7 @@ class AccountStore:
                 or binding.default_revision != 0):
             raise AccountError("account_binding_unverified")
         data=asdict(binding)
+        self.registered_cells.add((binding.host,binding.provider,binding.alias))
         prior=self.conn.execute("SELECT data FROM v2_account_bindings WHERE binding_key=?",(binding.key,)).fetchone()
         if prior and json.loads(prior[0]) != data: raise AccountError("account_binding_immutable")
         self.conn.execute("UPDATE v2_account_bindings SET active=0 WHERE host=? AND provider=? AND alias=? AND binding_key<>?",
@@ -84,6 +87,14 @@ class AccountStore:
             "(binding_key,provider,alias,host,generation,pool_id,data,health,active) VALUES (?,?,?,?,?,?,?,?,?)",(
             binding.key,binding.provider,binding.alias,binding.host,binding.generation,binding.pool_id,
             json.dumps(data),"healthy" if binding.healthy else "unknown",1))
+
+    def committed_cell(self,cell):
+        """The cell's active enabled binding key after commit, or None."""
+        row=self.conn.execute("SELECT data FROM v2_account_bindings WHERE host=? AND provider=? AND alias=? AND active=1",
+            cell).fetchone()
+        if row is None: return None
+        binding=Binding(**json.loads(row[0]))
+        return binding.key if binding.enabled else None
 
     def bound(self,key):
         row=self.conn.execute("SELECT data FROM v2_account_bindings WHERE binding_key=?",(key,)).fetchone()
@@ -116,7 +127,15 @@ class AccountStore:
         if row is None: raise AccountError("account_unconfigured")
         binding=Binding(**json.loads(row["data"]))
         if not binding.enabled: raise AccountError("account_disabled")
-        if row["health"] != "healthy": raise AccountError("account_unavailable")
+        if row["health"] != "healthy":
+            error=AccountError("account_unavailable")
+            # Private in-process snapshot for the admission-signalled recovery
+            # mark. These fields are deliberately not part of public context.
+            error._health=row["health"]
+            error._health_revision=row["health_revision"]
+            error._binding=binding
+            error._active=bool(row["active"])
+            raise error
         return binding
 
     def _cell(self,host,provider,alias):
@@ -226,17 +245,37 @@ class AccountStore:
         self.conn.execute("INSERT OR REPLACE INTO v2_account_observations VALUES (?,?,?)",(key,json.dumps(allowed),now))
         return allowed["collection"]!="identity_conflict"
 
-    def failure(self,key,kind,*,now):
+    def failure(self,key,kind,*,now,expected_revision=None,fence=None):
         if kind not in {"auth","quota","capacity","network","permission","identity"}: raise AccountError("provider_signal_invalid")
         with transaction(self.conn):
-            if self.bound(key) is None: raise AccountError("account_generation_unknown")
+            if fence is not None: fence(self)
+            binding=self.bound(key)
+            if binding is None: raise AccountError("account_generation_unknown")
+            if expected_revision is not None:
+                row=self.conn.execute("SELECT active,health,health_revision FROM v2_account_bindings WHERE binding_key=?",
+                    (key,)).fetchone()
+                if (not row or not row["active"] or not binding.enabled
+                        or row["health"]!="auth_unhealthy" or row["health_revision"]!=expected_revision):
+                    return False
             if kind=="auth":
-                self.conn.execute("UPDATE v2_account_bindings SET health=CASE WHEN health='identity_conflict' "
-                    "THEN health ELSE 'auth_unhealthy' END, health_revision=health_revision+1 WHERE binding_key=?",(key,))
+                where="binding_key=?";values=(key,)
+                if expected_revision is not None:
+                    where+=" AND active=1 AND health='auth_unhealthy' AND health_revision=?"
+                    values=(key,expected_revision)
+                changed=self.conn.execute("UPDATE v2_account_bindings SET health=CASE WHEN health='identity_conflict' "
+                    "THEN health ELSE 'auth_unhealthy' END, health_revision=health_revision+1 WHERE "+where,values).rowcount
+                if expected_revision is not None and changed!=1:return False
             if kind=="identity":
-                self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
-                    "health_revision=health_revision+1 WHERE binding_key=?",(key,))
+                where="binding_key=?"
+                values=(key,)
+                if expected_revision is not None:
+                    where+=" AND active=1 AND health='auth_unhealthy' AND health_revision=?"
+                    values=(key,expected_revision)
+                changed=self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
+                    "health_revision=health_revision+1 WHERE "+where,values).rowcount
+                if expected_revision is not None and changed!=1: return False
             self.conn.execute("INSERT OR REPLACE INTO v2_account_failures VALUES (?,?,?)",(key,kind,now))
+            return True
 
     def readback(self,*,now):
         accounts=[]; pools=[]

@@ -218,8 +218,38 @@ def _rejected_line(violations: object, fallback: str) -> str:
 
 
 class AgentOrchArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        # argparse includes the rejected token/value in many errors. Account
+        # arguments can contain host/account identifiers, paths or secrets, so
+        # use a constant message once an account command has been resolved.
+        if self.prog.endswith(" account") or getattr(self, "_account_parse_selected", False):
+            sys.stderr.write(f"{self.prog}: invalid account command input\n")
+            self.exit(2)
+        super().error(message)
+
+    def parse_known_args(self, args: list[str] | None = None, namespace: argparse.Namespace | None = None):
+        # A selected account subparser marks its root. This lets the root's
+        # leftover-argument error use safe formatting without guessing from
+        # token text or requiring a valid account action.
+        if self.prog.endswith(" account"):
+            root = getattr(self, "_account_root_parser", None)
+            if root is not None:
+                root._account_parse_selected = True
+        return super().parse_known_args(args, namespace)
+
     def parse_args(self, args: list[str] | None = None, namespace: argparse.Namespace | None = None) -> argparse.Namespace:
-        parsed = super().parse_args(args, namespace)
+        account_parser = None
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                account_parser = action.choices.get("account")
+                break
+        self._account_parse_selected = False
+        if account_parser is not None:
+            account_parser._account_root_parser = self
+        try:
+            parsed = super().parse_args(args, namespace)
+        finally:
+            self._account_parse_selected = False
         if getattr(parsed, "command", None) == "report" and getattr(parsed, "terminate", False) and parsed.status == "progress":
             self.error("report: --terminate is incompatible with --status=progress")
         if getattr(parsed, "command", None) == "await":

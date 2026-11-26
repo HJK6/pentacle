@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable
 from machines import MachineConfig, ssh_command, ssh_control_path
 from prockill import terminate_and_reap
 from sessions import VerbError
-from tmux_transport import Tmux, _exec
+from tmux_transport import Tmux, _exec, _exec_checked
 from v2_runtime import env_number
 
 log = logging.getLogger("chat_streamd_v2.hosts")
@@ -198,14 +198,18 @@ class Hosts:
 
     async def run_command(
         self, host: str, *args: str, timeout: float = 10.0, multiplex: bool = True,
-    ) -> tuple[int, str]:
+        checked: bool = False,
+    ) -> tuple[int, str] | tuple[int, str, str]:
+        """`(rc, output)`, failures folded in; with `checked`, `_exec_checked`'s
+        `(rc, stdout, stderr)`, and a failure to run raises."""
+        run = _exec_checked if checked else _exec
         if host == self.local_host:
-            return await _exec(*args, timeout=timeout)
+            return await run(*args, timeout=timeout)
         peer = self.peers.get(host)
         if peer is None:
-            return 127, "unknown host"
+            return (127, "", "unknown host") if checked else (127, "unknown host")
         remote = shlex.join(str(arg) for arg in args)
-        return await _exec(
+        return await run(
             *ssh_command(
                 peer.ssh_target,
                 remote,

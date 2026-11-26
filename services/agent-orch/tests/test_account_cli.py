@@ -190,8 +190,15 @@ def test_initial_activation_pair_and_readiness_inputs_reach_existing_transport(t
     pair=tmp_path/"pair.json";pair.write_text(json.dumps({"schema":1,"revision":1}))
     parked=tmp_path/"parked.json";parked.write_text("[]")
     argv=["account",action,"--host","fixture-host"]
-    if action=="repin":argv += ["--target-pin-file",str(pair),"--expected-pin-revision","0"]
-    else:argv += ["--pin-file",str(pair),"--initial-parked-cells-file",str(parked),"--expected-readiness-digest","a"*64]
+    if action=="repin":
+        argv += ["--provider","claude","--account","primary","--login-generation","old","--new-generation","new",
+                 "--operation-id","fixture-repin","--reason","reviewed","--target-pin-file",str(pair),
+                 "--expected-pin-revision","0","--expected-pin-digest","a"*64]
+    elif action=="pin-set":
+        argv += ["--pin-file",str(pair),"--expected-revision","0","--operation-id","fixture-pin-set",
+                 "--reason","reviewed","--initial-parked-cells-file",str(parked),"--expected-readiness-digest","a"*64]
+    else:
+        argv += ["--pin-file",str(pair),"--initial-parked-cells-file",str(parked),"--expected-readiness-digest","a"*64]
     args=cli.build_parser().parse_args(argv)
     assert args.func(args)==0
     payload,options=calls[0]
@@ -199,6 +206,146 @@ def test_initial_activation_pair_and_readiness_inputs_reach_existing_transport(t
     assert options["timeout"]==330
     assert not {"home","executable","profile_ref","binding"}&payload.keys()
     if action!="repin":assert payload["initial_parked_cells"]==[] and payload["expected_readiness_digest"]=="a"*64
+
+
+def _mock_account_rpc(monkeypatch):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"fixture-host:front-desk")
+    calls=[]
+    async def rpc(config,payload,**options):calls.append((payload,options));return {"type":"account.ok"}
+    monkeypatch.setattr(wsclient,"account_once",rpc)
+    return calls
+
+
+def test_rpc_level_explicit_null_cap_clear_is_preserved(monkeypatch):
+    calls=_mock_account_rpc(monkeypatch)
+    clear=cli.build_parser().parse_args(["account","pool-control-set","--provider","codex","--pool-id","pool-a",
+        "--expected-revision","0","--operation-id","clear-one","--blocked","false","--stop-pct","none",
+        "--window","none","--reason","clear cap","--authority-ref","operator-order"])
+    assert clear.func(clear)==0
+    assert calls[-1][0]["blocked"] is False
+    assert calls[-1][0]["stop_pct"] is None and calls[-1][0]["window"] is None
+
+def test_rpc_level_absent_pin_recovery_sentinel_is_preserved(monkeypatch):
+    calls=_mock_account_rpc(monkeypatch)
+    recover=cli.build_parser().parse_args(["account","pin-set","--recover-receipt","approved-one",
+        "--expected-raw-digest","absent","--expected-high-water-revision","4","--operation-id","recover-one",
+        "--reason","restore pair"])
+    assert recover.func(recover)==0
+    assert calls[-1][0]["recover_receipt"]=="approved-one"
+    assert calls[-1][0]["expected_raw_digest"]=="absent"
+    assert calls[-1][0]["expected_high_water_revision"]==4
+    assert "pin" not in calls[-1][0] and "expected_revision" not in calls[-1][0]
+
+
+@pytest.mark.parametrize("entry,argv",[
+    ("main-argv", ["--unrecognized=SECRET_MARKER","account","status"]),
+    ("main-argv", ["account","status","--unrecognized=SECRET_MARKER"]),
+    ("main-argv", ["account","status","--timeout=SECRET_MARKER"]),
+    ("main-argv", ["account","status","--kind=SECRET_MARKER"]),
+    ("main-argv", ["account","--unrecognized=SECRET_MARKER"]),
+    ("main-process", ["--unrecognized=SECRET_MARKER","account","status"]),
+    ("main-process", ["account","status","--unrecognized=SECRET_MARKER"]),
+    ("parse-args", ["--unrecognized=SECRET_MARKER","account","status"]),
+    ("parse-args", ["account","status","--unrecognized=SECRET_MARKER"]),
+    ("parse-args", ["account","--unrecognized=SECRET_MARKER"]),
+])
+def test_account_parse_errors_never_echo_supplied_text(entry,argv,capsys,monkeypatch):
+    monkeypatch.setattr(cli,"_invoke_command",lambda _args:pytest.fail("parse failure dispatched a command"))
+    with pytest.raises(SystemExit) as exc:
+        if entry=="main-argv":
+            cli.main(argv)
+        elif entry=="main-process":
+            monkeypatch.setattr("sys.argv",["agent-orch",*argv])
+            cli.main()
+        else:
+            cli.build_parser().parse_args(argv)
+    assert exc.value.code==2
+    captured=capsys.readouterr()
+    assert "SECRET_MARKER" not in captured.out
+    assert "SECRET_MARKER" not in captured.err
+
+
+def test_account_parse_state_does_not_leak_when_parser_is_reused(capsys):
+    parser=cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--unrecognized=ACCOUNT_SECRET","account","status"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--unrecognized=NON_ACCOUNT_DETAIL","start"])
+    captured=capsys.readouterr()
+    assert "ACCOUNT_SECRET" not in captured.out+captured.err
+    assert "NON_ACCOUNT_DETAIL" in captured.err
+
+
+def test_direct_account_subparser_parse_error_uses_safe_format(capsys):
+    parser=cli.build_parser()
+    subparsers=next(action for action in parser._actions if getattr(action,"choices",None) and "account" in action.choices)
+    with pytest.raises(SystemExit) as exc:
+        subparsers.choices["account"].parse_args(["status","--unrecognized=SUBPARSER_SECRET"])
+    assert exc.value.code==2
+    captured=capsys.readouterr()
+    assert "SUBPARSER_SECRET" not in captured.out+captured.err
+
+
+def test_non_account_parser_errors_keep_standard_diagnostics(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["start","--unrecognized=NON_ACCOUNT_DETAIL"])
+    assert "NON_ACCOUNT_DETAIL" in capsys.readouterr().err
+
+
+def test_local_file_parse_error_keeps_failing_option_label(monkeypatch,capsys,tmp_path):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"fixture-host:front-desk")
+    async def forbidden(*a,**k):pytest.fail("invalid file input reached RPC")
+    monkeypatch.setattr(wsclient,"account_once",forbidden)
+    bad_file=tmp_path/"bad-pin.json";bad_file.write_text('{"broken":')
+    args=cli.build_parser().parse_args(["account","pin-status","--pin-file",str(bad_file)])
+    assert args.func(args)==2
+    response=json.loads(capsys.readouterr().out)
+    assert response=={"type":"account.error","error_code":"account_request_invalid","option":"--pin-file"}
+
+
+def test_successful_first_file_does_not_keep_failure_attribution(monkeypatch,capsys,tmp_path):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"fixture-host:front-desk")
+    async def forbidden(*a,**k):pytest.fail("invalid file combination reached RPC")
+    monkeypatch.setattr(wsclient,"account_once",forbidden)
+    pin_file=tmp_path/"pin.json";pin_file.write_text(json.dumps({"schema":1,"revision":1}))
+    target_file=tmp_path/"target.json";target_file.write_text(json.dumps({"schema":1,"revision":1}))
+    args=cli.build_parser().parse_args(["account","pin-status","--pin-file",str(pin_file),
+        "--target-pin-file",str(target_file)])
+    assert args.func(args)==2
+    response=json.loads(capsys.readouterr().out)
+    assert response=={"type":"account.error","error_code":"account_request_invalid"}
+
+
+def test_report_failure_kind_remains_optional_like_main(monkeypatch):
+    calls=_mock_account_rpc(monkeypatch)
+    args=cli.build_parser().parse_args(["account","report-failure","--host","fixture-host",
+        "--provider","claude","--account","primary"])
+    assert args.func(args)==0
+    assert calls[-1][0]["action"]=="report-failure" and "kind" not in calls[-1][0]
+
+
+def test_identity_kind_remains_rejected_for_status_like_main(monkeypatch):
+    monkeypatch.setattr(cli,"_invoke_command",lambda _args:pytest.fail("invalid kind reached dispatch"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["account","status","--kind","identity"])
+    assert exc.value.code==2
+
+
+def test_incomplete_upgrade_and_revalidation_keep_existing_local_refusals(monkeypatch,capsys):
+    from agent_orch import config,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:pytest.fail("invalid request reached configuration/RPC"))
+    monkeypatch.setattr(wsclient,"account_once",lambda *a,**k:pytest.fail("invalid request reached RPC"))
+    for argv in (["account","upgrade","--host","h","--provider","codex","--account","a"],
+                 ["account","revalidate-health","--host","h","--provider","claude","--account","a"]):
+        args=cli.build_parser().parse_args(argv)
+        assert args.func(args)==2
+        assert json.loads(capsys.readouterr().out)["error_code"]=="account_request_invalid"
 
 
 def test_active_repin_refuses_pre_enforcement_target_file_before_rpc(tmp_path,monkeypatch):

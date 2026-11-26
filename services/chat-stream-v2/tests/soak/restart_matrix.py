@@ -144,33 +144,47 @@ class RestartDaemon:
                 pass
             time.sleep(0.1)
 
-    def stop(self, sig: signal.Signals, on_signal: Callable[[], Any] | None = None) -> dict[str, Any]:
+    def stop(self, sig: signal.Signals, on_signal: Callable[[], Any] | None = None, *,
+             before_signal: Callable[[], Any] | None = None,
+             after_exit: Callable[[], Any] | None = None) -> dict[str, Any]:
         """launchd semantics (`kickstart -k`): `sig` to the job's PID, SIGKILL after
         ExitTimeOut (20 s), then the rest of the job's process group is killed
-        (AbandonProcessGroup=false)."""
+        (AbandonProcessGroup=false). `before_signal` observes immediately before
+        delivery, `on_signal` after it, and `after_exit` once the job has exited
+        and before the group is killed; the group is killed regardless."""
         assert self.proc is not None
         proc, started = self.proc, time.monotonic()
         pgid = os.getpgid(proc.pid)
-        os.kill(proc.pid, sig)
-        at_signal = on_signal() if on_signal is not None else None
+        before = None
+        at_signal = after = None
         escalated = False
         try:
-            proc.wait(timeout=LAUNCHD_EXIT_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            escalated = True
-            os.kill(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=10)
-        try:
-            os.killpg(pgid, signal.SIGKILL)  # stragglers (blocked tmux wrappers)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            # Darwin can report EPERM until terminal group members are reaped.
-            if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
-                raise
-        self.proc = None
+            before = before_signal() if before_signal is not None else None
+            os.kill(proc.pid, sig)
+            at_signal = on_signal() if on_signal is not None else None
+            try:
+                proc.wait(timeout=LAUNCHD_EXIT_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                escalated = True
+                os.kill(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=10)
+            after = after_exit() if after_exit is not None else None
+        finally:
+            if proc.returncode is None:  # an observation failed before exit
+                os.kill(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=10)
+            try:
+                os.killpg(pgid, signal.SIGKILL)  # stragglers (blocked tmux wrappers)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                # Darwin can report EPERM until terminal group members are reaped.
+                if not wait_for(lambda: not _process_group_exists(pgid), timeout=1.0):
+                    raise
+            self.proc = None
         return {"signal": sig.name, "rc": proc.returncode, "exit_s": round(time.monotonic() - started, 3),
-                "escalated_to_sigkill": escalated, "at_signal": at_signal}
+                "escalated_to_sigkill": escalated, "at_signal": at_signal,
+                "before_signal": before, "after_exit": after}
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -326,12 +340,23 @@ class Cell:
         (self.evidence / f"pane-{name}-{label}.txt").write_text(out.stdout or out.stderr)
 
 
+HOLD_HAS_SESSION = Path(__file__).resolve().parent / "hold_has_session.py"
+
+
 def tmux_blocking_wrapper(root: Path, socket: str, real_tmux: str, control: Path) -> Path:
-    """`--tmux-bin`: blocks `new-session` while `control/block_new_session` exists."""
+    """`--tmux-bin`: blocks `new-session` while `control/block_new_session` exists,
+    and routes `has-session` through `hold_has_session.py` while
+    `control/hold_has_session` names a seat."""
     wrapper = root / "tmux-wrapper"
+    hold = shlex.quote(str(control / "hold_has_session"))
     wrapper.write_text(
         "#!/bin/sh\n"
         "case \" $* \" in\n"
+        f"  *\" has-session \"*) if [ -e {hold} ]; then\n"
+        f"      exec {shlex.quote(sys.executable)} {shlex.quote(str(HOLD_HAS_SESSION))} "
+        f"{shlex.quote(str(root / 'sessions.db'))} {shlex.quote(str(control))} "
+        f"{shlex.quote(real_tmux)} {shlex.quote(socket)} \"$@\"\n"
+        "    fi ;;\n"
         f"  *\" new-session \"*) if [ -e {shlex.quote(str(control / 'block_new_session'))} ]; then\n"
         f"      echo $$ > {shlex.quote(str(control / 'new_session_blocked'))}\n"
         f"      while [ -e {shlex.quote(str(control / 'block_new_session'))} ]; do sleep 0.05; done\n"
@@ -442,11 +467,11 @@ def measure_after_restart(cell: Cell, *, stage: str, name: str, prompt: str, key
               settle_s=settle_s)
     after = cell.snapshot("after-settle", name)
     cell.capture(name, "after-settle") if after["panes"] else None
-    status = rpc(url, {"type": "spawn_status", "idempotency_key": key})
+    status = rpc(url, {"type": "spawn_status", "target": request_id})
     awaited = rpc(url, {"type": "await_spawn", "spawn_request_id": request_id})
     refire_payload = spawn_payload(name, prompt, key)
     try:
-        refire = rpc(url, refire_payload, timeout=30)
+        refire = rpc(url, refire_payload, timeout=120)
     except Exception as exc:  # noqa: BLE001 - a hang is the finding
         refire = {"type": "harness.timeout", "error": f"{type(exc).__name__}: {exc}"}
     time.sleep(0)  # no-op; ordering marker for the timeline
@@ -473,25 +498,32 @@ def measure_after_restart(cell: Cell, *, stage: str, name: str, prompt: str, key
                                               and refire.get("stream_id") == f"{LOCAL_HOST}:{name}")
         fresh = None
     else:
-        checks["no_pane"] = not after_refire["panes"]
-        checks["no_open_row"] = not open_rows
+        # Before the refire; the same-key refire below then makes one fresh seat.
+        checks["no_pane"] = not after["panes"]
+        checks["no_open_row"] = not [r for r in after["sessions"] if r["status"] == "open"]
         checks["outcome_failed_with_reason"] = bool(outcome) and outcome["state"] == "failed" and bool(outcome.get("reason"))
         checks["settled_within_cadence"] = settled is not None
         checks["reservation_released"] = not [r for r in after["reservations"] if r.get("request_id") == request_id]
-        checks["spawn_status_failed_reason"] = any(o.get("state") == "failed" for o in status.get("outcomes") or [])
         recorded = str((outcome or {}).get("reason") or "").split(":", 1)[0]
-        checks["refire_refused_with_recorded_reason"] = (
-            refire.get("type") == "spawn.error" and bool(recorded) and refire.get("error_code") == recorded)
-        cell.set_mode("normal")
-        fresh_key = f"{key}-fresh"
+        checks["spawn_status_failed_reason"] = status.get("found") is True and any(
+            o.get("request_id") == request_id and o.get("state") == "failed"
+            and bool(recorded) and o.get("error_code") == recorded
+            for o in status.get("outcomes") or [])
+        # A failed outcome is not replayed: the same key and payload make one
+        # fresh claim, and a repeat replays that seat (restart-continuity table).
+        checks["same_key_refire_one_fresh_seat"] = (
+            refire.get("type") == "spawn.ok" and refire.get("state") == "ready"
+            and refire.get("stream_id") == f"{LOCAL_HOST}:{name}")
         try:
-            fresh = rpc(url, spawn_payload(name, prompt, fresh_key), timeout=60)
+            fresh = rpc(url, refire_payload, timeout=60)
         except Exception as exc:  # noqa: BLE001
             fresh = {"type": "harness.timeout", "error": f"{type(exc).__name__}: {exc}"}
-        final = cell.snapshot("after-fresh-key", name)
-        checks["fresh_key_one_seat"] = (fresh.get("type") == "spawn.ok" and fresh.get("state") == "ready"
-                                        and len(final["panes"]) == 1 and _deliveries(cell, name, prompt) == 1)
-        cell.note("fresh_key", reply=fresh)
+        final = cell.snapshot("after-repeat", name)
+        checks["repeat_replays_one_seat"] = (
+            fresh.get("type") == "spawn.ok" and fresh.get("stream_id") == refire.get("stream_id")
+            and len(final["panes"]) == 1 and len([r for r in final["sessions"] if r["status"] == "open"]) == 1
+            and _deliveries(cell, name, prompt) == 1)
+        cell.note("repeat", reply=fresh)
     return {
         "path": "success" if success_path else "durable_failure",
         "checks": checks,
@@ -605,16 +637,15 @@ def run_daemon_cell(stage: str, sig: signal.Signals, root: Path, evidence: Path,
 
 
 def run_s3(sig: signal.Signals, root: Path, evidence: Path, *, max_attempts: int = 20) -> list[dict[str, Any]]:
-    """S3: signal the instant the staged prompt file appears; classify the side of
-    `record_spawn_intent` from the pre-restart sqlite snapshot. Repeat until both
-    sub-windows are observed (or 20 attempts); a window never hit is a
-    HARNESS_ERROR, never a PASS."""
+    """S3b rehearsal: signal the instant the staged prompt file appears; classify
+    the side of `record_spawn_intent` from the pre-restart sqlite snapshot and
+    repeat until the post-intent, pre-pane window is observed (or 20 attempts).
+    A window never hit is a HARNESS_ERROR, never a PASS. The pre-intent window
+    is proved by the held `run_pre_intent_sigterm` cell, not sampled here."""
     windows: dict[str, dict[str, Any]] = {}
     attempts: list[dict[str, Any]] = []
     for attempt in range(1, max_attempts + 1):
-        # Natural timing first; once a natural attempt has shown post-intent,
-        # alternate with the deterministic intent-write hold for pre-intent.
-        hold = "pre_intent" not in windows and attempt % 2 == 0
+        hold = False
         rec = run_daemon_cell("S3", sig, root / f"a{attempt}", evidence / f"attempt-{attempt:02d}",
                               hold_intent_write=hold)
         pre = ((rec.get("pre_restart") or {}).get("stop") or {}).get("at_signal") or {}
@@ -630,14 +661,12 @@ def run_s3(sig: signal.Signals, root: Path, evidence: Path, *, max_attempts: int
         attempts.append({"attempt": attempt, "window": window, "hold_intent_write": hold,
                          "classification": rec.get("classification"),
                          "failed_checks": rec.get("failed_checks")})
-        if window in {"pre_intent", "post_intent_pre_pane"} and window not in windows:
-            windows[window] = {**rec, "cell": f"S3{'a' if window == 'pre_intent' else 'b'}-{sig.name}",
-                               "attempt": attempt}
-        if len(windows) == 2:
+        if window == "post_intent_pre_pane":
+            windows[window] = {**rec, "cell": f"S3b-{sig.name}", "attempt": attempt}
             break
     (evidence / "attempts.json").write_text(json.dumps(attempts, indent=1))
     out = []
-    for window, suffix in (("pre_intent", "a"), ("post_intent_pre_pane", "b")):
+    for window, suffix in (("post_intent_pre_pane", "b"),):
         if window in windows:
             out.append({**windows[window], "attempt_log": attempts})
         else:
@@ -645,6 +674,123 @@ def run_s3(sig: signal.Signals, root: Path, evidence: Path, *, max_attempts: int
                         "s3_window": window, "classification": HARNESS_ERROR,
                         "detail": "window not hit", "attempt_log": attempts})
     return out
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_pre_intent_sigterm(root: Path, evidence: Path) -> dict[str, Any]:
+    """S3a: SIGTERM while the target spawn is held before intent submission.
+
+    The tmux wrapper holds the seat's `has-session` inside the protected spawn
+    body, after its own empty reservation and before `record_spawn_intent`, and
+    stays held until the drain's cancellation kills it. One attempt, no retry:
+    a barrier that is never acknowledged is a HARNESS_ERROR. Limits here are
+    stuck detectors; nothing passes or fails on elapsed time."""
+    record: dict[str, Any] = {"cell": "S3a-SIGTERM", "stage": "S3a", "signal": "SIGTERM"}
+    name = "seat-s3a"
+    prompt = unique_prompt("S3a-SIGTERM")
+    key = f"k-s3a-sigterm-{uuid.uuid4().hex[:6]}"
+    request_id = f"spawn-{uuid.uuid4()}"
+    try:
+        with cell_env(root, evidence) as cell:
+            cell.set_mode("normal")
+            (cell.control / "hold_has_session").write_text(name)
+            cell.daemon.start()
+            cell.note("daemon_started", pid=cell.daemon.proc.pid, port=cell.daemon.port)
+            pending = PendingRpc(cell.daemon.url, spawn_payload(name, prompt, key, request_id))
+            ack_path = cell.control / "has_session_held"
+            if not wait_for(ack_path.exists, 60):
+                cell.snapshot("barrier-not-reached", name)
+                record.update(classification=HARNESS_ERROR, detail="has-session barrier not acknowledged",
+                              pending_reply=pending.reply, pending_error=pending.error)
+                return record
+            ack = json.loads(ack_path.read_text())
+            barrier = cell.snapshot("at-barrier", name)
+            res = barrier["reservations"]
+            barrier_checks = {
+                "exact_empty_reservation": len(res) == 1 and res[0]["request_id"] == request_id == ack["request_id"]
+                and res[0]["payload"] is None and not res[0]["tmux_created"],
+                "no_outcome": not barrier["outcomes"],
+                "no_session": not barrier["sessions"],
+                "no_pane": not barrier["panes"] and not barrier["inputs"],
+                "barrier_held": _pid_alive(int(ack["pid"])),
+            }
+            record["barrier"] = {"ack": ack, "checks": barrier_checks}
+            if not all(barrier_checks.values()):
+                record.update(classification=HARNESS_ERROR, detail="barrier state not as staged",
+                              failed_checks=[k for k, ok in barrier_checks.items() if not ok])
+                return record
+            log_offset = cell.daemon.logpath.stat().st_size
+            # Held at delivery: a paused wrapper is released only by a signal and
+            # the daemon is not yet signalled. Reaped by the daemon: gone once
+            # the daemon has exited, before the harness kills the group.
+            stop = cell.daemon.stop(
+                signal.SIGTERM,
+                before_signal=lambda: {"barrier_held": _pid_alive(int(ack["pid"]))},
+                after_exit=lambda: {"barrier_gone": not _pid_alive(int(ack["pid"]))},
+            )
+            cell.note("daemon_stopped", **stop)
+            with open(cell.daemon.logpath, "r", errors="replace") as fh:
+                fh.seek(log_offset)
+                shutdown_log = fh.read()
+            pre = cell.snapshot("pre-restart", name)
+            (cell.control / "hold_has_session").unlink()
+            checks: dict[str, bool] = {
+                "held_through_signal": bool((stop.get("before_signal") or {}).get("barrier_held")),
+                "graceful_exit": stop["rc"] == 0 and not stop["escalated_to_sigkill"],
+                "drained_one_unfinished_zero": "drained in-flight spawns at shutdown: cancelled=1 unfinished=0" in shutdown_log,
+                "barrier_released_by_cancellation": bool((stop.get("after_exit") or {}).get("barrier_gone")),
+                "no_tmux_timeout": "tmux_timeout" not in shutdown_log,
+                "store_running_at_teardown": "store is not running" not in shutdown_log,
+                "no_handle_before_restart": not pre["reservations"],
+                "no_outcome_before_restart": not pre["outcomes"],
+                "no_session_before_restart": not pre["sessions"],
+                "no_pane_before_restart": not pre["panes"] and not pre["inputs"],
+            }
+            record["pre_restart"] = {"stop": stop, "client_reply": pending.reply and pending.reply.get("type"),
+                                     "client_error": pending.error}
+            cell.daemon.start()
+            cell.note("daemon_restarted", pid=cell.daemon.proc.pid, port=cell.daemon.port)
+            status = rpc(cell.daemon.url, {"type": "spawn_status", "target": request_id})
+            checks["status_original_not_found"] = status.get("type") == "spawn_status.ok" and status.get("found") is False
+            refire = rpc(cell.daemon.url, spawn_payload(name, prompt, key), timeout=120)
+            checks["refire_one_fresh_seat"] = (refire.get("type") == "spawn.ok" and refire.get("state") == "ready"
+                                               and refire.get("stream_id") == f"{LOCAL_HOST}:{name}")
+            repeat = rpc(cell.daemon.url, spawn_payload(name, prompt, key), timeout=60)
+            final = cell.snapshot("after-repeat", name)
+            open_rows = [r for r in final["sessions"] if r["status"] == "open"]
+            checks["repeat_replays_same_seat"] = (repeat.get("type") == "spawn.ok"
+                                                  and repeat.get("stream_id") == refire.get("stream_id"))
+            checks["one_pane_one_row"] = len(final["panes"]) == 1 and len(open_rows) == 1
+            checks["prompt_delivered_once"] = _deliveries(cell, name, prompt) == 1
+            cell.note("reads", spawn_status=status, refire=refire, repeat=repeat)
+            record.update(checks=checks, spawn_status=status,
+                          refire={k: refire.get(k) for k in ("type", "state", "stream_id", "error_code", "error")},
+                          repeat={k: repeat.get(k) for k in ("type", "state", "stream_id", "replayed")})
+            failed = [k for k, ok in checks.items() if not ok]
+            record["failed_checks"] = failed
+            # An expired hold (the transport's own tmux timeout ends the
+            # wrapper) is no cancellation proof: the cell did not run.
+            record["classification"] = (HARNESS_ERROR if not checks["no_tmux_timeout"]
+                                        else PRODUCT_FAIL if failed else PASS)
+        residue = subprocess.run(["pgrep", "-f", str(root)], capture_output=True, text=True).stdout.split()
+        record["cleanup"] = "ok" if not residue else {"residual_pids": residue}
+        if residue and record.get("classification") == PASS:
+            record["classification"] = CLEANUP_FAIL
+    except Exception as exc:  # noqa: BLE001 - classified, never hidden
+        import traceback
+        record.update(classification=HARNESS_ERROR, detail=f"{type(exc).__name__}: {exc}",
+                      traceback=traceback.format_exc()[-3000:])
+    (evidence / "record.json").write_text(json.dumps(record, indent=1, default=str))
+    return record
 
 
 # --------------------------------------------------------------------------- #

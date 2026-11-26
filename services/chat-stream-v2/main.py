@@ -84,7 +84,6 @@ from voice_answers import dispatch_block as voice_answers_dispatch_block
 from send_metadata import voice_context_from_route, voice_context_dispatch_block
 from window_schedule import WindowSchedule
 import restart_notice
-import quarantine_scheduler
 
 log = logging.getLogger("chat_streamd_v2")
 
@@ -1029,11 +1028,15 @@ async def run(args: argparse.Namespace) -> int:
     # is empty would turn the first periodic no-op into a spurious snapshot.
     inventory_emitter.prime()
     log.info("adopted %d open session(s)", adopted)
+    # The recovery job's first pass, before its first sleep, resolves waiters
+    # left by a crash. It runs alongside the rest of boot, never ahead of readiness.
+    awaiter_task = None
     if not args.disable_awaiter_resolution:
-        startup_awaiter_result = await server.ledger.sweep_awaited_unreported(
-            limit=AwaiterResolutionConfig.from_env().max_per_pass,
+        acfg = AwaiterResolutionConfig.from_env()
+        awaiter_task = asyncio.create_task(
+            AwaiterResolutionJob(server.ledger, acfg).run_forever(),
+            name="awaiter-resolution",
         )
-        log.info("awaiter resolution startup sweep: %s", startup_awaiter_result)
     # Inventory is populated from persisted rows: `list_sessions` may serve.
     server.inventory_ready.set()
     # Keep the bind-first startup rule: git I/O happens only after the accept
@@ -1104,12 +1107,9 @@ async def run(args: argparse.Namespace) -> int:
             ocfg.lease_s,
             ocfg.max_attempts,
         )
-    if not args.disable_awaiter_resolution:
-        acfg = AwaiterResolutionConfig.from_env()
-        tasks.append(asyncio.create_task(
-            AwaiterResolutionJob(server.ledger, acfg).run_forever(),
-            name="awaiter-resolution",
-        ))
+    if awaiter_task is not None:
+        tasks.append(awaiter_task)
+        # The web gate reads this line as "error alerts configured"; keep it here.
         log.info(
             "awaiter-resolution: every %.0fs, cap %d rows/pass",
             acfg.interval_s, acfg.max_per_pass,
@@ -1192,11 +1192,6 @@ async def run(args: argparse.Namespace) -> int:
     # limits.update on change (no probing, no on-loop fsync — see usage_publisher).
     if not args.disable_usage_state_publisher:
         tasks.append(asyncio.create_task(limits_publisher.run_forever(), name="usage-state-publisher"))
-
-    quarantine_config = os.environ.get("PENTACLE_QUARANTINE_CONFIG", "").strip()
-    if quarantine_config:
-        tasks.append(asyncio.create_task(quarantine_scheduler.run_forever(quarantine_config),
-                                         name="flaky-test-quarantine"))
 
     await stop
     log.info("shutdown requested")

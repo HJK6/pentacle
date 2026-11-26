@@ -338,3 +338,39 @@ async def test_new_cause_while_original_input_awaits_proof(tmp_path, monkeypatch
         assert await s.queue.deliver_now(changed["notice_id"])
         await drain(s)
         assert len(await notices(s)) == 2
+
+
+async def seed_unchanged_report(store, spec):
+    def seed(conn):
+        with conn:
+            from work_report_freshness import apply_report_gate
+            rid, line, generation = spec + "-unchanged", "The lead is still working.", "lead-generation"
+            at = min(time.time(), datetime.fromisoformat(BEFORE).timestamp()) - 2400
+            conn.execute("INSERT INTO v2_report_status_boundaries VALUES (?,?,?,?,?,?,?)",
+                         ("fixture:lead", generation, spec, at - 60, 1, line, "old-revision"))
+            report = dict(status="done", report_id=rid, usage_snapshot={})
+            lead = dict(stream_id="fixture:lead", session_generation=generation, role="lead",
+                        status="open", assigned_spec_id=spec)
+            checkpoint = dict(spec_id=spec, session_generation=generation, state="valid",
+                              facts={"status_line": line}, source_revisions={"summary.md": "new-revision"})
+            apply_report_gate(conn, report, lead, {"authenticated_generation": generation, "checkpoint": checkpoint}, at)
+            conn.execute("""INSERT INTO v2_reports(report_id,from_stream_id,status,ingested_at,created_at,
+                         status_freshness) VALUES (?,?,'done',?,?,?)""",
+                         (rid, "fixture:lead", BEFORE, at, json.dumps(report["status_freshness"])))
+            record_latest_report_conn(conn, dict(report_id=rid, created_at=at, status="done",
+                usage_snapshot={"attribution": {"mode": "exclusive_primary", "spec_id": spec}}))
+    await store.submit(seed)
+
+
+@pytest.mark.asyncio
+async def test_unchanged_status_report_reaches_front_desk_as_status_behind(tmp_path, monkeypatch, isolated_config):
+    async with instance(tmp_path) as s:
+        await adopt(s, members=[FIRST], kind="behind")
+        await seed_observations(s.store, [observed(FIRST)])
+        await seed_unchanged_report(s.store, FIRST)
+        await drain(s)
+        await activate(s, monkeypatch, "expiry")
+        assert await dispatch(s) == 1
+        [row] = await notices(s)
+        causes = {c["condition"]: c for c in row["meta"]["tracking_causes"]}
+        assert causes["status_behind"]["gate_outcome"] == "unchanged"
