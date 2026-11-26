@@ -5291,8 +5291,9 @@ class SpawnCtl:
             # it saw. Only a proven early lookup or a crossing leaves early.
             now = time.monotonic()
             expiry_pass = proof_capable and now >= deadline
-            if not expiry_pass and deadline - now >= ADOPTION_MIN_EVENT_LOOKUP_S:
-                # The fast positive path: any other answer is discarded.
+            if proof_capable and not expiry_pass and deadline - now >= ADOPTION_MIN_EVENT_LOOKUP_S:
+                # The fast positive path, for a proof-capable receipt only:
+                # any other answer is discarded.
                 early = await self._adoption_event_proof(
                     stream_id, brief, delivery_receipt,
                     timeout_s=min(REMOTE_EVENT_LOOKUP_BOUND_S, deadline - now),

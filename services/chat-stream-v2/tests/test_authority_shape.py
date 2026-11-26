@@ -313,14 +313,19 @@ def test_real_spawnctl_restart_adopts_delivered_started_seat(tmp_path):
             fields['session_generation'] = episode['attempt_generation']
             assert await store.record_spawn_intent('fixture-advisor', name,
                 {'open_fields': fields, 'brief': payload['initial_prompt'],
-                 'delivery_receipt': {'state': 'indeterminate', 'transport': 'direct', 'proof_watermark_state': 'reachable'}},
+                 'delivery_receipt': {'state': 'indeterminate', 'transport': 'direct',
+                                      'proof_watermark': 1, 'proof_watermark_state': 'reachable'}},
                 request_id=episode['spawn_key'], nonce=nonce)
             await store.mark_tmux_created('fixture-advisor', name, request_id=episode['spawn_key'])
+            proofs = []
             async def proof(stream_id, text, receipt, **kwargs):
+                # Reached only for a proof-capable receipt: its saved watermark.
                 assert text == 'brief'
+                proofs.append(ctl._adoption_receipt_watermark(stream_id, receipt))
                 return SimpleNamespace(proven=True)
             ctl._adoption_event_proof = proof
             assert (await ctl.reconcile_spawn_intents(recurring=False))['adopted'] == 1
+            assert proofs and proofs[0] is not None and proofs[0].daemon_seq == 1
             row = await store.fetch_session('fixture-advisor', name)
             assert row['session_generation'] == episode['attempt_generation'] and row['bootstrap_state'] == 'started'
             await restore.run()

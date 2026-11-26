@@ -1751,6 +1751,23 @@ def test_expiry_observation_that_times_out_counts_as_no_transcript(monkeypatch: 
     assert result[:2] == ("failed", "agent_never_started")
 
 
+def test_a_transcript_only_pass_never_enters_the_early_proof_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SettleClock()
+    proof = CostedProof(clock, cost_s=0.0)
+    original = SpawnCtl._adoption_event_proof
+    entered: list[tuple[float, float]] = []
+
+    async def observe(self: SpawnCtl, *a: object, **kw: object) -> object:
+        entered.append((clock.rel(), kw["timeout_s"]))  # type: ignore[arg-type]
+        return await original(self, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SpawnCtl, "_adoption_event_proof", observe)
+    transcript = SteppedTranscript(clock, [], found_from_s=0)
+    result = _settle_at_expiry(monkeypatch, proof, transcript, clock, receipt={"transport": "legacy"})
+    assert result[:2] == ("delivered", "transcript") and proof.calls == []
+    assert entered == [], entered
+
+
 @pytest.mark.parametrize("receipt", [{"transport": "legacy"}, None], ids=["legacy-transport", "no-watermark"])
 def test_transcript_only_liveness_crossing_matches_the_previous_loop(
     monkeypatch: pytest.MonkeyPatch, receipt: dict | None,
