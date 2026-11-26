@@ -330,7 +330,10 @@ async def _refuse(ws, identity):
 
 
 async def send_frame(ws, payload: dict, identity: OutboundIdentity | None = None, *,
-                     config: Config, explicit_from_stream_id=None, challenge=None, compact=True):
+                     config: Config, explicit_from_stream_id=None, challenge=None, compact=True,
+                     on_handoff=None):
+    """`on_handoff` runs as the encoded frame is handed to `ws.send`: from
+    then on the daemon may have it, even if the send's drain raises."""
     frame = prepare_frame(payload)
     explicit = explicit_from_stream_id or frame.explicit_identity or frame.get("from_stream_id")
     # Re-resolve even when the caller supplied an identity: queued/retried
@@ -348,7 +351,10 @@ async def send_frame(ws, payload: dict, identity: OutboundIdentity | None = None
             wire.update(from_stream_id=identity.stream_id, stream_token=token)
     else:
         wire = _ordinary_frame(frame, identity, config, challenge)
-    await ws.send(json.dumps(wire, separators=(",", ":") if compact else None))
+    encoded = json.dumps(wire, separators=(",", ":") if compact else None)
+    if on_handoff is not None:
+        on_handoff()
+    await ws.send(encoded)
 
 
 async def send_uncredentialed(ws, frame: dict, *, compact=True):

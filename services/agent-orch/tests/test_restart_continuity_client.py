@@ -587,3 +587,43 @@ def test_exhaustion_keeps_the_indeterminate_result_after_an_unknown_attempt(monk
 
     assert len(sent) == 3
     assert unknown in (response["type"], response.get("outcome")), response
+
+
+class SendRaisesAfterWriteSocket(ReplyingSocket):
+    """websockets writes the frame before the awaited drain, which can raise:
+    the daemon may have the frame although `send` failed."""
+
+    def __init__(self, sent: list[dict]) -> None:
+        super().__init__("unused")
+        self.sent = sent
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(json.loads(raw))
+        raise websockets.ConnectionClosedError(None, None)
+
+
+@pytest.mark.parametrize("payload,unknown", [
+    (STOP_PAYLOADS[0], "tell.indeterminate"), (STOP_PAYLOADS[1], "transmit_delivered_awaiting_result")],
+    ids=["tell", "send"])
+def test_a_frame_handed_to_send_that_raises_keeps_the_result_indeterminate(monkeypatch, tmp_path, payload,
+                                                                            unknown):
+    """The first frame reached ws.send, whose drain then raised; later
+    attempts were refused until exhaustion. The first attempt's outcome is
+    unknown, so the result stays indeterminate, with the same ids throughout."""
+    fast_retry(monkeypatch)
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", "3")
+    connects, sent = [0], []
+
+    async def connect(config, **_kwargs):
+        connects[0] += 1
+        if connects[0] == 1:
+            return SendRaisesAfterWriteSocket(sent)
+        return StoppingThenReplyingSocket("unused", [99], sent)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), dict(payload), prefix=payload["type"], timeout=5))
+
+    assert len(sent) == 3
+    assert {frame["request_id"] for frame in sent} == {payload["request_id"]}
+    assert {frame.get("tell_id") for frame in sent} == {payload.get("tell_id")}
+    assert unknown in (response["type"], response.get("outcome")), response
