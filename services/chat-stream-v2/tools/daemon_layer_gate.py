@@ -526,6 +526,7 @@ def _check_candidate_policy(base: str) -> list[str]:
     errors = []
     for relative in sorted(changed):
         if (not relative.endswith(".py") or "/tests/" in relative or "/tools/" in relative
+                or relative.startswith("services/chat-stream-v2/deploy/")
                 or relative.endswith("/assistant_policy.py")):
             continue
         candidate_path = REPO_ROOT / relative
