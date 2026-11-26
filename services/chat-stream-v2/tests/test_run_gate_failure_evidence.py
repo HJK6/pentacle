@@ -121,6 +121,35 @@ def _subject_gone(tier: dict) -> bool:
     return False
 
 
+@pytest.mark.parametrize(("path", "selected"), [
+    ("tools/daemon_b04_gate.py", True),
+    ("tools/daemon_b04_anchors.py", True),
+    ("tools/daemon_import_census.py", True),
+    ("daemon_contract/active/boundary.txt", True),
+    ("tests/test_daemon_b04_gate.py", True),
+    ("tools/other.py", False),
+])
+def test_b04_self_test_routing(tmp_path, monkeypatch, path, selected):
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.email", "fixture@example.test")
+    git("config", "user.name", "Fixture")
+    git("commit", "--allow-empty", "-qm", "Base")
+    base = git("rev-parse", "HEAD")
+    service = tmp_path / "services/chat-stream-v2"
+    changed = service / path
+    changed.parent.mkdir(parents=True)
+    changed.write_text("fixture")
+    git("add", ".")
+    git("commit", "-qm", "Change one path")
+    head = git("rev-parse", "HEAD")
+    monkeypatch.setattr(run_gate, "SERVICE_DIR", service)
+    assert run_gate._run_b04_self_tests(base, head) is selected
+    assert run_gate._run_b04_self_tests(head, head)  # daily main
+
+
 def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
     for workers in (1, 2):
         case = tmp_path / str(workers)

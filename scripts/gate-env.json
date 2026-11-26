@@ -277,6 +277,7 @@
         "v2-unit-ci-shard": {
           "kind": "run_gate",
           "gate": "unit",
+          "pass_env": ["PENTACLE_B04_BASE"],
           "needs": [
             "python",
             "node",
