@@ -159,6 +159,24 @@ Selection advances past retained rows. A reused session name keeps today's behav
 terminal row replaces the archived incarnation, through the same order. The
 archive still holds one row per `(host, session_name)`.
 
+The collision check looks up each batch's event keys and non-null identities in
+the archive, once per stream and birth. Event keys use the table's unique index.
+Identities use `idx_archive_session_event_tail_identity` on
+`(stream_id, session_created_at, identity)`. Each eligible pass runs
+`CREATE INDEX IF NOT EXISTS` for it once, on the archive's own connection, after
+the archive checks and before the first event copy. It never runs at Store
+startup, during receipt work or per batch. The index is not unique, because an
+archive written before the collision check may hold one identity under two event
+ids. Building it on a large existing archive holds the archive write lock for the
+build (about half a second to a second per million rows), and the Store worker,
+which runs the pass, is delayed by the same time. If the build fails, the pass
+logs one warning, probes without the index (reading the stream and birth's
+archived rows) and tries again next pass. An archive outage that also stops the
+copy fails the pass as before. The index changes no table, marker or pair id,
+and older code reads and writes an indexed archive the same way. To remove it,
+run `DROP INDEX IF EXISTS idx_archive_session_event_tail_identity` on the
+archive's own connection.
+
 Late receipt reconciliation treats one empty-identity event that is found in both
 files with the same id and bytes as a single match.
 

@@ -919,6 +919,42 @@ def ensure_archive(archive_path: Path, schema: Schema, *, require_existing: bool
     ensure_archive_table(archive_path, schema.create_sql, "sessions", require_existing=require_existing)
 
 
+ARCHIVE_IDENTITY_INDEX = "idx_archive_session_event_tail_identity"
+
+
+def _archive_index_connection(archive_path: Path) -> sqlite3.Connection:
+    """The archive's own connection for its optional identity index."""
+    return _open_archive(archive_path)
+
+
+def ensure_event_identity_index(archive_path: Path, ev: "EventSchema", *,
+                                require_existing: bool = False) -> bool:
+    """Prepare the archive event table, then try its identity index once.
+
+    Called once per pass before the first event copy. Table preparation keeps
+    its refusals. The index (non-unique: archives may already hold one identity
+    under two event ids) only lets `conflicts` search all three keys, so a
+    failed build warns, leaves today's probe and is tried again next pass.
+    Returns whether the index exists.
+    """
+    ensure_archive_table(archive_path, ev.create_sql, ev.table, require_existing=require_existing)
+    if not {"stream_id", "session_created_at", "identity"} <= set(ev.columns):
+        return False
+    try:
+        conn = _archive_index_connection(archive_path)
+        try:
+            conn.execute(f'CREATE INDEX IF NOT EXISTS {ARCHIVE_IDENTITY_INDEX} '
+                         f'ON "{ev.table}"(stream_id, session_created_at, identity)')
+            conn.commit()
+        finally:
+            conn.close()
+    except (sqlite3.Error, RetentionError) as exc:
+        log.warning("retention: archive %s identity index not built (%s); "
+                    "using the unindexed probe this pass", archive_path, exc)
+        return False
+    return True
+
+
 def _attach_archive(conn: sqlite3.Connection, archive_path: Path, *, require_existing: bool) -> tuple:
     """ATTACH the archive as `arch` and return the binding to re-check before deletion."""
     # ATTACH is illegal inside a transaction, and the daemon's store connection
@@ -1212,8 +1248,10 @@ def archive_events(
     def conflicts(rows):
         """Current hot events whose event key or identity another archived event holds.
 
-        The archive has no identity index, so it is probed once per stream and
-        birth with the batch's current values rather than once per row.
+        Probed once per stream and birth with the batch's current values. The
+        event key uses the table's unique index; identity uses
+        `ARCHIVE_IDENTITY_INDEX` when this pass could build it, and otherwise
+        reads the stream and birth's archived rows.
         """
         ids = [row[key] for row in rows]
         clash = set()
@@ -1556,8 +1594,14 @@ class RetentionJob:
 
         if wants_events and budget > 0:
             retained: set = set()
+            indexed: list = []
 
             def _events(conn: sqlite3.Connection, limit: int) -> tuple[int, int]:
+                # Once per pass, before the first event copy, on the archive's
+                # own connection: never at Store startup or per batch.
+                if not indexed:
+                    indexed.append(ensure_event_identity_index(
+                        archive_path, EventSchema(conn), require_existing=True))
                 # Rebuild the hot set each chunk: rows the sessions pass just
                 # archived are no longer in `sessions`, and their events must
                 # archive with them.
