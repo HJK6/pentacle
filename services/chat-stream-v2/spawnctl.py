@@ -5272,7 +5272,8 @@ class SpawnCtl:
             if status == "unobserved":
                 if proof_capable:
                     # A probe that never ran supports nothing; the next pass
-                    # is the expiry observation.
+                    # is the expiry observation. Yield so the loop never spins.
+                    await asyncio.sleep(0)
                     continue
                 status = "no_transcript"
             pane_state: str | None = None
