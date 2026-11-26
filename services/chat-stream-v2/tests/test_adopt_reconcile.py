@@ -287,10 +287,51 @@ def test_native_initial_prompt_adoption_converges_without_re_admission() -> None
     assert tmux.pasted == []
 
 
+class ProductTime:
+    """Fixture control of product time on a real clock: the clock installed
+    when the fixture first advances (real, or a dispatch-delay probe) plus an
+    offset only the fixture moves."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.monkeypatch, self.offset, self.base = monkeypatch, 0.0, None
+
+    def monotonic(self) -> float:
+        return self.base.monotonic() + self.offset
+
+    def __getattr__(self, key: str) -> object:
+        return getattr(self.base, key)
+
+    def advance(self, seconds: float) -> None:
+        if self.base is None:
+            self.base = spawnctl_mod.time
+            self.monkeypatch.setattr(spawnctl_mod, "time", self)
+        self.offset += seconds
+
+
+def _admit_window_then_leave(monkeypatch: pytest.MonkeyPatch, ctl: SpawnCtl, remaining_s: float) -> list[float]:
+    """Admit the window under fixture control, then shorten it: each settlement
+    runs to the production deadline, and when its first window observation is
+    invoked product time advances so exactly ``remaining_s`` is left. Returns
+    the deadline of every admitted window."""
+    clock = ProductTime(monkeypatch)
+    observation = ctl._bounded_adoption_transcript_status
+    windows: list[float] = []
+
+    async def observe(*a: object, **kw: object) -> str:
+        deadline = kw.get("deadline")
+        if deadline is not None and deadline not in windows:
+            windows.append(deadline)  # type: ignore[arg-type]
+            clock.advance(deadline - remaining_s - spawnctl_mod.time.monotonic())  # type: ignore[operator]
+        return await observation(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ctl, "_bounded_adoption_transcript_status", observe)
+    return windows
+
+
 def test_event_store_user_arriving_during_slow_transcript_probe_wins_final_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.03)
+    window_s = 0.03
     brief = "[example-service-notice:late-event]\narrived during transcript probe"
     # Scaled to this test's short window: the production floor and expiry
     # transcript allowance would not fit inside it.
@@ -301,9 +342,11 @@ def test_event_store_user_arriving_during_slow_transcript_probe_wins_final_looku
         def __init__(self) -> None:
             self.event_ready = False
             self.calls = 0
+            self.answers: list[bool] = []
 
         async def fetch_session_event_tail(self, stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             self.calls += 1
+            self.answers.append(self.event_ready)
             if not self.event_ready:
                 return []
             return [{
@@ -313,7 +356,7 @@ def test_event_store_user_arriving_during_slow_transcript_probe_wins_final_looku
                 "text": brief,
             }]
 
-    async def run() -> tuple[str, str, str, AdoptTmux, LateHostStore]:
+    async def run() -> tuple[str, str, str, AdoptTmux, LateHostStore, list[float]]:
         db = Store(":memory:")
         db.start()
         try:
@@ -331,13 +374,14 @@ def test_event_store_user_arriving_during_slow_transcript_probe_wins_final_looku
                 return "no_transcript"
 
             ctl._transcript_status = slow_transcript  # type: ignore[method-assign]
+            windows = _admit_window_then_leave(monkeypatch, ctl, window_s)
             return await ctl._settle_adoption(
                 "hostb", "late-event", brief, tmux,
                 delivery_receipt={
                     "proof_watermark": 0,
                     "proof_watermark_state": "reachable",
                 },
-            ) + (tmux, event_store)
+            ) + (tmux, event_store, windows)
         finally:
             db.stop()
 
@@ -347,14 +391,15 @@ def test_event_store_user_arriving_during_slow_transcript_probe_wins_final_looku
         "adopted_after_restart: exact post-watermark USER event present in generation-fenced Store",
     )
     assert result[3].pasted == []
-    assert result[4].calls >= 2
+    # A prior pending read in the admitted window, then the final lookup sees it.
+    assert len(result[5]) == 1
+    assert result[4].answers[0] is False and result[4].answers[-1] is True, result[4].answers
 
 
 def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     deadline_s = 0.05
-    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", deadline_s)
     brief = "[example-service-notice:deadline]\nfinal read remains bounded"
     # Scaled to this test's short window: the production floor and expiry
     # transcript allowance would not fit inside it.
@@ -395,6 +440,7 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
                 return "no_transcript"
 
             ctl._transcript_status = slow_transcript  # type: ignore[method-assign]
+            windows = _admit_window_then_leave(monkeypatch, ctl, deadline_s)
             # Stuck detector only: the absolute deadline is proven by order below.
             result = await asyncio.wait_for(ctl._settle_adoption(
                 "hostb", "deadline", brief, tmux,
@@ -404,6 +450,7 @@ def test_slow_transcript_probe_keeps_absolute_deadline_and_runs_final_store_read
                 },
             ), timeout=10.0)
             probe_release.set()
+            assert len(windows) == 1
             return result, proof.calls, probe_started[0]
         finally:
             db.stop()
@@ -424,7 +471,6 @@ def test_final_store_slice_survives_advisory_probe_scheduler_overrun(
 ) -> None:
     """The final durable read uses its reserved slice even after a late wakeup."""
     deadline_s = 0.03
-    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", deadline_s)
     brief = "[example-service-notice:late-final-proof]\\nreserved lookup remains mandatory"
     # Scaled to this test's short window: the production floor and expiry
     # transcript allowance would not fit inside it.
@@ -449,8 +495,18 @@ def test_final_store_slice_survives_advisory_probe_scheduler_overrun(
             sessions = Sessions(db, tmux=tmux, local_host="hosta")
             ctl = SpawnCtl(db, sessions, tmux=tmux, submission_proof=proof)
 
-            async def late_probe(*_args: object, **_kwargs: object) -> str:
-                await asyncio.sleep(deadline_s * 2)
+            clock = ProductTime(monkeypatch)
+            woke: list[str] = []
+
+            async def late_probe(*_args: object, **kwargs: object) -> str:
+                # Each observation wakes late: the window one past its
+                # production deadline, the expiry one past its allowance.
+                if kwargs.get("deadline") is not None:
+                    woke.append("window")
+                    clock.advance(kwargs["deadline"] + deadline_s - spawnctl_mod.time.monotonic())  # type: ignore[operator]
+                else:
+                    woke.append("expiry")
+                    clock.advance(deadline_s * 2)
                 return "no_transcript"
 
             ctl._bounded_adoption_transcript_status = late_probe  # type: ignore[method-assign]
@@ -461,6 +517,7 @@ def test_final_store_slice_survives_advisory_probe_scheduler_overrun(
                     "proof_watermark_state": "reachable",
                 },
             )
+            assert woke == ["window", "expiry"]
             return result, proof.calls
         finally:
             db.stop()
@@ -653,7 +710,7 @@ def test_peer_no_event_and_no_transcript_still_fails_closed(
     import threading
     from reconciler import SessionReconciler
 
-    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.3)
+    window_s = 0.3
     brief = "[example-service-notice:no-event]\nnever submitted"
     started = time.perf_counter()
     host, name, request_id = "hostc", "no-event", "owned-no-event"
@@ -769,6 +826,7 @@ def test_peer_no_event_and_no_transcript_still_fails_closed(
                 return await original_observation(*args, **kwargs)
 
             monkeypatch.setattr(ctl, "_bounded_adoption_transcript_status", observed_observation)
+            trace["windows"] = _admit_window_then_leave(monkeypatch, ctl, window_s)
             assert await store.reserve_stream_id(host, name, ttl_s=30, request_id=request_id, nonce="TEST")
             assert await store.record_spawn_intent(host, name, {
                 "open_fields": {"objective": "Exercise interrupted spawn adoption", "provider": "claude"},
@@ -859,6 +917,7 @@ def test_peer_no_event_and_no_transcript_still_fails_closed(
             except OSError as exc:
                 trace["persistence_error_type"] = type(exc).__name__
         print("ADOPTION_RECONCILE " + json.dumps(trace, sort_keys=True), flush=True)
+    assert len(trace["windows"]) == len(trace["settlements"])  # every settlement admitted its window
     assert trace["remaining_reservations"] == 0
     assert trace["tmux_pastes"] == 0
     assert trace["unexpected_commands"] == []
