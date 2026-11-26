@@ -737,18 +737,29 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
 
 
 def work_lane_census_ids_conn(conn) -> set[str]:
-    """The due worked-time census: the union of effective member IDs across every
-    product lane, resolved once from the canonical identity snapshot.
+    """The due worked-time census: the union of effective member IDs over the
+    product lanes, resolved once from the canonical identity snapshot.
 
     Unlike ``work_lane_rows_conn`` this builds no enriched rows and decodes no
     observation records, reports, goals, routes, packets, hues or events -- it
-    only needs the spec IDs the ledger pass reads. The membership map already
-    covers exactly the ``work_state IS NOT NULL`` (``WORK_STATES``) lanes, keeping
-    unresolved IDs, done-only IDs, duplicates across lanes and derived
-    reassignment identical to the enriched union it replaces.
+    only needs the spec IDs the ledger pass reads. The union is taken over the
+    same ``WORK_STATES`` lanes the enriched reader selects, not the wider
+    ``work_state IS NOT NULL`` population, so a representable noncanonical state
+    never leaks its members; assignment resolution still sees the full population.
+    All reads run inside one connection-local read transaction so the lane and
+    epic SELECTs observe a single committed snapshot (a concurrent membership
+    commit yields the complete old or new answer, never a mix).
     """
-    membership = effective_membership_ids_conn(conn)["membership"]
-    return {spec_id for identities in membership.values() for spec_id in identities}
+    marks = ",".join("?" for _ in WORK_STATES)
+    conn.execute("BEGIN")
+    try:
+        membership = effective_membership_ids_conn(conn)["membership"]
+        eligible = {row[0] for row in conn.execute(
+            f"SELECT lane_id FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", WORK_STATES)}
+    finally:
+        conn.rollback()
+    return {spec_id for lane_id, identities in membership.items()
+            if lane_id in eligible for spec_id in identities}
 
 
 class _WorkLanesStoreMixin:
@@ -806,6 +817,12 @@ class _WorkLanesStoreMixin:
 
     async def get_work_lane(self, lane_id: str) -> dict[str, Any] | None:
         def _op(conn):
+            # Match the base early-out: an absent lane returns before any global
+            # read, so a fault reading unrelated index state cannot turn a missing
+            # lane into an error. Present rows keep the single shared resolution.
+            if conn.execute("SELECT 1 FROM v2_assistant_composite_lanes WHERE lane_id=?",
+                            (lane_id,)).fetchone() is None:
+                return None
             # Resolve canonical membership once and share it across both lane
             # reads and the filtered projection within this coherent read.
             snapshot = effective_membership_ids_conn(conn)

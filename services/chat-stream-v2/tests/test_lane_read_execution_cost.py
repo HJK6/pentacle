@@ -24,6 +24,8 @@ Each path carries three kinds of test, as the admission plan requires:
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -270,6 +272,92 @@ def test_due_census_empty_membership_schedules_no_worker(tmp_path):
         assert captured == {}                         # recorder never ran
         assert inv.worked.values == {}
         assert inv.worked._task is None
+
+    run(body, path=str(tmp_path / "db.sqlite"))
+
+
+def test_census_excludes_noncanonical_work_state(tmp_path):
+    """A lane whose work_state is a representable noncanonical TEXT value is not a
+    product lane: the census must exclude its members, matching the enriched
+    reader's WORK_STATES predicate (not the wider work_state IS NOT NULL)."""
+    root = tmp_path / "memory"
+
+    async def body(env):
+        target, legacy, done = await _seed_lanes(env, root)
+        # Set a real target lane to an unrestricted noncanonical state.
+        await env.store.submit(lambda c: (c.execute(
+            "UPDATE v2_assistant_composite_lanes SET work_state='legacy_hold' WHERE lane_id=?", (target,)),
+            c.commit()))
+        # Oracle: the enriched reader filters to WORK_STATES, so target (and its
+        # n00..n39 members) drop out.
+        oracle = await _legacy_census_union(env.store)
+        census = await env.store.work_lane_census_spec_ids()
+        assert census == oracle
+        assert not any(f"spec_demo__n{i:02}" in census for i in range(40))
+
+    run(body, path=str(tmp_path / "db.sqlite"))
+
+
+def test_census_coherent_under_concurrent_commit(tmp_path, monkeypatch):
+    """All census reads see one committed snapshot. A competing commit that lands
+    inside the resolver -- after its lane snapshot, before its epic-assignment
+    read -- must not tear the result (the classic old-members + newly-derived-add
+    mix that exists in neither committed state)."""
+    dbfile = str(tmp_path / "db.sqlite")
+    root = tmp_path / "memory"
+
+    async def body(env):
+        target, legacy, done = await _seed_lanes(env, root)
+        before = await env.store.work_lane_census_spec_ids()
+        assert "spec_demo__added" not in before
+
+        # Fire a competing commit from a second connection at goal_id, which the
+        # resolver calls after reading lanes and before the epic-assignment SELECT.
+        # The commit derives a new member of the target's epic.
+        import store_work_index
+        real_goal_id = store_work_index.goal_id
+        fired = {"done": False}
+
+        def goal_id_hook(identity):
+            if not fired["done"]:
+                fired["done"] = True
+                writer = sqlite3.connect(dbfile)
+                try:
+                    writer.execute(
+                        "INSERT OR REPLACE INTO v2_work_item_observations(spec_id,record_json) VALUES (?,?)",
+                        ("spec_demo__added", json.dumps({
+                            "member": {"spec_id": "spec_demo__added", "observation": {"quality": "fresh"}},
+                            "last_good": {"_epic": "epic_fixture"}})))
+                    writer.commit()
+                finally:
+                    writer.close()
+            return real_goal_id(identity)
+
+        monkeypatch.setattr(store_work_index, "goal_id", goal_id_hook)
+        census = await env.store.work_lane_census_spec_ids()
+        assert fired["done"], "injection point not reached"
+        # Coherent: the resolver's epic read sees the pre-commit snapshot, so the
+        # mid-read derived member never enters the census. A torn read would add it.
+        assert "spec_demo__added" not in census
+        assert census == before
+
+    run(body, path=str(tmp_path / "db.sqlite"))
+
+
+def test_get_work_lane_missing_lane_survives_state_read_fault(tmp_path, monkeypatch):
+    """An absent lane returns None before the global resolver runs, so a fault
+    reading unrelated index state cannot turn a missing lane into an error."""
+    root = tmp_path / "memory"
+
+    async def body(env):
+        await _seed_lanes(env, root)
+
+        def boom(conn):
+            raise sqlite3.DatabaseError("denied: v2_work_index_state")
+
+        monkeypatch.setattr(store_work_lanes, "effective_membership_ids_conn", boom)
+        # Missing lane: existence check returns first, the resolver is never called.
+        assert await env.store.get_work_lane("lane_does_not_exist") is None
 
     run(body, path=str(tmp_path / "db.sqlite"))
 
