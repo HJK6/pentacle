@@ -21,7 +21,7 @@ CORE = ('store.py', 'server.py', 'comms.py', 'sessions.py', 'ingest.py')
 CENSUS_PATH = SERVICE / 'daemon_contract/b04_core_imports.json'
 CENSUS_SHA256 = 'dc0907b598fb3f11a798d300ed25cc6a53773c9522a34b8aef5440722288a414'
 ADMISSIONS_PATH = SERVICE / 'daemon_contract/b04_f1_admissions.json'
-ADMISSIONS_SHA256 = '37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570'
+ADMISSIONS_SHA256 = 'd83833681df20f08ee00688a4065207b6d632ec78af0abc3ab1a02a1b1c34e08'
 STORE_PATH = 'services/chat-stream-v2/store.py'
 
 
