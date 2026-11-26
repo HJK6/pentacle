@@ -60,15 +60,33 @@ def _packet_rows(conn, watch_id):
         "SELECT * FROM v2_external_work_packets WHERE watch_id=? ORDER BY tag", (watch_id,))]
 
 
-def current_packets_conn(conn, *, config):
-    """One read-only snapshot, reusable inside lane lifecycle transactions."""
+def current_packets_conn(conn, *, config, snapshot=None, decoded=None, decoded_ids=None):
+    """One read-only snapshot, reusable inside lane lifecycle transactions.
+
+    The coherent lane reader passes the same-transaction identity ``snapshot`` it
+    already resolved, the observation records it already ``decoded`` and the ids
+    it decoded (``decoded_ids``); only packet-only ids are decoded here, against
+    that snapshot, so no second identity resolution runs. The distinction between
+    a queried-but-missing observation and an unqueried one is preserved: a decoded
+    id with no record stays absent (non-terminal), exactly as a fresh decode of
+    it would. Every other caller keeps the defaults and resolves fresh.
+    """
     if config is None or not config.enabled:
         return {"label": "", "packets": []}
     rows = [row for row in _packet_rows(conn, config.watch_id) if row["state"] in OPEN_PACKET_STATES]
     from store_work_index import effective_membership_conn
-    snapshot = effective_membership_conn(conn, spec_ids=[row["spec_id"] for row in rows])
-    if snapshot["state"]["available"]:
-        rows = [row for row in rows if snapshot["members"].get(row["spec_id"], {}).get("terminal")
+    spec_ids = list(dict.fromkeys(row["spec_id"] for row in rows))
+    if snapshot is None:
+        resolved = effective_membership_conn(conn, spec_ids=spec_ids)
+        state, members = resolved["state"], resolved["members"]
+    else:
+        state = snapshot["state"]
+        members = dict(decoded or {})
+        unqueried = [spec_id for spec_id in spec_ids if spec_id not in (decoded_ids or set())]
+        if unqueried:
+            members.update(effective_membership_conn(conn, spec_ids=unqueried, snapshot=snapshot)["members"])
+    if state["available"]:
+        rows = [row for row in rows if members.get(row["spec_id"], {}).get("terminal")
                 not in {"completed", "deprecated"}]
     return {"label": config.label, "packets": rows}
 

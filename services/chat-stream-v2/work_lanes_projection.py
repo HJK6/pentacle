@@ -492,8 +492,10 @@ class WorkLanesInventory:
                 await self.store.reconcile_lane_lifecycle()
                 await self.store.reconcile_work_lane_episodes(self.episode_sink)
                 if self.worked.needs_refresh():
-                    rows = await self.store.work_lane_rows(include_done=True)
-                    self.worked.refresh({member["spec_id"] for row in rows for member in row.get("_members", [])})
+                    # The census only needs the member spec IDs, not enriched lane
+                    # rows; resolve them once per TTL window (WorkedCache.ttl_s,
+                    # 600 s default) without decoding observations.
+                    self.worked.refresh(await self.store.work_lane_census_spec_ids())
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
                 log.exception("work lanes refresh failed")
