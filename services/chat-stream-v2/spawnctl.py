@@ -2607,6 +2607,9 @@ class SpawnCtl:
         # An exit without a confirmed disposition: the in-memory flag may lag a
         # committed intent, so teardown settles through the Store instead.
         unresolved = False
+        # Set on entry to the ordinary confirmed-failure write: an escape from
+        # there on keeps the base teardown, so a committed failure frees the name.
+        failure_recording = False
         # Preserve prompt intent across failures before `_prepare_brief`.
         delivery_receipt: dict[str, Any] = {
             "state": "requested" if self._prompt_requested(msg) else "not_requested"
@@ -3073,6 +3076,7 @@ class SpawnCtl:
                 # terminal failure after the reservation is released and replays it
                 # truthfully (Outcome Matrix class B) instead of minting a new pane.
                 failure_reason = f"{reason}: {exc}"
+                failure_recording = True
                 await self.store.set_spawn_outcome(
                     host, name, "failed", request_id=request_id, reason=failure_reason,
                     idempotency_key=idempotency_key or None,
@@ -3127,7 +3131,7 @@ class SpawnCtl:
             except BaseException as escaped:
                 # A cancel or Store failure inside this cleanup leaves the
                 # disposition unconfirmed; only its own deliberate raises are.
-                if escaped is not exc and not (
+                if not failure_recording and escaped is not exc and not (
                     isinstance(escaped, VerbError) and escaped.code == "spawn_launch_unconfirmed"
                 ):
                     unresolved = True
@@ -3181,7 +3185,10 @@ class SpawnCtl:
             # reconciliation handle. Without a confirmed disposition the Store
             # settles this spawn's own claim from the committed row.
             if unresolved:
-                await self._settle_unresolved_spawn(host, name, request_id, nonce)
+                await self._settle_unresolved_spawn(
+                    host, name, request_id, nonce,
+                    hand_off_cancelled=keep_reservation and intent_recorded and bool(self.instance_id),
+                )
             elif not keep_reservation:
                 await self._release_spawn_reservation(host, name, request_id)
             elif intent_recorded and self.instance_id:
@@ -4403,17 +4410,20 @@ class SpawnCtl:
         return await self.store.release_stream_id_fenced(host, name, request_id)
 
     async def _settle_unresolved_spawn(
-        self, host: str, name: str, request_id: str, nonce: str,
+        self, host: str, name: str, request_id: str, nonce: str, *,
+        hand_off_cancelled: bool = False,
     ) -> None:
         """Settle an interrupted spawn's own claim; never fall back.
 
+        `hand_off_cancelled` says this teardown would have handed off its
+        retained intent, which then holds even under a tombstone.
         If the settle fails or is itself cancelled, its outcome is unknown: no
         delete, pane action or outcome is invented, the original interruption
         propagates, and a distinct instance reconciles the surviving row."""
         try:
             await self.store.settle_spawn_claim(
                 host, name, request_id=request_id, nonce=nonce,
-                owner_instance_id=self.instance_id,
+                owner_instance_id=self.instance_id, hand_off_cancelled=hand_off_cancelled,
             )
         except Exception:  # noqa: BLE001 - never mask the original interruption
             log.exception("could not settle interrupted spawn claim %s:%s", host, name)

@@ -428,11 +428,16 @@ def _decode_spawn_outcome(row: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _spawn_cancelled(conn: sqlite3.Connection, host: str, name: str, request_id: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM v2_spawn_cancellations WHERE host=? "
-        "AND COALESCE(request_id, '')=? AND (request_id != '' OR session_name=?)",
-        (host, request_id, name),
-    ).fetchone() is not None or conn.execute(
+    # A nonempty request is cancelled on every name (raw equality on the
+    # partial request index); a legacy empty request only on its own name.
+    tombstone = conn.execute(
+        "SELECT 1 FROM v2_spawn_cancellations WHERE host=? AND request_id=? AND request_id != ''",
+        (host, request_id),
+    ) if request_id else conn.execute(
+        "SELECT 1 FROM v2_spawn_cancellations WHERE host=? AND session_name=? "
+        "AND COALESCE(request_id, '')=''", (host, name),
+    )
+    return tombstone.fetchone() is not None or conn.execute(
         "SELECT 1 FROM v2_spawn_outcomes WHERE host=? AND session_name=? "
         "AND COALESCE(request_id, '')=? AND state='cancelled'",
         (host, name, request_id),
@@ -1310,6 +1315,12 @@ SPAWN_CANCELLATION_DDL = SPAWN_OUTCOME_DDL.replace(
     "PRIMARY KEY (host, session_name)",
     "nonce TEXT,\n    PRIMARY KEY (host, session_name, request_id)",
 )
+# Cross-name precedence for a nonempty request id is a keyed lookup, not a
+# host-range scan. Additive and idempotent; legacy empty ids keep the name key.
+SPAWN_CANCELLATION_REQUEST_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS v2_spawn_cancellations_request "
+    "ON v2_spawn_cancellations (host, request_id) WHERE request_id != ''"
+)
 # Explicit column list for the outcome->cancellation backfill: the cancellation
 # table has one extra column (nonce), so `SELECT *` no longer aligns.
 _SPAWN_OUTCOME_COLUMNS = (
@@ -1808,6 +1819,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 "CREATE UNIQUE INDEX IF NOT EXISTS v2_spawn_cancellations_identity "
                 "ON v2_spawn_cancellations (host, session_name, COALESCE(request_id, ''))"
             )
+            conn.execute(SPAWN_CANCELLATION_REQUEST_INDEX_DDL)
             conn.execute(
                 f"INSERT OR IGNORE INTO v2_spawn_cancellations ({_SPAWN_OUTCOME_COLUMNS}, nonce) "
                 f"SELECT {_SPAWN_OUTCOME_COLUMNS}, NULL FROM v2_spawn_outcomes "
@@ -4136,37 +4148,58 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     async def settle_spawn_claim(
         self, host: str, session_name: str, *, request_id: str, nonce: str,
-        owner_instance_id: str,
+        owner_instance_id: str, hand_off_cancelled: bool = False,
     ) -> str:
         """Settle an interrupted spawn's own claim without a confirmed outcome.
 
-        Queued behind any intent write this spawn submitted, so the row it reads
-        is the committed truth. Only a match on host, name, request id, nonce
-        and current owner is mutated: a retained intent keeps its payload and
-        binding and only its owner is cleared; an empty, unbound claim is
-        deleted. A missing, foreign, tombstoned or bound empty row is untouched.
+        Queued behind any intent write this spawn submitted, and classified and
+        mutated in one write transaction that rolls back on any failure. Only a
+        match on host, name, request id, nonempty nonce and current owner is
+        mutated. An empty claim with no tmux binding and no pane pid is deleted,
+        even under a tombstone, which survives with the cancelled status. A
+        retained intent keeps its payload and binding and only its owner is
+        cleared; under a tombstone only when the caller would have handed it off
+        (`hand_off_cancelled`), leaving pane disposition to cancellation cleanup.
+        A missing, foreign or bound empty row is untouched.
         Returns ``retained``, ``released`` or ``untouched``."""
+        fence = (host, session_name, request_id, nonce, owner_instance_id)
+        own = (
+            "host=? AND session_name=? AND COALESCE(request_id, '')=? "
+            "AND nonce=? AND COALESCE(owner_instance_id, '')=?"
+        )
+
         def _op(conn: sqlite3.Connection) -> str:
-            res = _spawn_reservation(conn, host, session_name, request_id, nonce)
-            if res is None or str(res.get("owner_instance_id") or "") != owner_instance_id or not nonce:
-                return "untouched"
-            fence = (host, session_name, request_id, nonce, owner_instance_id)
-            if res.get("payload") is not None:
-                cursor = conn.execute(
-                    "UPDATE v2_stream_reservations SET owner_instance_id=NULL "
-                    "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=? "
-                    "AND nonce=? AND COALESCE(owner_instance_id, '')=? AND payload IS NOT NULL", fence,
-                )
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                res = conn.execute(
+                    f"SELECT payload IS NOT NULL FROM v2_stream_reservations WHERE {own}", fence,
+                ).fetchone()
+                if res is None or not nonce:
+                    conn.rollback()
+                    return "untouched"
+                if res[0]:
+                    if not hand_off_cancelled and _spawn_cancelled(conn, host, session_name, request_id):
+                        conn.rollback()
+                        return "untouched"
+                    cursor = conn.execute(
+                        "UPDATE v2_stream_reservations SET owner_instance_id=NULL "
+                        f"WHERE {own} AND payload IS NOT NULL", fence,
+                    )
+                    disposition = "retained"
+                else:
+                    cursor = conn.execute(
+                        f"DELETE FROM v2_stream_reservations WHERE {own} "
+                        "AND payload IS NULL AND tmux_created = 0 AND pane_pid IS NULL", fence,
+                    )
+                    disposition = "released"
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return "untouched"
                 conn.commit()
-                return "retained" if cursor.rowcount == 1 else "untouched"
-            cursor = conn.execute(
-                "DELETE FROM v2_stream_reservations "
-                "WHERE host=? AND session_name=? AND COALESCE(request_id, '')=? "
-                "AND nonce=? AND COALESCE(owner_instance_id, '')=? AND payload IS NULL "
-                "AND tmux_created = 0 AND pane_pid IS NULL", fence,
-            )
-            conn.commit()
-            return "released" if cursor.rowcount == 1 else "untouched"
+                return disposition
+            except BaseException:
+                conn.rollback()
+                raise
 
         return await self.submit(_op)
 

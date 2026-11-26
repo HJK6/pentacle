@@ -593,6 +593,13 @@ def test_settle_touches_nothing_it_does_not_own(case: str) -> None:
                     "INSERT INTO v2_spawn_outcomes (host, session_name, state, request_id, updated_at) "
                     "VALUES (?,?,?,?,?)", (HOST, "seat", "cancelled", "req", "2026-11-26T00:00:00Z")), c.commit()))
             before = await reservations(store)
+            if case == "tombstoned":
+                # Reservation housekeeping (Amendment r3): the owned empty
+                # unbound claim goes; the cancelled outcome stays.
+                assert await settle(store) == "released"
+                assert await reservations(store) == []
+                assert await store.spawn_cancelled(HOST, "seat", "req") is True
+                return
             assert await settle(store) == "untouched"
             assert await reservations(store) == before
         finally:
