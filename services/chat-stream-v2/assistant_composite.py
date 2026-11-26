@@ -487,6 +487,9 @@ class AssistantComposite:
             )
             if not receipt.get("duplicate"):
                 self._apply_binding(receipt["new_binding"])
+                if self.work_lanes_changed is not None:
+                    # The direct-primary binding decides lead and work-seat qualification.
+                    await self.work_lanes_changed()
                 guidelines = getattr(self, "guidelines", None)
                 if guidelines is not None:
                     new_binding = receipt["new_binding"]
@@ -497,9 +500,6 @@ class AssistantComposite:
                 if self.broadcast is not None:
                     await self.broadcast({"type": "assistant.binding.changed",
                                           **receipt["new_binding"]})
-                if self.work_lanes_changed is not None:
-                    # The direct-primary binding decides lead and work-seat qualification.
-                    await self.work_lanes_changed()
             return receipt
 
     async def target_closed(self, stream_id: str, generation: str | None) -> None:
@@ -2127,6 +2127,9 @@ class AssistantComposite:
                 else None
             ),
         )
+        if operation == "lane.bind" and self.work_lanes_changed is not None:
+            # A new backend can lose or regain the lane's lead with no seat change.
+            await self.work_lanes_changed()
         if operation == "route.resolve":
             # The transaction changed deferred -> resolved/intent before this
             # detached action exists.  If we crash here, startup recovery marks
@@ -2140,9 +2143,6 @@ class AssistantComposite:
                 self._start_dispatch(route)
             self._wake_worker()
         await self.refresh_activity()
-        if operation == "lane.bind" and self.work_lanes_changed is not None:
-            # A new backend can lose or regain the lane's lead with no seat change.
-            await self.work_lanes_changed()
         return {"type": "assistant.operation.ok", **result}
 
     async def _read_work_lane_confirmation(self, value: Any) -> dict[str, Any] | None:
@@ -2298,9 +2298,9 @@ class AssistantComposite:
                 actor_stream_id=source, actor_generation=generation, report_id=report_id,
                 authority_wake_recipient=self.config.astra_stream_id or None,
             )
-            await self.refresh_activity()
             if completed is not None and self.work_lanes_changed is not None:
                 await self.work_lanes_changed()
+            await self.refresh_activity()
             return completed
         return None
 

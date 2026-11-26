@@ -550,11 +550,16 @@ class WorkLanesInventory:
                 # Recorded before the reads, so a change during this pass reconciles again.
                 self._reconciles_started += 1
                 self._input_signature = lane_input_signature(self.sessions.list_open())
-                await self.reconcile_index()
-                # Complete, settle and reopen lanes from their goals before the
-                # episode alerts and the frame are built from the new state.
-                await self.store.reconcile_lane_lifecycle()
-                await self.store.reconcile_work_lane_episodes(self.episode_sink)
+                try:
+                    await self.reconcile_index()
+                    # Complete, settle and reopen lanes from their goals before the
+                    # episode alerts and the frame are built from the new state.
+                    await self.store.reconcile_lane_lifecycle()
+                    await self.store.reconcile_work_lane_episodes(self.episode_sink)
+                except Exception:
+                    # The next inventory observation retries rather than skipping as unchanged.
+                    self._input_signature = None
+                    raise
                 if self.worked.needs_refresh():
                     # The census only needs the member spec IDs, not enriched lane
                     # rows; resolve them once per TTL window (WorkedCache.ttl_s,

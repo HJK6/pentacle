@@ -315,10 +315,12 @@ class _ExternalWorkStoreMixin:
         return await self.submit(lambda conn: current_packets_conn(conn, config=config))
 
     async def external_work_packet(self, *, config, env_binding, actor, generation, now,
-                                   op, tag, spec_id=None, state=None):
+                                   op, tag, spec_id=None, state=None, on_change=None):
         tag = validate_tag(tag)
+        changed = []
         def body(conn):
             _authorize_conn(conn, config, env_binding, actor, generation)
+            before = conn.total_changes
             row = conn.execute("SELECT * FROM v2_external_work_packets WHERE watch_id=? AND tag=?",
                                (config.watch_id, tag)).fetchone()
             old = dict(row) if row else None
@@ -356,29 +358,41 @@ class _ExternalWorkStoreMixin:
                 conn.execute("UPDATE v2_external_work_packets SET spec_id=?,state=?,state_at=?,evidence_at=? "
                              "WHERE watch_id=? AND tag=?", (identity, target, now, max(now, old["evidence_at"]), config.watch_id, tag))
             _close_finished_conn(conn, config, now)
+            changed.append(conn.total_changes != before)
             return {"packet": dict(conn.execute("SELECT * FROM v2_external_work_packets WHERE watch_id=? AND tag=?",
                                                 (config.watch_id, tag)).fetchone())}
-        return await self._external_work_txn(body)
+        result = await self._external_work_txn(body)
+        if on_change is not None and changed[-1]:
+            on_change()
+        return result
 
-    async def external_work_mail(self, *, config, tag, mail_id, at, now):
+    async def external_work_mail(self, *, config, tag, mail_id, at, now, on_change=None):
+        changed = []
         def body(conn):
             if not config.enabled:
                 raise PacketError(config.status)
+            before = conn.total_changes
             row = conn.execute("SELECT * FROM v2_external_work_packets WHERE watch_id=? AND tag=?",
                                (config.watch_id, tag)).fetchone()
             if row is not None:
                 if at >= row["evidence_at"]:
                     conn.execute("UPDATE v2_external_work_packets SET evidence_at=?,mail_id=? WHERE watch_id=? AND tag=?",
                                  (at, mail_id, config.watch_id, tag))
+                changed.append(conn.total_changes != before)
                 return {"linked": row["state"] in OPEN_PACKET_STATES, "stored": True}
             count = conn.execute("SELECT COUNT(*) FROM v2_external_work_packets WHERE watch_id=? AND state='unlinked'",
                                  (config.watch_id,)).fetchone()[0]
             if count >= 32:
+                changed.append(False)
                 return {"linked": False, "stored": False}
             conn.execute("INSERT INTO v2_external_work_packets VALUES (?,?,NULL,'unlinked',?,?,?,?)",
                          (config.watch_id, tag, at, at, at, mail_id))
+            changed.append(True)
             return {"linked": False, "stored": True}
-        return await self._external_work_txn(body)
+        result = await self._external_work_txn(body)
+        if on_change is not None and changed[-1]:
+            on_change()
+        return result
 
     async def external_work_notice_verdict(self, notice_id, *, config, env_binding) -> dict[str, Any]:
         """Whether a queued reminder may still be delivered to its recipient."""

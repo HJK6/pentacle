@@ -285,9 +285,9 @@ class ExternalWork:
                         raise PacketError("invalid_request")
                 elif state is not None or spec_id is not None:
                     raise PacketError("invalid_request")
-                result = await self.store.external_work_packet(op=op, tag=tag, spec_id=spec_id, state=state, **caller)
-                if self.lanes_changed is not None:
-                    self.lanes_changed()
+                # The store calls lanes_changed only when the transaction changed a packet.
+                result = await self.store.external_work_packet(op=op, tag=tag, spec_id=spec_id, state=state,
+                                                               on_change=self.lanes_changed, **caller)
             else:
                 if validate_record(record)["request_id"] != request_id:
                     raise ValueError("invalid_request")
@@ -318,9 +318,8 @@ class ExternalWork:
             mail_id, at, now = message.get("mail_id"), message.get("at"), self.clock()
             if not _text(mail_id, 128) or type(at) is not int or at < 0 or at > now + 300:
                 raise PacketError("invalid_request")
-            result = await self.store.external_work_mail(config=self.config, tag=tag, mail_id=mail_id, at=at, now=now)
-            if self.lanes_changed is not None:
-                self.lanes_changed()
+            result = await self.store.external_work_mail(config=self.config, tag=tag, mail_id=mail_id, at=at, now=now,
+                                                         on_change=self.lanes_changed)
             reply = {"type": "external_work.mail.ok", "ok": True, **result}
         except ValueError as exc:
             reply = {"type": "external_work.error", "ok": False,

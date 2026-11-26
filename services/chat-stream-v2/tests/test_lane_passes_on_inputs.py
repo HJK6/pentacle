@@ -50,7 +50,7 @@ class Counted:
 
     def __init__(self, seats):
         self.store = Store(":memory:"); self.store.start()
-        self.counts = {"lifecycle": 0, "episodes": 0, "emits": 0}
+        self.counts = {"index": 0, "lifecycle": 0, "episodes": 0, "emits": 0}
         lifecycle, episodes = self.store.reconcile_lane_lifecycle, self.store.reconcile_work_lane_episodes
 
         async def counted_lifecycle(*args, **kwargs):
@@ -74,6 +74,12 @@ class Counted:
             self.counts["emits"] += 1
             return await emit()
         self.inv.emit_if_changed = counted_emit
+        index = self.inv.reconcile_index
+
+        async def counted_index(*args, **kwargs):
+            self.counts["index"] += 1
+            return await index(*args, **kwargs)
+        self.inv.reconcile_index = counted_index
         self.emit_sessions = _session_wrapper(self.inv)
 
     async def settle(self):
@@ -107,14 +113,32 @@ def run(body, *rows):
 @pytest.mark.timeout(30)
 def test_activity_only_inventory_changes_run_no_reconcile_and_still_emit():
     async def body(rig):
-        emits = rig.counts["emits"]
+        def seed(conn):
+            link_specs_conn(conn, "spec_fixture")
+            conn.execute("UPDATE v2_assistant_composite_lanes SET bound_stream_id=?,bound_generation=? WHERE lane_id=?",
+                         (SEAT["stream_id"], SEAT["session_generation"], FIXTURE_LANE_ID))
+            conn.commit()
+        await rig.store.submit(seed)
+        rig.inv.refresh()
+        await rig.settle()
+        passes, index, emits, frames = rig.passes(), rig.counts["index"], rig.counts["emits"], len(rig.frames)
+
+        def working(frame):
+            lane = next(lane for lane in frame["lanes"] if lane["lane_id"] == FIXTURE_LANE_ID)
+            assert lane["lead"]["stream_id"] == SEAT["stream_id"]
+            return lane["lead"]["presence"]["working"]
+        assert working(rig.frames[-1]) is False
         for flip in range(10):
-            rig.seats.rows[0].update(working=bool(flip % 2), busy=not flip % 2, context_tokens=flip)
+            rig.seats.rows[0].update(busy=not flip % 2, context_tokens=flip)
             await rig.emit_sessions(immediate=True)
             await rig.settle()
-        print(f"activity burst of 10: reconcile passes {rig.passes() - 1}, lane emits {rig.counts['emits'] - emits}")
-        assert rig.passes() == 1, "seat activity must not reconcile lanes"
-        assert rig.counts["emits"] > emits, "the lane frame is still re-emitted"
+        print(f"activity burst of 10: reconcile passes {rig.passes() - passes}, "
+              f"lane emits {rig.counts['emits'] - emits}, frames {len(rig.frames) - frames}")
+        assert rig.passes() == passes and rig.counts["index"] == index, "seat activity must not reconcile lanes"
+        assert [working(frame) for frame in rig.frames[frames:]] == [not flip % 2 for flip in range(10)]
+        await rig.emit_sessions(immediate=True)
+        await rig.settle()
+        assert len(rig.frames) == frames + 10, "an unchanged frame is deduplicated"
     run(body)
 
 
@@ -144,6 +168,31 @@ def test_each_lane_input_field_on_the_session_emit_reconciles_once(change):
         await rig.settle()
         assert rig.passes() == 2, "an unchanged signature does not reconcile again"
     run(body, SEAT, {**SEAT, "stream_id": "fixture:v2-other"})
+
+
+@pytest.mark.timeout(30)
+def test_a_failed_reconcile_retries_on_the_next_inventory_observation():
+    async def body(rig):
+        episodes, failures = rig.store.reconcile_work_lane_episodes, [1]
+
+        async def fail_once(*args, **kwargs):
+            if failures:
+                failures.pop()
+                raise RuntimeError("episode evaluation failed")
+            return await episodes(*args, **kwargs)
+        rig.store.reconcile_work_lane_episodes = fail_once
+        rig.seats.rows[0].update(pane_status="pane_dead")
+        await rig.emit_sessions(immediate=True)
+        await rig.settle()
+        assert rig.counts["lifecycle"] == 2 and rig.inv._input_signature is None
+        assert not failures and rig.counts["lifecycle"] == 2, "no immediate retry"
+        await rig.emit_sessions(immediate=True)
+        await rig.settle()
+        assert rig.counts["lifecycle"] == 3, "the next observation reconciles again"
+        await rig.emit_sessions(immediate=True)
+        await rig.settle()
+        assert rig.counts["lifecycle"] == 3
+    run(body)
 
 
 @pytest.mark.timeout(30)
@@ -181,6 +230,15 @@ def test_external_packet_and_mail_writes_request_a_lane_reconcile():
         assert (await packet(rig, 'set', state='working'))['ok']
         await mail(rig, 'fixture')
         assert len(requests) == 3
+        assert (await packet(rig, 'set', state='working'))['ok']
+        assert len(requests) == 3, "a same-state set changes no packet"
+        assert (await mail(rig, 'fixture', at=int(rig.now) - 60))['ok']
+        assert len(requests) == 3, "an older mail skips its write"
+        for i in range(32):
+            assert (await mail(rig, f'unlinked-{i:02}'))['stored']
+        assert len(requests) == 35
+        assert (await mail(rig, 'overflow'))['stored'] is False
+        assert len(requests) == 35, "a capped mail stores nothing"
     exercise(check, packet_mode=True)
 
 
@@ -332,6 +390,14 @@ def test_routing_lane_bind_and_direct_rebind_request_a_lane_reconcile():
             assert requests == [1]
             await composite.rebind(_request("move-a-b", 0, B), actor_stream_id=A)
             assert requests == [1], "a replayed rebind changes nothing"
+
+            async def broken(frame):
+                raise RuntimeError("broadcast failed")
+            composite.broadcast = broken
+            with pytest.raises(RuntimeError):
+                await composite.rebind(_request("move-b-a", 1, A), actor_stream_id=B)
+            assert (await store.get_assistant_binding(env_binding=composite._env_binding()))["stream_id"] == A
+            assert requests == [1, 1], "the committed rebind requested before the broadcast"
         finally:
             store.stop()
     asyncio.run(go())
