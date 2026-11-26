@@ -311,10 +311,13 @@ A stale startup receipt never reactivates an older generation.
 ### Explicit bound-executable upgrade
 
 A healthy generation can be independently enrolled with an alongside, pinned
-native executable and then imported with `agent-orch account upgrade`. Ordinary
-`relogin` still requires a native authentication failure. Upgrade never starts
-login, retries authorization, changes the saved default or rewrites existing
-session bindings. The current authenticated front desk must own the operation.
+native executable and then imported with `agent-orch account upgrade`. The
+enrollment path used by `relogin` still requires a native authentication failure;
+when authentication has been restored but the health row remains
+`auth_unhealthy`, the same-generation health repair can clear it without
+enrollment. Upgrade never starts login, retries authorization, changes the saved
+default or rewrites existing session bindings. The current authenticated front
+desk must own the operation.
 
 The deployment owner freezes admission for the exact host before enrollment,
 records the hold's reason/set_at/held_until tuple and retains all generations and
@@ -516,11 +519,26 @@ agent-orch account relogin --host host-a --provider codex --account primary \
   --login-generation active --operation-id repair-one --timeout 330
 ```
 
-Repair verifies actual auth failure, uses same-cell/host serialization, the
-existing 900-second cooldown and three-attempt hourly limit, and a fresh final
-home. An uncertain reply is inspected using the same operation/generation instead
-of starting another login. Wrong-account, human-step and failed outcomes are safe
-metadata; no healthy peer account is logged out or moved.
+When relogin must start enrollment, it verifies actual auth failure, uses
+same-cell/host serialization, the existing 900-second cooldown and three-attempt
+hourly limit, and a fresh final home. A valid bound observation can instead clear
+an existing `auth_unhealthy` row without enrolling. An uncertain reply is
+inspected using the same operation/generation instead of starting another login.
+Wrong-account, human-step and failed outcomes are safe metadata; no healthy peer
+account is logged out or moved.
+
+After an operator restores authentication in the existing host home, the same
+generation can recover through this explicit `relogin` request. The daemon runs
+the bound observation and clears `auth_unhealthy` only when the current active,
+enabled row still matches the captured health revision and the observation passes
+the shared identity and collection checks and has valid window structure. Native
+freshness enforcement remains in the host probe. That transition increments
+the revision and stores a receipt atomically. Repeating the same operation reads
+its receipt; a current healthy row is a no-op and creates no receipt. An auth
+failure keeps the row `auth_unhealthy` but records the new failure time, advances
+its revision and emits the existing alert before the usual enrollment path.
+Ordinary usage observations never clear `auth_unhealthy`, and neither this path
+nor enrollment clears `identity_conflict` or a disabled generation.
 
 The shared `recover-codex`/`recover-claude --account ALIAS` wrappers submit bound
 requests to this same daemon path. They do not run another login loop. Managed
@@ -888,8 +906,10 @@ per-cell ordering with repin, on both coordinator and host. An unresolved action
 in either order blocks the other until its exact outcome is accounted for.
 Restart does not release that exclusion. Read-only diagnosis, health revalidation,
 holds and policy/default maintenance remain available. No global pin lock spans
-remote work. With no unresolved repin, ordinary relogin retains its failed-auth
-requirement and ordinary upgrade retains its changed-artifact requirement.
+remote work. With no unresolved repin, the enrollment path for relogin retains its
+failed-auth requirement; same-generation health repair can clear a lingering
+`auth_unhealthy` row without enrollment. Ordinary upgrade retains its
+changed-artifact requirement.
 
 If old auth or proof cannot support in-place reconciliation, FD may explicitly
 choose one fresh sign-in through the existing relogin flow:

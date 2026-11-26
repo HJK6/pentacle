@@ -79,6 +79,39 @@ def test_primary_operator_and_exact_seat_override_deliver_then_revoke_refuses(tm
     asyncio.run(run())
 
 
+def test_auth_unhealthy_account_refuses_tell_then_relogin_restores_admission(tmp_path):
+    async def run():
+        from account_executor import AccountExecutor
+        from sessions import VerbError
+        from test_account_rotation import observation
+        store,runtime,comms,tmux,worker,meter=await fixture(tmp_path)
+        account=binding(provider='claude')
+        try:
+            def disable_fixture_cap(a):
+                a.conn.execute('DELETE FROM kv WHERE k=?',('account.pool-control:claude:pool-primary',))
+                a.conn.commit()
+            await runtime.run(disable_fixture_cap)
+            await runtime.record_failure(account,'auth')
+            message={'stream_id':worker['stream_id'],'message':'owned account-bound work',
+                'from_stream_id':PEER['stream_id'],'tell_id':'auth-before-relogin','request_id':'auth-before-relogin',
+                '_auth_context':PEER}
+            with pytest.raises(VerbError,match='account_unavailable'):
+                await comms.tell(message)
+            assert tmux.pastes==[]
+
+            async def execute(selected,action,operation_id,generation=None):
+                assert action=='observe-bound'
+                return {'outcome':'ok','binding_key':selected.key,'observation':observation(selected)}
+            executor=AccountExecutor(runtime,None,execute=execute)
+            recovered=await executor.recover(account,relogin=True,operation_id='auth-restored-for-tell')
+            assert recovered['outcome']=='healthy'
+
+            admitted=await comms.tell(dict(message,tell_id='auth-after-relogin',request_id='auth-after-relogin'))
+            assert admitted['submission_confirmed'] is True and len(tmux.pastes)==1
+        finally:store.stop()
+    asyncio.run(run())
+
+
 def test_operator_attachment_carries_provenance_to_receipt_and_physical_claim(tmp_path):
     async def run():
         store,runtime,comms,tmux,worker,meter=await fixture(tmp_path)
