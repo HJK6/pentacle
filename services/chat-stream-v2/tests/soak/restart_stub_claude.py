@@ -9,7 +9,7 @@ transcript the daemon recorded for this seat (held open, as Claude does).
 
 Control is file based so the harness can drive each stage deterministically:
 
-  $RESTART_STUB_CONTROL/mode       normal | hold_ready | withhold_user | exit_at_launch | stall
+  $RESTART_STUB_CONTROL/mode       normal | hold_ready | withhold_user | busy_user | exit_at_launch | stall
   $RESTART_STUB_CONTROL/release    created by the harness to end a hold
   $RESTART_STUB_CONTROL/<session>.booting   written while holding readiness
   $RESTART_STUB_CONTROL/<session>.pasted    written when a submission is held
@@ -100,11 +100,26 @@ def main() -> int:
         if transcript is None:
             TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
             transcript = open(TRANSCRIPT_DIR / f"{session_id}.jsonl", "a", encoding="utf-8")
-        transcript.write(json.dumps({
+        record = {
             "type": "user", "sessionId": session_id, "uuid": str(uuid.uuid4()),
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "cwd": os.getcwd(), "message": {"role": "user", "content": text},
-        }) + "\n")
+        }
+        if mode == "busy_user":
+            # Queue chrome from tests/test_submission_predicates.py.
+            sys.stdout.write(f"❯ {text}\n  ctrl+x ctrl+s to send now\n")
+            _chrome()
+            queued = {**record, "type": "attachment", "attachment": {
+                "type": "queued_command", "prompt": text, "origin": {"kind": "human"},
+            }}
+            del queued["message"]
+            transcript.write(json.dumps(queued) + "\n")
+            transcript.flush()
+            _wait_release()
+            mode = "normal"
+            record.update(type="assistant", uuid=str(uuid.uuid4()), timestamp=datetime.now(timezone.utc).isoformat(),
+                          message={"role": "assistant", "content": [{"type": "text", "text": "Held turn finished"}]})
+        transcript.write(json.dumps(record) + "\n")
         transcript.flush()
         sys.stdout.write(f"> {text[:60]}\n")
         _chrome()

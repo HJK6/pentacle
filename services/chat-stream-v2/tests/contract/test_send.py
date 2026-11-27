@@ -84,6 +84,54 @@ def _input_texts(chat, seat):
     return [record["text"] for record in chat.inputs(seat)]
 
 
+def test_busy_lane_send_lands_once(chat):
+    (chat.control / "mode").write_text("busy_user", encoding="utf-8")
+    chat.start()
+    client = chat.client()
+    client.subscribe()
+    seat = chat.spawn(client, unique("busy"))
+    token = chat.token(seat)
+    request_id, optimistic_id, text = unique("send"), unique("optimistic"), unique("message")
+    start = len(client.frames)
+    client.send({"type": "send", "request_id": request_id, "optimistic_id": optimistic_id,
+                 "to_stream_id": seat.stream_id, "text": text})
+    lane_read = client.call("work_lanes.list", from_stream_id=seat.stream_id, stream_token=token)
+    assert lane_read["type"] == "work_lanes.list.ok", lane_read
+    reply = client.wait_reply(request_id, start=start)
+    expect_landed(reply, seat.stream_id, request_id)
+    assert reply.get("provider_queued") is True, reply
+
+    event = _wait_user(client, seat, start, text)
+    assert (event["request_id"], event["optimistic_id"], event["receipt_id"]) == (
+        request_id, optimistic_id, reply["receipt_id"],
+    )
+
+    def user_history():
+        return [item["daemon_seq"] for frame in client.history(seat.stream_id, limit=20, chunk_limit=20)
+                for item in frame.body["events"]
+                if item["kind"] == "USER" and item["text"] == text]
+
+    assert user_history() == [event["daemon_seq"]]
+    receipt = _receipt(client, seat, request_id)
+    assert receipt is not None
+    assert (receipt["to_stream_id"], receipt["request_id"], receipt["receipt_id"]) == (
+        seat.stream_id, request_id, reply["receipt_id"],
+    )
+    assert (receipt["state"], receipt["submission_confirmed"], receipt["attempts"]) == ("landed", True, 1)
+
+    chat.release_user()
+    client.event(seat.stream_id, start=start,
+                 match=lambda item: (item["kind"], item["text"]) == ("ASSIST_TEXT", "Held turn finished"),
+                 description="the busy turn finished")
+    assert user_history() == [event["daemon_seq"]]
+    assert [item["daemon_seq"] for item in client.events_since(seat.stream_id, start)
+            if (item["kind"], item["text"]) == ("USER", text)] == [event["daemon_seq"]]
+    assert _receipt(client, seat, request_id) == receipt
+    assert _input_texts(chat, seat) == [text]
+    assert [frame.body for frame in client.frames[start:] if frame.body["type"] == "send.result"
+            and frame.body.get("request_id") == request_id] == [reply]
+
+
 def test_c4_overlapping_send_and_disconnected_initiator(chat):
     """C4: server.py:1851-1856,5609-5643; comms.py:2281-2347; store.py:6468-6541."""
     chat.start()
