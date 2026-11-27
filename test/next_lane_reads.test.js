@@ -292,10 +292,69 @@ test('a matching revision frame holds a previously hidden candidate', async () =
   assert.equal(state.detailRevision, REV_B);
 });
 
+test('a presence-only inventory change keeps held data without a read until it is ten minutes old', async () => {
+  let clock = 0;
+  let calls = 0;
+  const reads = createLaneReads({ now: () => clock, show: async () => {
+    calls += 1;
+    return reply({ members: [member(`spec_fixture__${calls}`)] });
+  } });
+  reads.updateInventory(inventory(lane(REV_A)));
+  await reads.requestMembers(LANE_ID);
+  await reads.requestGoals(LANE_ID);
+  const original = reads.getRead(LANE_ID, 'members').reply;
+  assert.equal(calls, 1, 'the members read also serves goals');
+
+  // Inventory pushes carry presence and working counts, which detail_revision excludes.
+  for (let push = 0; push < 20; push++) {
+    clock += 30 * 1000;
+    reads.updateInventory(inventory(lane(REV_A, { working: push % 2, last_activity: String(clock) })));
+  }
+  assert.equal(calls, 1, 'twenty presence pushes over ten minutes read nothing');
+  assert.equal(reads.getRead(LANE_ID, 'members').status, 'held');
+  assert.strictEqual(reads.getRead(LANE_ID, 'members').reply, original);
+
+  // Worked time is also outside the revision, so held data older than ten minutes refreshes once.
+  clock += 1000;
+  reads.updateInventory(inventory(lane(REV_A, { working: 3 })));
+  assert.equal(calls, 2);
+  assert.strictEqual(reads.getRead(LANE_ID, 'members').reply, original, 'the refresh keeps showing held data');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(reads.getRead(LANE_ID, 'members').reply.members.map(item => item.spec_id), ['spec_fixture__2']);
+  reads.updateInventory(inventory(lane(REV_A, { working: 4 })));
+  assert.equal(calls, 2);
+
+  // A new detail revision still reads at once.
+  clock += 1000;
+  reads.updateInventory(inventory(lane(REV_B)));
+  assert.equal(calls, 3);
+});
+
+test('a failed read waits for Retry, a new revision or ten minutes, not for presence pushes', async () => {
+  let clock = 0;
+  let calls = 0;
+  const reads = createLaneReads({ now: () => clock, show: async () => { calls += 1; throw new Error('refused'); } });
+  reads.updateInventory(inventory(lane(REV_A)));
+  await reads.requestGoals(LANE_ID);
+  assert.equal(reads.getRead(LANE_ID, 'goals').status, 'failed');
+  for (let push = 0; push < 20; push++) {
+    clock += 30 * 1000;
+    reads.updateInventory(inventory(lane(REV_A, { working: push })));
+  }
+  assert.equal(calls, 1, 'presence pushes do not retry a failed read');
+  clock += 1000;
+  reads.updateInventory(inventory(lane(REV_A, { working: 99 })));
+  assert.equal(calls, 2, 'ten minutes on, the next push tries again');
+  await new Promise(resolve => setImmediate(resolve));
+  reads.updateInventory(inventory(lane(REV_B)));
+  assert.equal(calls, 3, 'a new revision tries again at once');
+});
+
 test('same-revision entry changes refresh while preserving held data; failure keeps data and Retry recovers', async () => {
   const refreshed = deferred();
   let calls = 0;
-  const reads = createLaneReads({ show: async () => {
+  let clock = 0;
+  const reads = createLaneReads({ now: () => clock, show: async () => {
     calls += 1;
     if (calls === 1) return reply({ members: [member('spec_fixture__a')] });
     if (calls === 2) return refreshed.promise;
@@ -305,6 +364,7 @@ test('same-revision entry changes refresh while preserving held data; failure ke
   await reads.requestMembers(LANE_ID);
   const original = reads.getRead(LANE_ID, 'members').reply;
 
+  clock += 10 * 60 * 1000 + 1000;
   reads.updateInventory(inventory(lane(REV_A, { activity: 'working' })));
   const loading = reads.getRead(LANE_ID, 'members');
   assert.equal(loading.status, 'loading');

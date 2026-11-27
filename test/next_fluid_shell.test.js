@@ -84,6 +84,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
     chatSpawnCatalog: async () => ({ok:false,error:'test-only catalog'}),
     chatRename: async (...args) => { calls.push(['rename', ...args]); return {ok: false}; },
     chatClose: async (...args) => { calls.push(['close', ...args]); return {ok: true}; },
+    getBuild: async () => window.servedBuild || null, reloadApp: () => calls.push(['reload']),
   };
   onData = (slot, data) => ptyData?.(slot, data);
   window.Function('require', fs.readFileSync(entry,'utf8'))(id => {
@@ -544,4 +545,32 @@ test('only rail and title chat lists opt into the narrow scrollbar', async t => 
   limits.click();
   try { assert.equal(popover.classList.contains('next-chat-list-popover'),false); }
   finally { limits.click(); }
+});
+
+test('a newer build on the host adds one rail control that reloads, and only while it is newer', async t => {
+  const s = openShell(t, 1440, null, false, window => {
+    window.__PENTACLE_CONFIG__ = { buildId: 'one' };
+    window.servedBuild = { buildId: 'one' };
+  });
+  const look = async () => { s.window.document.dispatchEvent(new s.window.Event('visibilitychange')); await flush(); await flush(); };
+  const names = () => [...s.window.document.querySelectorAll('.rail-button')].map(button => button.getAttribute('aria-label'));
+  await look();
+  assert.equal(s.$('.update-button'), null, 'a page on the served build shows nothing');
+  assert.equal(names().length, 7);
+
+  s.window.servedBuild = { buildId: 'two' };
+  await look();
+  const update = s.$('.rail .update-button');
+  assert.ok(update, 'the page notices the newer build when it becomes visible');
+  assert.equal(update.getAttribute('aria-label'), 'Load the latest version');
+  assert.equal(update.nextElementSibling.getAttribute('aria-label'), 'Limits and machines', 'it sits above Limits');
+  assert.equal(names().length, 8);
+  assert.ok(!s.calls.some(call => call[0] === 'reload'), 'nothing reloads by itself');
+  update.click();
+  assert.deepEqual(s.calls.filter(call => call[0] === 'reload'), [['reload']]);
+
+  s.window.servedBuild = { buildId: 'one' };
+  await look();
+  assert.equal(s.$('.update-button'), null, 'a host rolled back to this build withdraws it');
+  assert.equal(names().length, 7);
 });

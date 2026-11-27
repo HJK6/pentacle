@@ -3,6 +3,9 @@
 const PAGE_SIZE = 32;
 const REVISION_RE = /^[a-f0-9]{64}$/;
 const CANCELLED = Symbol('cancelled lane read');
+// Presence and worked time are outside detail_revision, so without a new
+// revision a held or failed read is read again only once it is this old.
+const SETTLED_REFRESH_MS = 10 * 60 * 1000;
 
 function laneRevision(lane) {
   return typeof lane?.detail_revision === 'string' ? lane.detail_revision : null;
@@ -29,7 +32,7 @@ function errorMessage(error) {
   return 'Lane details unavailable';
 }
 
-function createLaneReads({ show } = {}) {
+function createLaneReads({ show, now = () => Date.now() } = {}) {
   if (typeof show !== 'function') throw new TypeError('show must be a function');
 
   let inventory = null;
@@ -67,6 +70,7 @@ function createLaneReads({ show } = {}) {
         revisionRestarts: 0,
         token: 0,
         waiter: null,
+        settledAt: 0,
       };
       reads.set(key, entry);
     }
@@ -127,6 +131,7 @@ function createLaneReads({ show } = {}) {
     }
     entry.status = 'failed';
     entry.error = errorMessage(error);
+    entry.settledAt = now();
     settleWaiter(entry);
     emit();
   }
@@ -134,6 +139,7 @@ function createLaneReads({ show } = {}) {
   function hold(entry, reply, revision) {
     entry.reply = reply;
     entry.detailRevision = revision;
+    entry.settledAt = now();
     entry.waitingReply = null;
     entry.status = 'held';
     entry.error = null;
@@ -394,7 +400,9 @@ function createLaneReads({ show } = {}) {
           entry.reply = null;
           entry.detailRevision = null;
         }
-        if (entry.active) start(entry, { preserveReply: !revisionChanged && entry.detailRevision === nextRevision });
+        // Most pushes change only presence; a read is due on a new revision or an old result.
+        const due = revisionChanged || now() - entry.settledAt > SETTLED_REFRESH_MS;
+        if (entry.active && due) start(entry, { preserveReply: !revisionChanged && entry.detailRevision === nextRevision });
       }
     }
   }

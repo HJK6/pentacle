@@ -4,7 +4,7 @@ The next view is a separate browser entry at `/next/` in the same authenticated 
 
 `renderer/next/entry.js` installs the existing web bridge and uses the shared chat store and transcript renderer. `renderer/next/layout.js` owns the pure card layout transitions, including the shared dashboard or picture slot and lanes rules. The lanes card is independent of chat cards and keeps its navigation state when hidden. `renderer/terminal_view.js` provides the xterm setup shared with the current view. The new composer's capture and delivery paths use the existing browser recorder, voice take and chat bridge.
 
-Lane inventory uses the existing pushed frames and chat-core normalizer. The additive `cc.workLanesShow` bridge supplies complete lane, goal and member details; `renderer/next/lane_reads.js` validates pagination and holds replies only at the current inventory revision. Failed reads remain explicit and can be retried. The lanes view model uses the pinned mobile readability helper, preserves daemon order for lanes without a road, and never infers absent membership from incomplete data.
+Lane inventory uses the existing pushed frames and chat-core normalizer. The additive `cc.workLanesShow` bridge supplies complete lane, goal and member details; `renderer/next/lane_reads.js` validates pagination and holds replies only at the current inventory revision. Inventory pushes mostly change presence and working counts, which `detail_revision` excludes, so a held or failed read is read again only when the revision changes or once its result is ten minutes old (worked time is outside the revision too). Failed reads remain explicit and Retry reads at once. The lanes view model uses the pinned mobile readability helper, preserves daemon order for lanes without a road, and never infers absent membership from incomplete data.
 
 The questions view consumes the existing notification list and frames, answer operation and prompt reconciliation. Its renderer places a spec question only with positive lane membership, keeps uncertain answers from being sent twice, and reads stored answers for the spec's “You said” line. The shared durable-question model supplies the current and next views; transcript name links are limited to unambiguous known lane and goal titles.
 
@@ -100,12 +100,27 @@ Messages from other agents, daemon notices and child reports are compact rows
 that open to the full text and stay open across updates. Tables, code, commands,
 file changes and tool results have their own styles in the conversation section
 at the end of `renderer/next/style.css`. Text, code and agent rows wrap to the
-pane, so a chat never scrolls sideways. A table with more columns than fit
-scrolls inside its own frame.
+pane, so a chat never scrolls sideways. The transcript renderer marks a table
+cell showing 18 characters or fewer `is-short`; headers and short cells keep to
+one line while the table's frame is wider than 520 px, and short cells wrap
+like the rest in a narrower frame. A table with more columns than fit scrolls
+inside its own frame. On a phone, agent, daemon and report rows hide their time.
+**Loading messages…** or **Retry** alone in a chat sits mid-pane.
 
 Terminal output reaches both cards through one listener in
 `renderer/next/entry.js`, because the web bridge keeps a single listener per
 event.
+
+### Loading the latest version
+
+A page knows the build it was served (`buildId` in the injected config) and asks
+the host which build it serves now (`cc.getBuild`) on reconnect, when the page
+becomes visible and every ten minutes. While the host serves a different build,
+the rail shows **Load the latest version** above Limits in the accent colour
+(beside Limits on a phone); a click reloads. Nothing reloads by itself, because
+a reload resets open cards and the pane layout. `renderer/next/update_notice.js`
+holds the comparison: an unknown build never shows the control, a failed check
+keeps the last answer, and a host rolled back to the page's build withdraws it.
 
 ### Reading width, microphone and scrollbars
 
