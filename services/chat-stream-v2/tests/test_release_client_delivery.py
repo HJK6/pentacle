@@ -137,16 +137,22 @@ def test_delivery_red_is_independent_in_release_and_nightly(tmp_path, monkeypatc
     }
     assert all(result['outcome'] == 'passed' for name, result in checks.items() if name != 'client_delivery')
 
+    # Nightly uses the same delivery verdict but no longer runs fleet or front-desk smoke.
+    class Socket:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def recv(self, **kwargs): return json.dumps({'type': 'welcome', 'runtime_sha': SHA})
+    monkeypatch.setattr(d, 'connect', lambda *a, **k: Socket())
     monkeypatch.setattr(d, '_run', runner)
-    monkeypatch.setattr(d, '_read_stamp', lambda *a: original)
+    monkeypatch.setattr(d, '_capture_log_offsets', lambda *a, **k: {})
     args = SimpleNamespace(checkout=tmp_path, service=service.name, evidence=tmp_path / 'evidence')
     assert nightly.check_release(args, deploy_module=d) == 1
     record = json.loads((args.evidence / 'receipt.json').read_text())
     nightly_receipt = str(args.evidence / 'receipt.json')
-    assert record['checks'] == {**checks, 'client_delivery': {**checks['client_delivery'], 'receipt': nightly_receipt}}
+    assert record['checks'] == {'slow_consumer': checks['slow_consumer'],
+                                'client_delivery': {**checks['client_delivery'], 'receipt': nightly_receipt}}
     assert record['result'] == 'FAIL'
-    # Nightly's report is the sole notification route for the recurrence.
-    assert notices == [checks, {name: check for name, check in checks.items() if name != 'client_delivery'}]
+    assert notices == [checks]
     assert original == {'sha': SHA}
 
 

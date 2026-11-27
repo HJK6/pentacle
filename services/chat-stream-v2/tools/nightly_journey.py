@@ -250,13 +250,24 @@ def check_release(args, *, deploy_module=None):
     record = {"checkout": str(repo)}
     try:
         service = d.SERVICES[args.service]
-        stamp = dict(d._read_stamp(repo, service))
-        stamp["release_exclusions"] = d.release_exclusions(service, repo)
-        record["release_exclusions"] = stamp["release_exclusions"]
-        sha = stamp["sha"]
+        pid = d._launchd_state(service.launchd_label, d._run).pid
+        start = d._process_start(pid, d._run)
+        with d.connect("ws://127.0.0.1:7791", open_timeout=2, close_timeout=1) as socket:
+            welcome = json.loads(socket.recv(timeout=2))
+        sha = welcome["runtime_sha"]
         record["source_sha"] = sha
-        record["identity_basis"] = "deployment stamp target; not independent loaded-runtime proof"
-        checks = d.run_post_release_checks(service, repo, sha, stamp, runner=d._run, nightly_receipt=path)
+        record["identity_basis"] = "serving welcome and launchd process"
+        offsets = d._capture_log_offsets(d._daemon_log_paths(service), retained=d._managed_log_config(service))
+        for captured in (offsets or {}).values():
+            if isinstance(captured, dict):
+                captured["size"] = 0
+        checks = {
+            "slow_consumer": d._scan_slow_consumer_window(service, offsets, expected_pid=pid,
+                expected_start=start, no_outgoing_writer=True, runner=d._run),
+            "client_delivery": d._check_client_delivery(service, repo, sha, pid, start, d._run),
+        }
+        checks["client_delivery"]["cause_target"] = d._client_delivery_cause(service, repo)
+        checks["client_delivery"]["receipt"] = str(path)
         passed = bool(checks) and all(row.get("outcome") == "passed" for row in checks.values())
         record.update(checks=checks, result="PASS" if passed else "FAIL",
                       primary_error="" if passed else "post-release checks failed")

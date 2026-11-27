@@ -9,7 +9,7 @@
     <string>__PENTACLE_USER_HOME__/.pentacle/nightly-soak/run-nightly-soak.sh</string>
   </array>
   <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>0</integer></dict>
+  <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>55</integer></dict>
   <key>RunAtLoad</key><false/>
   <key>StandardOutPath</key><string>__PENTACLE_USER_HOME__/.pentacle/nightly-soak.log</string>
   <key>StandardErrorPath</key><string>__PENTACLE_USER_HOME__/.pentacle/nightly-soak.err</string>

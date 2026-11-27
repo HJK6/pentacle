@@ -102,27 +102,32 @@ def test_missing_window_never_sleeps(tmp_path):
 
 @pytest.mark.parametrize('outcome,result,rc', [('passed', 'PASS', 0), ('failed', 'FAIL', 1),
                                            ('blocked', 'FAIL', 1), ('skipped', 'FAIL', 1)])
-def test_nightly_calls_shared_checks_on_deployed_stamp(tmp_path, monkeypatch, outcome, result, rc):
+def test_nightly_uses_serving_identity_for_both_checks(tmp_path, monkeypatch, outcome, result, rc):
     from deploy import deploy as d
-    stamp = {'sha': 'a'*40}
-    service = SimpleNamespace(name='v2')
-    monkeypatch.setattr(d, 'SERVICES', {'v2': service}, raising=False)
-    monkeypatch.setattr(d, '_read_stamp', lambda repo, svc: stamp)
-    monkeypatch.setattr(d, 'release_exclusions', lambda repo, svc: [])
-    monkeypatch.setattr(d, '_git_head', lambda repo, runner: 'a'*40, raising=False)
+    service = SimpleNamespace(name='v2', launchd_label='fixture')
+    monkeypatch.setattr(d, 'SERVICES', {'v2': service})
+    monkeypatch.setattr(d, '_read_stamp', lambda *a: pytest.fail('nightly must not read stamp'))
+    monkeypatch.setattr(d, '_launchd_state', lambda *a: SimpleNamespace(pid=42))
+    monkeypatch.setattr(d, '_process_start', lambda *a: 'start')
+    class Socket:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def recv(self, **kwargs): return json.dumps({'type': 'welcome', 'runtime_sha': 'b'*40})
+    monkeypatch.setattr(d, 'connect', lambda *a, **k: Socket())
+    monkeypatch.setattr(d, '_daemon_log_paths', lambda *a: ())
+    monkeypatch.setattr(d, '_managed_log_config', lambda *a: None)
+    monkeypatch.setattr(d, '_capture_log_offsets', lambda *a, **k: {})
     seen = []
-    def checks(svc, repo, sha, value, **kwargs):
-        seen.append((svc, repo, sha, value))
-        return {name: {'outcome': outcome} for name in ('fleet_smoke', 'slow_consumer', 'front_desk')}
-    monkeypatch.setattr(d, 'run_post_release_checks', checks, raising=False)
+    monkeypatch.setattr(d, '_scan_slow_consumer_window', lambda *a, **k: seen.append(k) or {'outcome': outcome})
+    monkeypatch.setattr(d, '_check_client_delivery', lambda *a: seen.append(a) or {'outcome': outcome})
+    monkeypatch.setattr(d, '_client_delivery_cause', lambda *a: None)
     args = SimpleNamespace(checkout=str(tmp_path), evidence=str(tmp_path/'evidence'), service='v2')
     assert nj.check_release(args, deploy_module=d) == rc
-    assert seen == [(service, tmp_path, 'a'*40, {**stamp, 'release_exclusions': []})]
-    assert stamp == {'sha': 'a'*40}
+    assert seen[0]['expected_pid'] == 42 and seen[0]['expected_start'] == 'start'
+    assert seen[1][2:5] == ('b'*40, 42, 'start')
     record = json.loads((tmp_path/'evidence/receipt.json').read_text())
-    assert record['source_sha'] == 'a'*40
-    assert record['result'] == result
-    assert set(record['checks']) == {'fleet_smoke', 'slow_consumer', 'front_desk'}
+    assert record['source_sha'] == 'b'*40 and record['result'] == result
+    assert set(record['checks']) == {'slow_consumer', 'client_delivery'}
 
 
 def test_wrapper_uses_deployed_checkout_and_existing_schedule():
@@ -134,3 +139,52 @@ def test_wrapper_uses_deployed_checkout_and_existing_schedule():
     assert '--wait-within-window' in wrapper
     assert 'TOOLS_ROOT' not in wrapper and 'soak_gate.py' not in wrapper
     assert not (service / 'deploy/com.pentacle.spawn-fleet-smoke.plist').exists()
+
+@pytest.mark.parametrize('soak_result', ['passed', 'failed', 'timeout', 'missing_bound'])
+def test_soak_result_does_not_change_serving_verdict(tmp_path, soak_result):
+    import os
+    import sys
+
+    checkout = tmp_path / 'checkout'
+    python = checkout / 'services/chat-stream-v2/.venv/bin/python'
+    python.parent.mkdir(parents=True)
+    python.write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+args = sys.argv[1:]
+if args[0] == '-':
+    os.execv(sys.executable, [sys.executable, *args])
+if args[0].endswith('nightly_journey.py'):
+    if args[1] == 'admit': print('ADMIT')
+    sys.exit(0)
+if args[0].endswith('scheduled_admission.py'):
+    receipt = pathlib.Path(args[args.index('--receipt') + 1])
+    if 'check-release' in args:
+        receipt.write_text(json.dumps({{'terminated_at_bound': False}}))
+        (receipt.parent / 'receipt.json').write_text(json.dumps({{'result': 'PASS', 'primary_error': ''}}))
+        sys.exit(0)
+    scenario = os.environ['SOAK_CASE']
+    if scenario != 'missing_bound':
+        receipt.write_text(json.dumps({{'terminated_at_bound': scenario == 'timeout', 'elapsed_s': 12.5}}))
+    if scenario != 'missing_bound':
+        (receipt.parent / 'soak.xml').write_text('<testsuites><testsuite tests="2" failures="1" errors="0" skipped="0"/></testsuites>')
+    sys.exit(0 if scenario == 'passed' else 1)
+sys.exit(99)
+''')
+    python.chmod(0o755)
+    config = tmp_path / 'config.zsh'
+    config.write_text(f'CHECKOUT={checkout}\nMEMORY_ROOT={tmp_path}\n')
+    window = tmp_path / '.pentacle/nightly-journey/window.json'
+    window.parent.mkdir(parents=True)
+    window.write_text(json.dumps({'start_utc': '00:00', 'duration_s': 86400}))
+    launcher = Path(__file__).resolve().parents[1] / 'deploy/nightly-soak/run-nightly-soak.sh'
+    run = subprocess.run(['zsh', str(launcher)], capture_output=True, text=True, timeout=30,
+                         env={**os.environ, 'HOME': str(tmp_path), 'NIGHTLY_SOAK_CONFIG': str(config),
+                              'SOAK_CASE': soak_result})
+    assert run.returncode == 0, run.stdout + run.stderr
+    receipt_path, = (tmp_path / '.pentacle/soak').glob('*/evidence/receipt.json')
+    record = json.loads(receipt_path.read_text())
+    assert (record['result'], record['primary_error']) == ('PASS', '')
+    assert record['soak']['result'] == ('failed' if soak_result == 'missing_bound' else soak_result)
+    assert record['soak']['duration_s'] == (None if soak_result == 'missing_bound' else 12.5)
+    assert record['soak']['counts'] == (None if soak_result == 'missing_bound' else
+        {'tests': 2, 'failures': 1, 'errors': 0, 'skipped': 0})

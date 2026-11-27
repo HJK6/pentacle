@@ -1,5 +1,4 @@
 """One installed declaration scopes ordinary/nightly smoke without hiding reds."""
-import copy
 from datetime import datetime, timezone
 import json
 import subprocess
@@ -9,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 from .test_deploy_script import deploy_mod as d, V2_SERVICE, TARGET_SHA
 from .test_deploy_log_guard import isolated_release
-import nightly_journey as nj
 
 LEGACY_DECLARATION = {'host': 'optional', 'reason': 'CLI pin mismatch',
                       'readiness_item': 'pentacle__fixture_readiness_2026_11'}
@@ -93,26 +91,6 @@ def test_ordinary_stamps_scope_before_activation(isolated_release, tmp_path, mon
     assert stamp['serving'] is True
     assert stamp['release_exclusions'] == [ACTIVE]
     assert module._read_stamp(repo, service)['release_exclusions'] == [ACTIVE]
-
-
-def test_nightly_reads_same_home_afresh_without_mutating_runtime_stamp(tmp_path,monkeypatch):
-    path=machines(tmp_path,[DECLARATION]);stamp={'sha':TARGET_SHA,'release_exclusions':[]};original=copy.deepcopy(stamp)
-    monkeypatch.setattr(d,'_launchd_environment',lambda _: {'PENTACLE_MACHINES_FILE':str(path)})
-    monkeypatch.setattr(d,'_read_stamp',lambda *a:stamp)
-    monkeypatch.setattr(d,'_write_stamp',lambda *a:pytest.fail('nightly must not rewrite recovery-bound stamp'))
-    seen=[]
-    def checks(service,repo,sha,value,**kwargs):
-        seen.append(copy.deepcopy(value));return {k:{'outcome':'passed'} for k in ('fleet_smoke','slow_consumer','front_desk')}
-    monkeypatch.setattr(d,'run_post_release_checks',checks)
-    args=SimpleNamespace(checkout=str(tmp_path),evidence=str(tmp_path/'evidence'),service='chat-streamd-v2')
-    assert nj.check_release(args,deploy_module=d)==0
-    assert seen[-1]['release_exclusions']==[ACTIVE]
-    assert json.loads((tmp_path/'evidence/receipt.json').read_text())['release_exclusions']==[ACTIVE]
-    machines(tmp_path, [{**DECLARATION, 'expires_at': '2021-01-01T00:00:00Z'}])
-    assert nj.check_release(args, deploy_module=d) == 0
-    assert seen[-1]['release_exclusions'][0]['status'] == 'expired'
-    assert not d._declared_release_scope(seen[-1]['release_exclusions'])
-    assert stamp == original
 
 
 def test_explicit_rollback_qualifies_only_declared_included_bindings(tmp_path, monkeypatch):
