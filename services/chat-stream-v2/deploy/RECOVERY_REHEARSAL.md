@@ -42,3 +42,11 @@ label, checkout, databases or progress file.
 
 An exit 5 reaches the release runner; the script does not itself notify an
 operator. A progress sample or welcome frame alone does not prove delivery.
+
+Operator grant, Nov 27 2026 (card q-be4cefcc), interim only: until the fixed
+stall checker's labelled push is confirmed delivered (Expo receipt ok), a
+release that ends on exit 5 sends the operator one text through Bart's
+existing SMS route, saying chat is down and naming the `needs_human` record
+path. One text per failed release, nothing else. Once that receipt is ok the
+grant has lapsed: on exit 5 the runner tells the planner and the front desk,
+and the stall checker alerts.
