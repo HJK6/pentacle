@@ -26,6 +26,13 @@ SLOW_LINE_S = 0.25
 ALERT_S = 2.0
 SUMMARY_INTERVAL_S = 3600.0
 TOP_N = 5
+GROUPS = (
+    ("lane_reads", ("_WorkLanesStoreMixin.get_work_lane", "_WorkLanesStoreMixin.work_lane_snapshot")),
+    ("rulings_loop", ("AssistantLaneRulings.",)),
+    ("advisor_checks", ("AdvisorSessions.",)),
+    ("alert_notice_reads", ("ErrorAlerts.notice_rows",)),
+    ("history_pages", ("Store.fetch_session_event_page",)),
+)
 NAME_MAX = 96
 UNNAMED = "unnamed"
 UNKNOWN = "unknown"
@@ -119,10 +126,16 @@ class StoreCallDiag:
 
     def _summarize(self, now: float) -> None:
         top = sorted(self._totals.items(), key=lambda item: item[1][1], reverse=True)[:TOP_N]
+        groups = {}
+        for group, prefixes in GROUPS:
+            matching = [totals for name, totals in self._totals.items() if name.startswith(prefixes)]
+            groups[group] = {"calls": sum(t[0] for t in matching),
+                             "execution_ms": round(sum(t[1] for t in matching) * 1000, 3)}
         log.info("store_call_top %s", json.dumps(
             {"window_s": round(now - self._window_start, 3),
              "top": [{"name": name, "calls": calls, "execution_ms": round(total * 1000, 3)}
                      for name, (calls, total) in top],
+             "groups": groups,
              "instrumentation_failures": self.failures}, separators=(",", ":")))
         self._totals, self._window_start = {}, now
 

@@ -167,6 +167,24 @@ def test_call_name_is_static_and_reduced():
         "test_call_name_is_static_and_reduced.locals.Callable.__call__")
 
 
+def test_hourly_line_group_totals(caplog):
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    diag = store_call_diag.StoreCallDiag()
+    diag.record("_WorkLanesStoreMixin.get_work_lane.locals.read", False, None, 0, 0, 0.125)
+    diag.record("_WorkLanesStoreMixin.work_lane_snapshot.locals.read", False, None, 1, 1, 1.25)
+    diag.record("AdvisorSessions.tick.locals.read", False, None, 2, 2, 2.5)
+    diag.record("unrelated", False, None, 3, 3, 3.75)
+    diag.record("unrelated", False, None, 3601, 3601, 3601)
+    [line] = lines(caplog, "store_call_top")
+    assert line["groups"] == {
+        "lane_reads": {"calls": 2, "execution_ms": 375.0},
+        "rulings_loop": {"calls": 0, "execution_ms": 0.0},
+        "advisor_checks": {"calls": 1, "execution_ms": 500.0},
+        "alert_notice_reads": {"calls": 0, "execution_ms": 0.0},
+        "history_pages": {"calls": 0, "execution_ms": 0.0},
+    }
+
+
 def test_hourly_line_lists_top_five_by_total_execution(caplog):
     caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
     diag = store_call_diag.StoreCallDiag()
