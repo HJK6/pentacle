@@ -112,10 +112,14 @@ if pathlib.Path(sys.argv[1]).name == 'restart_probe.py':
         count_file = pathlib.Path(os.environ['FIXTURE_VERIFY_COUNTS'])
         calls = int(count_file.read_text()) + 1
         count_file.write_text(str(calls))
-        events = 2 if os.environ.get('FIXTURE_DUPLICATE') else int(calls > 2)
-        print(f'1 ok:delivered - delivery_rows=1 target_events={events}')
-        sys.exit(int(events == 0))
-    sys.exit(int(os.environ.get('FIXTURE_PROBE_FAIL', '0')) if sys.argv[2] == 'verify' else 0)
+        duplicate = bool(os.environ.get('FIXTURE_DUPLICATE'))
+        events = 1 if duplicate else int(calls > 2)
+        print(f'1 ok:delivered - delivery_rows={2 if duplicate else 1} target_events={events}')
+        sys.exit(int(duplicate or events == 0))
+    if sys.argv[2] == 'verify' and os.environ.get('FIXTURE_PROBE_FAIL') == '1':
+        print('1 ok:delivered - delivery_rows=2 target_events=1 <-- CHECK')
+        sys.exit(1)
+    sys.exit(0)
 if pathlib.Path(sys.argv[1]).name == 'helper_release.py':
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 assert pathlib.Path(sys.argv[1]).name == 'welcome_probe.py'

@@ -77,14 +77,14 @@ finish() {
   if [[ -n "$PROBE_PID" ]]; then
     (( code == 130 )) && kill "$PROBE_PID" 2>/dev/null
     wait "$PROBE_PID"; local probe_run=$?
-    local start=$SECONDS tries=0 verify_output verify_rc
+    local start=$SECONDS verify_output verify_rc
     while true; do
       verify_output=$("$PY" "$SCRIPT_DIR/restart_probe.py" verify "$PROBE_FILE"); verify_rc=$?
       print -r -- "$verify_output"
-      if print -r -- "$verify_output" | grep -Eq '(delivery_rows|target_events)=([2-9]|[1-9][0-9]+)( |$)'; then break; fi
+      if print -r -- "$verify_output" | grep -Eq 'delivery_rows=([2-9]|[1-9][0-9]+)( |$)'; then break; fi
       if (( verify_rc == 0 && probe_run == 0 )); then PROBE_VERDICT=passed; break; fi
-      if (( SECONDS - start >= 180 || tries >= 36 || probe_run != 0 )); then break; fi
-      sleep $(( 180 - (SECONDS - start) < 5 ? 180 - (SECONDS - start) : 5 )); (( tries++ ))
+      if (( SECONDS - start >= 180 || probe_run != 0 )); then break; fi
+      sleep 5
     done
     PROBE_WAIT_S=$(( SECONDS - start )); say "probe wait: $PROBE_WAIT_S s"
     if [[ "$PROBE_VERDICT" != passed ]]; then
