@@ -19,14 +19,21 @@ class SendTiming:
             "reply_under_2s": 0, "reply_2s_or_more": 0,
             "proof_under_1s": 0, "queued": 0,
             "pending_proof": 0, "failed": 0, "coalesced": 0,
+            "backend_attempts": 0, "backend_proof_under_1s": 0, "backend_pending_proof": 0, "backend_worst_ms": 0,
         }
         self.failures = 0
 
-    def record(self, started: float, result: dict) -> None:
+    def record(self, started: float, result: dict, *, backend: bool = False) -> None:
         try:
             now = self._clock()
             if result.get("coalesced"):
-                self._counts["coalesced"] += 1
+                self._counts["coalesced"] += not backend
+            elif backend:
+                elapsed = now - started
+                self._counts["backend_attempts"] += 1
+                self._counts["backend_proof_under_1s"] += elapsed < 1 and result.get("submission_confirmed") is True
+                self._counts["backend_pending_proof"] += result.get("delivery") == "committed_pending_proof"
+                self._counts["backend_worst_ms"] = max(self._counts["backend_worst_ms"], round(elapsed * 1000, 3))
             else:
                 elapsed = now - started
                 confirmed = result.get("submission_confirmed") is True
@@ -43,7 +50,7 @@ class SendTiming:
                     self._counts["failed"] += 1
                 else:
                     self._counts["pending_proof"] += 1
-            self.flush(now)
+            if not backend: self.flush(now)
         except Exception:
             self.failures += 1
 
@@ -62,6 +69,7 @@ class SendTiming:
             "window_s": round(now - self._window_start, 3),
             "attempts": attempts,
             **self._counts,
+            "backend_worst_ms": self._counts["backend_worst_ms"] if self._counts["backend_attempts"] else None,
             "reply_p95_ms": round(reply_ms[math.ceil(attempts * 0.95) - 1], 3) if attempts else None,
             "reply_worst_ms": round(reply_ms[-1], 3) if attempts else None,
             "instrumentation_failures": self.failures,

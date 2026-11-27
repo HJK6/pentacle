@@ -67,6 +67,36 @@ def test_send_latency_counts_reply_time_boundaries(caplog):
     assert {key: window.get(key) for key in expected} == expected
 
 
+def test_send_latency_counts_backend_dispatches_separately(caplog):
+    times = iter([0, 1, 3600, 3600, 3600, 3600, 3600])
+    timing = SendTiming(clock=times.__next__)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    landed = {"delivery": "landed", "submission_confirmed": True}
+
+    timing.record(0.75, landed)
+    timing.record(3599.75, landed, backend=True)
+    timing.record(3599, landed, backend=True)
+    timing.record(3597.5, {"delivery": "committed_pending_proof"}, backend=True)
+    timing.record(3599.25, {"delivery": "not_landed"}, backend=True)
+    timing.record(3599.75, {**landed, "coalesced": True}, backend=True)
+    assert not caplog.messages
+
+    timing.flush(3600)
+    timing.flush(3601, force=True)
+    first, second = [json.loads(line.removeprefix("send_latency ")) for line in caplog.messages]
+    expected = {
+        "attempts": 1, "reply_under_1s": 1, "proof_under_1s": 1,
+        "pending_proof": 0, "failed": 0, "coalesced": 0,
+        "backend_attempts": 4, "backend_proof_under_1s": 1,
+        "backend_pending_proof": 1, "backend_worst_ms": 2500,
+    }
+    assert {key: first[key] for key in expected} == expected
+    assert {key: value for key, value in second.items() if key.startswith("backend_")} == {
+        "backend_attempts": 0, "backend_proof_under_1s": 0,
+        "backend_pending_proof": 0, "backend_worst_ms": None,
+    }
+
+
 def test_send_latency_counts_and_resets(caplog):
     times = iter([0, 1, 2, 3, 4, 5, 6, 7, 3601, 7202])
     timing = SendTiming(clock=times.__next__)
@@ -90,6 +120,8 @@ def test_send_latency_counts_and_resets(caplog):
         "reply_under_500ms": 3, "reply_under_2s": 6, "reply_2s_or_more": 1,
         "proof_under_1s": 2, "queued": 1, "pending_proof": 3, "failed": 1,
         "coalesced": 1, "reply_p95_ms": 2000, "reply_worst_ms": 2000,
+        "backend_attempts": 0, "backend_proof_under_1s": 0,
+        "backend_pending_proof": 0, "backend_worst_ms": None,
         "instrumentation_failures": 0,
     }
     assert len(caplog.messages) == 1
@@ -102,6 +134,8 @@ def test_send_latency_counts_and_resets(caplog):
         "reply_under_500ms": 1, "reply_under_2s": 1, "reply_2s_or_more": 0,
         "proof_under_1s": 1, "queued": 0, "pending_proof": 0, "failed": 0,
         "coalesced": 0, "reply_p95_ms": 250, "reply_worst_ms": 250,
+        "backend_attempts": 0, "backend_proof_under_1s": 0,
+        "backend_pending_proof": 0, "backend_worst_ms": None,
         "instrumentation_failures": 0,
     }
 

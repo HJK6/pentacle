@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import logging
+import time
 from pathlib import Path
 
 import pytest
 
 import comms as comms_module
 from comms import Comms
+from send_timing import SendTiming
 from sessions import Sessions, VerbError
 from spawnctl import SpawnCtl
 from store import Store
@@ -179,8 +183,11 @@ def test_claude_first_send_requires_bootstrap_ready(tmp_path: Path, bootstrap_st
     _run(go())
 
 
-def test_composite_backend_send_reuses_transport_without_ordinary_qa_progress(tmp_path: Path, monkeypatch) -> None:
+def test_composite_backend_send_reuses_transport_without_ordinary_qa_progress(tmp_path: Path, monkeypatch, caplog) -> None:
     """Only the daemon-only wrapper suppresses ordinary QA admission."""
+    timing = SendTiming()
+    monkeypatch.setattr(comms_module, "send_counter", timing)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
 
     async def go() -> None:
         tmux = FakeTmux()
@@ -207,6 +214,11 @@ def test_composite_backend_send_reuses_transport_without_ordinary_qa_progress(tm
             })
             assert direct["submission_confirmed"] is True
             assert len(admitted) == 1
+            timing.flush(time.monotonic(), force=True)
+            [line] = [message for message in caplog.messages if message.startswith("send_latency ")]
+            window = json.loads(line.removeprefix("send_latency "))
+            assert window["attempts"] == 1
+            assert window.get("backend_attempts") == 1
         finally:
             store.stop()
 
