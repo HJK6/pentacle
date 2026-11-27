@@ -62,7 +62,7 @@ import ingest_checkpoint as checkpoint
 
 log = logging.getLogger("chat_streamd_v2.ingest")
 
-DEFAULT_INTERVAL_S = 1.5
+DEFAULT_INTERVAL_S = 0.5
 #: Per-pass work cap (loop rule 2): at most this many newly-appended events per
 #: pass. Rotating the starting stream prevents a replay from monopolizing
 #: successive passes; the remainder is picked up on its next rotation.
@@ -80,7 +80,7 @@ ENV_PREFIX = "PENTACLE_INGEST_"
 class IngestConfig:
     """Loop-rule knobs (event-loop rule 2), mirroring MirrorConfig.
 
-    cadence      `interval_s`, default 1.5s, env `PENTACLE_INGEST_INTERVAL_S`
+    cadence      `interval_s`, default 0.5s, env `PENTACLE_INGEST_INTERVAL_S`
     per-pass cap `max_events_per_pass` newly-appended events across all streams
     backoff      exponential PER STREAM from `backoff_base_s`, capped at max
     kill switch  `--disable-ingest` (main.py never constructs the job)
