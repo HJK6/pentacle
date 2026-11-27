@@ -26,14 +26,6 @@ class ManualTimeouts:
             self.waits.put_nowait((delay, timeout))
             yield
 
-    async def sleep(self, delay):
-        # Also drive the original polling loop when running against main.
-        try:
-            async with self.timeout(delay):
-                await asyncio.Event().wait()
-        except TimeoutError:
-            pass
-
     async def next_wait(self):
         return await asyncio.wait_for(self.waits.get(), timeout=3)
 
@@ -61,19 +53,24 @@ async def test_new_request_wakes_rulings_before_idle_timeout(monkeypatch):
         monkeypatch.setattr(rulings, "tick", tick)
         await rulings.start()
         tick.assert_awaited_once()
-        await timeouts.next_wait()
+        _, startup_timeout = await timeouts.next_wait()
+        startup_timeout.reschedule(asyncio.get_running_loop().time())
+        delay, _ = await timeouts.next_wait()
+        assert delay == 15
 
         reply = await rulings.request_spawn(_spawn_msg(root, "wake-ruling"))
         assert reply["type"] == "spawn.pending_ruling"
         # The idle timeout is still held. Only the request can start this tick.
         delay, _ = await timeouts.next_wait()
         assert delay == 1
-        assert tick.await_count == 2
+        assert tick.await_count == 3
 
 
 async def test_next_idle_check_detects_authority_loss(monkeypatch):
     async with running_rig(monkeypatch) as (_root, server, timeouts):
         await server.lane_rulings.start()
+        _, startup_timeout = await timeouts.next_wait()
+        startup_timeout.reschedule(asyncio.get_running_loop().time())
         delay, timeout = await timeouts.next_wait()
         assert await _loss_notices(server.store) == []
 

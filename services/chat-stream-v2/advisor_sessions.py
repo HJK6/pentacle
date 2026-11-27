@@ -323,7 +323,7 @@ class AdvisorSessions:
                             continue
                     await self._start(row, 1 + (history[-1]["attempt"] if history else 0))
                     slots -= 1
-                return bool(records) or slots < 4
+                return bool(records)
 
     async def stop(self):
         tasks, self.tasks = list(self.tasks.values()), {}

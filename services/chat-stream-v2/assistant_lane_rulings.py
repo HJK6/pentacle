@@ -2040,12 +2040,13 @@ class AssistantLaneRulings:
                     await self._notify_unruled(row)
         return advisor_pending or bool(rows)
 
-    def _ensure_worker(self, pending: bool = True) -> None:
+    def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._run(pending), name="assistant-lane-rulings")
+            self._worker = asyncio.create_task(self._run(), name="assistant-lane-rulings")
 
     async def start(self) -> None:
-        self._ensure_worker(await self.tick())
+        self._ensure_worker()
+        await self.tick()
 
     async def stop(self) -> None:
         if self._worker is not None:
@@ -2056,7 +2057,8 @@ class AssistantLaneRulings:
                 pass
         await self.advisor_sessions.stop()
 
-    async def _run(self, pending: bool) -> None:
+    async def _run(self) -> None:
+        pending = True
         while True:
             try:
                 async with asyncio.timeout(1.0 if pending else IDLE_CHECK_SECONDS):
@@ -2067,4 +2069,5 @@ class AssistantLaneRulings:
             try:
                 pending = await self.tick()
             except Exception:
+                pending = True
                 log.exception("assistant lane ruling reconciliation failed; will retry")
