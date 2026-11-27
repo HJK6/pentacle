@@ -20,6 +20,7 @@ import time
 import uuid
 
 UNANSWERED_AFTER_SECONDS = 300
+IDLE_CHECK_SECONDS = 15.0
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +224,7 @@ class AssistantLaneRulings:
         self.server = server
         self.store = server.store
         self._worker: asyncio.Task[None] | None = None
+        self._wake = asyncio.Event()
         self._release_locks: dict[str, asyncio.Lock] = {}
         self._authority_lock = asyncio.Lock()
         from advisor_sessions import AdvisorSessions
@@ -650,6 +652,8 @@ class AssistantLaneRulings:
                 return False
         async with self._authority_lock:
             duplicate = await self.store.submit(op)
+        if not duplicate:
+            self._wake.set()
         return {"type": "assistant.answer.ok", "ruling_request_id": rid,
                 "state": "answered", "duplicate": duplicate}
 
@@ -1234,6 +1238,8 @@ class AssistantLaneRulings:
             if covered and binding["state"] in {"unconfigured", "same_primary"}:
                 binding = {**binding, "stream_id": "", "generation": ""}
             request = await self.store.submit(op)
+            if request["ruling_request_id"] == request_id:
+                self._wake.set()
             request["_binding_state"] = binding["state"]
             return request
 
@@ -1409,6 +1415,8 @@ class AssistantLaneRulings:
         except ValueError as exc:
             await self._audit(rid, "refused", actor_stream_id, actor_generation, str(exc))
             raise
+        if not request.get("duplicate"):
+            self._wake.set()
         if request["state"] == "approved":
             await self._release(request)
         elif request["state"] in {"revised", "denied"} and not request.get("duplicate"):
@@ -1978,9 +1986,10 @@ class AssistantLaneRulings:
             if self.server.broadcast is not None:
                 await self.server.broadcast({"type": "chat.event", "event": event})
 
-    async def tick(self) -> None:
+    async def tick(self) -> bool:
+        advisor_pending = False
         try:
-            await self.advisor_sessions.tick()
+            advisor_pending = await self.advisor_sessions.tick()
         except Exception:
             log.exception("assistant advisor-session check failed; will retry")
         try:
@@ -2029,6 +2038,7 @@ class AssistantLaneRulings:
                 await self._release(row)
                 if row["action"] != "question" and row["ruling"] is None and row["reason"] in _UNRULED_REASONS:
                     await self._notify_unruled(row)
+        return advisor_pending or bool(rows)
 
     def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():
@@ -2048,9 +2058,16 @@ class AssistantLaneRulings:
         await self.advisor_sessions.stop()
 
     async def _run(self) -> None:
+        pending = True
         while True:
-            await asyncio.sleep(1.0)
             try:
-                await self.tick()
+                async with asyncio.timeout(1.0 if pending else IDLE_CHECK_SECONDS):
+                    await self._wake.wait()
+            except TimeoutError:
+                pass
+            self._wake.clear()
+            try:
+                pending = await self.tick()
             except Exception:
+                pending = True
                 log.exception("assistant lane ruling reconciliation failed; will retry")
