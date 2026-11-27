@@ -127,7 +127,8 @@ print(n if sys.argv[1] == '+%s' else '00:00:00')
            "FIXTURE_STATE": str(state), "FIXTURE_CLOCK": str(clock), "FIXTURE_LOG": str(log),
            PREFIX + "RUNTIME_CHECKOUT": str(rt), PREFIX + "LAUNCHD_LABEL": "demo.daemon",
            PREFIX + "RUNTIME_PYTHON": str(probe), PREFIX + "DAEMON_URL": "ws://127.0.0.1:12345"}
-    env.pop(PREFIX + "PUTBACK_WORK", None)
+    for setting in ("PUTBACK_WORK", "RECORD_DIR", "PROBE_TARGET"):
+        env.pop(PREFIX + setting, None)
     return env, rt, state, {"prior": prior, "target": target, "diverged": diverged,
                             "changed_requirements": changed_requirements, "only_local": only_local, "helper_change": helper_change}
 
