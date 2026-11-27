@@ -54,6 +54,65 @@ def proof_point(sql):
     return sql.startswith('SELECT event_id,event_json FROM session_event_tail WHERE event_id=')
 
 
+def test_live_projection_skips_receipts_anchored_to_other_events(tmp_path):
+    from ingest import append_ingested_event
+
+    async def run():
+        store = Store(str(tmp_path / 'hot.db'))
+        store.start()
+        frames, statements, walks = [], [], []
+        repeated_wire = 'repeat the compaction input'
+
+        async def broadcast(frame):
+            frames.append(frame)
+
+        def seed(conn):
+            session(conn)
+            for i in range(6):
+                key = f'old-{i}'
+                seq = event(conn, key, repeated_wire)
+                delivery(conn, key, repeated_wire, proof_event_id=seq, proof_watermark=seq - 1)
+            delivery(conn, 'own', repeated_wire, proof_event_id=seq + 1, proof_watermark=seq)
+            delivery(conn, 'unanchored', 'unanchored input', proof_watermark=seq + 1)
+            delivery(conn, 'final', 'final input', proof_event_id=seq + 4, proof_watermark=seq + 3)
+            conn.commit()
+            return seq
+
+        try:
+            watermark = await store.submit(seed)
+            await store.submit(lambda conn: conn.set_trace_callback(statements.append))
+            try:
+                for key, wire in [('own', repeated_wire), ('unanchored', 'unanchored input'),
+                                  ('other-anchors', repeated_wire), ('final', 'final input')]:
+                    statements.clear()
+                    await append_ingested_event(store, broadcast, {
+                        'kind': 'USER', 'stream_id': TARGET, 'provider': 'codex',
+                        'timestamp': BIRTH, 'text': wire, 'raw': {'jsonl_record_uuid': key},
+                    }, recent_limit=100)
+                    walks.append(sum(proof_walk(sql) for sql in statements))
+            finally:
+                await store.submit(lambda conn: conn.set_trace_callback(None))
+
+            assert [frame['type'] for frame in frames] == ['chat.event'] * 4
+            observed = [
+                (item['daemon_seq'], item['raw']['jsonl_record_uuid'],
+                 item['raw']['input_provenance']['kind'], item['raw']['input_provenance']['verified'])
+                for frame in frames for item in [frame['event']]
+            ]
+            assert observed == [
+                (watermark + 1, 'own', 'service', True),
+                (watermark + 2, 'unanchored', 'service', True),
+                (watermark + 3, 'other-anchors', 'unknown', False),
+                (watermark + 4, 'final', 'service', True),
+            ]
+            print(f'Live projection tail reads (own, unanchored, other anchors, final): {walks}')
+            assert walks == [1, 1, 0, 1]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 async def measured(store, action, monkeypatch):
     statements, visits, decodes = [], [], []
     original = tell_proof._TailEvent.event
