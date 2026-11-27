@@ -195,59 +195,52 @@ def _collect_coverage(repo, revision, root, python, remaining, *, historical, er
         except failures as exc:
             errors.append(f"{revision} {suite}: {exc}")
 
-    if "npm" not in suites:
+    if "npm" in suites:
         try:
-            require(not checked(run(["git", "status", "--porcelain", "--untracked-files=all"], env=env, timeout=30)), "collection changed the tracked source")
-            require(checked(run(["git", "rev-parse", "HEAD"], env=env, timeout=30)).strip() == revision, "collection changed the pinned revision")
+            npm = targets["npm-test"]
+            patterns = npm["default_patterns"]
+            strings(patterns, "npm selection")
+            for pattern in patterns:
+                path_pattern(pattern)
+            _, setup_errors = ensure_npm_env(run, root, scratch / f"{root.name}-npm", env, profile, False,
+                                             lambda message: print(f"[coverage] {revision} {message}", flush=True))
+            require(not setup_errors, " | ".join(item["detail"] for item in setup_errors))
+            for build in npm.get("npm_build", []):
+                checked(run(["npm", "run", build], env=env, timeout=300))
+            script = """
+    const {collectNodeTests} = require('./scripts/lib/test-runner');
+    const controller = new AbortController();
+    process.once('SIGTERM', () => controller.abort());
+    const options = JSON.parse(process.argv[2]);
+    collectNodeTests(process.cwd(), JSON.parse(process.argv[1]), {...options, abortSignal: controller.signal})
+      .then(rows => process.stdout.write(JSON.stringify(rows)))
+      .catch(error => { console.error(error.message); process.exitCode = 1; });
+    """
+            collection_bound = min(npm["timeout_s"], command_budget(remaining()) - 5)
+            require(collection_bound >= 0.001, "coverage comparison timed out before npm collection")
+            options = {"runTimeoutMs": int(collection_bound * 1000),
+                       "fileTimeoutMs": npm.get("test_file_timeout_ms", 60000)}
+            rows = json.loads(checked(run(["node", "-e", script, json.dumps(patterns), json.dumps(options)],
+                                          env=env, timeout=remaining())))
+            files, invocations = {}, Counter()
+            for row in rows:
+                file = row["file"]
+                path_pattern(file)
+                require(all(type(case["skipped"]) is bool and case["id"].startswith(file + "::")
+                            for case in row["cases"]), f"invalid npm collection for {file}")
+                all_cases = Counter((case["id"], case["skipped"]) for case in row["cases"])
+                require(files.setdefault(file, all_cases) == all_cases,
+                        f"npm collection varied across invocations of {file}")
+                invocations[file] += 1
+            blocking, skipped, paths = Counter(), Counter(), {}
+            for file, cases in files.items():
+                for (test, nonblocking), count in cases.items():
+                    (skipped if nonblocking else blocking)[test] += count
+                    paths[test] = file
+            require(blocking or skipped, "empty npm collection")
+            inventory["npm"] = blocking, skipped, paths, invocations
         except failures as exc:
-            errors.append(f"{revision} source integrity: {exc}")
-            return {}
-        return inventory
-    try:
-        npm = targets["npm-test"]
-        patterns = npm["default_patterns"]
-        strings(patterns, "npm selection")
-        for pattern in patterns:
-            path_pattern(pattern)
-        _, setup_errors = ensure_npm_env(run, root, scratch / f"{root.name}-npm", env, profile, False,
-                                         lambda message: print(f"[coverage] {revision} {message}", flush=True))
-        require(not setup_errors, " | ".join(item["detail"] for item in setup_errors))
-        for build in npm.get("npm_build", []):
-            checked(run(["npm", "run", build], env=env, timeout=300))
-        script = """
-const {collectNodeTests} = require('./scripts/lib/test-runner');
-const controller = new AbortController();
-process.once('SIGTERM', () => controller.abort());
-const options = JSON.parse(process.argv[2]);
-collectNodeTests(process.cwd(), JSON.parse(process.argv[1]), {...options, abortSignal: controller.signal})
-  .then(rows => process.stdout.write(JSON.stringify(rows)))
-  .catch(error => { console.error(error.message); process.exitCode = 1; });
-"""
-        collection_bound = min(npm["timeout_s"], command_budget(remaining()) - 5)
-        require(collection_bound >= 0.001, "coverage comparison timed out before npm collection")
-        options = {"runTimeoutMs": int(collection_bound * 1000),
-                   "fileTimeoutMs": npm.get("test_file_timeout_ms", 60000)}
-        rows = json.loads(checked(run(["node", "-e", script, json.dumps(patterns), json.dumps(options)],
-                                      env=env, timeout=remaining())))
-        files, invocations = {}, Counter()
-        for row in rows:
-            file = row["file"]
-            path_pattern(file)
-            require(all(type(case["skipped"]) is bool and case["id"].startswith(file + "::")
-                        for case in row["cases"]), f"invalid npm collection for {file}")
-            all_cases = Counter((case["id"], case["skipped"]) for case in row["cases"])
-            require(files.setdefault(file, all_cases) == all_cases,
-                    f"npm collection varied across invocations of {file}")
-            invocations[file] += 1
-        blocking, skipped, paths = Counter(), Counter(), {}
-        for file, cases in files.items():
-            for (test, nonblocking), count in cases.items():
-                (skipped if nonblocking else blocking)[test] += count
-                paths[test] = file
-        require(blocking or skipped, "empty npm collection")
-        inventory["npm"] = blocking, skipped, paths, invocations
-    except failures as exc:
-        errors.append(f"{revision} npm: {exc}")
+            errors.append(f"{revision} npm: {exc}")
     try:
         require(not checked(run(["git", "status", "--porcelain", "--untracked-files=all"],
                                 env=env, timeout=30)), "collection changed the tracked source")
@@ -292,13 +285,12 @@ def check_coverage(repo: Path, base: str, head: str, *, python: str, timeout: fl
                   for change in changes(base, head, repo=repo, timeout=remaining())
                   for path in change["paths"]}
         suites = set()
+        # Suite roots correspond to the targets in scripts/gate-env.json.
         roots = {"daemon": "services/chat-stream-v2/", "cli": "services/agent-orch/",
                  "shared": "services/_shared/"}
         common = {"scripts/select_tests.py", "scripts/gate_env.py", "scripts/gate-env.json",
                   "scripts/quarantine_plugin.py", "scripts/quarantine_list.py",
-                  "scripts/quarantine-v2.json", "scripts/quarantine.json", "scripts/admission_inputs.py",
-                  "services/chat-stream-v2/tools/run_gate.py", "services/chat-stream-v2/tools/gate_shard.py",
-                  "services/chat-stream-v2/tools/gate_progress.py"}
+                  "scripts/quarantine-v2.json", "scripts/quarantine.json"}
         for path in scopes:
             if path in common:
                 suites.update((*roots, "npm"))

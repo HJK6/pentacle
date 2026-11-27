@@ -38,6 +38,7 @@ PRE_FLIGHT = SERVICE_DIR / "tools" / "gate_preflight.sh"
 UNIT_SEPARATE_MARKERS = ("repin_exhaustive",)
 DEFAULT_TIMEOUTS = {"contract": 300.0, "unit": 18000.0, "smoke": 600.0, "soak": 7200.0}
 MERGE_TIERS = ("contract", "unit", "smoke")
+MERGE_BASE_TIMEOUT_S = 20.0
 # Component bounds for the --deadline-seconds envelope. The reserve covers this
 # runner's own terminate (5s TERM, 20s final reap), reader drain (READER_JOIN_S), reap and evidence writes.
 USAGE_BOUND_S = 30.0
@@ -321,6 +322,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
         except ValueError as exc:
             return _result(tier, code=2, passed=False, reason="invalid_soak_tier", junit=junit, log=log, soak={"error": str(exc)})
     if tier == "unit" and selection == []:
+        print("[v2-gate] unit: empty selection, not run")
         return _result(tier, code=0, passed=True, reason=None)
     command = _tier_command(tier, junit, basetemp)
     if tier == "unit" and selection is not None:
@@ -609,7 +611,7 @@ def main() -> int:
             if not results:
                 if args.gate == "merge":
                     try:
-                        base = _merge_contract_base(merge_bounds.get("merge_base", 30.0))
+                        base = _merge_contract_base(merge_bounds["merge_base"])
                         from select_tests import check_coverage
                         try:
                             check_coverage(REPO_ROOT, base, sha, python=_python_bin(), timeout=merge_bounds['coverage'])
@@ -627,7 +629,7 @@ def main() -> int:
                         from tools.gate_selection import stack
                     except ModuleNotFoundError:
                         from gate_selection import stack
-                    selection, unmapped = stack(REPO_ROOT, _merge_contract_base(merge_bounds.get("merge_base", 30.0)))
+                    selection, unmapped = stack(REPO_ROOT, _merge_contract_base(merge_bounds.get("merge_base", MERGE_BASE_TIMEOUT_S)))
                     print("[v2-gate] selected:", *selection, sep="\n  ")
                     print("[v2-gate] unmapped:", *unmapped, sep="\n  ")
                 for index, (tier, limit) in enumerate(limits):
@@ -636,7 +638,8 @@ def main() -> int:
                     if (index or merge_bounds) and (refusal := _deadline_check(deadline, clock_start, "deadline", pending[index:], usage_pending=False)):
                         results.append(refusal)
                         break
-                    options = {"selection": selection} if selection is not None else {}
+                    unit_selection = [p for p in selection if not p.startswith(("tests/contract/", "tests/smoke/", "tests/soak/"))] if selection is not None else None
+                    options = {"selection": unit_selection} if unit_selection is not None else {}
                     if args.shard_index is not None:
                         options.update(shard_index=args.shard_index, shard_count=args.shard_count)
                     results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest,
