@@ -198,6 +198,7 @@ class AdvisorSessions:
                           "WHERE ruling_request_id=? AND authority_stream_id=? AND authority_generation=? AND state='pending'",
                           (rid, record["stream_id"], record["generation"]))
         await self.store.submit(complete)
+        self.rulings._wake.set()
         return True
 
     async def close_request(self, rid, reason):
@@ -271,7 +272,7 @@ class AdvisorSessions:
                 body="[Advisor session failed] " + _canonical({"ruling_request_id": rid, "attempts": attempts}),
                 metadata={"authority_generation": generation})
 
-    async def tick(self):
+    async def tick(self) -> bool:
         async with self.lock:
             now = time.time()
             records = await self.store.submit(lambda c: [dict(r) for r in c.execute(
@@ -281,13 +282,13 @@ class AdvisorSessions:
             async with self.server.sessions.assistant.authority_lock, self.rulings._authority_lock:
                 binding = await self.rulings.binding()
                 if binding["state"] == "disabled":
-                    return
+                    return bool(records)
                 # Commit holds this authority lock through binding publication.
                 # Cleanup may retry later; it must not keep new requests paused.
                 if await self.store.submit(lambda c: bool(c.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_host_transfers'").fetchone()) and
                         bool(c.execute("SELECT 1 FROM v2_host_transfers WHERE state='preparing' LIMIT 1").fetchone())):
-                    return
+                    return bool(records)
                 kinds = await self.store.submit(lambda c: json_record(c, KINDS_KEY, []))
                 active = await self.store.submit(lambda c: [dict(r) for r in c.execute(
                     "SELECT r.work_item FROM v2_advisor_sessions s JOIN v2_assistant_lane_rulings r "
@@ -322,6 +323,7 @@ class AdvisorSessions:
                             continue
                     await self._start(row, 1 + (history[-1]["attempt"] if history else 0))
                     slots -= 1
+                return bool(records) or slots < 4
 
     async def stop(self):
         tasks, self.tasks = list(self.tasks.values()), {}
