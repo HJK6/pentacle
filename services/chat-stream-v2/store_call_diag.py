@@ -17,6 +17,7 @@ import re
 import sys
 
 from error_adapters import ErrorFact
+from send_timing import send_counter
 
 log = logging.getLogger("chat_streamd_v2.store")
 
@@ -120,11 +121,11 @@ class StoreCallDiag:
             if self._window_start is None:
                 self._window_start = finished
             elif finished - self._window_start >= SUMMARY_INTERVAL_S:
-                self._summarize(finished)
+                self._summarize(finished, loop)
         except Exception:
             self.failures += 1
 
-    def _summarize(self, now: float) -> None:
+    def _summarize(self, now: float, loop) -> None:
         top = sorted(self._totals.items(), key=lambda item: item[1][1], reverse=True)[:TOP_N]
         groups = {}
         for group, prefixes in GROUPS:
@@ -138,6 +139,7 @@ class StoreCallDiag:
              "groups": groups,
              "instrumentation_failures": self.failures}, separators=(",", ":")))
         self._totals, self._window_start = {}, now
+        loop.call_soon_threadsafe(send_counter.flush, now)
 
     def _hand_off(self, name: str, loop) -> None:
         # Schedule only; the worker never waits on, re-enters or networks for the alert.

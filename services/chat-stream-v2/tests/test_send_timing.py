@@ -1,7 +1,42 @@
+import asyncio
 import json
 import logging
 
+import pytest
+
+import store_call_diag
 from send_timing import SendTiming
+
+
+@pytest.mark.asyncio
+async def test_store_summary_flushes_quiet_send_window(caplog, monkeypatch):
+    timing = SendTiming(clock=lambda: 0)
+    monkeypatch.setattr(store_call_diag, "send_counter", timing, raising=False)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    diag = store_call_diag.StoreCallDiag()
+    loop = asyncio.get_running_loop()
+
+    diag.record("read", False, loop, 0, 0, 0)
+    await asyncio.to_thread(diag.record, "read", False, loop, 3600, 3600, 3600)
+
+    store_line, send_line = caplog.messages
+    assert store_line.startswith("store_call_top ")
+    assert send_line.startswith("send_latency ")
+    assert json.loads(send_line.removeprefix("send_latency "))["attempts"] == 0
+
+
+def test_forced_flush_reports_and_resets_partial_window(caplog):
+    times = iter([0, 2])
+    timing = SendTiming(clock=times.__next__)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    timing.record(1.5, {"delivery": "landed", "submission_confirmed": True})
+
+    timing.flush(12.5, force=True)
+    timing.flush(13, force=True)
+
+    first, second = [json.loads(line.removeprefix("send_latency ")) for line in caplog.messages]
+    assert (first["window_s"], first["attempts"]) == (12.5, 1)
+    assert (second["window_s"], second["attempts"]) == (0.5, 0)
 
 
 def test_send_latency_counts_and_resets(caplog):
@@ -22,6 +57,8 @@ def test_send_latency_counts_and_resets(caplog):
     assert not caplog.messages
 
     timing.record(3400, {**landed, "coalesced": True, "provider_queued": True})
+    assert not caplog.messages
+    timing.flush(3601)
     first_window = {
         "window_s": 3601, "attempts": 7, "reply_under_1s": 5,
         "proof_under_1s": 2, "queued": 1, "pending_proof": 3, "failed": 1,
@@ -32,6 +69,7 @@ def test_send_latency_counts_and_resets(caplog):
     assert json.loads(caplog.messages[0].removeprefix("send_latency ")) == first_window
 
     timing.record(7201.75, landed)
+    timing.flush(7202)
     assert len(caplog.messages) == 2
     assert json.loads(caplog.messages[1].removeprefix("send_latency ")) == {
         "window_s": 3601, "attempts": 1, "reply_under_1s": 1,
@@ -54,8 +92,10 @@ def test_send_timing_failure_does_not_escape(caplog, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(logger, "info", broken_log)
         timing.record(3600.75, landed)
+        timing.flush(3601)
 
     timing.record(7201.75, landed)
+    timing.flush(7202)
     assert len(caplog.messages) == 1
     window = json.loads(caplog.messages[0].removeprefix("send_latency "))
     assert window["attempts"] == window["instrumentation_failures"] == 1
