@@ -181,8 +181,16 @@ The daemon reuses the shared specs subsystem and its watcher/debounce.
 `PENTACLE_MEMORY_ROOT` names the root containing `work/<status>/<item>/spec.md`
 and `summary.md`. A bounded sweep reads those files at that depth, excluding
 artifact directories, conflict copies and symlinks. `WORK_INDEX_SWEEP_S`
-defaults to 300 seconds. The existing inventory loop owns the sweep; there is
+defaults to 60 seconds. The existing inventory loop owns the sweep; there is
 no new service, database file, catalog publisher or agent duty.
+
+Standard installs run in polling mode. If the optional top-level `watchdog`
+module is absent, the subsystem logs one informational fallback and does not
+retry attachment until it is recreated. Root health checks, periodic sweeps,
+and on-demand reads continue. When a watcher attaches, it schedules debounced
+refreshes for recognized edits; the same periodic sweep catches missed events.
+Transient attach errors still warn and retry. A missing configured root is
+disabled until the root becomes available again.
 
 Members resolve by declared YAML `id`, including after folder moves; the
 physical directory supplies status. The shared loader handles quoted and
