@@ -38,7 +38,7 @@ if [[ ${1:-} == --execute ]]; then
   print reason=checkout_overhead > "$RUN/launch" || exit 70
   "$PY" -c 'import os, sys, time; sys.exit(float(os.environ["PENTACLE_SCHEDULED_TERM_AT"]) - time.monotonic() < 10805)' || exit 2
   print "source=$SHA comparison=$SHA profile=merge" > "$RUN/launch" || exit 70
-  "$PY" services/chat-stream-v2/tools/run_gate.py merge --deadline-seconds 10800 --evidence-dir "$RUN"
+  "$PY" services/chat-stream-v2/tools/run_gate.py merge --unit-workers 2 --deadline-seconds 10800 --evidence-dir "$RUN"
   exit $?
 fi
 detail=reason=admission

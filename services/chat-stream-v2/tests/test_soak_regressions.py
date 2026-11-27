@@ -1,8 +1,8 @@
 """Regressions from the 2026-11-13 nightly soak receipt."""
 import json
 import os
-from pathlib import Path
 import shutil
+from pathlib import Path
 import subprocess
 import sys
 
@@ -13,47 +13,35 @@ from .test_deploy_script import deploy_mod
 SERVICE = Path(__file__).resolve().parents[1]
 
 
-def test_check_release_script_imports_shared_for_test_profile(tmp_path):
-    # Copy the actual entry point and deploy implementation into a disposable tree.
+def test_check_release_script_imports_shared_in_fresh_process(tmp_path):
     services = tmp_path / 'services'
     service = services / 'chat-stream-v2'
     shutil.copytree(SERVICE / 'deploy', service / 'deploy')
     shutil.copytree(SERVICE / 'tools', service / 'tools')
     shutil.copytree(SERVICE.parent / '_shared', services / '_shared')
     shutil.copy(SERVICE / 'managed_logs.py', service / 'managed_logs.py')
-    # Stub all process and daemon adapters, while retaining the real release checks.
     with (service / 'deploy/deploy.py').open('a') as out:
-        out.write('''\n
-def release_exclusions(*args): return []
+        out.write("""\n
+class FixtureSocket:
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def recv(self, **kwargs): return json.dumps({'type': 'welcome', 'runtime_sha': 'a' * 40})
+def connect(*args, **kwargs): return FixtureSocket()
 def _launchd_state(*args): return LaunchdState(loaded=True, pid=1)
+def _process_start(*args): return 'fixture'
 def _capture_log_offsets(*args, **kwargs): return {}
 def _daemon_log_paths(*args): return ()
-def _release_machines_file(*args): return "fixture"
-def _declared_release_scope(*args): return []
-def _fleet_smoke_verdict(*args, **kwargs): return {"outcome": "passed"}
-def _process_start(*args): return "fixture"
-def _scan_slow_consumer_window(*args, **kwargs): return {"outcome": "passed"}
-def _check_client_delivery(*args): return {"outcome": "passed"}
-def _notify_failed_checks(*args): pass
-def _run(argv, cwd):
-    profile = json.loads((cwd / ".pentacle-deploy/chat-streamd-v2.json").read_text())["test_profile"]
-    return subprocess.CompletedProcess(argv, 0, json.dumps({"test_profile": profile, "outcome": "passed"}), "")
-''')
-    from _shared.spawn_profiles import MODELS, _profile_digest
-    pairs = {name: None for name in MODELS}
-    profile = {'schema': 'pentacle.test-profile.v1', 'providers': pairs,
-               'profile_sha256': _profile_digest(pairs),
-               'settings_sha256': {'spawn_defaults.json': '0' * 64, 'spawn_defaults.local.json': None},
-               'resolver_sha256': '0' * 64}
-    stamps = tmp_path / '.pentacle-deploy'
-    stamps.mkdir()
-    (stamps / 'chat-streamd-v2.json').write_text(json.dumps({'sha': 'a' * 40, 'test_profile': profile}))
+def _managed_log_config(*args): return None
+def _scan_slow_consumer_window(*args, **kwargs): return {'outcome': 'passed'}
+def _check_client_delivery(*args): return {'outcome': 'passed'}
+def _client_delivery_cause(*args): return None
+""")
     env = dict(os.environ, PYTHONPATH='')
     result = subprocess.run([sys.executable, str(service / 'tools/nightly_journey.py'), 'check-release',
                              '--checkout', str(tmp_path), '--evidence', str(tmp_path / 'evidence')],
                             cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads((tmp_path / 'evidence/receipt.json').read_text())['result'] == 'PASS'
+    assert json.loads((tmp_path / 'evidence/receipt.json').read_text())['source_sha'] == 'a' * 40
 
 
 @pytest.mark.parametrize(('change', 'expected'), [

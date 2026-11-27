@@ -271,7 +271,7 @@ def test_signature_strips_volatile_values_but_keeps_row_and_class():
 def test_both_seasonal_schedules_fit_and_old_times_fail(window):
     deploy = Path(nj.__file__).parents[1] / "deploy"
     config = plistlib.loads((deploy / "com.pentacle.nightly-soak.plist").read_bytes())
-    assert config["StartCalendarInterval"] == {"Hour": 1, "Minute": 0}
+    assert config["StartCalendarInterval"] == {"Hour": 2, "Minute": 55}
     observed = []
     for hour, envelope in ((1, 2400), (3, 1200)):
         for month in (1, 7):
