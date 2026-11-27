@@ -1,5 +1,7 @@
 """Delivery and receipt contracts through ordinary client send requests."""
 
+import json
+import os
 import signal
 
 import pytest
@@ -8,7 +10,7 @@ from websockets.exceptions import ConnectionClosed
 from tests.contract.harness import (
     event_stamp, expect_landed, observed, read_records, unique,
 )
-from tests.soak.restart_matrix import LOCAL_HOST
+from tests.soak.restart_matrix import LOCAL_HOST, SERVICE_DIR
 
 
 def test_c3_send_lands_once(chat):
@@ -36,6 +38,34 @@ def test_c3_send_lands_once(chat):
     assert (event["request_id"], event["optimistic_id"], event["receipt_id"]) == (
         request_id, optimistic_id, reply["receipt_id"],
     ), "C3 durable USER was not attributed to this send"
+
+
+def test_send_records_reply_in_daemon_latency_window(chat):
+    # Close the diagnostic window on the first send in this disposable process.
+    # There is no public knob for the reporting interval.
+    (chat.daemon.root / "sitecustomize.py").write_text(
+        "from importlib.util import find_spec\n"
+        "if find_spec('send_timing') is not None:\n"
+        "    import send_timing\n"
+        "    send_timing.SUMMARY_INTERVAL_S = 0\n",
+        encoding="utf-8",
+    )
+    chat.daemon.extra_env["PYTHONPATH"] = os.pathsep.join(map(str, (chat.daemon.root, SERVICE_DIR)))
+    chat.start()
+    client = chat.client()
+    client.subscribe()
+    seat = chat.spawn(client, unique("timed"))
+    request_id = unique("send")
+    reply = client.call("send", request_id=request_id, to_stream_id=seat.stream_id,
+                        text=unique("message"))
+    expect_landed(reply, seat.stream_id, request_id)
+
+    windows = [json.loads(line.split("send_latency ", 1)[1])
+               for line in chat.daemon.logpath.read_text().splitlines()
+               if " send_latency " in line]
+    assert len(windows) == 1, windows
+    assert windows[0]["attempts"] == 1
+    assert windows[0]["reply_p95_ms"] is not None
 
 
 def _receipt(client, seat, request_id):
