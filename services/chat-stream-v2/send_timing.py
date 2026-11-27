@@ -38,7 +38,13 @@ class SendTiming:
                     self._counts["failed"] += 1
                 else:
                     self._counts["pending_proof"] += 1
-            if now - self._window_start >= SUMMARY_INTERVAL_S:
+            self.flush(now)
+        except Exception:
+            self.failures += 1
+
+    def flush(self, now: float, *, force: bool = False) -> None:
+        try:
+            if force or now - self._window_start >= SUMMARY_INTERVAL_S:
                 self._summarize(now)
         except Exception:
             self.failures += 1

@@ -17,6 +17,7 @@ import re
 import sys
 
 from error_adapters import ErrorFact
+from send_timing import send_counter
 
 log = logging.getLogger("chat_streamd_v2.store")
 
@@ -121,6 +122,7 @@ class StoreCallDiag:
                 self._window_start = finished
             elif finished - self._window_start >= SUMMARY_INTERVAL_S:
                 self._summarize(finished)
+                loop.call_soon_threadsafe(send_counter.flush, finished)
         except Exception:
             self.failures += 1
 

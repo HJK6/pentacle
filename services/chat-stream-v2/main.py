@@ -72,6 +72,7 @@ from usage_history import HISTORY_FILENAME, HistoryLog
 from usage_provenance import ProvenanceSink
 from retention import RetentionConfig, RetentionJob
 from routing_integrity import RoutingIntegrity
+from send_timing import send_counter
 from server import RECENT_LIMIT, Server
 from shutdown_budget import ShutdownBudget, configured_budget_s
 from sessions import Sessions
@@ -1288,6 +1289,7 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
         log.error("store stop failed", exc_info=stop_task.exception())
     if budget.abandoned:
         log.warning("shutdown abandoned steps after the budget: %s", ", ".join(budget.abandoned))
+    send_counter.flush(time.monotonic(), force=True)
 
 
 def main(argv: list[str] | None = None) -> int:
