@@ -190,3 +190,28 @@ def test_collection_failure_keeps_independent_known_loss(repo, capsys):
     log = capsys.readouterr().out
     assert "Coverage loss " + CLI_LOSS + ":" in log
     assert f"{head} shared:" in log
+
+
+def test_changed_file_lost_function_requires_matching_trailer(repo, capsys):
+    repo.write(f"{DAEMON}/test_pair.py", "def test_keep(): pass\ndef test_removed(): pass\n")
+    base = repo.commit()
+    repo.write(f"{DAEMON}/test_pair.py", "def test_keep(): pass\n")
+    head = repo.commit()
+    with pytest.raises(RuntimeError, match="Coverage loss undeclared"):
+        repo.check(base, head)
+    assert "daemon::tests/test_pair.py::test_removed" in capsys.readouterr().out
+    repo.git("commit", "--amend", "-m", "Declare removal", "-m",
+             "Coverage-Drop: daemon::tests/test_pair.py::test_removed")
+    repo.check(base, "HEAD")
+    assert "declared 1/1" in capsys.readouterr().out
+
+
+def test_product_only_collects_no_suites(repo, capsys):
+    base = repo.commit()
+    repo.write("services/chat-stream-v2/product_only.py", "VALUE = 1\n")
+    head = repo.commit()
+    repo.check(base, head)
+    output = capsys.readouterr().out
+    for suite in ("daemon", "cli", "shared", "npm"):
+        assert f"coverage: {suite} unchanged, not collected" in output
+    assert "npm ci" not in output

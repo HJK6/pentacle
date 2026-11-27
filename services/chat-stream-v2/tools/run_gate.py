@@ -38,6 +38,7 @@ PRE_FLIGHT = SERVICE_DIR / "tools" / "gate_preflight.sh"
 UNIT_SEPARATE_MARKERS = ("repin_exhaustive",)
 DEFAULT_TIMEOUTS = {"contract": 300.0, "unit": 18000.0, "smoke": 600.0, "soak": 7200.0}
 MERGE_TIERS = ("contract", "unit", "smoke")
+MERGE_BASE_TIMEOUT_S = 20.0
 # Component bounds for the --deadline-seconds envelope. The reserve covers this
 # runner's own terminate (5s TERM, 20s final reap), reader drain (READER_JOIN_S), reap and evidence writes.
 USAGE_BOUND_S = 30.0
@@ -295,7 +296,8 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
 
 
 def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1,
-              shard_index: int | None = None, shard_count: int | None = None) -> dict[str, Any]:
+              shard_index: int | None = None, shard_count: int | None = None,
+              selection: list[str] | None = None) -> dict[str, Any]:
     started = time.monotonic()
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
@@ -319,7 +321,12 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             soak = _effective_soak_parameters(env)
         except ValueError as exc:
             return _result(tier, code=2, passed=False, reason="invalid_soak_tier", junit=junit, log=log, soak={"error": str(exc)})
+    if tier == "unit" and selection == []:
+        print("[v2-gate] unit: empty selection, not run")
+        return _result(tier, code=0, passed=True, reason=None)
     command = _tier_command(tier, junit, basetemp)
+    if tier == "unit" and selection is not None:
+        command[3:4] = selection
     if tier != "contract":
         quarantine_manifest = evidence / f'{tier}.quarantine.json'
         scope_args = [f'--quarantine-separate-marker={name}' for name in UNIT_SEPARATE_MARKERS] if tier == 'unit' else []
@@ -516,6 +523,7 @@ def main() -> int:
     parser.add_argument("--basetemp", type=Path, help="gate base temp directory and owner-manifest home")
     parser.add_argument("--timeout-seconds", type=float)
     parser.add_argument("--unit-workers", type=int, help="fixed contract and unit workers; 1 keeps serial execution")
+    parser.add_argument("--changed-tests", action="store_true", help="select unit tests affected by the stack against origin/main")
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int)
     parser.add_argument("--deadline-seconds", type=_positive_finite,
@@ -615,13 +623,23 @@ def main() -> int:
                                                reason="contract_base_unavailable", error=type(exc).__name__))
                 if usage_pending:
                     results.append(_run_usage_manifest(args.usage_manifest, evidence, args.usage_deployment_contract))
+                selection = None
+                if args.changed_tests:
+                    try:
+                        from tools.gate_selection import stack
+                    except ModuleNotFoundError:
+                        from gate_selection import stack
+                    selection, unmapped = stack(REPO_ROOT, _merge_contract_base(merge_bounds.get("merge_base", MERGE_BASE_TIMEOUT_S)))
+                    print("[v2-gate] selected:", *selection, sep="\n  ")
+                    print("[v2-gate] unmapped:", *unmapped, sep="\n  ")
                 for index, (tier, limit) in enumerate(limits):
                     if _TERMINATION_REQUESTED:
                         raise KeyboardInterrupt
                     if (index or merge_bounds) and (refusal := _deadline_check(deadline, clock_start, "deadline", pending[index:], usage_pending=False)):
                         results.append(refusal)
                         break
-                    options = {}
+                    unit_selection = [p for p in selection if not p.startswith(("tests/contract/", "tests/smoke/", "tests/soak/"))] if selection is not None else None
+                    options = {"selection": unit_selection} if unit_selection is not None else {}
                     if args.shard_index is not None:
                         options.update(shard_index=args.shard_index, shard_count=args.shard_count)
                     results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest,
