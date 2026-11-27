@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from collections import OrderedDict
@@ -41,6 +42,26 @@ class PresenceConfig:
     #: Grace after the last observed spinner before a missed capture flips the
     #: indicator off; smooths a single mid-turn miss without stranding it.
     working_clear_grace_ms: int = 1100
+
+    def capture_rotation_age_s(self, row_count: int, interval_s: float) -> float:
+        """A healthy idle capture can be one whole bounded rotation old."""
+        count = max(1, row_count)
+        batch = min(count, self.max_rows_per_pass) if self.max_rows_per_pass > 0 else count
+        preview = min(batch, self.preview_max_rows_per_pass)
+        if preview <= 0:
+            # No scheduled idle captures: keep only the ordinary freshness
+            # window for other current evidence (e.g. the hot capture path).
+            return interval_s + self.list_timeout_s
+        # A row is listed at least once per outer tour. If the cap does
+        # not divide the cohort, its overlapping batches can contain up to
+        # batch-1 different neighbors on each side. Once a neighbor has
+        # consumed a capture slot it cannot beat the same older row again.
+        contenders = batch if count % batch == 0 else min(count, 2 * batch - 1)
+        rotation = math.ceil(count / batch) * math.ceil(contenders / preview)
+        # A cached serve never renews capture authority. Allow one bounded
+        # tour (or set of tours) after a cached result becomes eligible again.
+        cache_slack = self.preview_cache_ttl_s if self.preview_cache_ttl_s > interval_s else 0
+        return rotation * interval_s + cache_slack + self.list_timeout_s
 
     @classmethod
     def from_env(cls) -> "PresenceConfig":
@@ -145,7 +166,6 @@ class RemotePresence:
         #: Failed captures do not replace the last good value, preserving an
         #: honest cached preview.
         self._preview_cache: OrderedDict[tuple[str, str], tuple[str, float]] = OrderedDict()
-        self._preview_offset = 0
         #: Parsed live state travels with the same bounded capture lifecycle as
         #: preview; it is never acquired by a second capture subsystem.
         self._capture_state: dict[tuple[str, str], _RemoteCaptureState] = {}
@@ -255,13 +275,16 @@ class RemotePresence:
 
     # -- one pass ----------------------------------------------------------
 
+    def _presence_rows(self, rows):
+        return [row for row in rows if str(row.get("provider") or "") != "composite"
+                and (row.get("host") == self.hosts.local_host or row.get("host") in self.hosts.peers)]
+
     def select_rows(self) -> list[dict[str, Any]]:
-        rows = [
-            row for row in self.sessions.list_open()
-            if str(row.get("provider") or "") != "composite"
-            and (row.get("host") == self.hosts.local_host or row.get("host") in self.hosts.peers)
-        ]
-        return self._bounded(rows)
+        return self._bounded(self._presence_rows(self.sessions.list_open()))
+
+    def lane_capture_age_s(self, rows, reconcile_interval_s):
+        """Use this observer's actual cohort and caps, on the lane snapshot."""
+        return self.cfg.capture_rotation_age_s(len(self._presence_rows(rows)), reconcile_interval_s)
 
     def apply_observation(
         self, rows: list[dict[str, Any]], observation: PresenceObservation
@@ -583,13 +606,14 @@ class RemotePresence:
         if not candidates or cap <= 0:
             await self._flush_broadcasts()
             return [], 0
-        if len(candidates) > cap:
-            start = self._preview_offset % len(candidates)
-            ordered = (candidates + candidates)[start:start + len(candidates)]
-            self._preview_offset = start + cap
-        else:
-            ordered = candidates
+        # Select the least recently attempted generations within the
+        # bounded outer cohort. Rotating both positional offsets can
+        # synchronize on the same seats and leave others permanently unserved.
+        def attempted_at(candidate):
+            state = self._capture_state.get(self._preview_key(candidate[1]))
+            return state.capture_observed_at if state is not None else 0
 
+        ordered = sorted(candidates, key=attempted_at)
         to_capture: list[tuple[str, dict[str, Any]]] = []
         applied = 0
         for host, row in ordered:

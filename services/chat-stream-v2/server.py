@@ -5290,7 +5290,8 @@ class Server:
         return {"ok": bool(str(reply.get("type") or "").endswith(".ok")), "reply": reply}
 
     async def _on_assistant_operation(self, msg: dict[str, Any]) -> dict[str, Any]:
-        from store_work_lanes import WorkLaneCloseBlocked, WorkLaneGoalUnresolved, WorkLaneMemberConflict, WorkLaneMemberInUse
+        from store_work_lanes import (WorkLaneCloseBlocked, WorkLaneGoalUnresolved, WorkLaneMemberConflict,
+                                      WorkLaneMemberInUse, WorkLanePauseRefused)
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified"):
@@ -5313,7 +5314,7 @@ class Server:
                         if identity not in existing and (specs is None or specs.resolution_for(identity) != "resolved"):
                             raise VerbError("work_lane_member_unresolved", f"{identity} is not a resolved spec")
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
-        except WorkLaneCloseBlocked as exc:
+        except (WorkLaneCloseBlocked, WorkLanePauseRefused) as exc:
             raise VerbError(exc.code, str(exc), **exc.details) from exc
         except (WorkLaneGoalUnresolved, WorkLaneMemberConflict, WorkLaneMemberInUse) as exc:
             raise VerbError(exc.code, str(exc)) from exc

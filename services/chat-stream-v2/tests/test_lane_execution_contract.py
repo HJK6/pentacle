@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 
-from test_work_lanes import FD, run
+from test_work_lanes import FD, _lane_activity, run
 from work_lane_progress import lane_state, lane_lead_lost
 from work_lanes_projection import build_frame, project_lane, page_lane_detail
 from test_work_lane_assignment import env, item, lane, seat, agent, refused, spec_update
@@ -30,7 +30,7 @@ def test_receipt_precedence_survives_lane_display_transition(tmp_path, to, archi
         owner = await env.seat("receipt-lead", role="lead", parent_stream_id=FD)
         lane_row = (await env.adopt(key="stream:receipt-drain", lead=owner,
                                    members=["spec_demo__receipt_drain"]))["lane"]
-        worker, _ = await env.seat("receipt-worker", role="worker",
+        worker, generation = await env.seat("receipt-worker", role="worker",
                                    assigned_spec_id="spec_demo__receipt_drain")
 
         async def append(state="accepted", **changes):
@@ -86,6 +86,10 @@ def test_receipt_precedence_survives_lane_display_transition(tmp_path, to, archi
         if to == "done":
             from test_work_lanes import seed_lane_work
             await seed_lane_work(env.store, lane_row["lane_id"])
+        if to == "paused":
+            # Receipt state is not execution. Supply known idle evidence so
+            # this still proves the same receipt precedence across a pause.
+            env.store.lane_presence_reader = lambda: [_lane_activity(worker, generation)]
         result = await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
         assert result["lane"]["work_state"] == to
         # Lane display transitions do not consume or alter send receipt evidence.
@@ -211,12 +215,21 @@ def test_busy_assigned_worker_does_not_block_display_transition(to):
         worker = await env.seat("drain-worker", role="worker", assigned_spec_id="spec_demo__drain")
         sessions = Sessions(env.store, tmux=None, local_host="host-a")
         await sessions.refresh()
-        sessions.apply_live(worker[0], working=True, online=True)
+        overlay = _lane_activity(*worker, working=True)
+        sessions.apply_live(worker[0], **{k: v for k, v in overlay.items()
+                                        if k not in {"stream_id", "session_generation"}})
         payload = {"to": to, "reason": "Checkpoint before hold", "next_action": "Resume when keys arrive", "blocker": "keys", "outcome": "Done"}
         if to == "done":
             from test_work_lanes import seed_lane_work
             await seed_lane_work(env.store, lane_row["lane_id"])
-        assert (await env.op("set_state", payload, lane=lane_row["lane_id"], version=1))["lane"]["work_state"] == to
+        if to == "paused":
+            prior = await env.store.get_work_lane(lane_row["lane_id"])
+            with pytest.raises(ValueError, match="work_lane_pause_working"):
+                await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
+            after = await env.store.get_work_lane(lane_row["lane_id"])
+            assert after["lane"] == prior["lane"] and after["events"] == prior["events"]
+        else:
+            assert (await env.op("set_state", payload, lane=lane_row["lane_id"], version=1))["lane"]["work_state"] == to
 
     run(body)
 
@@ -245,6 +258,8 @@ async def test_real_graph_fence_pause_versus_admitted_spawn_preserves_delivery(e
     task = asyncio.create_task(ctl.spawn(agent(caller, spec=target, name="race-child"), HOST))
     try:
         await asyncio.wait_for(entered.wait(), 2)
+        # Admission has occurred, but the synthetic pane has not started.
+        env.store.lane_presence_reader = lambda: [_lane_activity(*caller)]
         result = await fd.op("set_state", {"to": "paused", "reason": "Checkpoint hold", "next_action": "Resume later"},
                              lane=lid, version=1)
         assert result["lane"]["work_state"] == "paused"

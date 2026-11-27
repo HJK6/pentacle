@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 from work_lane_members import validate_members, validate_title
 from _shared.lane_icons import validate_icon
 from _shared.work_goals import EPIC_ID, derive_lane_id, goal_id, goal_progress, lane_work_status
-from work_lane_progress import lane_lead_lost, members_working, seat_live, seat_working
+from work_lane_progress import lane_lead_lost, seat_live, seat_working, working_spec_ids
 from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
                               effective_membership_conn, effective_membership_ids_conn,
                               effective_member_ids, enrich_goals_conn)
@@ -220,6 +220,21 @@ def require_finished_routing_lane_conn(conn, lane):
              "_goals": {epic: record for epic, record in ids["goals"].items()
                         if record["facts"]["lane_id"] == lane["lane_id"]}}
     require_finished_lane(facts)
+
+
+class WorkLanePauseRefused(ValueError):
+    """Ordinary pause: current work or incomplete evidence, before any write."""
+
+    def __init__(self, *, retryable, specs=(), packets=(), source=None):
+        self.code = "work_lane_pause_activity_unavailable" if retryable else "work_lane_pause_working"
+        self.details = {"retryable": retryable}
+        if retryable:
+            self.details["source"] = source
+            message = f"{self.code}: {source}; retry after a current observation"
+        else:
+            self.details.update(spec_ids=list(specs), packet_refs=list(packets))
+            message = f"{self.code}: " + ", ".join([*specs, *packets])
+        super().__init__(message)
 
 
 class WorkLaneMemberConflict(ValueError):
@@ -677,7 +692,7 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
 
 
 def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None, external_config=None,
-                        ids_snapshot: dict | None = None) -> list[dict[str, Any]]:
+                        ids_snapshot: dict | None = None, activity_inputs: bool = False) -> list[dict[str, Any]]:
     states = WORK_STATES if include_done else OPEN_WORK_STATES
     # The coherent reader shares one identity resolution across its lane reads,
     # the filtered projection and the packet snapshot; other callers resolve here.
@@ -695,15 +710,19 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
     named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
     snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
     route_dispatch_map = resolved_route_dispatch_map(conn)
-    from store_external_work import current_packets_conn
-    # Reuse the already-resolved snapshot and decoded observations for the packet
-    # terminal filter only on the coherent reader; other callers resolve fresh.
-    external = current_packets_conn(conn, config=external_config,
+    if activity_inputs:
+        external, external_known = _activity_packets_conn(conn, external_config)
+    else:
+        from store_external_work import current_packets_conn
+        # Reuse the already-resolved snapshot and decoded observations for the packet
+        # terminal filter only on the coherent reader; other callers resolve fresh.
+        external, external_known = current_packets_conn(conn, config=external_config,
                                     snapshot=ids_snapshot if reuse else None,
                                     decoded=snapshot["members"] if reuse else None,
-                                    decoded_ids=set(named) if reuse else None)
+                                    decoded_ids=set(named) if reuse else None), False
     for lane in lanes:
         lane["_external_packets"] = external
+        lane["_activity_external_known"] = external_known
         lane["_members"] = members_conn(conn, lane, snapshot)
         enrich_latest_reports_conn(conn, lane["_members"])
         enrich_goals_conn(conn, lane, snapshot)
@@ -784,7 +803,6 @@ class _WorkLanesStoreMixin:
                     "actor_stream_id": actor_stream_id}
         digest = _digest(identity)
         fault = self._work_lane_fault
-        live_sessions = ()
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -792,7 +810,9 @@ class _WorkLanesStoreMixin:
                                      lane_id=lane_id, expected=expected_lane_version, payload=payload,
                                      actor=actor_stream_id, generation=actor_generation,
                                      binding_name=binding_name, env_binding=env_binding,
-                                     confirmation=confirmation, digest=digest, fault=fault, live_sessions=live_sessions,
+                                     confirmation=confirmation, digest=digest, fault=fault,
+                                     activity_reader=getattr(self, "lane_presence_reader", None),
+                                     capture_age_reader=getattr(self, "lane_capture_age_reader", None),
                                      external_config=getattr(self, "external_work_config", None))
                 conn.commit()
                 return result
@@ -800,8 +820,6 @@ class _WorkLanesStoreMixin:
                 conn.rollback()
                 raise
         async with self.session_graph_lock:
-            reader = getattr(self, "lane_presence_reader", None)
-            live_sessions = reader() if reader else ()
             return await self.submit(_op)
 
 
@@ -980,7 +998,10 @@ class _WorkLanesStoreMixin:
         def _op(conn):
             conn.execute("BEGIN IMMEDIATE")
             try:
-                result = _reconcile_lane_lifecycle_conn(conn, external_config=getattr(self, "external_work_config", None))
+                result = _reconcile_lane_lifecycle_conn(
+                    conn, external_config=getattr(self, "external_work_config", None),
+                    activity_reader=getattr(self, "lane_presence_reader", None),
+                    capture_age_reader=getattr(self, "lane_capture_age_reader", None))
                 conn.commit()
                 return result
             except BaseException:
@@ -1058,6 +1079,140 @@ def _assigned_seats_conn(conn, spec_ids: list[str]) -> list[dict[str, str]]:
         (*spec_ids, *spec_ids))]
 
 
+_ACTIVITY_READ_ERRORS = (sqlite3.Error, OSError, ValueError, TypeError, KeyError, RuntimeError)
+
+def _activity_packets_conn(conn, config):
+    """Read authority separately from the inventory's empty disabled projection."""
+    from store_external_work import current_packets_conn
+    if config is None or getattr(config, "status", None) == "disabled":
+        return {"label": "", "packets": []}, True
+    if getattr(config, "status", None) != "enabled" or not getattr(config, "watch_id", None):
+        return {"label": "", "packets": []}, False
+    try:
+        result = current_packets_conn(conn, config=config)
+        packets = result["packets"]
+        if (not isinstance(packets, list) or any(not isinstance(row, dict)
+                or not isinstance(row.get("tag"), str) or not row["tag"] or row.get("state") not in {"queued", "working", "review"}
+                or not isinstance(row.get("spec_id"), str) or not row["spec_id"] for row in packets)):
+            raise ValueError("invalid external packet snapshot")
+        return result, True
+    except _ACTIVITY_READ_ERRORS:
+        return {"label": "", "packets": []}, False
+
+
+class _LaneActivitySnapshot:
+    """Read each source once in the caller's current Store transaction."""
+
+    def __init__(self, conn, reader, capture_age_reader=None):
+        self.conn = conn
+        self.reader = reader
+        self.capture_age_reader = capture_age_reader
+        self.assignments = None
+        self.presence = None
+
+    def _assignments(self):
+        from store_specs import effective_assignment
+        if self.assignments is None:
+            grouped = {}
+            for row in self.conn.execute(
+                "SELECT s.host,s.session_name,s.spec_id,s.spec_ids,s.assigned_spec_id,s.pane_status,s.provider,"
+                "s.offline_since_ts,s.presumed_dead_at,g.generation FROM sessions s "
+                "LEFT JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+                "WHERE s.status='open' AND (s.assigned_spec_id IS NOT NULL OR s.spec_id IS NOT NULL OR s.spec_ids IS NOT NULL)"
+            ):
+                row = dict(row)
+                identity = effective_assignment(row)
+                if identity:
+                    grouped.setdefault(identity, []).append(row)
+            self.assignments = grouped
+        return self.assignments
+
+    def _presence(self):
+        if self.presence is None:
+            try:
+                from presence import PresenceConfig
+                from reconciler import ReconcileConfig
+                observed = self.reader() if self.reader else None
+                if not isinstance(observed, (list, tuple)):
+                    raise ValueError("activity presence unavailable")
+                rows = {}
+                for row in observed:
+                    if not isinstance(row, dict) or not isinstance(row.get("stream_id"), str):
+                        raise ValueError("invalid activity presence")
+                    identity = row["stream_id"]
+                    if identity in rows:
+                        raise ValueError("duplicate activity presence")
+                    rows[identity] = row
+                if self.capture_age_reader is not None:
+                    max_age = self.capture_age_reader(observed)
+                else:
+                    max_age = PresenceConfig.from_env().capture_rotation_age_s(
+                        len(observed), ReconcileConfig.from_env().interval_s)
+                self.presence = rows, time.time(), max_age
+            except _ACTIVITY_READ_ERRORS:
+                self.presence = False  # Do not retry a failed reader for another lane in this snapshot.
+        if self.presence is False:
+            raise ValueError("activity presence unavailable")
+        return self.presence
+
+    def work(self, lane):
+        # Placement may be retained from a last-good epic after a newer
+        # source scan fails (even when the charter itself is fresh).
+        if (not lane.get("_work_index_available") or any(
+                goal.get("quality") != "fresh" for goal in (lane.get("_goals") or {}).values()) or any(
+                (m.get("observation") or {}).get("error") == "work_goal_reference_unresolved"
+                or (m.get("goal_id") is not None and (m.get("observation") or {}).get("quality") != "fresh")
+                for m in lane.get("_members") or [])):
+            return (), (), "membership"
+        if not lane.get("_activity_external_known"):
+            return (), (), "external_work"
+        members = {row["spec_id"] for row in lane["_members"]}
+        seats = []
+        try:
+            for identity in sorted(members):
+                for row in self._assignments().get(identity, ()):
+                    sid = f"{row['host']}:{row['session_name']}"
+                    # A virtual composite has no executing pane. Real
+                    # assigned seats use the shared predicate regardless of
+                    # role; lead eligibility is a separate policy.
+                    if row["provider"] == "composite":
+                        continue
+                    if not row["generation"]:
+                        return (), (), "assignment_generation"
+                    durable_disconnect = (row["pane_status"] == "pane_dead"
+                                          or row["offline_since_ts"] is not None or row["presumed_dead_at"])
+                    try:
+                        live, now, max_age = self._presence()
+                    except _ACTIVITY_READ_ERRORS:
+                        if durable_disconnect:
+                            continue
+                        return (), (), "presence"
+                    observed = live.get(sid)
+                    if not observed or observed.get("session_generation") != row["generation"]:
+                        if durable_disconnect:
+                            continue
+                        return (), (), "presence"
+                    if observed.get("pane_status") == "pane_dead" or (
+                            observed.get("online") is not True and (durable_disconnect
+                            or observed.get("offline_since_ts") is not None or observed.get("presumed_dead_at"))):
+                        continue
+                    stamp = observed.get("capture_observed_at")
+                    if (observed.get("capture_generation") != row["generation"]
+                            or observed.get("capture_liveness") != "idle"
+                            or type(stamp) not in (int, float) or not 0 <= now - stamp <= max_age
+                            or type(observed.get("working")) is not bool):
+                        return (), (), "presence"
+                    # Only the durable assignment grants membership. Presence
+                    # contributes execution, never an assignment or replacement generation.
+                    seats.append({**observed, "assigned_spec_id": identity})
+        except _ACTIVITY_READ_ERRORS:
+            return (), (), "assignment_or_presence"
+        specs = tuple(sorted(working_spec_ids(lane, seats)))
+        packets = tuple(sorted(row["tag"] for row in lane["_external_packets"]["packets"]
+                               if row["state"] == "working" and row["spec_id"] in members))
+        return specs, packets, None
+
+
 def _has_work_seat_conn(conn, lane: dict[str, Any]) -> bool:
     members = lane.get("_members")
     if members is None:
@@ -1105,7 +1260,7 @@ def _lane_work_status_conn(conn, lane_id: str) -> str:
 
 
 def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, payload, actor, generation,
-                binding_name, env_binding, confirmation, digest, fault, live_sessions=(), external_config=None) -> dict[str, Any]:
+                binding_name, env_binding, confirmation, digest, fault, activity_reader=None, capture_age_reader=None, external_config=None) -> dict[str, Any]:
     from store_assistant_binding import _binding_conn
     binding = _binding_conn(conn, env_binding or {}, name=binding_name, include_target=False)
     if (not actor or not generation or binding.get("stream_id") != actor
@@ -1136,10 +1291,19 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         lane = lane_row_conn(conn, lane_id)
         if lane is None or lane["stream_id"] != stream_id or lane.get("work_state") is None:
             raise ValueError("work_lane_not_found")
+        ordinary_pause = (operation == "set_state" and payload.get("to") == "paused"
+                          and not payload.get("parked"))
         if operation == "set_state":
-            enriched = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id, external_config=external_config)), None)
+            try:
+                enriched = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id,
+                    external_config=external_config, activity_inputs=ordinary_pause)), None)
+            except _ACTIVITY_READ_ERRORS:
+                if ordinary_pause:
+                    raise WorkLanePauseRefused(retryable=True, source="membership_or_assignment") from None
+                raise
             if enriched:
-                lane.update({key: enriched[key] for key in ("_members", "_goals", "_work_index_available", "_external_packets", "_has_work_seat", "_has_external_work")})
+                lane.update({key: enriched[key] for key in ("_members", "_goals", "_work_index_available",
+                            "_external_packets", "_has_work_seat", "_has_external_work", "_activity_external_known")})
         _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor)
         if expected != int(lane["version"]):
             raise ValueError("assistant_lane_version_conflict")
@@ -1189,6 +1353,14 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                                "work_lane_override_reason_required", required=True)
                 event_payload = dict(payload, override=_override_audit(
                     actor, generation, "set_state:" + to, prior_state, to, reason))
+            if to == "paused" and parking is None:
+                _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required", required=True)
+                _text(payload.get("next_action"), UPDATE_TEXT_MAX, "work_lane_next_action_required", required=True)
+                specs, packets, unavailable = _LaneActivitySnapshot(conn, activity_reader, capture_age_reader).work(lane)
+                if unavailable:
+                    raise WorkLanePauseRefused(retryable=True, source=unavailable)
+                if specs:
+                    raise WorkLanePauseRefused(retryable=False, specs=specs, packets=packets)
             changes.update(parked_at=stamp if parking is not None else None, parked_reason=parking)
             changes["work_state"] = to
             changes["work_state_reason"] = "reopened" if prior_state == "done" else "fd"
@@ -1671,25 +1843,31 @@ def _lifecycle_lane_rows_conn(conn, external_config=None) -> list[dict[str, Any]
         "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL")]
     named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
     snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
-    from store_external_work import current_packets_conn
-    external = current_packets_conn(conn, config=external_config)
+    external, external_known = _activity_packets_conn(conn, external_config)
     for lane in lanes:
         lane.pop("hue_open_order", None)
         lane["_members"] = members_conn(conn, lane, snapshot)
         lane["_external_packets"] = external
+        lane["_activity_external_known"] = external_known
         enrich_latest_reports_conn(conn, lane["_members"])
         enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
     return lanes
 
 
-def _reconcile_lane_lifecycle_conn(conn, external_config=None) -> dict[str, Any]:
+def _reconcile_lane_lifecycle_conn(conn, external_config=None, activity_reader=None, capture_age_reader=None) -> dict[str, Any]:
     stamp = _now()
     completed: list[str] = []
     settled: list[str] = []
     reopened: list[str] = []
     resumed: list[str] = []
-    for lane in _lifecycle_lane_rows_conn(conn, external_config):
+    try:
+        lanes = _lifecycle_lane_rows_conn(conn, external_config)
+    except _ACTIVITY_READ_ERRORS:
+        # An unavailable membership read is not a known empty lane.
+        return {"completed": completed, "settled": settled, "reopened": reopened, "resumed": resumed}
+    activity = _LaneActivitySnapshot(conn, activity_reader, capture_age_reader)
+    for lane in lanes:
         # Spec F's reversible archive mark is skipped by settling and reopening.
         if lane.get("archived_at"):
             continue
@@ -1700,7 +1878,10 @@ def _reconcile_lane_lifecycle_conn(conn, external_config=None) -> dict[str, Any]
             if status == "finished":
                 _complete_lane_conn(conn, lane, stamp)
                 completed.append(lane["lane_id"])
-            elif state == "paused" and not lane.get("parked_at") and (_has_work_seat_conn(conn, lane) or _has_external_work(lane)):
+            elif state == "paused" and not lane.get("parked_at"):
+                specs, _, unavailable = activity.work(lane)
+                if unavailable or not specs:
+                    continue
                 version = int(lane["version"]) + 1
                 cur = conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='active', work_state_reason='work_started', version=?, updated_at=? WHERE lane_id=? AND version=?",
                                    (version, stamp, lane["lane_id"], lane["version"]))
