@@ -395,6 +395,75 @@ def test_old_record_upgrade_and_interrupted_split_replay(tmp_path, provider):
     asyncio.run(run())
 
 
+def test_append_legacy_lookup_work_depends_on_lifecycles():
+    from ingest import _identity_key
+    from store import Store
+    from test_native_input_lookup import BIRTH, TARGET, put, source
+
+    async def run(size):
+        store = Store()
+        store.start()
+        try:
+            host, name = TARGET.split(':', 1)
+            await store.open_session(host, name, created_at=BIRTH, provider='claude', pane_pid='123')
+            lifecycle = await store.fetch_open_session_lifecycle(TARGET, pane_pid='123')
+            assert lifecycle is not None
+            texts = ['first new', 'old legacy', 'native first', 'current legacy', 'last new']
+            originals = {text: {**source(text, text), 'kind': 'TOOL_RESULT'} for text in texts}
+
+            def seed(conn):
+                for i in range(size):
+                    key = f'noise-{i}'
+                    put(conn, source(key, key), '' if i % 2 else BIRTH)
+                put(conn, originals['old legacy'], '')
+                native = originals['native first']
+                put(conn, {**native, 'raw': {**native['raw'], 'native_input_version': 1}}, '')
+                put(conn, native, BIRTH)
+                put(conn, originals['current legacy'], BIRTH)
+                conn.commit()
+
+            await store.submit(seed)
+            entries = []
+            for original in originals.values():
+                segment = {**original, 'raw': {
+                    **original['raw'], 'jsonl_event_index': 1, 'native_input_version': 1,
+                    'legacy_input_events': [original],
+                }}
+                entries.append({'stream_id': TARGET, 'event': segment,
+                                'identity': _identity_key(segment), 'lifecycle': lifecycle})
+
+            callbacks = 0
+
+            def progress():
+                nonlocal callbacks
+                callbacks += 1
+                return 0
+
+            await store.submit(lambda conn: conn.set_progress_handler(progress, 100))
+            try:
+                ids = await store.append_session_events_lifecycle_cas(entries, limit=500)
+            finally:
+                await store.submit(lambda conn: conn.set_progress_handler(None, 0))
+            assert ids is not None
+            assert [event_id is not None for event_id in ids] == [True, False, True, False, True]
+            rows = await store.submit(lambda conn: conn.execute(
+                """SELECT event_id, json_extract(event_json,'$.text') FROM session_event_tail
+                   WHERE stream_id=? AND session_created_at=?
+                   AND json_extract(event_json,'$.raw.jsonl_event_index')=1 ORDER BY event_id""",
+                (TARGET, BIRTH),
+            ).fetchall())
+            assert [tuple(row) for row in rows] == [
+                (ids[0], 'first new'), (ids[2], 'native first'), (ids[4], 'last new'),
+            ]
+            return callbacks * 100
+        finally:
+            store.stop()
+
+    small, large = [asyncio.run(run(size)) for size in (40, 4096)]
+    print(f'Append VM steps with 40 and 4096 unrelated rows: {small}, {large}')
+    assert large <= max(1500, small * 2), (small, large)
+
+
 @pytest.mark.parametrize('case', ['before-return', 'restart', 'generation', 'forged-meta', 'coalesced'])
 def test_send_occurrence_is_durable_and_never_borrowed(tmp_path, case):
     from ingest import append_ingested_event
