@@ -6052,8 +6052,19 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             # the original record's replay floor, including changed event kinds.
             from ingest import _identity_key
             for legacy in raw.get("legacy_input_events") or []:
-                row = conn.execute("SELECT event_json FROM session_event_tail WHERE stream_id=? AND identity=? LIMIT 1",
-                                   (stream_id, _identity_key(legacy))).fetchone()
+                # Earliest birth matches the deployed idx_session_event_tail_activity prefix (stream_id, session_created_at).
+                row = conn.execute(
+                    """WITH RECURSIVE lifecycles(created) AS (
+                           SELECT min(session_created_at) FROM session_event_tail WHERE stream_id=?1
+                           UNION ALL
+                           SELECT (SELECT min(session_created_at) FROM session_event_tail
+                                   WHERE stream_id=?1 AND session_created_at > lifecycles.created)
+                           FROM lifecycles WHERE lifecycles.created IS NOT NULL)
+                       SELECT t.event_json FROM lifecycles AS b CROSS JOIN session_event_tail AS t
+                       WHERE t.stream_id=?1 AND t.session_created_at=b.created AND t.identity=?2
+                       ORDER BY b.created LIMIT 1""",
+                    (stream_id, _identity_key(legacy)),
+                ).fetchone()
                 if row and not (json.loads(row[0]).get("raw") or {}).get("native_input_version"):
                     return None
         event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
