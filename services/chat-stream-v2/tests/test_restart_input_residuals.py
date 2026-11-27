@@ -498,7 +498,11 @@ def test_private_daemon_null_intent_is_interruption(tmp_path):
         assert before[0]["payload"] is None
         cell.daemon.extra_env["PENTACLE_FORCE_LIVE_DAEMON"] = "1"
         cell.daemon.start()
-        assert rm.wait_for(lambda: bool(cell.outcomes("null-seat")), 10, .05)
+        # await_spawn waits for boot reconciliation, including reservation release.
+        settled = rm.rpc(cell.daemon.url, {
+            "type": "await_spawn", "spawn_request_id": before[0]["request_id"],
+        })
+        assert (settled["type"], settled.get("state")) == ("await_spawn.error", "failed"), settled
         outcome = cell.outcomes("null-seat")[0]
         write(tmp_path / "evidence/result.json", {"before": before, "outcome": outcome})
         assert outcome["reason"] == "spawn_interrupted: daemon restarted before spawn intent was persisted"
