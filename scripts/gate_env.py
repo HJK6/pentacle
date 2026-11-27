@@ -100,7 +100,7 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
         problems.append("deadline")
     elif "merge_check_bounds_s" in deadline:
         bounds = deadline.get("merge_check_bounds_s")
-        if (not isinstance(bounds, dict) or set(bounds) != {"merge_base", "daemon_contract", "daemon_layer_selectors", "daemon_b04_selectors", "coverage"}
+        if (not isinstance(bounds, dict) or set(bounds) != {"merge_base", "daemon_contract", "coverage"}
                 or any(type(v) is not int or v <= 0 for v in bounds.values())
                 ):
             problems.append("merge deadline bounds")

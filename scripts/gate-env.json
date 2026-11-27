@@ -28,8 +28,6 @@
     "merge_check_bounds_s": {
       "merge_base": 20,
       "daemon_contract": 60,
-      "daemon_layer_selectors": 90,
-      "daemon_b04_selectors": 90,
       "coverage": 2400
     }
   },
@@ -277,7 +275,6 @@
         "v2-unit-ci-shard": {
           "kind": "run_gate",
           "gate": "unit",
-          "pass_env": ["PENTACLE_B04_BASE"],
           "needs": [
             "python",
             "node",

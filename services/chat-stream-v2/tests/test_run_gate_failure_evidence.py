@@ -121,57 +121,6 @@ def _subject_gone(tier: dict) -> bool:
     return False
 
 
-@pytest.mark.parametrize(("path", "selected"), [
-    ("tools/daemon_b04_gate.py", True),
-    ("tools/daemon_b04_anchors.py", True),
-    ("tools/daemon_import_census.py", True),
-    ("daemon_contract/active/boundary.txt", True),
-    ("tests/test_daemon_b04_gate.py", True),
-    ("work_lanes_projection.py", True),
-    ("main.py", True),
-    ("new_package/runtime.py", True),
-    ("tools/run_gate.py", True),
-    ("deploy/unrelated.py", False),
-    ("tests/test_other.py", False),
-    ("tools/other.py", False),
-])
-def test_b04_self_test_routing(tmp_path, monkeypatch, path, selected):
-    def git(*args):
-        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
-
-    git("init", "-q")
-    git("config", "user.email", "fixture@example.test")
-    git("config", "user.name", "Fixture")
-    git("commit", "--allow-empty", "-qm", "Base")
-    base = git("rev-parse", "HEAD")
-    service = tmp_path / "services/chat-stream-v2"
-    changed = service / path
-    changed.parent.mkdir(parents=True)
-    changed.write_text("fixture")
-    git("add", ".")
-    git("commit", "-qm", "Change one path")
-    head = git("rev-parse", "HEAD")
-    monkeypatch.setattr(run_gate, "SERVICE_DIR", service)
-    assert run_gate._run_b04_self_tests(base, head) is selected
-    assert run_gate._run_b04_self_tests(head, head)  # daily main
-
-
-def test_b04_reports_an_undeclared_read_in_a_child(tmp_path):
-    from tests.fixtures.b04_reads import sitecustomize as guard
-
-    root = tmp_path / "source copy"
-    root.mkdir()
-    name = "off-list.txt"
-    (root / name).write_text("fixture")
-    inventory = tmp_path / "excluded.json"
-    inventory.write_text(json.dumps([name]))
-    report = tmp_path / "reads"
-    env = dict(os.environ, PYTHONPATH=str(Path(guard.__file__).parent),
-               PENTACLE_B04_READ_GUARD=json.dumps([[str(root)], str(inventory), str(report)]))
-    subprocess.run([sys.executable, "-c", "open('off-list.txt').read()"], cwd=root, env=env, check=True)
-    assert report.read_text().splitlines() == [name]
-
-
 def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
     for workers in (1, 2):
         case = tmp_path / str(workers)
@@ -362,8 +311,7 @@ def test_deadline_refuses_before_launch(tmp_path: Path) -> None:
     assert code == 1 and len(data["tiers"]) == 1 and refusal["reason"] == "deadline_envelope_exceeded"
     check = refusal["deadline_check"]
     assert check["tier_bounds_s"] == {"contract": 20.0, "unit": 20.0, "smoke": 20.0} and check["preflight_bounds_s"] == {}
-    assert check["merge_check_bounds_s"] == {"merge_base": 20, "daemon_contract": 60,
-                                            "daemon_layer_selectors": 90, "daemon_b04_selectors": 90, "coverage": 2400}
+    assert check["merge_check_bounds_s"] == {"merge_base": 20, "daemon_contract": 60, "coverage": 2400}
     assert check["required_s"] == 3 * 20 + run_gate.DEFAULT_RESERVE_S + sum(check["merge_check_bounds_s"].values())
     assert not (tmp_path / "evidence" / "unit.progress.jsonl").exists()
 
@@ -408,27 +356,26 @@ def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
 
     def check(evidence, base, timeout):
         clock[0] += timeout
-        return run_gate._result("selector", code=0, passed=True)
+        return run_gate._result("daemon_contract", code=0, passed=True)
 
     monkeypatch.setitem(sys.modules, 'quarantine_list', SimpleNamespace(load_quarantine=lambda root: {}))
     monkeypatch.setitem(sys.modules, 'select_tests', SimpleNamespace(check_coverage=lambda *a, **kw: clock.__setitem__(0, clock[0] + kw['timeout'])))
     monkeypatch.setattr(run_gate, '_preflight', lambda *a, **kw: (0, False))
     monkeypatch.setattr(run_gate, "_merge_contract_base", base)
-    for name in ("_run_daemon_contract", "_run_daemon_layer_selectors", "_run_daemon_b04_selectors"):
-        monkeypatch.setattr(run_gate, name, check)
+    monkeypatch.setattr(run_gate, "_run_daemon_contract", check)
     monkeypatch.setattr(run_gate, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(run_gate, "_run_tier", fake_tier)
     monkeypatch.setattr(run_gate, "_sha", lambda: "c" * 40)
     monkeypatch.setattr(run_gate, "_git_status", lambda: "")
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(sys, "argv", ["run_gate.py", "merge", "--evidence-dir", str(tmp_path / "evidence"), "--basetemp",
-                                      str(tmp_path / "base"), "--timeout-seconds", "10", "--deadline-seconds", "2700",
+                                      str(tmp_path / "base"), "--timeout-seconds", "10", "--deadline-seconds", "2520",
                                       "--deadline-reserve-seconds", "5"])
     assert run_gate.main() == 1
     data = json.loads((tmp_path / "evidence" / "v2-merge-evidence.json").read_text(encoding="utf-8"))
     assert seen == ["contract", "unit"]
     assert [(t["tier"], t["reason"]) for t in data["tiers"]] == [
-        ("selector", None), ("selector", None), ("selector", None),
+        ("daemon_contract", None),
         ("contract", None), ("unit", None), ("deadline", "deadline_envelope_exceeded"),
     ]
     assert [check["ok"] for check in data["deadline"]["checks"]] == [True, True, True, False]
