@@ -70,16 +70,24 @@ if [[ "$DRY" == --dry-run ]]; then
 fi
 
 PREFLIGHT=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
-STOP_TIME= SERVING_TIME= NEW_PID= BOOT_ID= PROBE_VERDICT=skipped PROBE_PID= PROBE_FILE=
+STOP_TIME= SERVING_TIME= NEW_PID= BOOT_ID= PROBE_VERDICT=skipped PROBE_PID= PROBE_FILE= PROBE_WAIT_S=
 finish() {
   local code=$? outcome
   trap - EXIT
   if [[ -n "$PROBE_PID" ]]; then
     (( code == 130 )) && kill "$PROBE_PID" 2>/dev/null
     wait "$PROBE_PID"; local probe_run=$?
-    if "$PY" "$SCRIPT_DIR/restart_probe.py" verify "$PROBE_FILE" && (( probe_run == 0 )); then
-      PROBE_VERDICT=passed
-    else
+    local start=$SECONDS verify_output verify_rc
+    while true; do
+      verify_output=$("$PY" "$SCRIPT_DIR/restart_probe.py" verify "$PROBE_FILE"); verify_rc=$?
+      print -r -- "$verify_output"
+      if print -r -- "$verify_output" | grep -Eq 'delivery_rows=([2-9]|[1-9][0-9]+)( |$)'; then break; fi
+      if (( verify_rc == 0 && probe_run == 0 )); then PROBE_VERDICT=passed; break; fi
+      if (( SECONDS - start >= 180 || probe_run != 0 )); then break; fi
+      sleep 5
+    done
+    PROBE_WAIT_S=$(( SECONDS - start )); say "probe wait: $PROBE_WAIT_S s"
+    if [[ "$PROBE_VERDICT" != passed ]]; then
       PROBE_VERDICT=failed
       (( code == 0 )) && code=6
     fi
@@ -102,14 +110,14 @@ except (OSError, ValueError, AttributeError, KeyError): pass
   if [[ -n "${PENTACLE_RELEASE_RECORD_DIR:-}" ]]; then
     "$PY" -c '
 import json, os, pathlib, sys, tempfile
-keys = ("target", "prior", "outcome", "exit_code", "preflight", "stop", "serving", "old_pid", "new_pid", "boot_id", "probe_verdict", "probe_path")
+keys = ("target", "prior", "outcome", "exit_code", "preflight", "stop", "serving", "old_pid", "new_pid", "boot_id", "probe_verdict", "probe_path", "probe_wait_s")
 values = [v or None for v in sys.argv[2:]]
-for i in (3, 7, 8): values[i] = int(values[i]) if values[i] is not None else None
+for i in (3, 7, 8, 12): values[i] = int(values[i]) if values[i] is not None else None
 path = pathlib.Path(sys.argv[1]) / (values[4] + "-" + values[0][:12] + ".json")
 with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
     json.dump(dict(zip(keys, values)), f, indent=2); f.write("\n")
 os.replace(f.name, path)
-' "$PENTACLE_RELEASE_RECORD_DIR" "$TARGET" "$PRIOR" "$outcome" "$code" "$PREFLIGHT" "$STOP_TIME" "$SERVING_TIME" "$OLD_PID" "$NEW_PID" "$BOOT_ID" "$PROBE_VERDICT" "$PROBE_FILE" || say "WARNING: release record could not be written"
+' "$PENTACLE_RELEASE_RECORD_DIR" "$TARGET" "$PRIOR" "$outcome" "$code" "$PREFLIGHT" "$STOP_TIME" "$SERVING_TIME" "$OLD_PID" "$NEW_PID" "$BOOT_ID" "$PROBE_VERDICT" "$PROBE_FILE" "$PROBE_WAIT_S" || say "WARNING: release record could not be written"
   else
     say "WARNING: PENTACLE_RELEASE_RECORD_DIR unset; no release record"
   fi

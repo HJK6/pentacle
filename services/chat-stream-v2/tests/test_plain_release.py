@@ -108,7 +108,18 @@ if sys.argv[1] == '-c':
 assert pathlib.Path(sys.argv[1]).is_file(), sys.argv[1]
 if pathlib.Path(sys.argv[1]).name == 'restart_probe.py':
     if sys.argv[2] == 'run': pathlib.Path(sys.argv[5]).write_text('probe evidence\\n')
-    sys.exit(int(os.environ.get('FIXTURE_PROBE_FAIL', '0')) if sys.argv[2] == 'verify' else 0)
+    if sys.argv[2] == 'verify' and 'FIXTURE_VERIFY_COUNTS' in os.environ:
+        count_file = pathlib.Path(os.environ['FIXTURE_VERIFY_COUNTS'])
+        calls = int(count_file.read_text()) + 1
+        count_file.write_text(str(calls))
+        duplicate = bool(os.environ.get('FIXTURE_DUPLICATE'))
+        events = 1 if duplicate else int(calls > 2)
+        print(f'1 ok:delivered - delivery_rows={2 if duplicate else 1} target_events={events}')
+        sys.exit(int(duplicate or events == 0))
+    if sys.argv[2] == 'verify' and os.environ.get('FIXTURE_PROBE_FAIL') == '1':
+        print('1 ok:delivered - delivery_rows=2 target_events=1 <-- CHECK')
+        sys.exit(1)
+    sys.exit(0)
 if pathlib.Path(sys.argv[1]).name == 'helper_release.py':
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 assert pathlib.Path(sys.argv[1]).name == 'welcome_probe.py'
@@ -378,3 +389,22 @@ def test_probe_verdict_recorded(rig, tmp_path, monkeypatch, fails, verdict, code
     assert Path(record['probe_path']).name == records[0].stem + '.probe.jsonl'
     assert Path(record['probe_path']).read_text() == 'probe evidence\n'
     assert git(rt, 'rev-parse', 'HEAD') == shas['target']
+
+
+@pytest.mark.parametrize(('duplicate', 'code', 'calls'), [(False, 0, 3), (True, 6, 1)])
+def test_probe_waits_for_target_events_or_fails_on_duplicate(rig, tmp_path, duplicate, code, calls):
+    env, rt, state, shas = rig
+    directory = tmp_path / 'records'
+    directory.mkdir()
+    counts = tmp_path / 'verify-counts'
+    counts.write_text('0')
+    env.update({PREFIX + 'RECORD_DIR': str(directory), PREFIX + 'PROBE_TARGET': 'fixture:target',
+                'FIXTURE_VERIFY_COUNTS': str(counts)})
+    if duplicate:
+        env['FIXTURE_DUPLICATE'] = '1'
+    result = invoke(env, shas['target'])
+    assert result.returncode == code, result
+    assert int(counts.read_text()) == calls
+    record = json.loads(next(directory.glob('*.json')).read_text())
+    assert isinstance(record['probe_wait_s'], int)
+    assert f"probe wait: {record['probe_wait_s']} s" in result.stdout
