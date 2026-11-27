@@ -2391,8 +2391,7 @@ class Comms:
     async def send(self, msg: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         result = await self._send(msg)
-        if not msg.get("_assistant_composite_backend_dispatch"):
-            send_counter.record(started, result)
+        send_counter.record(started, result, backend=bool(msg.get("_assistant_composite_backend_dispatch")))
         return result
 
     async def _send(self, msg: dict[str, Any]) -> dict[str, Any]:
