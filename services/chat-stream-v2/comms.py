@@ -49,6 +49,7 @@ from typing import Any
 
 from claude_jsonl_norm import strip_peer_delivery_envelope
 from send_metadata import normalize_send_meta, voice_context_dispatch_block
+from send_timing import send_counter
 from boot_ready import (
     CODEX_RESET_BLOCKED,
     DRAFT_PREDICATES,
@@ -2388,6 +2389,13 @@ class Comms:
         return result
 
     async def send(self, msg: dict[str, Any]) -> dict[str, Any]:
+        started = time.monotonic()
+        result = await self._send(msg)
+        if not msg.get("_assistant_composite_backend_dispatch"):
+            send_counter.record(started, result)
+        return result
+
+    async def _send(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Append acceptance before materialization, then append the known result."""
         # Wire clients mint this ID. The fallback preserves direct in-process
         # callers during the mobile rollout; it deliberately adds no dedupe.
