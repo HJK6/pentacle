@@ -44,7 +44,6 @@ def test_bare_helper_package_init_and_conftest_select_tests(tmp_path):
 
 
 def test_selected_empty_shard_passes_through_gate(tmp_path):
-    import hashlib
     import json
     import os
     import subprocess
@@ -59,15 +58,36 @@ def test_selected_empty_shard_passes_through_gate(tmp_path):
     subprocess.run(['git', 'add', str(test.relative_to(repo))], cwd=repo, check=True)
     subprocess.run(['git', '-c', 'user.name=Test Agent', '-c', 'user.email=test@example.invalid',
                     'commit', '-qm', 'Add one selected test'], cwd=repo, check=True)
-    node = 'tests/test_shard_fixture.py::test_only'
-    shard = 1 - int(hashlib.sha256(node.encode()).hexdigest(), 16) % 2
-    evidence = tmp_path / 'evidence'
     env = os.environ.copy()
     env['V2_PYTHON_BIN'] = sys.executable
+    empty = 0
+    for shard in range(2):
+        evidence = tmp_path / f'evidence-{shard}'
+        result = subprocess.run([sys.executable, str(repo / 'services/chat-stream-v2/tools/run_gate.py'),
+                                 'unit', '--changed-tests', '--shard-index', str(shard), '--shard-count', '2',
+                                 '--evidence-dir', str(evidence)], cwd=repo, env=env, text=True,
+                                capture_output=True, timeout=45)
+        assert result.returncode == 0, result.stdout + result.stderr
+        empty += 'no selected tests for this shard' in result.stdout
+        assert json.loads((evidence / 'v2-unit-evidence.json').read_text())['passed'] is True
+    assert empty == 1
+
+
+def test_unselected_empty_unit_collection_fails(tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[3]
+    evidence = tmp_path / 'empty-evidence'
+    env = os.environ.copy()
+    env['V2_PYTHON_BIN'] = sys.executable
+    env['PYTEST_ADDOPTS'] = '--ignore-glob=tests/test_*.py'
     result = subprocess.run([sys.executable, str(repo / 'services/chat-stream-v2/tools/run_gate.py'),
-                             'unit', '--changed-tests', '--shard-index', str(shard), '--shard-count', '2',
-                             '--evidence-dir', str(evidence)], cwd=repo, env=env, text=True,
+                             'unit', '--evidence-dir', str(evidence)], cwd=repo, env=env, text=True,
                             capture_output=True, timeout=45)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert 'no selected tests for this shard' in result.stdout
-    assert json.loads((evidence / 'v2-unit-evidence.json').read_text())['passed'] is True
+    assert result.returncode != 0, result.stdout + result.stderr
+    report = json.loads((evidence / 'v2-unit-evidence.json').read_text())
+    assert report['passed'] is False
+    assert report['tiers'][0]['reason'] == 'no_tests_collected'

@@ -1176,7 +1176,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             state.update(outcome="pass", first_failure=None)
         else:
             command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env,
-                                             changed_tests=args.changed_tests,
+                                             **({"changed_tests": True} if args.changed_tests else {}),
                                              **({"shard_index": args.shard_index, "shard_count": args.shard_count}
                                                 if args.shard_index is not None else {}))
             if target["kind"] == "pytest_files":  # establish ownership before claiming a subject start
