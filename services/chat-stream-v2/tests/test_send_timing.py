@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,14 +11,21 @@ from send_timing import SendTiming
 
 @pytest.mark.asyncio
 async def test_store_summary_flushes_quiet_send_window(caplog, monkeypatch):
+    loop = asyncio.get_running_loop()
+    flushed = loop.create_future()
     timing = SendTiming(clock=lambda: 0)
-    monkeypatch.setattr(store_call_diag, "send_counter", timing, raising=False)
+
+    def flush(now):
+        timing.flush(now)
+        flushed.set_result(None)
+
+    monkeypatch.setattr(store_call_diag, "send_counter", SimpleNamespace(flush=flush))
     caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
     diag = store_call_diag.StoreCallDiag()
-    loop = asyncio.get_running_loop()
 
     diag.record("read", False, loop, 0, 0, 0)
     await asyncio.to_thread(diag.record, "read", False, loop, 3600, 3600, 3600)
+    await asyncio.wait_for(flushed, timeout=1)
 
     store_line, send_line = caplog.messages
     assert store_line.startswith("store_call_top ")
