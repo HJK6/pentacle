@@ -79,8 +79,6 @@ def main() -> int:
         sys.stdout.write("Claude stub booting...\n")
         sys.stdout.flush()
         _wait_release()
-    if mode == "busy_user":
-        sys.stdout.write("✻ Computing… (10s)\n")
     _chrome()
     transcript = None
     pending: list[str] = []

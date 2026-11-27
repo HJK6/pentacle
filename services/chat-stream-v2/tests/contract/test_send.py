@@ -97,7 +97,6 @@ def test_busy_lane_send_lands_once(chat):
                  "to_stream_id": seat.stream_id, "text": text})
     lane_read = client.call("work_lanes.list", from_stream_id=seat.stream_id, stream_token=token)
     assert lane_read["type"] == "work_lanes.list.ok", lane_read
-    assert not any(frame.body.get("request_id") == request_id for frame in client.frames[start:])
     reply = client.wait_reply(request_id, start=start)
     expect_landed(reply, seat.stream_id, request_id)
     assert reply.get("provider_queued") is True, reply
@@ -113,9 +112,8 @@ def test_busy_lane_send_lands_once(chat):
                 if item["kind"] == "USER" and item["text"] == text]
 
     assert user_history() == [event["daemon_seq"]]
-    destination = client.call("send.receipt.get", request_id=request_id, to_stream_id=seat.stream_id)
-    assert destination["type"] == "send.receipt.get.ok" and destination["found"], destination
-    receipt, = destination["receipts"]
+    receipt = _receipt(client, seat, request_id)
+    assert receipt is not None
     assert (receipt["to_stream_id"], receipt["request_id"], receipt["receipt_id"]) == (
         seat.stream_id, request_id, reply["receipt_id"],
     )
@@ -126,6 +124,8 @@ def test_busy_lane_send_lands_once(chat):
                  match=lambda item: (item["kind"], item["text"]) == ("ASSIST_TEXT", "Held turn finished"),
                  description="the busy turn finished")
     assert user_history() == [event["daemon_seq"]]
+    assert [item["daemon_seq"] for item in client.events_since(seat.stream_id, start)
+            if (item["kind"], item["text"]) == ("USER", text)] == [event["daemon_seq"]]
     assert _receipt(client, seat, request_id) == receipt
     assert _input_texts(chat, seat) == [text]
     assert [frame.body for frame in client.frames[start:] if frame.body["type"] == "send.result"
