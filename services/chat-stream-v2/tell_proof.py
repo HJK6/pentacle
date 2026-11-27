@@ -752,6 +752,10 @@ def input_origin(conn, event, event_id, *, deliveries=None):
         delivery = payload.get('delivery') or {}
         if delivery.get('text') != text or delivery.get('proof_generation') != generation:
             continue
+        anchor = delivery.get('proof_event_id')
+        # An anchored proof can only confirm the event it names.
+        if type(anchor) is int and type(event_id) is int and anchor != event_id:
+            continue
         proof = (retained_proof(conn, payload) if deliveries is None
                  else retained_proof(conn, payload, deliveries=deliveries))
         if proof is None or proof.get('proof_event_id') != event_id:
