@@ -139,3 +139,52 @@ def test_wrapper_uses_deployed_checkout_and_existing_schedule():
     assert '--wait-within-window' in wrapper
     assert 'TOOLS_ROOT' not in wrapper and 'soak_gate.py' not in wrapper
     assert not (service / 'deploy/com.pentacle.spawn-fleet-smoke.plist').exists()
+
+@pytest.mark.parametrize('soak_result', ['passed', 'failed', 'timeout', 'missing_bound'])
+def test_soak_result_does_not_change_serving_verdict(tmp_path, soak_result):
+    import os
+    import sys
+
+    checkout = tmp_path / 'checkout'
+    python = checkout / 'services/chat-stream-v2/.venv/bin/python'
+    python.parent.mkdir(parents=True)
+    python.write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+args = sys.argv[1:]
+if args[0] == '-':
+    os.execv(sys.executable, [sys.executable, *args])
+if args[0].endswith('nightly_journey.py'):
+    if args[1] == 'admit': print('ADMIT')
+    sys.exit(0)
+if args[0].endswith('scheduled_admission.py'):
+    receipt = pathlib.Path(args[args.index('--receipt') + 1])
+    if 'check-release' in args:
+        receipt.write_text(json.dumps({{'terminated_at_bound': False}}))
+        (receipt.parent / 'receipt.json').write_text(json.dumps({{'result': 'PASS', 'primary_error': ''}}))
+        sys.exit(0)
+    scenario = os.environ['SOAK_CASE']
+    if scenario != 'missing_bound':
+        receipt.write_text(json.dumps({{'terminated_at_bound': scenario == 'timeout', 'elapsed_s': 12.5}}))
+    if scenario != 'missing_bound':
+        (receipt.parent / 'soak.xml').write_text('<testsuites><testsuite tests="2" failures="1" errors="0" skipped="0"/></testsuites>')
+    sys.exit(0 if scenario == 'passed' else 1)
+sys.exit(99)
+''')
+    python.chmod(0o755)
+    config = tmp_path / 'config.zsh'
+    config.write_text(f'CHECKOUT={checkout}\nMEMORY_ROOT={tmp_path}\n')
+    window = tmp_path / '.pentacle/nightly-journey/window.json'
+    window.parent.mkdir(parents=True)
+    window.write_text(json.dumps({'start_utc': '00:00', 'duration_s': 86400}))
+    launcher = Path(__file__).resolve().parents[1] / 'deploy/nightly-soak/run-nightly-soak.sh'
+    run = subprocess.run(['zsh', str(launcher)], capture_output=True, text=True, timeout=30,
+                         env={**os.environ, 'HOME': str(tmp_path), 'NIGHTLY_SOAK_CONFIG': str(config),
+                              'SOAK_CASE': soak_result})
+    assert run.returncode == 0, run.stdout + run.stderr
+    receipt_path, = (tmp_path / '.pentacle/soak').glob('*/evidence/receipt.json')
+    record = json.loads(receipt_path.read_text())
+    assert (record['result'], record['primary_error']) == ('PASS', '')
+    assert record['soak']['result'] == ('failed' if soak_result == 'missing_bound' else soak_result)
+    assert record['soak']['duration_s'] == (None if soak_result == 'missing_bound' else 12.5)
+    assert record['soak']['counts'] == (None if soak_result == 'missing_bound' else
+        {'tests': 2, 'failures': 1, 'errors': 0, 'skipped': 0})

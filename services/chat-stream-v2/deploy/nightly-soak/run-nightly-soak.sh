@@ -59,6 +59,7 @@ for dir in ${old[15,-1]}; do rm -rf -- $dir; done
 $PY - "$RUN/evidence" "$rc" "$soak_rc" <<'PY'
 import json, sys
 from pathlib import Path
+import xml.etree.ElementTree as ET
 root, rc, soak_rc = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
 record = json.loads((root / 'receipt.json').read_text())
 bound = json.loads((root / 'bound.json').read_text()) if (root / 'bound.json').exists() else {}
@@ -66,11 +67,17 @@ if bound.get('terminated_at_bound'):
     record.update(result='BLOCKED', primary_error='terminated_at_bound')
 elif rc and record.get('result') != 'FAIL':
     record.update(result='FAIL', primary_error='post-release checks did not complete')
-record['soak'] = {'returncode': soak_rc, 'junit': str(root / 'soak.xml'),
-                  'log': str(root / 'soak.log'),
-                  'bound': json.loads((root / 'soak-bound.json').read_text())}
-if soak_rc and record.get('result') == 'PASS':
-    record.update(result='FAIL', primary_error='soak tier failed')
+soak_bound = json.loads((root / 'soak-bound.json').read_text()) if (root / 'soak-bound.json').exists() else {}
+soak_xml = root / 'soak.xml'
+counts = None
+try:
+    suite = ET.parse(soak_xml).getroot().find('testsuite')
+    counts = {key: int(suite.get(key, 0)) for key in ('tests', 'failures', 'errors', 'skipped')}
+except (OSError, ET.ParseError, AttributeError, ValueError):
+    pass
+record['soak'] = {'result': 'timeout' if soak_bound.get('terminated_at_bound') else 'passed' if soak_rc == 0 else 'failed',
+                  'returncode': soak_rc, 'counts': counts, 'duration_s': soak_bound.get('elapsed_s'),
+                  'junit': str(soak_xml), 'log': str(root / 'soak.log'), 'bound': soak_bound}
 record['subprocess_returncode'] = rc
 (root / 'receipt.json').write_text(json.dumps(record, indent=2) + '\n')
 (root / 'result.txt').write_text(record.get('result', 'FAIL'))
