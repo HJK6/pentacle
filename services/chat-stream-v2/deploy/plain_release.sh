@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Switch a clean runtime checkout, restart once, and prove or put back.
 set -u
+SCRIPT_DIR=${0:A:h}
 
 say() { print -r -- "$(date '+%H:%M:%S') $*"; }
 refuse() { say "REFUSED: $*"; exit 2; }
@@ -16,7 +17,7 @@ RT=${PENTACLE_RELEASE_RUNTIME_CHECKOUT:-}
 UNIT=${PENTACLE_RELEASE_LAUNCHD_LABEL:-}
 PY=${PENTACLE_RELEASE_RUNTIME_PYTHON:-}
 DAEMON_URL=${PENTACLE_RELEASE_DAEMON_URL:-}
-PROBE=${0:A:h}/welcome_probe.py
+PROBE=$SCRIPT_DIR/welcome_probe.py
 # Only the helper wrapper sets this; it is a path, never evaluated as code.
 PUTBACK_WORK=${PENTACLE_RELEASE_PUTBACK_WORK:-}
 [[ -n "$RT" && -n "$UNIT" && -n "$PY" && -n "$DAEMON_URL" ]] ||
@@ -53,7 +54,7 @@ git -C "$RT" merge-base --is-ancestor "$PRIOR" "$TARGET" || refuse "prior is not
 git -C "$RT" diff --quiet "$PRIOR" "$TARGET" -- services/chat-stream-v2/requirements.txt ||
   refuse "requirements changed"
 if [[ -z "$PUTBACK_WORK" ]]; then
-  PYTHONPATH="${0:A:h:h}:${0:A:h:h:h}" "$PY" -c '
+  PYTHONPATH="${SCRIPT_DIR:h}:${SCRIPT_DIR:h:h}" "$PY" -c '
 import subprocess, sys
 from deploy.coordinated_runtime import code_identity_at
 run = lambda args, cwd: subprocess.run(args, cwd=cwd, capture_output=True, text=True)
@@ -76,7 +77,7 @@ finish() {
   if [[ -n "$PROBE_PID" ]]; then
     (( code == 130 )) && kill "$PROBE_PID" 2>/dev/null
     wait "$PROBE_PID"; local probe_run=$?
-    if "$PY" "${0:A:h}/restart_probe.py" verify "$PROBE_FILE" && (( probe_run == 0 )); then
+    if "$PY" "$SCRIPT_DIR/restart_probe.py" verify "$PROBE_FILE" && (( probe_run == 0 )); then
       PROBE_VERDICT=passed
     else
       PROBE_VERDICT=failed
@@ -123,7 +124,7 @@ if [[ -n "${PENTACLE_RELEASE_PROBE_TARGET:-}" ]]; then
     PROBE_FILE=$(mktemp) || refuse "could not create probe file"
     say "probe file: $PROBE_FILE"
   fi
-  "$PY" "${0:A:h}/restart_probe.py" run "$PENTACLE_RELEASE_PROBE_TARGET" 10 "$PROBE_FILE" &
+  "$PY" "$SCRIPT_DIR/restart_probe.py" run "$PENTACLE_RELEASE_PROBE_TARGET" 10 "$PROBE_FILE" &
   PROBE_PID=$!
   sleep 5
 fi
@@ -145,7 +146,7 @@ fi
 say "target not serving after ${WAIT_S}s (serving='$(serving)', pid='$(pid_of)'); restoring $PRIOR"
 MID_PID=$(pid_of)
 if [[ -n "$PUTBACK_WORK" ]]; then
-  "$PY" "${0:A:h}/helper_release.py" restore-policy --work "$PUTBACK_WORK" ||
+  "$PY" "$SCRIPT_DIR/helper_release.py" restore-policy --work "$PUTBACK_WORK" ||
     human "pre-putback step failed"
 fi
 git -C "$RT" checkout -q --detach "$PRIOR" || human "could not check out prior"

@@ -105,6 +105,7 @@ else:
     executable(probe, common + '''
 if sys.argv[1] == '-c':
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+assert pathlib.Path(sys.argv[1]).is_file(), sys.argv[1]
 if pathlib.Path(sys.argv[1]).name == 'restart_probe.py':
     if sys.argv[2] == 'run': pathlib.Path(sys.argv[5]).write_text('probe evidence\\n')
     sys.exit(int(os.environ.get('FIXTURE_PROBE_FAIL', '0')) if sys.argv[2] == 'verify' else 0)
@@ -362,7 +363,8 @@ def test_record_putback_and_needs_human(rig, tmp_path, mode, outcome, code):
 
 
 @pytest.mark.parametrize(('fails', 'verdict', 'code'), [(False, 'passed', 0), (True, 'failed', 6)])
-def test_probe_verdict_recorded(rig, tmp_path, fails, verdict, code):
+def test_probe_verdict_recorded(rig, tmp_path, monkeypatch, fails, verdict, code):
+    monkeypatch.chdir(tmp_path)
     env, rt, state, shas = rig
     directory = tmp_path / 'records'
     directory.mkdir()
