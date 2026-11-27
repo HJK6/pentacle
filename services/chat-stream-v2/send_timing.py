@@ -15,7 +15,9 @@ class SendTiming:
         self._window_start = clock()
         self._reply_ms: list[float] = []
         self._counts = {
-            "reply_under_1s": 0, "proof_under_1s": 0, "queued": 0,
+            "reply_under_500ms": 0, "reply_under_1s": 0,
+            "reply_under_2s": 0, "reply_2s_or_more": 0,
+            "proof_under_1s": 0, "queued": 0,
             "pending_proof": 0, "failed": 0, "coalesced": 0,
         }
         self.failures = 0
@@ -29,6 +31,9 @@ class SendTiming:
                 elapsed = now - started
                 confirmed = result.get("submission_confirmed") is True
                 self._reply_ms.append(elapsed * 1000)
+                self._counts["reply_under_500ms"] += elapsed < 0.5
+                self._counts["reply_under_2s"] += elapsed < 2
+                self._counts["reply_2s_or_more"] += elapsed >= 2
                 if elapsed < 1:
                     self._counts["reply_under_1s"] += 1
                     self._counts["proof_under_1s"] += confirmed
