@@ -93,7 +93,7 @@ def changes(base, head, *, repo=None, timeout=None):
     return result
 
 
-def _collect_coverage(repo, revision, root, python, remaining, *, historical, errors):
+def _collect_coverage(repo, revision, root, python, remaining, *, historical, errors, suites):
     from gate_env import ensure_npm_env, group_alive, stop_group
 
     def command_budget(available):
@@ -152,6 +152,8 @@ def _collect_coverage(repo, revision, root, python, remaining, *, historical, er
         return inventory
 
     for suite in ("daemon", "cli", "shared"):
+        if suite not in suites:
+            continue
         try:
             if suite == "daemon":
                 # One collection spans unit, smoke, soak and separately executed repin tests.
@@ -193,6 +195,14 @@ def _collect_coverage(repo, revision, root, python, remaining, *, historical, er
         except failures as exc:
             errors.append(f"{revision} {suite}: {exc}")
 
+    if "npm" not in suites:
+        try:
+            require(not checked(run(["git", "status", "--porcelain", "--untracked-files=all"], env=env, timeout=30)), "collection changed the tracked source")
+            require(checked(run(["git", "rev-parse", "HEAD"], env=env, timeout=30)).strip() == revision, "collection changed the pinned revision")
+        except failures as exc:
+            errors.append(f"{revision} source integrity: {exc}")
+            return {}
+        return inventory
     try:
         npm = targets["npm-test"]
         patterns = npm["default_patterns"]
@@ -281,16 +291,42 @@ def check_coverage(repo: Path, base: str, head: str, *, python: str, timeout: fl
         scopes = {path: " ".join([change["status"], " -> ".join(change["paths"])])
                   for change in changes(base, head, repo=repo, timeout=remaining())
                   for path in change["paths"]}
+        suites = set()
+        roots = {"daemon": "services/chat-stream-v2/", "cli": "services/agent-orch/",
+                 "shared": "services/_shared/"}
+        common = {"scripts/select_tests.py", "scripts/gate_env.py", "scripts/gate-env.json",
+                  "scripts/quarantine_plugin.py", "scripts/quarantine_list.py",
+                  "scripts/quarantine-v2.json", "scripts/quarantine.json", "scripts/admission_inputs.py",
+                  "services/chat-stream-v2/tools/run_gate.py", "services/chat-stream-v2/tools/gate_shard.py",
+                  "services/chat-stream-v2/tools/gate_progress.py"}
+        for path in scopes:
+            if path in common:
+                suites.update((*roots, "npm"))
+            if path in {"pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py", "services/conftest.py"}:
+                suites.update(roots)
+            for suite, root in roots.items():
+                if path.startswith(root + "tests/") or path in {root + name for name in
+                        ("pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py", "requirements.txt")}:
+                    suites.add(suite)
+            if path.startswith(("test/", "scripts/lib/")) or path in {"package.json", "package-lock.json"}:
+                suites.add("npm")
+        if not scopes:  # Full nightly on main retains its existing coverage collection.
+            suites.update((*roots, "npm"))
+        for suite in (*roots, "npm"):
+            if suite not in suites:
+                print(f"coverage: {suite} unchanged, not collected", flush=True)
         trailers = git("log", "-1", "--format=%(trailers:key=Coverage-Drop,valueonly,separator=%x00,unfold=true)",
                        head, "--", repo=repo, timeout=remaining()).decode().removesuffix("\n")
         declarations = Counter(trailers.split("\0")) if trailers else Counter()
         errors = []
+        if not suites:
+            return
         with tempfile.TemporaryDirectory(prefix="pc-cover-") as tmp:
             scratch = Path(tmp)
             before = _collect_coverage(repo, base, scratch / "base", python, remaining,
-                                       historical=base != head, errors=errors)
+                                       historical=base != head, errors=errors, suites=suites)
             after = before if base == head else _collect_coverage(
-                repo, head, scratch / "head", python, remaining, historical=False, errors=errors)
+                repo, head, scratch / "head", python, remaining, historical=False, errors=errors, suites=suites)
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
         raise RuntimeError(f"Coverage comparison inconclusive: {exc}") from exc
 
