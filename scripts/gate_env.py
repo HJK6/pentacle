@@ -893,6 +893,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--target")
     parser.add_argument("--select", action="append", default=[], help="run only: test files/nodes; required for pytest targets (never defaults to the full suite)")
+    parser.add_argument("--changed-tests", action="store_true")
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int)
     parser.add_argument("--pass-env", action="append", default=[], metavar="NAME")
@@ -1175,6 +1176,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             state.update(outcome="pass", first_failure=None)
         else:
             command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env,
+                                             changed_tests=args.changed_tests,
                                              **({"shard_index": args.shard_index, "shard_count": args.shard_count}
                                                 if args.shard_index is not None else {}))
             if target["kind"] == "pytest_files":  # establish ownership before claiming a subject start
@@ -1305,7 +1307,7 @@ def profile_root(service_dir: Path, checkout: Path) -> str:
 
 def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional[Path], checkout: Path, service_dir: Path, evidence: Path, basetemp: Path,
                   selection: List[str], timeout_s: int, env: Dict[str, str], *, shard_index: Optional[int] = None,
-                  shard_count: Optional[int] = None) -> Tuple[List[str], Dict[str, Any]]:
+                  shard_count: Optional[int] = None, changed_tests: bool = False) -> Tuple[List[str], Dict[str, Any]]:
     gate_dir = evidence / "gate"
     gate_dir.mkdir(parents=True, exist_ok=True)
     kind = target["kind"]
@@ -1330,6 +1332,8 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
                 deadline_s += sum(budget.get("merge_check_bounds_s", {}).values())
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
+        if changed_tests:
+            command += ["--changed-tests"]
         if shard_index is not None:
             command += ["--shard-index", str(shard_index), "--shard-count", str(shard_count)]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
