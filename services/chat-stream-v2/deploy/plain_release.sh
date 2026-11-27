@@ -96,7 +96,7 @@ try:
     lines = pathlib.Path(m.group(1).strip()).read_text().splitlines()
     for line in reversed(lines):
         if line.startswith("generation=") and " chat_streamd_v2 listening on " in line:
-            identity = json.loads(line.split(" ", 1)[0][11:])
+            identity, _ = json.JSONDecoder().raw_decode(line[11:])
             if identity.get("pid") == int(sys.argv[1]): print(identity["boot_uuid"]); break
 except (OSError, ValueError, AttributeError, KeyError): pass
 ' "$NEW_PID")

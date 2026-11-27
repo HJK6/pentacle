@@ -98,7 +98,7 @@ else:
         data['serving'] = 'wrong-sha'
     else:
         data['serving'] = sha
-    pathlib.Path(os.environ['FIXTURE_LOG']).write_text('generation=' + json.dumps({'pid': data['pid'], 'start': 'fixture', 'boot_uuid': '12345678-1234-4234-8234-123456789abc'}, separators=(',', ':')) + ' chat_streamd_v2 listening on fixture\\n')
+    pathlib.Path(os.environ['FIXTURE_LOG']).write_text('generation=' + json.dumps({'pid': data['pid'], 'start': 'Fri Nov 27 08:00:00 2026', 'boot_uuid': '12345678-1234-4234-8234-123456789abc'}, separators=(',', ':')) + ' chat_streamd_v2 listening on fixture\\n')
     state.write_text(json.dumps(data))
 ''')
     probe = bins / "probe wrapper"
