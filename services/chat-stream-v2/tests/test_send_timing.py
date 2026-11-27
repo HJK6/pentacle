@@ -47,6 +47,26 @@ def test_forced_flush_reports_and_resets_partial_window(caplog):
     assert (second["window_s"], second["attempts"]) == (0.5, 0)
 
 
+def test_send_latency_counts_reply_time_boundaries(caplog):
+    timing = SendTiming(clock=lambda: 3)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    landed = {"delivery": "landed", "submission_confirmed": True}
+
+    for elapsed in (0.3, 0.5, 0.9, 1, 1.5, 2, 2.5):
+        timing.record(3 - elapsed, landed)
+    timing.record(2.7, {**landed, "coalesced": True})
+    timing.flush(4, force=True)
+
+    [line] = caplog.messages
+    window = json.loads(line.removeprefix("send_latency "))
+    expected = {
+        "attempts": 7, "coalesced": 1, "proof_under_1s": 3,
+        "reply_under_500ms": 1, "reply_under_1s": 3,
+        "reply_under_2s": 5, "reply_2s_or_more": 2,
+    }
+    assert {key: window.get(key) for key in expected} == expected
+
+
 def test_send_latency_counts_and_resets(caplog):
     times = iter([0, 1, 2, 3, 4, 5, 6, 7, 3601, 7202])
     timing = SendTiming(clock=times.__next__)
@@ -67,6 +87,7 @@ def test_send_latency_counts_and_resets(caplog):
     timing.record(3400, {**landed, "coalesced": True, "provider_queued": True})
     first_window = {
         "window_s": 3601, "attempts": 7, "reply_under_1s": 5,
+        "reply_under_500ms": 3, "reply_under_2s": 6, "reply_2s_or_more": 1,
         "proof_under_1s": 2, "queued": 1, "pending_proof": 3, "failed": 1,
         "coalesced": 1, "reply_p95_ms": 2000, "reply_worst_ms": 2000,
         "instrumentation_failures": 0,
@@ -78,6 +99,7 @@ def test_send_latency_counts_and_resets(caplog):
     assert len(caplog.messages) == 2
     assert json.loads(caplog.messages[1].removeprefix("send_latency ")) == {
         "window_s": 3601, "attempts": 1, "reply_under_1s": 1,
+        "reply_under_500ms": 1, "reply_under_2s": 1, "reply_2s_or_more": 0,
         "proof_under_1s": 1, "queued": 0, "pending_proof": 0, "failed": 0,
         "coalesced": 0, "reply_p95_ms": 250, "reply_worst_ms": 250,
         "instrumentation_failures": 0,
