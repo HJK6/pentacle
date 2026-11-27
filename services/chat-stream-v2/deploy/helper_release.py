@@ -331,7 +331,7 @@ def plain(args, *, dry_run=False, work=None):
 def release(args):
     work = args.work
     try:
-        preflight = plain(args, dry_run=True)
+        preflight = plain(args, dry_run=True, work=work)
     except OSError as exc:
         say("REFUSED: could not invoke plain release:", exc)
         return 2
@@ -376,15 +376,15 @@ def release(args):
     # The put-back subprocess may have updated the state file.
     state = read(work / "state.json")
     state["plain_release_exit"] = code
-    if code == 0:
+    if code in (0, 6):
         state["phase"] = "released"
     save(work, state)
-    if code == 0:
+    if code in (0, 6):
         say("RELEASED with new helpers. Verify the target welcome and single listener PID; "
             "confirm current pin proofs with code identity", state["identity"],
             "on released hosts; verify one local and one satellite account-bound spawn "
             "and a delivered tell before lifting the hold.")
-        return 0
+        return code
     if code == 2:
         try:
             restore_policy(work)

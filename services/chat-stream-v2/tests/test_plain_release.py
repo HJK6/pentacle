@@ -1,4 +1,5 @@
 """Plain release journeys against Git and owned command fixtures, never launchd."""
+import ast
 import json
 import os
 from pathlib import Path
@@ -36,13 +37,28 @@ def rig(tmp_path):
     git(tmp_path, "init", "--bare", "--initial-branch=main", str(origin))
     git(tmp_path, "init", "--initial-branch=main", str(src))
     requirements = "services/chat-stream-v2/requirements.txt"
+    service = DEPLOY.parent
+    tree = ast.parse((service / "provider_cli_artifact.py").read_text())
+    identity = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "code_identity")
+    names = ast.literal_eval(next(n.value for n in identity.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "files" for t in n.targets)))
+    for name in names:
+        dst = src / "services/chat-stream-v2" / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes((service / name).read_bytes())
+    shared = src / "services/_shared/provider_cli_release.py"
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    shared.write_bytes((service.parent / "_shared/provider_cli_release.py").read_bytes())
+    git(src, "add", "services")
     root = commit(src, requirements, "requirements")
     prior = commit(src, "version", "prior")
     target = commit(src, "version", "target")
     changed_requirements = commit(src, requirements, "changed")
+    git(src, "checkout", "-q", "--detach", target)
+    helper_change = commit(src, "services/chat-stream-v2/" + names[0], "helper change")
+    git(src, "branch", "helper-change", helper_change)
     git(src, "checkout", "-q", "-b", "other", root)
     diverged = commit(src, "version", "diverged")
-    git(src, "push", str(origin), "main", "other")
+    git(src, "push", str(origin), "main", "other", "helper-change")
     git(tmp_path, "clone", str(origin), str(rt))
     git(rt, "checkout", "--detach", prior)
     only_local = commit(rt, "version", "not published")
@@ -52,6 +68,8 @@ def rig(tmp_path):
     bins.mkdir()
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"pid": 100, "serving": prior, "mode": "normal", "restarts": []}))
+    log = tmp_path / "daemon.log"
+    log.write_text("")
     clock = tmp_path / "clock"
     clock.write_text("1000")
     common = (
@@ -64,6 +82,7 @@ assert sys.argv[-1] == 'gui/' + str(os.getuid()) + '/demo.daemon'
 if sys.argv[1] == 'print':
     if data['pid']:
         print('  pid =', data['pid'])
+    print('  stdout path =', os.environ['FIXTURE_LOG'])
 else:
     assert sys.argv[1:-1] == ['kickstart', '-k']
     sha = subprocess.check_output(
@@ -79,10 +98,15 @@ else:
         data['serving'] = 'wrong-sha'
     else:
         data['serving'] = sha
+    pathlib.Path(os.environ['FIXTURE_LOG']).write_text('generation=' + json.dumps({'pid': data['pid'], 'start': 'fixture', 'boot_uuid': '12345678-1234-4234-8234-123456789abc'}, separators=(',', ':')) + ' chat_streamd_v2 listening on fixture\\n')
     state.write_text(json.dumps(data))
 ''')
     probe = bins / "probe wrapper"
     executable(probe, common + '''
+if sys.argv[1] == '-c':
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+if pathlib.Path(sys.argv[1]).name == 'restart_probe.py':
+    sys.exit(int(os.environ.get('FIXTURE_PROBE_FAIL', '0')) if sys.argv[2] == 'verify' else 0)
 if pathlib.Path(sys.argv[1]).name == 'helper_release.py':
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 assert pathlib.Path(sys.argv[1]).name == 'welcome_probe.py'
@@ -100,12 +124,12 @@ print(n if sys.argv[1] == '+%s' else '00:00:00')
     home = tmp_path / "home"
     home.mkdir()
     env = {**os.environ, "HOME": str(home), "PATH": str(bins) + os.pathsep + os.environ["PATH"],
-           "FIXTURE_STATE": str(state), "FIXTURE_CLOCK": str(clock),
+           "FIXTURE_STATE": str(state), "FIXTURE_CLOCK": str(clock), "FIXTURE_LOG": str(log),
            PREFIX + "RUNTIME_CHECKOUT": str(rt), PREFIX + "LAUNCHD_LABEL": "demo.daemon",
            PREFIX + "RUNTIME_PYTHON": str(probe), PREFIX + "DAEMON_URL": "ws://127.0.0.1:12345"}
     env.pop(PREFIX + "PUTBACK_WORK", None)
     return env, rt, state, {"prior": prior, "target": target, "diverged": diverged,
-                            "changed_requirements": changed_requirements, "only_local": only_local}
+                            "changed_requirements": changed_requirements, "only_local": only_local, "helper_change": helper_change}
 
 
 def invoke(env, *args):
@@ -300,3 +324,67 @@ def test_welcome_probe_ignores_non_welcome_frames(monkeypatch, capsys):
     monkeypatch.setattr(welcome_probe.websockets, "connect", connect)
     assert asyncio.run(welcome_probe.probe("ws://fixture.invalid")) == 0
     assert capsys.readouterr().out == "sample-sha\n"
+
+
+def test_release_writes_record(rig, tmp_path):
+    env, rt, state, shas = rig
+    records_dir = tmp_path / 'records'
+    records_dir.mkdir()
+    env[PREFIX + 'RECORD_DIR'] = str(records_dir)
+    result = invoke(env, shas['target'])
+    assert result.returncode == 0, result
+    records = list(records_dir.glob('*.json'))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert record['target'] == shas['target'] and record['prior'] == shas['prior']
+    assert record['outcome'] == 'released' and record['exit_code'] == 0
+    assert record['old_pid'] == '100' and record['new_pid'] == '101'
+    assert record['boot_id'] == '12345678-1234-4234-8234-123456789abc'
+    assert record['preflight'].endswith('Z') and record['stop'].endswith('Z') and record['serving'].endswith('Z')
+
+
+def test_helper_change_refused_for_plain_but_helper_path_proceeds(rig, tmp_path, monkeypatch):
+    env, rt, state, shas = rig
+    result = invoke(env, shas['helper_change'])
+    assert result.returncode == 2 and 'needs the helper release' in result.stdout
+    clean_prior(rt, state, shas['prior'])
+    from types import SimpleNamespace
+    from deploy import helper_release as helper
+    work = tmp_path / 'helper-work'
+    calls = []
+    monkeypatch.setattr(helper, 'plain', lambda args, **kwargs: calls.append(kwargs) or 2)
+    assert helper.release(SimpleNamespace(work=work)) == 2
+    assert calls == [{'dry_run': True, 'work': work}]
+    env[PREFIX + 'PUTBACK_WORK'] = str(work)
+    assert invoke(env, shas['helper_change'], '--dry-run').returncode == 0
+    assert invoke(env, shas['helper_change']).returncode == 0
+
+
+@pytest.mark.parametrize(('mode', 'outcome', 'code'), [('putback', 'put_back', 4), ('failure', 'needs_human', 5)])
+def test_record_putback_and_needs_human(rig, tmp_path, mode, outcome, code):
+    env, rt, state, shas = rig
+    directory = tmp_path / 'records'
+    directory.mkdir()
+    env[PREFIX + 'RECORD_DIR'] = str(directory)
+    change(state, mode=mode)
+    result = invoke(env, shas['target'])
+    assert result.returncode == code, result
+    records = list(directory.glob('*.json'))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert record['outcome'] == outcome and record['exit_code'] == code
+    assert record['target'] == shas['target'] and record['prior'] == shas['prior']
+
+
+@pytest.mark.parametrize(('fails', 'verdict', 'code'), [(False, 'passed', 0), (True, 'failed', 6)])
+def test_probe_verdict_recorded(rig, tmp_path, fails, verdict, code):
+    env, rt, state, shas = rig
+    directory = tmp_path / 'records'
+    directory.mkdir()
+    env.update({PREFIX + 'RECORD_DIR': str(directory), PREFIX + 'PROBE_TARGET': 'fixture:target', 'FIXTURE_PROBE_FAIL': str(int(fails))})
+    result = invoke(env, shas['target'])
+    assert result.returncode == code, result
+    records = list(directory.glob('*.json'))
+    assert len(records) == 1
+    assert json.loads(records[0].read_text())['probe_verdict'] == verdict
+    assert git(rt, 'rev-parse', 'HEAD') == shas['target']

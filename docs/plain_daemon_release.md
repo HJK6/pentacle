@@ -4,12 +4,14 @@ The authorized release operator runs these commands in a maintenance window.
 Do not overlap them with another release or account-policy edit. Use a tooling
 worktree at the full target SHA, not the checkout serving the daemon.
 
-Set all four variables before running either route (there are no defaults):
+Set all four required variables before either route (there are no defaults):
 
 - `PENTACLE_RELEASE_RUNTIME_CHECKOUT`: the daemon's runtime Git checkout.
 - `PENTACLE_RELEASE_LAUNCHD_LABEL`: launchd label without `gui/<uid>/`.
 - `PENTACLE_RELEASE_RUNTIME_PYTHON`: absolute runtime Python executable.
 - `PENTACLE_RELEASE_DAEMON_URL`: URL for the read-only WebSocket welcome probe.
+- `PENTACLE_RELEASE_RECORD_DIR` (optional): existing directory for release JSON records.
+- `PENTACLE_RELEASE_PROBE_TARGET` (optional): stream to receive restart delivery probes.
 
 From the tooling worktree:
 
@@ -20,9 +22,15 @@ services/chat-stream-v2/deploy/plain_release.sh "$TARGET"
 
 Preflight checks the current welcome and PID, refreshes origin refs, and
 requires a clean checkout, a reachable fast-forward commit, and unchanged
-daemon requirements. Dry-run fetches, but never checks out or restarts.
+daemon requirements and helper identity. Helper changes require the helper route.
+Dry-run fetches, but never checks out or restarts.
 The real run checks out the target and requires a new PID and matching welcome.
 If they do not appear, it restores the prior checkout and restarts the prior.
+Each real run after preflight writes one JSON record with outcome, exit code,
+UTC preflight/stop/serving times, commits, PIDs, boot ID and probe verdict.
+If the record directory is unset or unwritable, the script prints a warning.
+A missing boot marker is recorded as null. The probe runs only when configured;
+a failed delivery probe is recorded and does not put back a serving release.
 
 | Exit | Meaning |
 | --- | --- |
@@ -31,6 +39,7 @@ If they do not appear, it restores the prior checkout and restarts the prior.
 | 3 | Helper route failed before the serving daemon changed. Inspect the state. |
 | 4 | Forward release failed; the prior is restored and serving. |
 | 5 | Needs an operator. Preserve state; inspect checkout, PID, welcome and policy. |
+| 6 | Released and serving, but the delivery probe failed. |
 
 Use `helper_release.py` in the same deploy directory when account helper code
 or its proof identity must move with the daemon. Run it with runtime Python:
