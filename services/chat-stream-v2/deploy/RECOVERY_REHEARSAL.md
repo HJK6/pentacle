@@ -7,14 +7,19 @@ label, checkout, databases or progress file.
 1. Record the live daemon PID and boot ID. Resolve and record a distinct
    throwaway launchd label, Git checkout, loopback port, data directory, log
    directory and `PENTACLE_DAEMON_PROGRESS_PATH`; stop if any matches live.
-   Use a private home, tmux socket, provider stub and local-only machines file.
-   Clear the inherited environment and use the daemon's existing switches to
-   disable fleet hosts, mirror and outbound notices; keep all fixture databases
-   and logs under the owned directory.
+   Clear the inherited environment. Use a private home and `--tmux-bin` pointing
+   to a wrapper for a private socket, `--claude-bin tests/soak/restart_stub_claude.py`,
+   and a local-only `PENTACLE_MACHINES_FILE`. Keep fixture data and logs owned.
+   Pass `--disable-mirror --disable-hosts --disable-reconciler --disable-retention
+   --disable-nudges --disable-notification-expiry --disable-remote-presence
+   --disable-event-push-ingest --disable-routing-integrity --disable-outbound-notices
+   --disable-awaiter-resolution --disable-window-schedule --disable-usage-state-publisher`.
 2. Use a private local Git origin and checkout. From a serving prior, make an
    unpushed target that starts the watchdog and exits before bootstrap welcome.
    Make the prior fail at the same point only when an owned sentinel exists.
-   Register the isolated launchd job and verify that the prior serves. Set the
+   Run with process access; the sandbox blocks launchd bootstrap. Boot out any
+   leftover job only after verifying it belongs to this fixture label, then
+   bootstrap the isolated job and verify that the prior serves. Set the
    four `PENTACLE_RELEASE_*` settings required by `plain_release.sh` and a
    separate record directory. Never configure a real probe target.
 3. Release the failing target. Require exit 4, `PRIOR RESTORED`, and the prior
@@ -28,7 +33,9 @@ label, checkout, databases or progress file.
    captured samples through the installed checker's engine and admission policy;
    report the observed boot IDs and admissions, and the observation duration.
 5. Boot out only the isolated label, stop its private tmux server, and verify
-   the label and fixture listener are absent. Remove the owned plist and fixture
+   the label is absent. Use `lsof -nP -iTCP:<port> -sTCP:LISTEN` to verify that
+   nothing listens on the fixture port; a plain bind can fail due to TIME_WAIT.
+   Remove the owned plist and fixture
    directories. Read the live PID and boot ID again; both must match the initial
    record. Keep the release output, send proof, samples, replay and cleanup
    readbacks outside the checkout.
