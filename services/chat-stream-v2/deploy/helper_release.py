@@ -8,9 +8,7 @@ import json
 import os
 import plistlib
 import re
-import secrets
 import stat
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -26,9 +24,7 @@ from deploy.coordinated import Invalid  # noqa: E402
 
 PREFIX = "PENTACLE_RELEASE_"
 SETTINGS = ("RUNTIME_CHECKOUT", "LAUNCHD_LABEL", "RUNTIME_PYTHON", "DAEMON_URL")
-OWNER_FILE = ".plain-release-owner"
 SHA = re.compile(r"[0-9a-f]{40}")
-TOKEN = re.compile(r"[0-9a-f]{32}")
 
 
 def say(*parts):
@@ -71,94 +67,6 @@ def environment(label):
             Path(argv[argv.index("--db") + 1]))
 
 
-def remote(installer, target, command):
-    return installer._remote(target, command, dry_run=False)
-
-
-def staged_path(target, sha):
-    root = Path(target.root)
-    if (not SHA.fullmatch(sha) or not root.is_absolute() or ".." in root.parts
-            or root.name != ".pentacle-account-helpers"):
-        raise Invalid("invalid helper release path")
-    return root / sha
-
-
-def stage_owned(installer, target, bundle, sha, manifest, token):
-    """The existing installer owns staging. Mark only a directory it publishes."""
-    release = staged_path(target, sha)
-    staging = Path(str(release) + ".helper-staging")
-    publish = f"mv {shlex.quote(str(staging))} {shlex.quote(str(release))}"
-    marker = shlex.quote(str(staging / OWNER_FILE))
-
-    def runner(argv, **kwargs):
-        # The installer's final rename carries the marker with this run's
-        # staged directory. The reusable-existing path never runs this command.
-        if not ((target.local and argv[:2] == ["sh", "-lc"])
-                or (not target.local and argv[0] == "ssh")):
-            return subprocess.run(argv, **kwargs)
-        command = argv[-1] if target.local else shlex.split(argv[-1])[-1]
-        if command.endswith(" && " + publish):
-            marked = command.removesuffix(publish) + f"(set -C; printf '%s' {token} > {marker}) && " + publish
-            argv = [*argv[:-1], marked if target.local else "sh -lc " + shlex.quote(marked)]
-        return subprocess.run(argv, **kwargs)
-
-    actual = installer.stage_helper_source(target, bundle, sha, manifest, runner=runner)
-    if actual != str(release):
-        raise Invalid("helper path differs from the requested release")
-    return actual
-
-
-# Read-only check also identifies already-completed removal after interruption.
-# No recursive deletion of symlinked, non-owned or substituted directories.
-_OWNER_CHECK = """
-import json, os, pathlib, shutil, stat, sys
-p = pathlib.Path(sys.argv[1])
-marker = p / sys.argv[2]
-token = sys.argv[3]
-if p != p.resolve():
-    raise SystemExit('helper release path changed or is symlinked')
-if not p.exists():
-    print('gone')
-    raise SystemExit(0)
-s = p.lstat()
-if not stat.S_ISDIR(s.st_mode) or s.st_uid != os.getuid() or s.st_mode & 0o022:
-    print('foreign')
-    raise SystemExit(0)
-try:
-    m = marker.lstat()
-except FileNotFoundError:
-    print('foreign')
-    raise SystemExit(0)
-if (not stat.S_ISREG(m.st_mode) or m.st_uid != os.getuid()
-        or m.st_mode & 0o022 or m.st_size != len(token) or marker.read_text() != token):
-    print('foreign')
-    raise SystemExit(0)
-if sys.argv[4] == 'remove':
-    for value in json.loads(sys.argv[5]):
-        script = pathlib.Path(value)
-        if not script.is_absolute() or script.resolve().is_relative_to(p):
-            raise SystemExit('cannot remove a release the policy may reference')
-    if not shutil.rmtree.avoids_symlink_attacks:
-        raise SystemExit('safe recursive cleanup unavailable')
-    shutil.rmtree(p)
-    if p.exists() or p.is_symlink():
-        raise SystemExit('helper release still present')
-    print('removed')
-else:
-    print('owned')
-"""
-
-
-def ownership(installer, target, sha, token, *, policy_scripts=None):
-    if not TOKEN.fullmatch(token):
-        raise Invalid("invalid helper ownership token")
-    path = staged_path(target, sha)
-    return remote(installer, target, shlex.join([
-        "python3", "-c", _OWNER_CHECK, str(path), OWNER_FILE, token,
-        "remove" if policy_scripts is not None else "check", json.dumps(policy_scripts),
-    ]))
-
-
 def prepare(args, work):
     if not SHA.fullmatch(args.target) or run(("git", "rev-parse", "HEAD"), SERVICE).stdout.strip() != args.target:
         raise Invalid("run from a tooling worktree checked out at exactly TARGET")
@@ -175,7 +83,7 @@ def prepare(args, work):
     accounts = cr.Runtime.account_snapshot(None, policy, str(database), scope={"included_hosts": hosts})
     installer = cr.load_installer(SERVICE.parents[1])
     identity = cr.code_identity_at(args.runtime, args.target, run)
-    state = {"target": args.target, "identity": identity, "token": secrets.token_hex(16),
+    state = {"target": args.target, "identity": identity,
              "policy": {"path": str(policy_path), "sha256": digest(policy_bytes)},
              "hosts": {}, "phase": "prepared"}
     save(work, state)
@@ -201,15 +109,14 @@ def prepare(args, work):
         if ssh is not None and (not isinstance(ssh, str) or not ssh or ssh.startswith("-")):
             raise Invalid("invalid machine SSH target")
         target = installer.Target(host, ssh or "", root, ssh is None)
-        script = str(staged_path(target, args.target) / "app" / cr.HELPER)
-        helper = {"target": vars(target), "python": executor["python"], "script": script,
-                  "old_script": executor["script"], "created": False, "stage_started": True}
+        release = str(Path(root) / args.target)
+        existed = bool(installer._remote(target, f"test -e {installer._remote_quote(release)} && printf yes || true", dry_run=False))
+        release = installer.stage_helper_source(target, bundle, args.target, manifest)
+        helper = {"target": vars(target), "python": executor["python"], "script": release + "/app/" + cr.HELPER,
+                  "old_script": executor["script"], "created": not existed}
         state["hosts"][host] = helper
         save(work, state)
-        stage_owned(installer, target, bundle, args.target, manifest, state["token"])
-        helper["created"] = ownership(installer, target, args.target, state["token"]) == "owned"
-        save(work, state)
-        say("staged", host, script, "(new)" if helper["created"] else "(already present)")
+        say("staged", host, release, "(already present)" if existed else "(new)")
         proof = cr.Runtime._helper_proof(prover, helper, accounts, identity, manifest, args.target)
         helper["proof"] = {"identity": proof["closure"]["identity"], "python": proof["closure"]["python"],
                            "artifacts": [item.get("binding_key") for item in proof["artifacts"]]}
@@ -278,39 +185,19 @@ def restore_policy(work):
 
 def unstage(work):
     state = read(work / "state.json")
+    policy = read(state["policy"]["path"])
     installer = cr.load_installer(SERVICE.parents[1])
     for host, helper in state["hosts"].items():
-        if not helper["stage_started"] or helper.get("removed"):
+        release = str(Path(helper["script"]).parents[3])
+        if not helper["created"] or helper.get("removed"):
             continue
+        if policy["executors"][host]["script"] == helper["script"]:
+            raise Invalid(f"{host}: the policy names {release}; restore the policy first")
         target = installer.Target(**helper["target"])
-        release = staged_path(target, state["target"])
-        if target.name != host or helper["script"] != str(release / "app" / cr.HELPER):
-            raise Invalid("stored helper path does not match its release")
-        status = ownership(installer, target, state["target"], state["token"])
-        if status == "gone" and helper.get("removal_started"):
-            helper["removed"] = True
-            save(work, state)
-            continue
-        if status != "owned":
-            say("kept", host, release, "(not owned by this run)")
-            continue
-        policy = read(state["policy"]["path"])
-        if host not in policy["executors"]:
-            raise Invalid(f"{host}: cannot establish current policy ownership")
-        scripts = [executor["script"] for executor in policy["executors"].values()]
-        for value in scripts:
-            script = Path(os.path.normpath(value))
-            if not script.is_absolute() or script.is_relative_to(release):
-                raise Invalid(f"{host}: cannot remove a release the policy may reference")
-        helper["created"] = True
-        helper["removal_started"] = True
-        save(work, state)
-        try:
-            outcome = ownership(installer, target, state["target"], state["token"], policy_scripts=scripts)
-        except subprocess.CalledProcessError as exc:
-            raise Invalid(f"{host}: helper removal refused: {exc.stderr.strip()}") from exc
-        if outcome not in {"removed", "gone"}:
-            raise Invalid(f"{host}: helper ownership changed before removal")
+        installer._remote(target, f"rm -r -- {installer._remote_quote(release)}", dry_run=False)
+        gone = installer._remote(target, f"test -e {installer._remote_quote(release)} || printf gone", dry_run=False)
+        if gone != "gone":
+            raise Invalid(f"{host}: {release} still present")
         helper["removed"] = True
         save(work, state)
         say("removed", host, release)
@@ -458,7 +345,6 @@ def main():
         local = os.environ.get(PREFIX + "LOCAL_HOST")
         if not local or args.hosts != [local]:
             parser.error("rehearse requires --hosts matching PENTACLE_RELEASE_LOCAL_HOST")
-        # The machine record must also indicate local execution.
     if args.command == "release":
         return release(args)
     if args.command == "rehearse":

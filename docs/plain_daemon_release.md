@@ -1,8 +1,7 @@
 # Plain daemon release
 
-The authorized release operator runs these commands in a maintenance window.
-Do not overlap them with another release or account-policy edit. Use a tooling
-worktree at the full target SHA, not the checkout serving the daemon.
+Use a tooling worktree at the target SHA in a maintenance window.
+Do not overlap a release with another release or account-policy edit.
 
 Set all four required variables before either route (there are no defaults):
 
@@ -30,7 +29,9 @@ Each real run after preflight writes one JSON record with outcome, exit code,
 UTC preflight/stop/serving times, commits, PIDs, boot ID and probe verdict.
 If the record directory is unset or unwritable, the script prints a warning.
 A missing boot marker is recorded as null. The probe runs only when configured;
-a failed delivery probe is recorded and does not put back a serving release.
+It sends 10 tells; its JSONL evidence stays beside the record. A failed probe
+does not put back a serving release.
+Never export `PENTACLE_RELEASE_PUTBACK_WORK` in a shell.
 
 | Exit | Meaning |
 | --- | --- |
@@ -49,12 +50,11 @@ helpers, saves the policy bytes and mode, then rewrites only selected executor
 script paths. On put-back it restores policy before restarting the prior.
 Helper `--dry-run` stops before policy rewrite but leaves inert staged copies.
 
-For an inert local rehearsal use `rehearse "$TARGET" --work "$WORK" --hosts HOST`
-with `PENTACLE_RELEASE_LOCAL_HOST` set to that local machine's configured ID.
+For rehearsal use `rehearse "$TARGET" --work "$WORK" --hosts HOST` with
+`PENTACLE_RELEASE_LOCAL_HOST` set to that local machine's configured ID.
 For authorized recovery use `restore-policy --work "$WORK"` or
 `unstage --work "$WORK"`. Unstage removes only copies owned by this run and
 not referenced by current policy, and records each removal in `state.json`.
 Do not discard the run directory during review or recovery.
-
 After helper success, verify current pin proofs, an account-bound spawn on
 the local and a satellite host, and a delivered tell before lifting the hold.

@@ -74,6 +74,7 @@ finish() {
   local code=$? outcome
   trap - EXIT
   if [[ -n "$PROBE_PID" ]]; then
+    (( code == 130 )) && kill "$PROBE_PID" 2>/dev/null
     wait "$PROBE_PID"; local probe_run=$?
     if "$PY" "${0:A:h}/restart_probe.py" verify "$PROBE_FILE" && (( probe_run == 0 )); then
       PROBE_VERDICT=passed
@@ -81,13 +82,8 @@ finish() {
       PROBE_VERDICT=failed
       (( code == 0 )) && code=6
     fi
-    /bin/rm -f "$PROBE_FILE"
   fi
   case $code in 0|6) outcome=released;; 2) outcome=refused;; 4) outcome=put_back;; *) outcome=needs_human;; esac
-  if [[ "$code" == 4 ]]; then
-    NEW_PID=$(pid_of)
-    SERVING_TIME=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
-  fi
   if [[ -n "$NEW_PID" ]]; then
   BOOT_ID=$(launchctl print "$LABEL" | "$PY" -c '
 import json, pathlib, re, sys
@@ -104,20 +100,29 @@ except (OSError, ValueError, AttributeError, KeyError): pass
   [[ -n "$STOP_TIME" && -z "$NEW_PID" ]] && NEW_PID=$(pid_of)
   if [[ -n "${PENTACLE_RELEASE_RECORD_DIR:-}" ]]; then
     "$PY" -c '
-import json, pathlib, sys, uuid
-keys = ("target", "prior", "outcome", "exit_code", "preflight", "stop", "serving", "old_pid", "new_pid", "boot_id", "probe_verdict")
-values = [v or None for v in sys.argv[2:]]; values[3] = int(values[3])
-path = pathlib.Path(sys.argv[1]) / (str(uuid.uuid4()) + ".json")
-path.write_text(json.dumps(dict(zip(keys, values)), indent=2) + "\n")
-' "$PENTACLE_RELEASE_RECORD_DIR" "$TARGET" "$PRIOR" "$outcome" "$code" "$PREFLIGHT" "$STOP_TIME" "$SERVING_TIME" "$OLD_PID" "$NEW_PID" "$BOOT_ID" "$PROBE_VERDICT" || say "WARNING: release record could not be written"
+import json, os, pathlib, sys, tempfile
+keys = ("target", "prior", "outcome", "exit_code", "preflight", "stop", "serving", "old_pid", "new_pid", "boot_id", "probe_verdict", "probe_path")
+values = [v or None for v in sys.argv[2:]]
+for i in (3, 7, 8): values[i] = int(values[i]) if values[i] is not None else None
+path = pathlib.Path(sys.argv[1]) / (values[4] + "-" + values[0][:12] + ".json")
+with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+    json.dump(dict(zip(keys, values)), f, indent=2); f.write("\n")
+os.replace(f.name, path)
+' "$PENTACLE_RELEASE_RECORD_DIR" "$TARGET" "$PRIOR" "$outcome" "$code" "$PREFLIGHT" "$STOP_TIME" "$SERVING_TIME" "$OLD_PID" "$NEW_PID" "$BOOT_ID" "$PROBE_VERDICT" "$PROBE_FILE" || say "WARNING: release record could not be written"
   else
     say "WARNING: PENTACLE_RELEASE_RECORD_DIR unset; no release record"
   fi
   exit "$code"
 }
 trap finish EXIT
+trap 'exit 130' INT TERM HUP
 if [[ -n "${PENTACLE_RELEASE_PROBE_TARGET:-}" ]]; then
-  PROBE_FILE=$(mktemp) || refuse "could not create probe file"
+  if [[ -n "${PENTACLE_RELEASE_RECORD_DIR:-}" ]]; then
+    PROBE_FILE="$PENTACLE_RELEASE_RECORD_DIR/$PREFLIGHT-${TARGET[1,12]}.probe.jsonl"
+  else
+    PROBE_FILE=$(mktemp) || refuse "could not create probe file"
+    say "probe file: $PROBE_FILE"
+  fi
   "$PY" "${0:A:h}/restart_probe.py" run "$PENTACLE_RELEASE_PROBE_TARGET" 10 "$PROBE_FILE" &
   PROBE_PID=$!
   sleep 5
@@ -146,6 +151,8 @@ fi
 git -C "$RT" checkout -q --detach "$PRIOR" || human "could not check out prior"
 launchctl kickstart -k "$LABEL" || say "kickstart returned nonzero; checking what serves"
 if wait_for "$PRIOR" "${MID_PID:-$OLD_PID}"; then
+  NEW_PID=$(pid_of)
+  SERVING_TIME=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
   say "PRIOR RESTORED: pid $(pid_of) serves $PRIOR; release failed"
   exit 4
 fi

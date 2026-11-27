@@ -106,6 +106,7 @@ else:
 if sys.argv[1] == '-c':
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 if pathlib.Path(sys.argv[1]).name == 'restart_probe.py':
+    if sys.argv[2] == 'run': pathlib.Path(sys.argv[5]).write_text('probe evidence\\n')
     sys.exit(int(os.environ.get('FIXTURE_PROBE_FAIL', '0')) if sys.argv[2] == 'verify' else 0)
 if pathlib.Path(sys.argv[1]).name == 'helper_release.py':
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
@@ -255,49 +256,31 @@ def test_unstage_removes_only_owned_unreferenced_helpers_and_records_removal(tmp
     owned = installer.Target("own", "unused", str(tmp_path / "one" / ".pentacle-account-helpers"), True)
     reused = installer.Target("existing", "unused", str(tmp_path / "two" / ".pentacle-account-helpers"), True)
     installer.stage_helper_source(reused, bundle, sha, manifest)
-    token = "b" * 32
-    helper.stage_owned(installer, owned, bundle, sha, manifest, token)
-    helper.stage_owned(installer, reused, bundle, sha, manifest, token)
-    assert helper.ownership(installer, owned, sha, token) == "owned"
-    assert helper.ownership(installer, reused, sha, token) == "foreign"
+    installer.stage_helper_source(owned, bundle, sha, manifest)
 
-    def record(target):
-        script = helper.staged_path(target, sha) / "app" / helper.cr.HELPER
-        return {"script": str(script), "target": vars(target), "stage_started": True}
+    def record(target, created):
+        script = Path(target.root) / sha / "app" / helper.cr.HELPER
+        return {"script": str(script), "target": vars(target), "created": created}
 
     work = tmp_path / "work"
     work.mkdir()
     policy = tmp_path / "policy.json"
-    hosts = {"existing": record(reused), "own": record(owned)}
-    helper.save(work, {"target": sha, "token": token, "policy": {"path": str(policy)}, "hosts": hosts})
+    hosts = {"existing": record(reused, False), "own": record(owned, True)}
+    helper.save(work, {"target": sha, "policy": {"path": str(policy)}, "hosts": hosts})
     policy.write_text(json.dumps({"executors": {
-        "own": {"script": str(tmp_path / "unrelated")},
-        "existing": {"script": hosts["own"]["script"]},
-    }}))
-    with pytest.raises(helper.Invalid, match="policy may reference"):
-        helper.unstage(work)
-    assert helper.staged_path(owned, sha).is_dir()
-    assert helper.staged_path(reused, sha).is_dir()
-
-    alias = tmp_path / "referenced-alias"
-    alias.symlink_to(helper.staged_path(owned, sha) / "app")
-    policy.write_text(json.dumps({"executors": {
-        "own": {"script": str(alias / helper.cr.HELPER)},
+        "own": {"script": hosts["own"]["script"]},
         "existing": {"script": hosts["existing"]["script"]},
     }}))
-    with pytest.raises(helper.Invalid, match="policy may reference"):
+    with pytest.raises(helper.Invalid, match="policy names"):
         helper.unstage(work)
-    assert helper.staged_path(owned, sha).is_dir()
-
     policy.write_text(json.dumps({"executors": {
         "own": {"script": str(tmp_path / "unrelated")},
         "existing": {"script": hosts["existing"]["script"]},
     }}))
     assert helper.unstage(work) == helper.unstage(work) == 0
-    assert not helper.staged_path(owned, sha).exists()
-    assert helper.staged_path(reused, sha).is_dir()
+    assert not (Path(owned.root) / sha).exists()
+    assert (Path(reused.root) / sha).exists()
     state = helper.read(work / "state.json")
-    assert state["hosts"]["own"]["created"] is True
     assert state["hosts"]["own"]["removed"] is True
     assert not state["hosts"]["existing"].get("removed")
 
@@ -338,8 +321,9 @@ def test_release_writes_record(rig, tmp_path):
     assert len(records) == 1
     record = json.loads(records[0].read_text())
     assert record['target'] == shas['target'] and record['prior'] == shas['prior']
+    assert records[0].name == record['preflight'] + '-' + shas['target'][:12] + '.json'
     assert record['outcome'] == 'released' and record['exit_code'] == 0
-    assert record['old_pid'] == '100' and record['new_pid'] == '101'
+    assert record['old_pid'] == 100 and record['new_pid'] == 101
     assert record['boot_id'] == '12345678-1234-4234-8234-123456789abc'
     assert record['preflight'].endswith('Z') and record['stop'].endswith('Z') and record['serving'].endswith('Z')
 
@@ -387,5 +371,8 @@ def test_probe_verdict_recorded(rig, tmp_path, fails, verdict, code):
     assert result.returncode == code, result
     records = list(directory.glob('*.json'))
     assert len(records) == 1
-    assert json.loads(records[0].read_text())['probe_verdict'] == verdict
+    record = json.loads(records[0].read_text())
+    assert record['probe_verdict'] == verdict
+    assert Path(record['probe_path']).name == records[0].stem + '.probe.jsonl'
+    assert Path(record['probe_path']).read_text() == 'probe evidence\n'
     assert git(rt, 'rev-parse', 'HEAD') == shas['target']
