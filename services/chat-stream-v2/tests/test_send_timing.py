@@ -65,8 +65,6 @@ def test_send_latency_counts_and_resets(caplog):
     assert not caplog.messages
 
     timing.record(3400, {**landed, "coalesced": True, "provider_queued": True})
-    assert not caplog.messages
-    timing.flush(3601)
     first_window = {
         "window_s": 3601, "attempts": 7, "reply_under_1s": 5,
         "proof_under_1s": 2, "queued": 1, "pending_proof": 3, "failed": 1,
@@ -77,7 +75,6 @@ def test_send_latency_counts_and_resets(caplog):
     assert json.loads(caplog.messages[0].removeprefix("send_latency ")) == first_window
 
     timing.record(7201.75, landed)
-    timing.flush(7202)
     assert len(caplog.messages) == 2
     assert json.loads(caplog.messages[1].removeprefix("send_latency ")) == {
         "window_s": 3601, "attempts": 1, "reply_under_1s": 1,

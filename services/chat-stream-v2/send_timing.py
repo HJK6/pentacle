@@ -38,6 +38,7 @@ class SendTiming:
                     self._counts["failed"] += 1
                 else:
                     self._counts["pending_proof"] += 1
+            self.flush(now)
         except Exception:
             self.failures += 1
 
