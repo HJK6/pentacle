@@ -183,6 +183,7 @@ class ChatStreamClient {
     this._fetchBlobChunks = new Map();
     this._reconnectTimer = null;
     this._restartRecoveryTimer = null;
+    this._restartRecoveryPending = false;
     this._welcomeTimer = null;
     this._pendingHandshakeLimitsUpdate = null;
     this._heartbeatTimer = null;
@@ -547,6 +548,10 @@ try {
     if (isError && upload) upload.error = msg;
     const pending = this._pending.get(msg.request_id);
     if (!pending) return false;
+    if (pending.prefix === 'send.receipt.get' && !['send.receipt.get.ok', 'send.receipt.get.error'].includes(type)) {
+      if (isSendReceipt) { this._forwardFrame(msg); return true; }
+      return false;
+    }
     if (isError && pending.retry?.(msg)) return true;
     this._pending.delete(msg.request_id);
     if (type === 'request_stream_events.ok') {
@@ -774,6 +779,12 @@ try {
       'send',
       { requestId },
     );
+  }
+
+  getSendReceipt({ streamId, requestId, originalRequest } = {}) {
+    return this.sendCommand({ type: 'send.receipt.get', to_stream_id: streamId,
+      ...(originalRequest ? { original_request: originalRequest } : {}) },
+    'send.receipt.get', { requestId, rawResponse: true });
   }
 
   transcribeBlob({ request_id, blob_sha, mime } = {}) {
@@ -1410,6 +1421,7 @@ try {
   }
 
   _beginRestartRecovery() {
+    this._restartRecoveryPending = true;
     if (this._restartRecoveryTimer !== null) return; // failed reconnects cannot renew the deadline
     this._restartRecoveryTimer = setTimeout(() => {
       this._restartRecoveryTimer = null;
@@ -1425,6 +1437,8 @@ try {
     this._handshakeState = 'ready';
     this._setConnected(true);
     this._setConnectionError(null);
+    const daemonRestarted = this._restartRecoveryPending === true;
+    this._restartRecoveryPending = false;
     this._clearRestartRecovery();
     this._isAlive = true;
     this._clearWelcomeTimer();
@@ -1449,7 +1463,7 @@ try {
     // once the authenticated transport can actually reach durable receipts.
     const prevGeneration = this._socketGeneration;
     this._socketGeneration += 1;
-    this._forwardFrame({ type: '__reconnect', generation: prevGeneration, next_generation: this._socketGeneration });
+    this._forwardFrame({ type: '__reconnect', generation: prevGeneration, next_generation: this._socketGeneration, ...(daemonRestarted ? { daemon_restarted: true } : {}) });
   }
 
   _queueHandshakeLimitsUpdate(msg) {

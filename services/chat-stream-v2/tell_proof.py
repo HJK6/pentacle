@@ -396,10 +396,7 @@ class ProjectionDeliveries:
                         extracted = row[column]
                         if type(extracted) is not type(value) or extracted != value:
                             raise ValueError("SQLite/Python delivery lookup disagreement")
-                    item = {"tell_id": row["tell_id"], "payload": payload, "delivery": delivery,
-                            "text_digest": (cache.text_digest(row["tell_id"], delivery.get("text"))
-                                            if cache is not None
-                                            else provider_text_digest(delivery.get("text")))}
+                    item = {"tell_id": row["tell_id"], "payload": payload, "delivery": delivery}
                     by_target.setdefault(delivery.get("to_stream_id"), []).append(item)
                     by_input.setdefault((delivery.get("to_stream_id"), delivery.get("text")), []).append(payload)
             except (sqlite3.Error, TypeError, ValueError, AttributeError, RecursionError):
@@ -412,6 +409,15 @@ class ProjectionDeliveries:
                 cache.prune(live_tell_ids)
             self._by_target, self._by_input = by_target, by_input
         return self._by_target.get(target, [])
+
+    @staticmethod
+    def text_digest(conn, row):
+        if "text_digest" not in row:
+            text = row["delivery"].get("text")
+            cache = getattr(conn, "delivery_parse_cache", None)
+            row["text_digest"] = (cache.text_digest(row["tell_id"], text)
+                                  if cache is not None else provider_text_digest(text))
+        return row["text_digest"]
 
     def candidates(self, conn, target, text):
         if self.rows_for(conn, target, text) is None:
@@ -559,7 +565,8 @@ def retained_proof(conn, payload, *, deliveries=None):
                     and other.get("proof_generation") == generation
                     and type(lower) is int and lower < event_id
                     and not (type(upper) is int and upper <= watermark)
-                    and (row["text_digest"] if rows is not None else provider_text_digest(other.get("text")))
+                    and (deliveries.text_digest(conn, row) if rows is not None
+                         else provider_text_digest(other.get("text")))
                     == raw_input_digest()):
                 return None
         except (TypeError, ValueError, AttributeError):
@@ -634,13 +641,17 @@ def delivery_wire(event):
     return raw.get('peer_wire_text') if isinstance(raw.get('peer_wire_text'), str) else event.get('text')
 
 
+def is_native_input_event(event):
+    return event.get('kind') in {'USER', 'TELL'}
+
+
 def split_native_input(conn, event, *, lookup_deadline=None):
     """Locate only unique, unconsumed exact delivery spans in an admitted input.
 
     The original record and full text remain in raw. Textual headers are never
     a boundary oracle. Leftovers retain unknown origin until dispatch proof.
     """
-    if event.get('kind') not in {'USER', 'TELL'}:
+    if not is_native_input_event(event):
         return [event]
     text = delivery_wire(event)
     target = event.get('stream_id')

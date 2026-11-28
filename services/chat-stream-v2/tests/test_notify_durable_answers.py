@@ -239,7 +239,7 @@ def test_late_proof_holds_original_generation_until_lookup_finishes(tmp_path,mon
             await store.submit(_expire_abandoned_leases)
             await queue.drain_once(force=True)
             assert (await state(notify,q))['resolution']['delivery_status']=='unconfirmed'
-            original_tail=store.fetch_session_event_tail
+            original_tail=store.fetch_session_event_tail_for_proof
             replacement=None
             blocked=None
             async def tail(*args,**kwargs):
@@ -249,7 +249,7 @@ def test_late_proof_holds_original_generation_until_lookup_finishes(tmp_path,mon
                     await asyncio.sleep(.03)
                     blocked=not replacement.done()
                 return await original_tail(*args,**kwargs)
-            store.fetch_session_event_tail=tail
+            store.fetch_session_event_tail_for_proof=tail
             await notify.recover_once()
             assert replacement is not None
             await replacement

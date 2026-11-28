@@ -41,8 +41,8 @@ async def append_rows(store, count, *, malformed=False, birth=BIRTH):
 
 @pytest.mark.parametrize("path", ["comms_watermark", "watermark", "wait_for_watermark",
                                   "comms_proof", "proof"])
-def test_submission_projects_only_post_watermark_rows(monkeypatch, path):
-    """RED on the old real Store: each entry projects all 500 rows."""
+def test_submission_reads_do_not_project_history(monkeypatch, path):
+    """Neither watermark capture nor post-watermark proof needs the history projector."""
     async def run():
         store = Store()
         store.start()
@@ -71,7 +71,7 @@ def test_submission_projects_only_post_watermark_rows(monkeypatch, path):
             else:
                 await proof.lookup(STREAM, expected_text="missing",
                                    watermark=EventWatermark(STREAM, watermark, "reachable"))
-            assert sorted(projected) == ([] if "watermark" in path else ids[-2:])
+            assert projected == []
         finally:
             store.stop()
     asyncio.run(run())

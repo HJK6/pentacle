@@ -59,6 +59,7 @@ export type TranscriptRenderOptions = {
   showDashboardLinks?: boolean;
   pictureCards?: boolean;
   allowQueuedSendNow?: boolean;
+  allowFailedDiscard?: boolean;
   resolvedQuestions?: readonly ResolvedQuestionRecord[];
 };
 
@@ -390,16 +391,16 @@ function renderChatBody(text: string, options: TranscriptRenderOptions = {}): st
 // operator's ask). Confirmed rows pass sendState undefined and render nothing.
 const ACTIONABLE_ASSISTANT_STATES = new Set(['waiting_for_operator', 'waiting_for_dependency', 'uncertain', 'failed', 'cancelled']);
 
-function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string, streamId?: string, allowSendNow = false): string {
-  const label = sendState === 'indeterminate' ? 'Delivery uncertain' : sendState === 'sent' ? 'Sent' : sendState === 'queued'
+function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string, streamId?: string, allowSendNow = false, allowDiscard = false): string {
+  const label = sendState === 'indeterminate' ? 'sending…' : sendState === 'sent' ? 'Sent' : sendState === 'queued'
     ? 'Queued'
     : sendState === 'sending'
       ? 'sending…'
       : sendState === 'cancelled'
         ? 'Cancelled'
         : 'Failed to send';
-  const retry = (sendState === 'failed' || sendState === 'indeterminate') && optimisticId
-    ? `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}">Retry</button>`
+  const retry = sendState === 'failed' && optimisticId
+    ? allowDiscard ? `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}" aria-label="Retry sending"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" class="slot-chat-send-discard" data-optimistic-id="${escapeHtml(optimisticId)}" aria-label="Cancel and delete"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>` : `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}">Retry</button>`
     : '';
   const sendNow = sendState === 'queued' && allowSendNow && optimisticId && streamId
     ? `<button type="button" class="slot-chat-send-now" data-stream-id="${escapeHtml(streamId)}" data-optimistic-id="${escapeHtml(optimisticId)}">Send now</button>` : '';
@@ -575,7 +576,7 @@ function renderTranscriptItemBodyHtml(
       ? sendState : item.providerQueued ? 'queued' : item.receiptCaption || (sendState === 'queued' ? 'sending' : sendState);
     const invalidVoiceAnswers = item.voiceAnswersInvalid === true && sendState === 'failed';
     const droppedVoiceAnswers = item.voiceAnswersStatus?.state === 'dropped';
-    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId, options.streamId, item.providerQueued === true && options.allowQueuedSendNow === true) : '';
+    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId, options.streamId, item.providerQueued === true && options.allowQueuedSendNow === true, options.allowFailedDiscard === true) : '';
     const plainVoice = invalidVoiceAnswers && item.optimisticId
       ? `<button type="button" data-question-voice-plain data-optimistic-id="${escapeHtml(item.optimisticId)}">Send as plain voice note</button>` : '';
     const voiceAnswersStatus = invalidVoiceAnswers || droppedVoiceAnswers

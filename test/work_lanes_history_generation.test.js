@@ -19,7 +19,7 @@ test('initial read carries the generation only when asked', async () => {
   lazy.ensureChatEventsLoaded(state, 'hostc:a', cc, quiet, { generation: 'g1' });
   lazy.ensureChatEventsLoaded(state, 'hostc:b', cc, quiet, {});
   await flush();
-  assert.deepEqual(calls, [{ streamId: 'hostc:a', generation: 'g1' }, { streamId: 'hostc:b' }]);
+  assert.deepEqual(calls, [{ streamId: 'hostc:a', limit: 64, generation: 'g1' }, { streamId: 'hostc:b', limit: 64 }]);
 });
 
 test('older-history pages carry the generation only when asked', async () => {
@@ -45,7 +45,7 @@ test('reconnect refetch passes each slot its own generation', async () => {
   });
   await flush();
   // The same stream id is loaded once; the first slot claims it with its generation.
-  assert.deepEqual(calls, [{ streamId: 'hostc:a', generation: 'g1' }]);
+  assert.deepEqual(calls, [{ streamId: 'hostc:a', limit: 64, generation: 'g1' }]);
 });
 
 test('retry keeps the generation of the failed read', async () => {
@@ -78,10 +78,10 @@ test('retry ownership is per slot kind and generation: an ordinary retry cannot 
   const [ordinary, lane] = timers.splice(0);
   ordinary();
   await flush();
-  assert.deepEqual(calls, [{ streamId: 'hostc:a' }], 'the ordinary retry fires without a generation');
+  assert.deepEqual(calls, [{ streamId: 'hostc:a', limit: 64 }], 'the ordinary retry fires without a generation');
   lane();
   await flush();
-  assert.deepEqual(calls, [{ streamId: 'hostc:a' }, { streamId: 'hostc:a', generation: 'g1' }],
+  assert.deepEqual(calls, [{ streamId: 'hostc:a', limit: 64 }, { streamId: 'hostc:a', limit: 64, generation: 'g1' }],
     'the lane retry still fires, with its generation, after the ordinary retry replaced the shared load');
 });
 

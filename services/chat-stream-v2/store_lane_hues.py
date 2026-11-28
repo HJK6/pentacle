@@ -11,10 +11,10 @@ log = logging.getLogger(__name__)
 
 
 @contextmanager
-def hue_transaction(conn):
+def hue_transaction(conn, begin='BEGIN IMMEDIATE'):
     owned = not conn.in_transaction
     if owned:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(begin)
     try:
         yield
         if owned:
