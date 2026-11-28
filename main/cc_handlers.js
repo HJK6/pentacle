@@ -132,6 +132,7 @@ function createCcHandlers({
   micRequest = null,
   buildId = null,
   hostedDashboardAuthMode = 'unknown',
+  monotonicNow = () => performance.now(),
 }) {
   const telemetry = [];
   const laneShowsBySender = new WeakMap();
@@ -143,11 +144,11 @@ function createCcHandlers({
     if (!unknownRevisionCount) return;
     console.info({ subsystem: 'work_lanes', event: 'unknown_revision_passthrough', count: unknownRevisionCount });
     unknownRevisionCount = 0;
-    unknownRevisionLastLog = Date.now();
+    unknownRevisionLastLog = monotonicNow();
   }
   function countUnknownRevision() {
     unknownRevisionCount += 1;
-    const remaining = 60000 - (Date.now() - unknownRevisionLastLog);
+    const remaining = 60000 - (monotonicNow() - unknownRevisionLastLog);
     if (remaining <= 0) {
       if (unknownRevisionTimer !== null) clearTimeout(unknownRevisionTimer);
       flushUnknownRevisions();
@@ -247,7 +248,7 @@ function createCcHandlers({
       const key = JSON.stringify([laneId, page.goalId ?? null, page.membersAfter ?? null, page.membersLimit ?? 32]);
       const previous = entries.get(key);
       if (previous?.revision === revision && (previous.pending
-        || (revision !== null && Date.now() - previous.completedAt < 300000))) {
+        || (revision !== null && monotonicNow() - previous.completedAt < 300000))) {
         entries.delete(key); entries.set(key, previous);
         return previous.promise;
       }
@@ -256,7 +257,7 @@ function createCcHandlers({
       entries.delete(key);
       entry.promise = Promise.resolve(chatStreamClient.workLanesShow(laneId, page)).then(reply => {
         entry.pending = false;
-        entry.completedAt = Date.now();
+        entry.completedAt = monotonicNow();
         const validDetail = reply?.type === 'work_lanes.show.ok'
           && typeof reply.detail_revision === 'string' && /^[a-f0-9]{64}$/.test(reply.detail_revision)
           && reply.lane?.lane_id === laneId && reply.projection?.lane_id === laneId;

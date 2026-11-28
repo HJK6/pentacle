@@ -133,7 +133,7 @@ test('unknown revision joins in-flight requests but never reuses completed repli
   t.mock.method(Date,'now',()=>now);
   t.mock.method(console,'info',(...args)=>logs.push(args));
   const client={snapshot:()=>({work_lanes:{lanes:[]}}),workLanesShow:()=>new Promise(resolve=>requests.push(resolve))};
-  const table={}; createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const table={}; createCcHandlers({CONFIG:{},chatStreamClient:client,monotonicNow:()=>now}).register(createCollector(table));
   const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
   const first=show(event,'missing_lane',{membersLimit:32});
   const joined=show(event,'missing_lane',{membersLimit:32});
@@ -194,7 +194,7 @@ test('known replies expire five minutes after completion while in-flight calls k
   let now=0,calls=0,finish; t.mock.method(Date,'now',()=>now); const revision='a'.repeat(64);
   const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision}]}}),
     workLanesShow:()=>{calls++;return new Promise(resolve=>{finish=resolve;});}};
-  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client,monotonicNow:()=>now}).register(createCollector(table));
   const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}},detail={type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}};
   const first=show(event,'lane_fixture',{});now=600000;
   const joined=show(event,'lane_fixture',{});assert.equal(calls,1,'pending work remains joined even after five minutes');
@@ -220,7 +220,7 @@ test('unknown-revision counter flushes trailing calls after one minute without m
   t.mock.timers.enable({apis:['setTimeout']}); let now=100000; t.mock.method(Date,'now',()=>now);
   const logs=[];t.mock.method(console,'info',(...args)=>logs.push(args));
   const client={snapshot:()=>({work_lanes:{lanes:[]}}),workLanesShow:async()=>({type:'work_lanes.show.ok'})};
-  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client,monotonicNow:()=>now}).register(createCollector(table));
   const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
   await show(event,'missing_lane',{});await show(event,'missing_lane',{});
   assert.equal(logs.length,1);now+=59999;t.mock.timers.tick(59999);assert.equal(logs.length,1);
@@ -237,4 +237,35 @@ test('the completed-entry cap never evicts an in-flight request', async () => {
   const joined=show(event,'lane_fixture',{membersAfter:'spec_fixture__0'});assert.equal(calls,65);
   const reply={type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}};
   pending.forEach(resolve=>resolve(reply));await Promise.all([...promises,joined]);
+});
+
+
+test('wall-clock steps do not change elapsed expiry or counter rate', async t => {
+  let wall=1000000, elapsed=0, calls=0;
+  t.mock.method(Date,'now',()=>wall); t.mock.timers.enable({apis:['setTimeout']});
+  const logs=[]; t.mock.method(console,'info',(...args)=>logs.push(args));
+  const rev='a'.repeat(64), lane='lane_fixture';
+  const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:lane,detail_revision:rev}]}}),
+    workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:rev,lane:{lane_id:lane},projection:{lane_id:lane}};}};
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client,monotonicNow:()=>elapsed}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
+  await show(event,lane,{}); wall-=600000; elapsed+=300000;
+  await show(event,lane,{}); assert.equal(calls,2,'elapsed five minutes expire despite a backward wall step');
+  await show(event,'missing_lane',{}); wall+=3600000; elapsed+=1000;
+  await show(event,'missing_lane',{}); assert.equal(logs.length,1,'forward wall step does not bypass rate limit');
+  elapsed+=59000;t.mock.timers.tick(59000);assert.equal(logs.length,2,'trailing counter flushes on elapsed time');
+});
+
+test('pending page survives eviction of completed pages', async () => {
+  const revision='a'.repeat(64), lane='lane_fixture';let calls=0, finish;
+  const detail={type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:lane},projection:{lane_id:lane}};
+  const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:lane,detail_revision:revision}]}}),
+    workLanesShow:(_lane,options)=>{calls++;return options.membersAfter==='pending' ? new Promise(resolve=>{finish=resolve;}) : Promise.resolve(detail);}};
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
+  const first=show(event,lane,{membersAfter:'pending'});
+  for(let i=0;i<65;i++) await show(event,lane,{membersAfter:'page'+i});
+  const joined=show(event,lane,{membersAfter:'pending'});
+  assert.equal(calls,66,'pending page is retained through completed-page eviction');
+  finish(detail);await Promise.all([first,joined]);
 });
