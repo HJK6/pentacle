@@ -96,6 +96,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   const choose = id => { $("button[aria-label^=Chats]").click(); $(`.popover [data-stream-id="fixture:${id}"]`).click(); };
   return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts, focused, unread,
     update: () => notify(),
+    frame: f => frame(f),
     inventory: () => { frame({type:'session.inventory', sessions:rows}); notify(); },
     sendState: (stage, allowed) => { sendStage = stage; sendNowAllowed = allowed; notify(); },
     shown: () => [...window.document.querySelectorAll('.chat-card:not([hidden])')] };
@@ -225,18 +226,199 @@ test('the chats on screen are the store\'s focused streams and each is read once
   const reads = () => s.calls.filter(c => c[0] === 'history').map(c => c[1]);
   assert.deepEqual(s.focused.at(-1), ['fixture:assistant']);
   assert.deepEqual(reads(), ['fixture:assistant']);
-  s.choose('a'); s.choose('b');
+  const assistantShown = () => !s.$('[data-pane=assistant]').hidden;
+  s.choose('a');
   await flush();
-  assert.deepEqual(s.focused.at(-1), ['fixture:assistant', 'fixture:a', 'fixture:b']);
+  assert.equal(assistantShown(), true);
+  assert.deepEqual(s.focused.at(-1), ['fixture:assistant', 'fixture:a']);
+  s.choose('b');
+  await flush();
+  assert.equal(assistantShown(), false, 'two cards leave no room for the Assistant');
+  assert.deepEqual(s.focused.at(-1), ['fixture:a', 'fixture:b'], 'a pane off screen is not held for it');
   s.update(); s.update();
   assert.deepEqual(reads(), ['fixture:assistant', 'fixture:a', 'fixture:b'], 'a render does not read a chat again');
   s.$('[data-pane=chat] [aria-label=Close]').click();
   await flush();
   assert.equal(s.focused.at(-1).includes('fixture:a'), false, 'a closed card releases its chat');
+  assert.equal(assistantShown(), true);
+  assert.equal(reads().filter(id => id === 'fixture:assistant').length, 2, 'the Assistant is read again when it returns');
   s.choose('a');
   await flush();
   assert.equal(reads().filter(id => id === 'fixture:a').length, 2, 'a chat that left the screen is read again');
-  assert.equal(reads().filter(id => id === 'fixture:assistant').length, 1);
+  s.update();
+  assert.equal(reads().filter(id => id === 'fixture:a').length, 2, 'and only once');
+});
+
+test('a chat covered by a full-screen card is released and read again when it comes back', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  await flush();
+  const reads = id => s.calls.filter(c => c[0] === 'history' && c[1] === id).length;
+  assert.equal(reads('fixture:a'), 1);
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  await flush();
+  assert.equal(s.$('[data-pane=chat]').closest('.chat-card').hidden, true);
+  assert.equal(s.focused.at(-1).includes('fixture:a'), false, 'the covered chat is not held for the screen');
+  assert.equal(s.focused.at(-1).includes('fixture:b'), true);
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  await flush();
+  assert.equal(s.focused.at(-1).includes('fixture:a'), true);
+  assert.equal(reads('fixture:a'), 2, 'the chat that came back is read again');
+  assert.equal(reads('fixture:b'), 1, 'the chat that stayed on screen is not');
+});
+
+test('with a store that notifies at once, a covered chat is released once and read only when it returns', async t => {
+  const s = openShell(t);
+  // The real store tells its subscribers inside setFocusedChatStreams.
+  const pin = s.window.PentacleChatStore.setFocusedChatStreams;
+  s.window.PentacleChatStore.setFocusedChatStreams = ids => { pin(ids); s.update(); };
+  await flush(); s.choose('a'); s.choose('b'); await flush();
+  const reads = id => s.calls.filter(c => c[0] === 'history' && c[1] === id).length;
+  assert.equal(reads('fixture:a'), 1);
+  const hid = s.focused.length;
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  await flush();
+  assert.deepEqual(s.focused.slice(hid), [['fixture:b']], 'one pin change, never back to the covered chat');
+  assert.equal(reads('fixture:a'), 1, 'a covered chat is not read');
+  const back = s.focused.length;
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  await flush();
+  assert.deepEqual(s.focused.slice(back), [['fixture:a', 'fixture:b']]);
+  assert.equal(reads('fixture:a'), 2, 'read once on return');
+  assert.equal(reads('fixture:b'), 1);
+});
+
+test('an earlier-messages request from before a chat switch cannot move the pane that came back', async t => {
+  const s = openShell(t);
+  const pending = [];
+  let older = 0;
+  s.window.cc.requestStreamEvents = args => {
+    s.calls.push(['history', args.streamId, args.beforeDaemonSeq ?? null]);
+    if (!args.beforeDaemonSeq) return Promise.resolve({ ok: true, received: 500, nextBeforeDaemonSeq: 900 });
+    return new Promise(resolve => pending.push(resolve));
+  };
+  let shown = 0;
+  const select = s.window.PentacleChatStore.selectSessionDetail;
+  s.window.PentacleChatStore.selectSessionDetail = (id, options) => {
+    if (id !== 'fixture:a') return select(id, options);
+    shown = Math.min(120 + older, options.visibleCount);
+    return { transcriptItems: Array.from({ length: shown }, (_, i) => ({ id: 'm' + i })), remainingCount: 120 + older - shown };
+  };
+  s.window.PentacleChatView.renderTranscriptTimelineHtml = detail => `<p>${detail?.transcriptItems?.length ?? 0} rows</p>`;
+  await flush(); s.choose('a'); await flush();
+  const show = id => { s.$('[data-pane=chat] .next-chat-title').click(); s.$(`.popover:not([hidden]) [data-stream-id="fixture:${id}"]`).click(); };
+  const earlier = () => s.$('[data-pane=chat] .next-history-earlier');
+  earlier().click();
+  await flush();
+  assert.equal(pending.length, 1, 'the first older page is on its way');
+  show('b'); await flush();
+  show('a'); await flush();
+  earlier().click();
+  await flush();
+  assert.equal(pending.length, 2, 'the returning chat asks again');
+  older = 60;
+  pending[0]({ ok: true, received: 500, nextBeforeDaemonSeq: 400 });
+  await flush(); await flush();
+  assert.equal(shown, 120, 'the old request does not reveal rows in the new pane');
+  assert.match(s.$('[data-pane=chat] .thread-inner').textContent, /Loading earlier messages/, 'the new request still shows its loading line');
+  pending[1]({ ok: true, received: 500, nextBeforeDaemonSeq: 400 });
+  await flush(); await flush();
+  assert.equal(shown, 168, 'the request the reader is waiting on reveals 48 more');
+});
+
+test('a running time on a card showing its terminal schedules no redraws and is current when the thread returns', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  const clock = controlClock(t, s);
+  const a = s.rows[1]; a.working = true;
+  s.elapsed[a.stream_id] = 7000;
+  s.update();
+  assert.equal(s.$('[data-pane=chat] .next-working').hidden, false, 'the time shows in the thread');
+  clock.advance(5);
+  s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
+  await flush();
+  const realTimeout = s.window.setTimeout;
+  const scheduled = [];
+  s.window.setTimeout = (fn, ms, ...rest) => { if (fn?.name === 'paintWorking') scheduled.push(ms); return realTimeout.call(s.window, fn, ms, ...rest); };
+  s.update();
+  s.window.setTimeout = realTimeout;
+  clock.release();
+  assert.deepEqual(scheduled, [], 'the working row is hidden behind the terminal');
+  assert.equal(s.$('[data-pane=chat] .next-working').hidden, true, 'no stale time is left showing beside the terminal');
+  s.elapsed[a.stream_id] = 20000;
+  s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
+  assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '20s', 'leaving the terminal brings the time up to date');
+  a.working = false; s.update();
+});
+
+test('a daemon reconnect reads the open chats again even with no disconnect frame', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  await flush();
+  const reads = () => s.calls.filter(c => c[0] === 'history').map(c => c[1]);
+  assert.deepEqual(reads(), ['fixture:assistant', 'fixture:a']);
+  s.frame({ type: '__reconnect', generation: 1, next_generation: 2 });
+  s.frame({ type: 'snapshot', connected: true, sessions: s.rows });
+  await flush();
+  assert.deepEqual(reads().slice(2).sort(), ['fixture:a', 'fixture:assistant']);
+});
+
+// A controlled clock for working-time tests: the paint that covers a pane comes
+// a moment after its last visible paint, as it does for a reader.
+function controlClock(t, s) {
+  const realNow = s.window.Date.now;
+  let now = realNow.call(s.window.Date);
+  s.window.Date.now = () => now;
+  t.after(() => { s.window.Date.now = realNow; });
+  return { advance(ms) { now += ms; }, release() { s.window.Date.now = realNow; } };
+}
+
+test('a running time behind a full-screen card schedules no redraws', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const clock = controlClock(t, s);
+  const a = s.rows[1]; a.working = true;
+  s.elapsed[a.stream_id] = 7000;
+  s.update();
+  clock.advance(5);
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  const realTimeout = s.window.setTimeout;
+  const scheduled = [];
+  s.window.setTimeout = (fn, ms, ...rest) => { if (fn?.name === 'paintWorking') scheduled.push(ms); return realTimeout.call(s.window, fn, ms, ...rest); };
+  s.update();
+  assert.deepEqual(scheduled, [], 'nothing on screen is counting');
+  s.window.setTimeout = realTimeout;
+  clock.release();
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '7s', 'the time is current when the card returns');
+  a.working = false; s.update();
+});
+
+test('a chat opens on its latest 120 rows and each earlier step adds 48 above the reader', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); await flush();
+  const total = 300; let shown = 0;
+  const select = s.window.PentacleChatStore.selectSessionDetail;
+  s.window.PentacleChatStore.selectSessionDetail = (id, options) => {
+    if (id !== 'fixture:a') return select(id, options);
+    shown = Math.min(total, options.visibleCount);
+    return { transcriptItems: Array.from({ length: shown }, (_, i) => ({ id: 'm' + (total - shown + i) })), remainingCount: total - shown };
+  };
+  s.window.PentacleChatView.renderTranscriptTimelineHtml = detail => `<p>${detail?.transcriptItems?.length ?? 0} rows</p>`;
+  const thread = s.$('[data-pane=chat] .thread');
+  Object.defineProperty(thread, 'clientHeight', { configurable: true, get: () => 400 });
+  Object.defineProperty(thread, 'scrollHeight', { configurable: true, get: () => shown * 20 });
+  s.update();
+  assert.equal(shown, 120);
+  assert.match(s.$('[data-pane=chat] .thread-inner').textContent, /120 rows/);
+  thread.scrollTop = 500; thread.dispatchEvent(new s.window.Event('scroll'));
+  const earlier = () => s.$('[data-pane=chat] .next-history-earlier');
+  earlier().click();
+  assert.equal(shown, 168, 'one step reveals 48 more');
+  assert.equal(thread.scrollTop, 500 + 48 * 20, 'the rows the reader was looking at stay where they were');
+  earlier().click(); earlier().click(); earlier().click();
+  assert.equal(shown, total);
+  assert.equal(earlier(), null, 'nothing earlier is offered once all of it is shown and the daemon has no more');
 });
 
 test('a reader who moved up keeps their place through a hidden card and a chat switch', async t => {
