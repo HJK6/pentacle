@@ -5170,6 +5170,11 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     async def consent_expire(self, registry: Any, protected_role='assistant') -> list[dict[str, Any]]:
         def _op(conn):
+            if not conn.execute("SELECT 1 WHERE EXISTS (SELECT 1 FROM v2_consent_offers WHERE state='pending') "
+                                "OR EXISTS (SELECT 1 FROM v2_consent_intents WHERE state='pending') "
+                                "OR EXISTS (SELECT 1 FROM v2_consent_challenges WHERE state='pending' AND expires_at<=?)",
+                                (time.time(),)).fetchone():
+                return []
             try:
                 from _shared import operator_auth
                 import store_consent_offers as offers
@@ -5209,6 +5214,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     async def consent_push_due(self, registry, protected_role):
         def _op(conn):
+            if not conn.execute("SELECT 1 FROM v2_consent_push_jobs WHERE state IN ('pending','retry','receipt') "
+                                "AND next_at<=? LIMIT 1", (time.time(),)).fetchone():
+                return []
             from _shared import operator_auth
             import store_consent_push as push
             with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + '.lock')):
