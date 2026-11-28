@@ -316,7 +316,7 @@ def failure(db: Path, monkeypatch) -> tuple:
     monkeypatch.setattr(r, "history_checkpoint", checkpoint)
     try:
         with pytest.raises(Exception) as raised:
-            run_pass(db, cfg())
+            store_pass(db, cfg(), lambda conn: conn.execute("PRAGMA busy_timeout=50"))
     finally:
         for conn in holder_conn:
             conn.rollback()
@@ -367,7 +367,7 @@ def test_a_lock_held_across_only_the_index_step_keeps_the_copy(identified, monke
     r.log.addHandler(release)
     try:
         with caplog.at_level(logging.WARNING, logger=r.log.name):
-            result = run_pass(identified, cfg())
+            result = store_pass(identified, cfg(), lambda conn: conn.execute("PRAGMA busy_timeout=50"))
     finally:
         r.log.removeHandler(release)
         for conn in held:
