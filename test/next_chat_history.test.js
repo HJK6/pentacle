@@ -133,3 +133,86 @@ test('a preview or an answered question is not history, and only rows below the 
   assert.equal(newTailRows(items, null), 0);
   assert.equal(newTailRows(items, 'gone'), 0, 'earlier rows arriving above do not count');
 });
+
+test('an empty first read does not hide older history once a retry reaches it', async () => {
+  let rows = false;
+  const s = open({ rows: () => rows, reply: (args, n) => args.beforeDaemonSeq ? { ok: true, received: 20, nextBeforeDaemonSeq: null, exhausted: true }
+    : n === 1 ? { ok: true, received: 0, nextBeforeDaemonSeq: null } : { ok: true, received: 500, nextBeforeDaemonSeq: 1000 } });
+  s.history.setConnected(true);
+  s.history.focus(['a:1']);
+  await flush();
+  assert.equal(s.history.hasOlder('a:1'), false, 'nothing older is known after an empty read');
+  s.history.focus(['a:1']);
+  assert.equal(s.timers.length, 1, 'the empty read retries');
+  s.timers[0].fn();
+  rows = true;
+  await flush();
+  assert.deepEqual(s.history.status('a:1'), { message: '', retry: false });
+  assert.equal(s.history.hasOlder('a:1'), true, 'the full reply sets the older boundary');
+  await s.history.loadOlder('a:1', () => true);
+  assert.deepEqual(s.calls.at(-1), { streamId: 'a:1', beforeDaemonSeq: 1000, limit: 500 });
+});
+
+test('a fresh read after paging keeps the deeper place it reached', async () => {
+  const s = open({ reply: args => args.beforeDaemonSeq === 900 ? { ok: true, received: 500, nextBeforeDaemonSeq: 400 }
+    : args.beforeDaemonSeq ? { ok: true, received: 20, nextBeforeDaemonSeq: null, exhausted: true }
+    : { ok: true, received: 500, nextBeforeDaemonSeq: 900 } });
+  s.history.setConnected(true);
+  s.history.focus(['a:1']);
+  await flush();
+  await s.history.loadOlder('a:1', () => true);
+  s.history.reconnected();
+  await flush();
+  await s.history.loadOlder('a:1', () => true);
+  assert.deepEqual(s.calls.at(-1), { streamId: 'a:1', beforeDaemonSeq: 400, limit: 500 }, 'the store still holds the rows above 400');
+});
+
+test('older pages stop when the chat that asked for them is no longer wanted', async () => {
+  let release;
+  const s = open({ reply: (args, n) => n === 1 ? { ok: true, received: 500, nextBeforeDaemonSeq: 900 }
+    : args.beforeDaemonSeq === 900 ? new Promise(resolve => { release = () => resolve({ ok: true, received: 500, nextBeforeDaemonSeq: 400 }); })
+    : { ok: true, received: 20, nextBeforeDaemonSeq: null, exhausted: true } });
+  s.history.setConnected(true);
+  s.history.focus(['a:1']);
+  await flush();
+  let wanted = true;
+  const loading = s.history.loadOlder('a:1', () => false, () => wanted);
+  await flush();
+  wanted = false;
+  release();
+  await loading;
+  assert.deepEqual(s.calls.map(call => call.beforeDaemonSeq ?? null), [null, 900], 'no page is asked for after the reader left');
+  assert.equal(s.history.loadingOlder('a:1'), false);
+});
+
+test('a daemon reconnect with no disconnect in between reads every open chat again', async () => {
+  const s = open();
+  s.history.setConnected(true);
+  s.history.focus(['a:1', 'a:2']);
+  await flush();
+  s.history.reconnected();
+  assert.deepEqual(s.ids(), ['a:1', 'a:2', 'a:1', 'a:2']);
+  await flush();
+  s.history.focus(['a:1', 'a:2']);
+  assert.equal(s.calls.length, 4, 'each chat is read once per connection');
+});
+
+test('a positively complete zero-event page settles as an empty conversation', async () => {
+  const s = open({ reply: () => ({ ok: true, complete: true, received: 0 }), rows: () => false });
+  s.history.setConnected(true);
+  s.history.focus(['a:1']);
+  await flush();
+  s.history.focus(['a:1']);
+  assert.deepEqual(s.history.status('a:1'), { message: '', retry: false });
+  assert.equal(s.timers.length, 0);
+});
+
+test('an empty page without positive completion still retries', async () => {
+  const s = open({ reply: () => ({ ok: true, received: 0 }), rows: () => false });
+  s.history.setConnected(true);
+  s.history.focus(['a:1']);
+  await flush();
+  s.history.focus(['a:1']);
+  assert.equal(s.history.status('a:1').message, 'Loading messages…');
+  assert.equal(s.timers.length, 1);
+});

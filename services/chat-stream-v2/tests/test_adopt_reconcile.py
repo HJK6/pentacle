@@ -764,7 +764,7 @@ def test_peer_no_event_and_no_transcript_still_fails_closed(
             sessions = Sessions(store, tmux=tmux, local_host="hosta", hosts=hosts)
             proof = DurableUserEventProof(store, local_host="hosta")
             ctl = SpawnCtl(store, sessions, tmux=tmux, hosts=hosts, submission_proof=proof)
-            original_tail = store.fetch_session_event_tail
+            original_tail = store.fetch_session_event_tail_for_proof
             original_proof = ctl._adoption_event_proof
             original_settle = ctl._settle_adoption
             original_reconcile = ctl.reconcile_spawn_intents
@@ -819,7 +819,7 @@ def test_peer_no_event_and_no_transcript_still_fails_closed(
                 trace["reconcile_calls"].append(dict(kwargs))
                 return await original_reconcile(*args, **kwargs)
 
-            monkeypatch.setattr(store, "fetch_session_event_tail", observed_tail)
+            monkeypatch.setattr(store, "fetch_session_event_tail_for_proof", observed_tail)
             monkeypatch.setattr(ctl, "_adoption_event_proof", observed_proof)
             monkeypatch.setattr(ctl, "_settle_adoption", observed_settle)
             monkeypatch.setattr(ctl, "reconcile_spawn_intents", observed_reconcile)

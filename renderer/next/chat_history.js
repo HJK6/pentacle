@@ -23,7 +23,7 @@ function newTailRows(items, previousTail) {
 
 // History for the chats on screen, under the current web's rules: the shared
 // store keeps a focused stream's events, a load starts once connected, a failed
-// or empty load retries on a bounded backoff, and older pages come on request.
+// or incomplete load retries on a bounded backoff, and older pages come on request.
 function createChatHistory({ cc, store, onChange, logger = console, setTimer }) {
   const state = { connected: false, eventsLoadedFor: new Set(), historyLoads: {}, historyPaging: {} };
   let focused = [];
@@ -37,13 +37,19 @@ function createChatHistory({ cc, store, onChange, logger = console, setTimer }) 
     delete state.historyLoads[id];
   };
 
+  function restart() {
+    state.eventsLoadedFor.clear();
+    state.historyLoads = {};
+    for (const id of focused) ensure(id);
+  }
+
   function ensure(id) {
     if (!id || !state.connected) return;
     lazy.ensureChatEventsLoaded(state, id, cc, logger, { onChange });
     const load = state.historyLoads[id];
     if (!load || load.status === 'loading' || load.settled) return;
     const rows = held(id);
-    if (load.status === 'loaded' && rows) { load.settled = true; return; }
+    if (load.status === 'loaded' && (rows || load.completeEmpty)) { load.settled = true; return; }
     lazy.scheduleHistoryRetry(state, id, cc, logger, {
       hasRows: rows, onChange, setTimer,
       stillNeeded: stream => focused.includes(stream) && (state.historyLoads[stream]?.status === 'error' || !held(stream)),
@@ -67,24 +73,28 @@ function createChatHistory({ cc, store, onChange, logger = console, setTimer }) 
     setConnected(connected) {
       if (state.connected === !!connected) return;
       state.connected = !!connected;
-      state.eventsLoadedFor.clear();
-      state.historyLoads = {};
-      for (const id of focused) ensure(id);
+      restart();
+    },
+    // The daemon reconnected without the page ever seeing it go away (its
+    // restart grace hides the disconnect), so the open chats are read again.
+    reconnected() {
+      if (state.connected) restart();
     },
     retry(id) {
       if (!id || !state.connected) return;
       lazy.ensureChatEventsLoaded(state, id, cc, logger, { retry: true, onChange });
     },
     status(id) {
-      if (state.connected && state.historyLoads[id]?.settled) return { message: '', retry: false };
+      if (state.connected && (state.historyLoads[id]?.settled || state.historyLoads[id]?.completeEmpty)) return { message: '', retry: false };
       const rows = held(id);
       const status = lazy.chatHistoryStatus({ connected: state.connected, load: state.historyLoads[id], hasRows: rows, hasRendered: true });
       return rows && !status.retry ? { message: '', retry: false } : status;
     },
     hasOlder: id => lazy.historyHasOlder(state, id),
     loadingOlder: id => !!state.historyPaging[id]?.loading,
-    loadOlder: (id, hasNewRows) => lazy.requestOlderHistory(state, id, cc, logger, {
+    loadOlder: (id, hasNewRows, stillWanted) => lazy.requestOlderHistory(state, id, cc, logger, {
       onChange, hasNewRows, expand: stream => store.setHistoryExpanded?.(stream),
+      stillWanted: stream => focused.includes(stream) && (!stillWanted || stillWanted(stream)),
     }),
   };
 }

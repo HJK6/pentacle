@@ -28,7 +28,6 @@ from _shared.spawn_profiles import resolve_test_profile, validate_test_profile
 
 from store import Store  # noqa: E402
 from machines import configured_host_names, load_machines  # noqa: E402
-from deploy.deploy import DeployError, _load_gate_evidence  # noqa: E402
 from deploy.release_selection import helper_manifest  # noqa: E402
 
 
@@ -36,6 +35,60 @@ SATELLITE_HOSTS = configured_host_names("PENTACLE_SATELLITE_HOSTS", remote_only=
 OPTIONAL_SATELLITE_HOSTS = tuple(machine.name for machine in load_machines() if machine.smoke_optional)
 SATELLITE_READBACK_INTERVAL_SECONDS = 2
 SATELLITE_READBACK_DEADLINE_SECONDS = 420
+
+
+class DeployError(RuntimeError):
+    pass
+
+
+def _load_gate_evidence(path: Path, sha: str) -> dict[str, object]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise DeployError(f"invalid gate evidence: {exc}") from exc
+    required = {"schema", "gate", "sha", "source", "tiers", "passed"}
+    missing = sorted(required - set(raw))
+    if missing:
+        raise DeployError(f"gate evidence missing fields: {', '.join(missing)}")
+    if raw.get("sha") != sha:
+        raise DeployError("gate evidence sha does not match deploy sha")
+    if raw.get("schema") != "pentacle.v2.gate-evidence.v1" or raw.get("gate") != "merge":
+        raise DeployError("gate evidence is not canonical v2 merge evidence")
+    if raw.get("passed") is not True:
+        raise DeployError("gate evidence is not passing")
+    source = raw.get("source")
+    if not isinstance(source, dict) or source.get("sha_before") != sha or source.get("sha_after") != sha:
+        raise DeployError("gate evidence source SHA does not match deploy SHA")
+    if source.get("clean_before") is not True or source.get("clean_after") is not True:
+        raise DeployError("gate evidence source was not clean")
+    tiers = raw.get("tiers")
+    if not isinstance(tiers, list):
+        raise DeployError("gate evidence tiers must be a list")
+    required_tiers = {"unit", "smoke"}
+    passed_tiers = set()
+    for item in tiers:
+        if not isinstance(item, dict) or not isinstance(item.get("tier"), str) or not item["tier"]:
+            raise DeployError("gate evidence tier row is malformed")
+        tier = item["tier"]
+        if tier in passed_tiers:
+            raise DeployError(f"gate evidence repeats tier {tier}")
+        if item.get("passed") is not True:
+            raise DeployError(f"gate evidence top-level pass contradicts failing tier {tier}")
+        counts = item.get("counts")
+        if (
+            ("returncode" in item and (type(item["returncode"]) is not int or item["returncode"] != 0))
+            or ("timed_out" in item and item["timed_out"] is not False)
+            or (counts is not None and (
+                not isinstance(counts, dict)
+                or type(counts.get("failures")) is not int or counts["failures"] != 0
+                or type(counts.get("errors")) is not int or counts["errors"] != 0
+            ))
+        ):
+            raise DeployError(f"gate evidence tier {tier} contradicts passed")
+        passed_tiers.add(tier)
+    if not required_tiers.issubset(passed_tiers):
+        raise DeployError("gate evidence is missing a passing v2 unit or smoke tier")
+    return raw
 
 
 def _require_gate_evidence(path: Path | None, candidate: str) -> None:

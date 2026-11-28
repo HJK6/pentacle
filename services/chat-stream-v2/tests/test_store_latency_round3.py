@@ -60,6 +60,14 @@ def _row_oracle(conn, target):
     return out
 
 
+def _rows_with_digests(conn, table, target, text):
+    """Exercise the lazy digest after the lookup has selected a row."""
+    rows = table.rows_for(conn, target, text)
+    for row in rows:
+        table.text_digest(conn, row)
+    return rows
+
+
 # --- Item 1: provider_text_digest memoisation --------------------------------
 
 def test_row_digest_equality_across_cache_states():
@@ -73,7 +81,7 @@ def test_row_digest_equality_across_cache_states():
 
             def check(conn):
                 table = ProjectionDeliveries()
-                rows = table.rows_for(conn, "host-a:proof", "input peer")
+                rows = _rows_with_digests(conn, table, "host-a:proof", "input peer")
                 assert rows == _row_oracle(conn, "host-a:proof")
 
             await store.submit(check)           # cold
@@ -98,18 +106,21 @@ def test_row_digest_equality_across_cache_states():
 
 
 def test_row_digest_not_recomputed_for_unchanged_reply(monkeypatch):
-    # RED on baseline: every build re-hashes every row's delivery text.
+    # A new projection reuses the digests of unchanged replies when compared.
     async def run():
         store = Store()
         store.start()
         try:
             await corpus(store)
             calls = _counting_digest(monkeypatch)
-            await store.submit(lambda c: ProjectionDeliveries().rows_for(c, "host-a:proof", "x"))
+            def compute(conn):
+                _rows_with_digests(conn, ProjectionDeliveries(), "host-a:proof", "x")
+
+            await store.submit(compute)
             cold = len(calls)
             assert cold == 9                       # one per delivery row
-            await store.submit(lambda c: ProjectionDeliveries().rows_for(c, "host-a:proof", "x"))
-            await store.submit(lambda c: ProjectionDeliveries().rows_for(c, "host-a:proof", "x"))
+            await store.submit(compute)
+            await store.submit(compute)
             assert len(calls) == cold              # unchanged rows: zero recomputation
             # An UPDATE recomputes exactly the changed row.
             await store.submit(lambda c: (c.execute(
@@ -117,7 +128,7 @@ def test_row_digest_not_recomputed_for_unchanged_reply(monkeypatch):
                 (json.dumps({"payload_digest": "peer", "delivery": {
                     "tell_id": "peer", "to_stream_id": "host-a:proof", "text": "edited peer"}}),)),
                 c.commit()))
-            await store.submit(lambda c: ProjectionDeliveries().rows_for(c, "host-a:proof", "x"))
+            await store.submit(compute)
             assert len(calls) == cold + 1
         finally:
             store.stop()
@@ -169,7 +180,7 @@ async def _update_then_delete_check(store, cache):
     await store.submit(lambda c: setattr(c, "delivery_parse_cache", cache))
 
     def table(conn):
-        return ProjectionDeliveries().rows_for(conn, "host-a:proof", "x")
+        return _rows_with_digests(conn, ProjectionDeliveries(), "host-a:proof", "x")
 
     await store.submit(table)
     await store.submit(lambda c: (c.execute(
@@ -244,7 +255,7 @@ PLAIN = "hello plain"
 def _retained(conn, payload, *, via_table):
     if via_table:
         table = ProjectionDeliveries()
-        table.rows_for(conn, TARGET, payload["delivery"]["text"])  # build outside the counted call
+        _rows_with_digests(conn, table, TARGET, payload["delivery"]["text"])  # warm before counting
         return table
     return None
 
@@ -265,7 +276,7 @@ def test_retained_proof_equals_legacy_oracle(text, form, via_table):
             payload, _ = await store.submit(lambda c: _seed_proof(c, text, event_digest=digest))
 
             def check(conn):
-                table = _retained(conn, payload, via_table=via_table)
+                table = ProjectionDeliveries() if via_table else None
                 got = retained_proof(conn, payload, deliveries=table) if via_table else retained_proof(conn, payload)
                 assert got == legacy.retained_proof(conn, payload)
                 return got
@@ -387,7 +398,7 @@ def test_unchanged_reply_changed_provider_text_keeps_row_digests_recomputes_call
             payload, _ = await store.submit(lambda c: _seed_proof(c, ENVELOPED, event_digest=real_digest(ENVELOPED)))
 
             def build(conn):
-                ProjectionDeliveries().rows_for(conn, TARGET, ENVELOPED)
+                _rows_with_digests(conn, ProjectionDeliveries(), TARGET, ENVELOPED)
 
             await store.submit(build)                 # warm the per-row digests
             calls = _counting_digest(monkeypatch)

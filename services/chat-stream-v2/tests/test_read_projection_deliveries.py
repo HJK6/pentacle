@@ -239,6 +239,36 @@ def test_history_page_reads_one_snapshot(messages):
     asyncio.run(run())
 
 
+def test_history_page_does_not_digest_uncompared_deliveries(monkeypatch):
+    import tell_proof
+
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await seed(store, messages=4, deliveries=7)
+            await store.put_tell_delivery("same-target", {
+                "delivery": {"to_stream_id": "host-a:seat-0", "text": "unmatched text"},
+            })
+            calls = []
+            original = tell_proof.provider_text_digest
+
+            def count_digest(text):
+                calls.append(text)
+                return original(text)
+
+            monkeypatch.setattr(tell_proof, "provider_text_digest", count_digest)
+            events, statements, rows = await measure(store, lambda: store.fetch_session_event_page(
+                "host-a:seat-0", before_daemon_seq=None, limit=8,
+            ))
+            assert len(events) == 4
+            assert (statements, rows) == (1, 8)
+            assert calls == []
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_operator_dispatch_does_not_build_deliveries():
     import tell_proof
     async def run():

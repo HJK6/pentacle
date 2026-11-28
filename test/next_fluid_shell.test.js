@@ -96,6 +96,7 @@ function openShell(t, width = 1440, storedRail = null, storageUnavailable = fals
   const choose = id => { $("button[aria-label^=Chats]").click(); $(`.popover [data-stream-id="fixture:${id}"]`).click(); };
   return { $, window, calls, rendered, onData, choose, rows, activity, elapsed, wireDrafts, focused, unread,
     update: () => notify(),
+    frame: f => frame(f),
     inventory: () => { frame({type:'session.inventory', sessions:rows}); notify(); },
     sendState: (stage, allowed) => { sendStage = stage; sendNowAllowed = allowed; notify(); },
     shown: () => [...window.document.querySelectorAll('.chat-card:not([hidden])')] };
@@ -225,18 +226,199 @@ test('the chats on screen are the store\'s focused streams and each is read once
   const reads = () => s.calls.filter(c => c[0] === 'history').map(c => c[1]);
   assert.deepEqual(s.focused.at(-1), ['fixture:assistant']);
   assert.deepEqual(reads(), ['fixture:assistant']);
-  s.choose('a'); s.choose('b');
+  const assistantShown = () => !s.$('[data-pane=assistant]').hidden;
+  s.choose('a');
   await flush();
-  assert.deepEqual(s.focused.at(-1), ['fixture:assistant', 'fixture:a', 'fixture:b']);
+  assert.equal(assistantShown(), true);
+  assert.deepEqual(s.focused.at(-1), ['fixture:assistant', 'fixture:a']);
+  s.choose('b');
+  await flush();
+  assert.equal(assistantShown(), false, 'two cards leave no room for the Assistant');
+  assert.deepEqual(s.focused.at(-1), ['fixture:a', 'fixture:b'], 'a pane off screen is not held for it');
   s.update(); s.update();
   assert.deepEqual(reads(), ['fixture:assistant', 'fixture:a', 'fixture:b'], 'a render does not read a chat again');
   s.$('[data-pane=chat] [aria-label=Close]').click();
   await flush();
   assert.equal(s.focused.at(-1).includes('fixture:a'), false, 'a closed card releases its chat');
+  assert.equal(assistantShown(), true);
+  assert.equal(reads().filter(id => id === 'fixture:assistant').length, 2, 'the Assistant is read again when it returns');
   s.choose('a');
   await flush();
   assert.equal(reads().filter(id => id === 'fixture:a').length, 2, 'a chat that left the screen is read again');
-  assert.equal(reads().filter(id => id === 'fixture:assistant').length, 1);
+  s.update();
+  assert.equal(reads().filter(id => id === 'fixture:a').length, 2, 'and only once');
+});
+
+test('a chat covered by a full-screen card is released and read again when it comes back', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  await flush();
+  const reads = id => s.calls.filter(c => c[0] === 'history' && c[1] === id).length;
+  assert.equal(reads('fixture:a'), 1);
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  await flush();
+  assert.equal(s.$('[data-pane=chat]').closest('.chat-card').hidden, true);
+  assert.equal(s.focused.at(-1).includes('fixture:a'), false, 'the covered chat is not held for the screen');
+  assert.equal(s.focused.at(-1).includes('fixture:b'), true);
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  await flush();
+  assert.equal(s.focused.at(-1).includes('fixture:a'), true);
+  assert.equal(reads('fixture:a'), 2, 'the chat that came back is read again');
+  assert.equal(reads('fixture:b'), 1, 'the chat that stayed on screen is not');
+});
+
+test('with a store that notifies at once, a covered chat is released once and read only when it returns', async t => {
+  const s = openShell(t);
+  // The real store tells its subscribers inside setFocusedChatStreams.
+  const pin = s.window.PentacleChatStore.setFocusedChatStreams;
+  s.window.PentacleChatStore.setFocusedChatStreams = ids => { pin(ids); s.update(); };
+  await flush(); s.choose('a'); s.choose('b'); await flush();
+  const reads = id => s.calls.filter(c => c[0] === 'history' && c[1] === id).length;
+  assert.equal(reads('fixture:a'), 1);
+  const hid = s.focused.length;
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  await flush();
+  assert.deepEqual(s.focused.slice(hid), [['fixture:b']], 'one pin change, never back to the covered chat');
+  assert.equal(reads('fixture:a'), 1, 'a covered chat is not read');
+  const back = s.focused.length;
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  await flush();
+  assert.deepEqual(s.focused.slice(back), [['fixture:a', 'fixture:b']]);
+  assert.equal(reads('fixture:a'), 2, 'read once on return');
+  assert.equal(reads('fixture:b'), 1);
+});
+
+test('an earlier-messages request from before a chat switch cannot move the pane that came back', async t => {
+  const s = openShell(t);
+  const pending = [];
+  let older = 0;
+  s.window.cc.requestStreamEvents = args => {
+    s.calls.push(['history', args.streamId, args.beforeDaemonSeq ?? null]);
+    if (!args.beforeDaemonSeq) return Promise.resolve({ ok: true, received: 500, nextBeforeDaemonSeq: 900 });
+    return new Promise(resolve => pending.push(resolve));
+  };
+  let shown = 0;
+  const select = s.window.PentacleChatStore.selectSessionDetail;
+  s.window.PentacleChatStore.selectSessionDetail = (id, options) => {
+    if (id !== 'fixture:a') return select(id, options);
+    shown = Math.min(120 + older, options.visibleCount);
+    return { transcriptItems: Array.from({ length: shown }, (_, i) => ({ id: 'm' + i })), remainingCount: 120 + older - shown };
+  };
+  s.window.PentacleChatView.renderTranscriptTimelineHtml = detail => `<p>${detail?.transcriptItems?.length ?? 0} rows</p>`;
+  await flush(); s.choose('a'); await flush();
+  const show = id => { s.$('[data-pane=chat] .next-chat-title').click(); s.$(`.popover:not([hidden]) [data-stream-id="fixture:${id}"]`).click(); };
+  const earlier = () => s.$('[data-pane=chat] .next-history-earlier');
+  earlier().click();
+  await flush();
+  assert.equal(pending.length, 1, 'the first older page is on its way');
+  show('b'); await flush();
+  show('a'); await flush();
+  earlier().click();
+  await flush();
+  assert.equal(pending.length, 2, 'the returning chat asks again');
+  older = 60;
+  pending[0]({ ok: true, received: 500, nextBeforeDaemonSeq: 400 });
+  await flush(); await flush();
+  assert.equal(shown, 120, 'the old request does not reveal rows in the new pane');
+  assert.match(s.$('[data-pane=chat] .thread-inner').textContent, /Loading earlier messages/, 'the new request still shows its loading line');
+  pending[1]({ ok: true, received: 500, nextBeforeDaemonSeq: 400 });
+  await flush(); await flush();
+  assert.equal(shown, 168, 'the request the reader is waiting on reveals 48 more');
+});
+
+test('a running time on a card showing its terminal schedules no redraws and is current when the thread returns', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  const clock = controlClock(t, s);
+  const a = s.rows[1]; a.working = true;
+  s.elapsed[a.stream_id] = 7000;
+  s.update();
+  assert.equal(s.$('[data-pane=chat] .next-working').hidden, false, 'the time shows in the thread');
+  clock.advance(5);
+  s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
+  await flush();
+  const realTimeout = s.window.setTimeout;
+  const scheduled = [];
+  s.window.setTimeout = (fn, ms, ...rest) => { if (fn?.name === 'paintWorking') scheduled.push(ms); return realTimeout.call(s.window, fn, ms, ...rest); };
+  s.update();
+  s.window.setTimeout = realTimeout;
+  clock.release();
+  assert.deepEqual(scheduled, [], 'the working row is hidden behind the terminal');
+  assert.equal(s.$('[data-pane=chat] .next-working').hidden, true, 'no stale time is left showing beside the terminal');
+  s.elapsed[a.stream_id] = 20000;
+  s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
+  assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '20s', 'leaving the terminal brings the time up to date');
+  a.working = false; s.update();
+});
+
+test('a daemon reconnect reads the open chats again even with no disconnect frame', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  await flush();
+  const reads = () => s.calls.filter(c => c[0] === 'history').map(c => c[1]);
+  assert.deepEqual(reads(), ['fixture:assistant', 'fixture:a']);
+  s.frame({ type: '__reconnect', generation: 1, next_generation: 2 });
+  s.frame({ type: 'snapshot', connected: true, sessions: s.rows });
+  await flush();
+  assert.deepEqual(reads().slice(2).sort(), ['fixture:a', 'fixture:assistant']);
+});
+
+// A controlled clock for working-time tests: the paint that covers a pane comes
+// a moment after its last visible paint, as it does for a reader.
+function controlClock(t, s) {
+  const realNow = s.window.Date.now;
+  let now = realNow.call(s.window.Date);
+  s.window.Date.now = () => now;
+  t.after(() => { s.window.Date.now = realNow; });
+  return { advance(ms) { now += ms; }, release() { s.window.Date.now = realNow; } };
+}
+
+test('a running time behind a full-screen card schedules no redraws', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const clock = controlClock(t, s);
+  const a = s.rows[1]; a.working = true;
+  s.elapsed[a.stream_id] = 7000;
+  s.update();
+  clock.advance(5);
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  const realTimeout = s.window.setTimeout;
+  const scheduled = [];
+  s.window.setTimeout = (fn, ms, ...rest) => { if (fn?.name === 'paintWorking') scheduled.push(ms); return realTimeout.call(s.window, fn, ms, ...rest); };
+  s.update();
+  assert.deepEqual(scheduled, [], 'nothing on screen is counting');
+  s.window.setTimeout = realTimeout;
+  clock.release();
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '7s', 'the time is current when the card returns');
+  a.working = false; s.update();
+});
+
+test('a chat opens on its latest 120 rows and each earlier step adds 48 above the reader', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); await flush();
+  const total = 300; let shown = 0;
+  const select = s.window.PentacleChatStore.selectSessionDetail;
+  s.window.PentacleChatStore.selectSessionDetail = (id, options) => {
+    if (id !== 'fixture:a') return select(id, options);
+    shown = Math.min(total, options.visibleCount);
+    return { transcriptItems: Array.from({ length: shown }, (_, i) => ({ id: 'm' + (total - shown + i) })), remainingCount: total - shown };
+  };
+  s.window.PentacleChatView.renderTranscriptTimelineHtml = detail => `<p>${detail?.transcriptItems?.length ?? 0} rows</p>`;
+  const thread = s.$('[data-pane=chat] .thread');
+  Object.defineProperty(thread, 'clientHeight', { configurable: true, get: () => 400 });
+  Object.defineProperty(thread, 'scrollHeight', { configurable: true, get: () => shown * 20 });
+  s.update();
+  assert.equal(shown, 120);
+  assert.match(s.$('[data-pane=chat] .thread-inner').textContent, /120 rows/);
+  thread.scrollTop = 500; thread.dispatchEvent(new s.window.Event('scroll'));
+  const earlier = () => s.$('[data-pane=chat] .next-history-earlier');
+  earlier().click();
+  assert.equal(shown, 168, 'one step reveals 48 more');
+  assert.equal(thread.scrollTop, 500 + 48 * 20, 'the rows the reader was looking at stay where they were');
+  earlier().click(); earlier().click(); earlier().click();
+  assert.equal(shown, total);
+  assert.equal(earlier(), null, 'nothing earlier is offered once all of it is shown and the daemon has no more');
 });
 
 test('a reader who moved up keeps their place through a hidden card and a chat switch', async t => {
@@ -443,6 +625,159 @@ test('rename suppresses Escape/blur saves, rejects empty names and rolls back a 
   assert.equal(row('a'),null);
   assert.equal(s.$('[data-pane=chat]').hidden,true);
   assert.equal(s.$('[data-pane=chat2]').hidden,false);
+});
+
+test('an open chat renames and deletes from its header with the list rules and confirm', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const head = pane => s.$(`[data-pane=${pane}] .card-head`);
+  const key = (el, key) => el.dispatchEvent(new s.window.KeyboardEvent('keydown',{key,bubbles:true}));
+  const labels = pane => [...head(pane).querySelectorAll(':scope > button:not([hidden])')].map(b => b.getAttribute('aria-label'));
+  assert.deepEqual(labels('chat'), ['Status', 'Terminal', 'Rename', 'Delete', 'Full screen', 'Close'], 'Rename and Delete sit beside status, terminal, full screen and close');
+  const startRename = () => { head('chat').querySelector('[aria-label=Rename]').click(); return head('chat').querySelector('.next-chat-edit'); };
+  let input = startRename();
+  assert.equal(input.value, 'a'); assert.equal(s.window.document.activeElement, input);
+  input.value = 'cancelled'; key(input, 'Escape'); input.blur();
+  assert.equal(head('chat').querySelector('.next-chat-edit'), null, 'Escape restores the title');
+  assert.equal(s.$('[data-pane=chat] .next-chat-title').hidden, false);
+  input = startRename(); input.value = '   '; input.blur();
+  assert.equal(s.calls.filter(c => c[0] === 'rename').length, 0, 'an empty or cancelled name is not saved');
+  input = startRename(); input.value = 'from header'; key(input, 'Enter');
+  assert.equal(s.$('[data-pane=chat] .next-chat-title').textContent, 'from header', 'the new name shows at once');
+  await flush();
+  assert.deepEqual(s.calls.filter(c => c[0] === 'rename'), [['rename', 'local', 'a', 'from header']]);
+  head('chat').querySelector('[aria-label=Delete]').click();
+  assert.equal(head('chat').querySelector('.next-chat-question').textContent, 'Delete chat?');
+  assert.equal(s.window.document.activeElement, head('chat').querySelector('.next-chat-cancel'), 'the confirm takes focus on Cancel');
+  head('chat').querySelector('.next-chat-cancel').click();
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0, 'Cancel closes nothing');
+  assert.equal(head('chat').querySelector('.next-chat-question'), null);
+  assert.deepEqual(labels('chat'), ['Status', 'Terminal', 'Rename', 'Delete', 'Full screen', 'Close'], 'Cancel restores every header control');
+  assert.equal(s.window.document.activeElement, head('chat').querySelector('[aria-label=Delete]'), 'Cancel returns focus to Delete');
+  head('chat').querySelector('[aria-label=Delete]').click();
+  head('chat').querySelector('.next-chat-confirm').click(); await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(s.calls.filter(c => c[0] === 'close'))), [['close', 'local', 'a', {operatorConfirm: true, force: true}]]);
+  assert.equal(s.$('[data-pane=chat]').hidden, true, 'the deleted chat leaves the screen');
+  assert.equal(s.$('[data-pane=chat2]').hidden, false, 'the other chat stays');
+});
+
+test('a chat closed elsewhere leaves the screen; the other card stays', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const shown = id => [...s.window.document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].map(el => el.dataset.streamId).includes(id);
+  assert.ok(shown('fixture:a') && shown('fixture:b'));
+  s.inventory(); await flush();
+  assert.ok(shown('fixture:a') && shown('fixture:b'), 'an unchanged inventory closes nothing');
+  const a = s.rows.findIndex(row => row.stream_id === 'fixture:a');
+  const [removed] = s.rows.splice(a, 1);
+  s.inventory(); await flush();
+  assert.ok(!shown('fixture:a'), 'a chat that drops out of the open inventory closes its card');
+  assert.ok(shown('fixture:b'), 'the other chat stays');
+  s.rows.splice(a, 0, removed);
+  s.choose('a');
+  assert.ok(shown('fixture:a') && shown('fixture:b'));
+  s.rows.find(row => row.stream_id === 'fixture:b').status = 'closed';
+  s.inventory(); await flush();
+  assert.ok(!shown('fixture:b'), 'a chat whose row says closed closes its card');
+  assert.ok(shown('fixture:a'));
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0, 'closing the card sends no close of its own');
+});
+
+test('a chat missing after a reconnect or in a snapshot is a new view, not a close', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const shown = id => [...s.window.document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].map(el => el.dataset.streamId).includes(id);
+  s.inventory(); await flush();
+  const others = s.rows.filter(row => row.stream_id !== 'fixture:a');
+  s.frame({ type: '__reconnect', generation: 1, next_generation: 2 });
+  s.frame({ type: 'session.inventory', sessions: others }); s.update(); await flush();
+  assert.ok(shown('fixture:a'), 'the first inventory on a new connection may have a different scope');
+  s.frame({ connected: false, error: 'Stream disconnected' });
+  s.frame({ type: 'session.inventory', sessions: others }); s.update(); await flush();
+  assert.ok(shown('fixture:a'), 'nor after a disconnect');
+  s.frame({ type: 'snapshot', sessions: others }); s.update(); await flush();
+  assert.ok(shown('fixture:a'), 'a snapshot starts a fresh view');
+  s.frame({ type: 'session.inventory', sessions: s.rows }); await flush();
+  s.frame({ type: 'session.inventory', sessions: others }); s.update(); await flush();
+  assert.ok(!shown('fixture:a'), 'two inventories on one connection still close it');
+});
+
+test('the Assistant overlay covering a card cancels its Delete question', async t => {
+  const s = openShell(t, 900);
+  await flush(); s.choose('a'); s.choose('b');
+  const seat = [...s.window.document.querySelectorAll('.chat-card')].find(c => c.querySelector('.thread-inner').dataset.streamId === 'fixture:a').dataset.pane;
+  s.$(`[data-pane=${seat}] .card-head [aria-label=Delete]`).click();
+  assert.ok(s.$(`[data-pane=${seat}] .next-chat-question`), 'Delete is armed');
+  s.$('.rail .brand').click();
+  assert.equal(s.$('.assistant-overlay').hidden, false, 'the Assistant overlay covers the card');
+  s.$('.rail .brand').click();
+  assert.ok(!s.$('.assistant-overlay') || s.$('.assistant-overlay').hidden, 'the overlay is dismissed');
+  assert.equal(s.$(`[data-pane=${seat}] .next-chat-question`), null, 'the question did not survive coverage');
+  assert.equal(s.$(`[data-pane=${seat}] .card-head [aria-label=Delete]`).hidden, false, 'Delete is offered again');
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0);
+});
+
+test('after a populated or sessionless snapshot the first inventory omission keeps the card; a real close does not', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const shown = id => [...s.window.document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].map(el => el.dataset.streamId).includes(id);
+  const others = () => s.rows.filter(row => row.stream_id !== 'fixture:a');
+  for (const snapshot of [{ type: 'snapshot', connected: true, sessions: s.rows }, { type: 'snapshot', connected: true }]) {
+    s.inventory(); await flush();
+    s.frame(snapshot); s.update(); await flush();
+    s.frame({ type: 'session.inventory', sessions: others() }); s.update(); await flush();
+    assert.ok(shown('fixture:a') && shown('fixture:b'),
+      (snapshot.sessions ? 'a populated' : 'a sessionless') + ' snapshot does not let the first omission close an open card');
+  }
+  s.frame({ type: 'session.inventory', sessions: s.rows }); await flush();
+  s.frame({ type: 'session.inventory', sessions: others() }); s.update(); await flush();
+  assert.ok(!shown('fixture:a'), 'two comparable inventories still close the dropped chat');
+  assert.ok(shown('fixture:b'), 'and only that chat');
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0);
+});
+
+test('full screen and leaving it use different icons', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const full = () => s.$('[data-pane=chat2] .fullscreen');
+  const enter = full().innerHTML;
+  full().click();
+  assert.equal(full().getAttribute('aria-label'), 'Leave full screen');
+  assert.notEqual(full().innerHTML, enter, 'leaving full screen has its own icon');
+  full().click();
+  assert.equal(full().getAttribute('aria-label'), 'Full screen');
+  assert.equal(full().innerHTML, enter);
+});
+
+test('a card that switches to the new-chat form hides Rename and Delete', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  const control = label => s.$(`[data-pane=chat] .card-head [aria-label=${label}]`);
+  const shown = label => !!control(label) && !control(label).hidden;
+  assert.ok(shown('Rename') && shown('Delete'), 'an open chat offers both');
+  s.$('[data-pane=chat] .next-chat-title').click(); s.$('.popover .next-chat-new').click();
+  assert.ok(s.$('[data-pane=chat] .new-chat-host') && !s.$('[data-pane=chat] .new-chat-host').hidden, 'the same card shows the new-chat form');
+  assert.ok(!shown('Rename') && !shown('Delete'), 'the new-chat form offers neither');
+});
+
+test('a Delete question does not outlive full screen or coverage, and Escape answers it', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const key = (el, key) => el.dispatchEvent(new s.window.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
+  const question = pane => s.$(`[data-pane=${pane}] .next-chat-question`);
+  const shown = (pane, label) => { const b = s.$(`[data-pane=${pane}] .card-head [aria-label="${label}"]`); return !!b && !b.hidden; };
+  s.$('[data-pane=chat] .card-head [aria-label=Delete]').click();
+  assert.ok(question('chat'));
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  assert.equal(question('chat'), null, 'covering the card dismisses its question');
+  assert.ok(shown('chat', 'Full screen') && shown('chat', 'Close') && shown('chat', 'Delete'), 'and restores its controls');
+  s.$('[data-pane=chat] [aria-label="Full screen"]').click();
+  s.$('[data-pane=chat] .card-head [aria-label=Delete]').click();
+  key(s.$('[data-pane=chat] .next-chat-cancel'), 'Escape');
+  assert.equal(question('chat'), null, 'Escape answers the question');
+  assert.ok(shown('chat', 'Leave full screen'), 'and does not also leave full screen');
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0);
 });
 
 test('U1 Settings applies an exact shared width, keeps focus during renders and restores invalid input', async t => {

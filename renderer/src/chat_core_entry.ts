@@ -18,6 +18,8 @@ store.setSendBridge(async ({ streamId, text, requestId, optimisticId, attachment
   return browser.cc.chatSendCorrelated(host, session, text, requestId, optimisticId, attachments,
     { stream_id: streamId, ...(meta ? { meta } : {}), reply_to_message_id: replyToMessageId, reply_to_question_id: replyToQuestionId });
 });
+store.setSendReceiptBridge(async ({ streamId, requestId, originalRequest }) =>
+  browser.cc.chatSendReceipt(streamId, requestId, originalRequest));
 store.setCancelBridge(async ({ streamId, expectedSessionGeneration }) => {
   const { host, session } = target(streamId);
   return browser.cc.chatInterrupt(host, session, expectedSessionGeneration);
