@@ -1,5 +1,6 @@
 """Launch-path contracts that do not require a running daemon."""
 
+from dataclasses import replace
 from pathlib import Path
 import shlex
 
@@ -127,6 +128,62 @@ def _codex_machine(tmp_path: Path) -> "launch.LocalMachine":
         "hostc", cwd=str(tmp_path / "machine-default"),
         codex_bin="/bin/echo", projects_root=str(tmp_path / "projects"),
     )
+
+
+def test_claude_launch_honors_spawn_cwd(tmp_path: Path) -> None:
+    machine = launch.local_machine(
+        "local", cwd=str(tmp_path / "default"), claude_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    )
+    worktree = str(tmp_path / "default" / "spawn cwd")
+    plan = launch.build_launch(
+        machine, provider="claude", tmux_session="s",
+        launch_model=None, launch_effort=None, cwd=worktree,
+    )
+    assert plan.jsonl_path == launch.jsonl_path_for(machine, worktree, plan.session_id)
+    assert plan.command.startswith(f"cd {shlex.quote(worktree)} && ")
+
+
+def test_claude_launch_defaults_to_machine_cwd(tmp_path: Path) -> None:
+    machine = launch.local_machine(
+        "local", cwd=str(tmp_path / "default"), claude_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    )
+    plan = launch.build_launch(
+        machine, provider="claude", tmux_session="s",
+        launch_model=None, launch_effort=None,
+    )
+    assert plan.command.startswith(f"cd {shlex.quote(machine.cwd)} && ")
+    assert plan.jsonl_path == launch.jsonl_path_for(machine, machine.cwd, plan.session_id)
+
+
+def test_claude_launch_rejects_untrusted_spawn_cwd(tmp_path: Path, caplog) -> None:
+    machine = launch.local_machine(
+        "local", cwd=str(tmp_path / "default"), claude_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    )
+    worktree = str(tmp_path / "outside")
+    plan = launch.build_launch(
+        machine, provider="claude", tmux_session="s",
+        launch_model=None, launch_effort=None, cwd=worktree,
+    )
+    assert plan.command.startswith(f"cd {shlex.quote(machine.cwd)} && ")
+    assert plan.jsonl_path == launch.jsonl_path_for(machine, machine.cwd, plan.session_id)
+    assert worktree in caplog.text and "trust" in caplog.text.lower()
+
+
+def test_remote_claude_launch_keeps_machine_cwd(tmp_path: Path, caplog) -> None:
+    machine = replace(launch.local_machine(
+        "remote", cwd=str(tmp_path / "default"), claude_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    ), resolve_cwd_locally=False)
+    plan = launch.build_launch(
+        machine, provider="claude", tmux_session="s", launch_model=None,
+        launch_effort=None, cwd=str(tmp_path / "default" / "worktree"),
+    )
+    assert plan.command.startswith(f"cd {shlex.quote(machine.cwd)} && ")
+    assert plan.jsonl_path == launch.jsonl_path_for(machine, machine.cwd, plan.session_id)
+    assert not caplog.records
 
 
 def test_codex_command_honors_launch_cwd_and_trusts_it(tmp_path: Path) -> None:
