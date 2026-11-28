@@ -46,26 +46,8 @@ NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT = "assistant_lane_ruling_result"
 ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
 TRACKING_INPUT_TOKEN = object()
 
-_NON_URGENT_KINDS = frozenset({
-    NOTICE_KIND_FD_TURN_BUDGET,
-    "error_alert",
-    "codex_capacity_exhausted",
-    NOTICE_KIND_REPORT,
-    NOTICE_KIND_RECONCILER,
-    NOTICE_KIND_SPAWN_FAILURE,
-    "watch", "wake", "wake_missed",
-    NOTICE_KIND_TREE_IDLE,
-    NOTICE_KIND_LANE_DIGEST,
-    NOTICE_KIND_EXTERNAL_WORK_DUE,
-    "owed_due", "work_item_tracking",
-    NOTICE_KIND_NOTIFICATION_ANSWER,
-    NOTICE_KIND_STATUS_CARD,
-    NOTICE_KIND_STATUS_CARD_COMBINED,
-    NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY,
-    NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST,
-    NOTICE_KIND_ASSISTANT_LANE_RULING,
-    NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT,
-})
+# Only kinds explicitly intended to interrupt an active turn belong here.
+_URGENT_KINDS = frozenset({"wake_urgent"})
 
 _TERMINAL_CODES = frozenset({
     "pool_at_cap", "pool_blocked", "pool_usage_unknown",
@@ -355,10 +337,7 @@ class OutboundNoticeQueue:
                 "stream_id": str(row["recipient_stream_id"]),
                 "to_stream_id": str(row["recipient_stream_id"]),
                 "message": str(row["body"]),
-                # Report and reconciler notices are informational queue
-                # deliveries; only an explicitly urgent notice may interrupt
-                # an in-flight provider turn.
-                "urgent": kind not in _NON_URGENT_KINDS,
+                "urgent": kind in _URGENT_KINDS,
             }
             import json
             metadata = row.get('metadata') or '{}'

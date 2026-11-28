@@ -90,6 +90,24 @@ class _RecordingComms:
         }
 
 
+@pytest.mark.parametrize("kind", ["unlisted", "spawn_delivery_failed", "dispatch_no_reply"])
+def test_unlisted_notice_kind_is_not_urgent(kind: str) -> None:
+    async def run() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            comms = _RecordingComms()
+            queue = OutboundNoticeQueue(store, comms, config=_config())
+            await _enqueue(queue, kind=kind)
+            assert await queue.deliver_now("notice-1")
+            [(message, _)] = comms.calls
+            assert message["urgent"] is False
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 class _PendingComms:
     def __init__(self, proof_state: str = "pending") -> None:
         self.proof_state = proof_state
