@@ -7,6 +7,7 @@ import pytest
 
 import comms as comms_module
 import tmux_transport
+from boot_ready import approval_prompt_visible
 from comms import Comms
 from outbound_notices import OutboundNoticeQueue
 from sessions import Sessions, VerbError
@@ -605,6 +606,12 @@ async def test_codex_cross_thread_snapshot_above_current_composer_allows_enter(c
     tmux = RecordingTmux(after_paste=f"{CODEX_CROSS_THREAD_COMMAND}\n{composer}")
     await tmux.paste(NAME, BODY)
     assert tmux.actions == ["paste", "Enter"]
+
+
+@pytest.mark.expected_miss(reason="Review 8b30df09 and the planner's 11:58 AM CST ruling on 2026-11-28")
+def test_codex_elided_approval_heading_is_an_expected_miss():
+    # The pinned picker uses the only header row for its elision notice.
+    assert approval_prompt_visible(frame("codex_elided_header")) is False
 
 
 @pytest.mark.asyncio
