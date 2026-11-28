@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import re
 
-APPROVAL_SELECTED_OPTION = re.compile(r"^[❯›]\s+\d+\.\s")
 _APPROVAL_OPTION = re.compile(r"^\s*(?:([❯›])\s+)?\d+\.\s")
 _CLAUDE_SHORT_APPROVAL = re.compile(r"^(?:Ready to code\?|Do you want to (?:make this edit|create |overwrite ))")
-_CODEX_APPROVAL_HEADINGS = {
-    "Would you like to run the following command?", "Would you like to make the following edits?",
-}
+_CODEX_APPROVAL_FOOTER = re.compile(r"^[ \t]*Press\s+enter\s+to\s+confirm\s+or\s+esc\s+to\s+cancel\Z", re.M)
+_CODEX_APPROVAL_HEADING = re.compile(
+    r"^[ \t]*Would\s+you\s+like\s+to\s+"
+    r"(?:run\s+the\s+following\s+command|make\s+the\s+following\s+edits)\?[ \t]*$",
+    re.M,
+)
 
 
 def approval_prompt_visible(pane_text: str) -> bool:
@@ -22,38 +24,39 @@ def approval_prompt_visible(pane_text: str) -> bool:
     lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
     if not lines:
         return False
-    footer = lines.pop().lstrip()
-    codex = footer == "Press enter to confirm or esc to cancel"
-    if not codex and footer not in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
+    footer = lines[-1].lstrip()
+    codex_footer = _CODEX_APPROVAL_FOOTER.search("\n".join(lines)) if footer.endswith("cancel") else None
+    if codex_footer:
+        del lines[-len(codex_footer[0].splitlines()):]
+    elif footer in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
+        lines.pop()
+    else:
         return False
-    marker = "›" if codex else "❯"
-    # A repaint can show a draft above the outgoing menu's last footer.
-    if lines and lines[-1].lstrip().startswith(marker) and not _APPROVAL_OPTION.match(lines[-1]):
-        lines.pop()
-    if lines and lines[-1].strip() in {"↑", "↓", "↑↓", "↕"}:
-        lines.pop()
+    marker = "›" if codex_footer else "❯"
     options = 0
-    selected = False
+    selected = 0
+    overflow = False
     while lines:
         if option := _APPROVAL_OPTION.match(lines[-1]):
-            selected |= option[1] == marker
+            selected += option[1] == marker
             options += 1
+        elif codex_footer and lines[-1].strip() in {"↑", "↓", "↑↓", "↕"}:
+            overflow = True
         elif not lines[-1].startswith("     "):
             break  # wrapped option descriptions are indented
         lines.pop()
-    if not selected or options < 2:
+    if selected != 1 or (options < 2 and not overflow):
         return False
     if footer == "Esc to cancel · Tab to amend":
         return True
+    heading_lines = []
     for line in reversed(lines):
-        line = line.lstrip()
-        if line.startswith(("❯", "›")):
-            return False
-        if codex and line in _CODEX_APPROVAL_HEADINGS:
-            return True
-        if not codex and _CLAUDE_SHORT_APPROVAL.match(line):
-            return True
-    return False
+        if line.lstrip().startswith(("❯", "›")):
+            break
+        heading_lines.append(line)
+    if codex_footer:
+        return bool(_CODEX_APPROVAL_HEADING.search("\n".join(reversed(heading_lines))))
+    return any(_CLAUDE_SHORT_APPROVAL.match(line.lstrip()) for line in heading_lines)
 
 
 # A Codex reset interstitial is an operator-only decision point: accepting it

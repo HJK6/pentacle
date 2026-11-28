@@ -1,4 +1,4 @@
-"""Exercise daemon delivery against approval frames with a recording transport."""
+"""One-worker focused regression suite for Thoth with no daemon or pane I/O."""
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,6 +26,7 @@ FIXTURES = Path(__file__).with_name("fixtures")
 
 APPROVALS = [
     pytest.param("claude", "claude_bash", id="claude-bash"),
+    # The edit and plan frames are representative of the pinned CLI.
     pytest.param("claude", "claude_edit", id="claude-edit"),
     pytest.param("claude", "claude_plan", id="claude-plan"),
     pytest.param("codex", "codex_command", id="codex-command"),
@@ -76,8 +77,8 @@ class RecordingTmux(BootReadyTmux, Tmux):
 
 @pytest.fixture(autouse=True)
 def immediate_transport_ticks(monkeypatch):
-    async def settle(_delay):
-        pass
+    async def settle(_delay, result=None):
+        return result
 
     monkeypatch.setattr(tmux_transport.asyncio, "sleep", settle)
     monkeypatch.setattr(comms_module, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0)
@@ -223,9 +224,7 @@ async def test_notice_defers_without_attempt_on_prompt(prompt_before_paste):
             tell_id="approval-guard-notice", body=BODY, source_stream_id=f"{HOST}:notice-source",
         )
         await queue.deliver_now(row["notice_id"])
-        saved = await store.submit(lambda conn: dict(conn.execute(
-            "SELECT * FROM v2_outbound_notices WHERE notice_id=?", (row["notice_id"],),
-        ).fetchone()))
+        saved = await store.outbound_notice_for_dedupe("approval-guard-notice")
         custody = await store.get_tell_delivery("approval-guard-notice")
     assert saved["attempts"] == (0 if prompt_before_paste else 1)
     assert CODE in saved["last_error"]
@@ -270,13 +269,248 @@ async def test_refused_spawn_brief_records_not_delivered_and_never_repastes(prom
         after_paste=None if prompt_before_paste else prompt,
     )
     async with delivery(tmux, None) as (store, _, spawnctl):
+        request = {
+            "session_name": NAME, "request_id": "approval-guard-spawn",
+            "idempotency_key": "approval-guard-spawn",
+            "objective": "Exercise spawn guard", "command": "run", "prompt": BODY,
+        }
         with pytest.raises(VerbError) as error:
-            await spawnctl.spawn({
-                "session_name": NAME, "request_id": "approval-guard-spawn",
-                "objective": "Exercise spawn guard", "command": "run", "prompt": BODY,
-            }, HOST)
+            await spawnctl.spawn(request, HOST)
         assert error.value.code == CODE
         outcome = await store.get_spawn_outcome(HOST, NAME)
+        with pytest.raises(VerbError):
+            await spawnctl.spawn(request, HOST)
     assert outcome["state"] != "delivered"
     assert outcome["delivery_receipt"]["failure_code"] == CODE
     assert tmux.actions == ([] if prompt_before_paste else ["paste"])
+
+
+def mixed_claude_frame(draft=BODY):
+    prompt, footer = frame("claude_bash").strip().rsplit("\n", 1)
+    return f"{prompt}\n❯ {draft}\n{footer}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", ["wrapped-heading", "wrapped-footer", "focused-option-only"])
+async def test_codex_narrow_or_short_approval_suppresses_enter(layout):
+    # The pinned approval overlay wraps title/footer and its picker clips rows.
+    # Transform the pinned capture at exactly those renderer boundaries.
+    screen = frame("codex_command")
+    if layout == "wrapped-heading":
+        screen = screen.replace("following command?", "following\n  command?")
+    elif layout == "wrapped-footer":
+        screen = screen.replace("confirm or esc", "confirm\n  or esc")
+    else:
+        header = screen.split("\n›", 1)[0]
+        screen = f"{header}\n› 1. Yes, proceed (y)\n↓\n  Press enter to confirm or esc to cancel"
+    tmux = RecordingTmux(after_paste=screen)
+    with pytest.raises(VerbError) as error:
+        await tmux.paste(NAME, BODY)
+    assert error.value.code == CODE
+    assert tmux.actions == ["paste"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["", "gemini"])
+@pytest.mark.parametrize("observed", ["approval", "unreadable"])
+async def test_fallback_enter_retry_requires_a_clear_observation(provider, observed, monkeypatch):
+    tmux = RecordingTmux()
+
+    async def no_proof(*args, **kwargs):
+        tmux.screen = frame("codex_command") if observed == "approval" else ""
+        if (observation := kwargs.get("observation")) is not None:
+            observation[:] = [tmux.screen]
+        return False
+
+    async with delivery(tmux, provider) as (_, comms, spawn):
+        monkeypatch.setattr(spawn, "_await_marker", no_proof)
+        monkeypatch.setattr(comms, "_submission_evidence", no_proof)
+        reply = await comms.send(message())
+    assert tmux.actions == ["paste", "Enter"]
+    assert reply["delivery"] == "committed_pending_proof"
+    assert reply["reason"] == (CODE if observed == "approval" else "enter_failed")
+    assert reply["do_not_resubmit"] is True
+    if observed == "approval":
+        assert reply["phase"] == "enter_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["tell", "send"])
+@pytest.mark.parametrize("draft", [BODY, f"1. {BODY}"])
+async def test_stale_footer_above_live_composer_does_not_block_initial_paste(verb, draft):
+    tmux = RecordingTmux(screen=mixed_claude_frame(draft))
+    async with delivery(tmux, "claude") as (_, comms, _):
+        reply = await getattr(comms, verb)(message())
+    assert tmux.actions == ["paste", "Enter"]
+    assert reply.get("delivery_status", reply.get("delivery")) in {"delivered", "landed"}
+
+
+@pytest.mark.asyncio
+async def test_tell_refused_retry_preserves_uncertain_first_enter(monkeypatch):
+    tmux = RecordingTmux(screen=CODEX_COMPOSER)
+
+    async def delayed_proof(*args, **kwargs):
+        tmux.screen = frame("codex_command")
+        return False
+
+    monkeypatch.setattr(Comms, "_submission_evidence", delayed_proof)
+    async with delivery(tmux, "codex") as (store, comms, _):
+        request = message(tell_id="approval-guard-tell-retry")
+        result = await comms.tell(request)
+        stored = await store.get_tell_delivery(request["tell_id"])
+        duplicate = await comms.tell(request)
+    assert result["delivery_status"] == "committed_pending_proof"
+    assert result["reason"] == CODE
+    assert result["phase"] == "enter_failed"
+    assert result["active_draft"] is False
+    assert "not submitted" not in result["retry_guidance"]
+    assert duplicate["duplicate"] is True
+    assert stored["reply"]["phase"] == "enter_failed"
+    assert tmux.actions == ["paste", "Enter"]
+
+
+@pytest.mark.asyncio
+async def test_generation_bound_tell_reports_refusal_with_existing_custody():
+    tmux = RecordingTmux(after_paste=frame("codex_command"))
+    async with delivery(tmux, "codex") as (store, comms, _):
+        current = await store.fetch_session(HOST, NAME)
+        request = message(
+            tell_id="approval-guard-answer",
+            _notification_answer_generation=current["session_generation"],
+        )
+        result = await comms.tell(request)
+        row = await store.get_tell_delivery(request["tell_id"])
+        duplicate = await comms.tell(request)
+    assert result["delivery_status"] == "pasted_unsubmitted"
+    assert result["reason"] == CODE
+    assert result["phase"] == "body_maybe_pasted"
+    assert result["ledger_row_id"] == row["reply"]["ledger_row_id"]
+    assert result["do_not_resubmit"] is True
+    assert row["reply"]["delivery_status"] == "proof_unavailable"
+    assert duplicate["delivery_status"] == "proof_unavailable"
+    assert duplicate["duplicate"] is True
+    assert row["delivery"]["notification_answer_generation"] == current["session_generation"]
+    assert tmux.actions == ["paste"]
+
+
+@pytest.mark.asyncio
+async def test_compact_prompt_after_paste_keeps_custody_and_logs_once(monkeypatch, caplog):
+    from submission_events import EventProof
+
+    tmux = RecordingTmux(
+        screen="────────────────────────\n❯ \n────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        after_paste=frame("claude_bash"),
+    )
+    async with delivery(tmux, "claude") as (store, comms, _):
+        current = await store.fetch_session(HOST, NAME)
+        generation = current["session_generation"]
+        await store.update_session(HOST, NAME, context_level="compact")
+        comms.sessions.apply_live(
+            TARGET, working=False, capture_generation=generation, capture_liveness="idle",
+            pane_status="pane_alive",
+        )
+        async def pending(*args, **kwargs):
+            return EventProof("pending", TARGET, 0)
+        monkeypatch.setattr(comms, "_durable_submission_evidence", pending)
+        caplog.set_level("INFO", logger="chat_streamd_v2.tmux_transport")
+        outcome = await comms.submit_context_compact(
+            TARGET, "/compact", expected_generation=current["created_at"], before_input=pending,
+        )
+    assert outcome["outcome"] == "pending_input"
+    assert outcome["reason"] == CODE
+    assert tmux.actions == ["paste"]
+    refusals = [record for record in caplog.messages if CODE in record]
+    assert len(refusals) == 1
+    assert "path=compact phase=body_maybe_pasted" in refusals[0]
+
+
+@pytest.mark.asyncio
+async def test_send_now_rechecks_prompt_on_existing_retry_cadence():
+    import test_queued_send_now as queued
+
+    harness = await queued.setup()
+    try:
+        harness.controller.clock = lambda: harness.now
+        await harness.controller.send(queued.message())
+        await queued.signal(harness, "turn_aborted")
+        await queued.intake(harness)
+        harness.tmux.screen = frame("codex_command")
+        await queued.settle(harness)
+        key = harness.controller.operation_key(queued.SID, queued.GEN, "selected")
+        waiting, _ = await harness.controller._record(key)
+        assert waiting["state"] == "continue_retry_wait"
+        request = waiting["continue_request_id"]
+        harness.now = waiting["next_retry_at"] + 1
+        await queued.settle(harness)
+        waiting, _ = await harness.controller._record(key)
+        assert waiting["state"] == "continue_retry_wait"
+        assert waiting["continue_request_id"] == request
+        assert harness.tmux.pastes == []
+        harness.tmux.screen = CODEX_COMPOSER
+        harness.now = waiting["next_retry_at"] + 1
+        await queued.settle(harness)
+        assert harness.tmux.pastes == ["continue"]
+        assert len(harness.tmux.keys) == 1
+    finally:
+        await queued.finish(harness)
+
+
+@pytest.mark.asyncio
+async def test_send_now_does_not_retry_a_possibly_pasted_continuation():
+    import test_queued_send_now as queued
+
+    harness = await queued.setup()
+    try:
+        await harness.controller.send(queued.message())
+        await queued.signal(harness, "turn_aborted")
+        await queued.intake(harness)
+        transport = RecordingTmux(after_paste=frame("codex_command"))
+        harness.tmux.screen = CODEX_COMPOSER
+        harness.tmux.paste = transport.paste
+        await queued.settle(harness)
+        key = harness.controller.operation_key(queued.SID, queued.GEN, "selected")
+        operation, _ = await harness.controller._record(key)
+        assert operation["state"] == "continue_pending_proof"
+        await queued.settle(harness)
+        assert transport.actions == ["paste"]
+        assert len(harness.tmux.keys) == 1
+    finally:
+        await queued.finish(harness)
+
+
+@pytest.mark.asyncio
+async def test_adopted_staged_brief_refuses_before_refencing_and_never_repastes(monkeypatch):
+    import time
+
+    tmux = RecordingTmux(screen=f"{CLAUDE_COMPOSER}\n{frame('claude_bash')}")
+    tmux.alive = True
+    async with delivery(tmux, None) as (store, _, spawnctl):
+        request_id = "approval-adopted-spawn"
+        nonce = "approval-fixture"
+        assert await store.reserve_stream_id(HOST, NAME, ttl_s=60, request_id=request_id, nonce=nonce)
+        await spawnctl.sessions.open(HOST, NAME, fence=request_id, provider="claude")
+        current = await store.fetch_session(HOST, NAME)
+        receipt = {"transport": "staged", "state": "requested"}
+        intent = {"brief": BODY, "delivery_receipt": receipt,
+                  "open_fields": {"provider": "claude", "session_generation": current["session_generation"]}}
+        assert await store.record_spawn_intent(HOST, NAME, intent, request_id=request_id, nonce=nonce)
+        reservation, = await store.reservations(include_expired=True)
+
+        async def bound(*args, **kwargs):
+            return True
+
+        monkeypatch.setattr(spawnctl, "_commit_pane_bound", bound)
+        outcome = await spawnctl._adopt_interrupted_spawn(
+            HOST, NAME, request_id, intent, tmux, reservation={**reservation, "expires_at": time.time() + 60},
+        )
+        assert outcome == "adopted"
+        assert tmux.actions == []
+        saved = await store.get_spawn_outcome(HOST, NAME)
+        assert saved["state"] == "failed"
+        assert saved["delivery_receipt"]["failure_code"] == CODE
+        remaining, = await store.reservations(include_expired=True)
+        assert '"proof_watermark_state"' not in remaining["payload"]
+        tmux.screen = CLAUDE_COMPOSER
+        await spawnctl.reconcile_spawn_intents()
+        assert (await store.get_spawn_outcome(HOST, NAME))["state"] == "failed"
+    assert tmux.actions == []

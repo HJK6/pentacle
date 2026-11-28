@@ -1474,7 +1474,7 @@ class SpawnCtl:
 
     async def _await_provider_ready(
         self, name: str, provider: str, tmux: "tmux_transport.Tmux",
-        *, absolute_deadline: float | None = None,
+        *, absolute_deadline: float | None = None, guard_approval: bool = False,
     ) -> "BootReadyOutcome":
         """Poll readiness against one absolute deadline."""
         predicate = READY_PREDICATES[provider]
@@ -1496,6 +1496,8 @@ class SpawnCtl:
                     raise
                 # A capture timeout is transport ambiguity, not a dead pane.
             now = time.monotonic()
+            if guard_approval and approval_prompt_visible(pane_text):
+                return _outcome(False, reason=tmux_transport.PROVIDER_PROMPT_WAITING)
             if provider == "codex" and pane_text:
                 if codex_tui_readiness(pane_text) == CODEX_RESET_BLOCKED:
                     return _outcome(False, reason=CODEX_RESET_BLOCKED)
@@ -1585,6 +1587,7 @@ class SpawnCtl:
         self, name: str, marker: str, timeout: float, *, since: str | None = None,
         tmux: tmux_transport.Tmux | None = None, reset_guard: bool = False,
         absolute_deadline: float | None = None,
+        observation: list[str] | None = None,
     ) -> bool:
         """Poll a boot or receipt marker; `since` excludes an old matching echo."""
         tmux = tmux or self.tmux
@@ -1604,6 +1607,8 @@ class SpawnCtl:
             except VerbError as exc:
                 if exc.code != "tmux_timeout":
                     raise
+            if observation is not None:
+                observation[:] = [raw_capture]
             if reset_guard and raw_capture and codex_reset_interstitial_visible(raw_capture):
                 raise VerbError(
                     CODEX_RESET_BLOCKED,
@@ -5541,7 +5546,11 @@ class SpawnCtl:
         stream_id = f"{host}:{name}"
         ready = await self._await_provider_ready(
             name, provider, tmux, absolute_deadline=time.monotonic() + ADOPTION_BOOT_DEADLINE_S,
+            guard_approval=True,
         )
+        if ready.reason == tmux_transport.PROVIDER_PROMPT_WAITING:
+            refusal = tmux_transport.approval_prompt_refusal(stream_id, "spawn", "not_started")
+            return ("failed", refusal.code, str(refusal)), receipt
         if not ready.ready:
             if not await tmux.has_session(name):
                 return ("failed", "pane_died_during_boot", "adopted pane died before its brief was delivered"), receipt

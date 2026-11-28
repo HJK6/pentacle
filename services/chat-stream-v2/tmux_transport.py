@@ -17,10 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from boot_ready import (
-    APPROVAL_SELECTED_OPTION, approval_prompt_visible,
-    claude_prompt_in_active_draft, codex_prompt_in_active_draft,
-)
+from boot_ready import approval_prompt_visible
 from machines import ssh_command, ssh_tmux_command
 from prockill import terminate_and_reap
 from sessions import VerbError
@@ -531,15 +528,9 @@ class Tmux:
             except VerbError as exc:
                 log.warning("pre_enter_capture_failed code=%s", exc.code)
                 pane = ""
+            # A live draft above stale approval chrome is a composer frame.
             if approval_prompt_visible(pane):
-                caret = next(line.lstrip() for line in reversed(pane.splitlines())
-                             if line.lstrip().startswith(("❯", "›")))
-                in_draft = not APPROVAL_SELECTED_OPTION.match(caret) and (
-                    claude_prompt_in_active_draft(pane, text)
-                    or codex_prompt_in_active_draft(pane, text, exact=True)
-                )
-                if not in_draft:
-                    raise VerbError(PROVIDER_PROMPT_WAITING, _PROMPT_WAITING_MESSAGE, phase=phase)
+                raise VerbError(PROVIDER_PROMPT_WAITING, _PROMPT_WAITING_MESSAGE, phase=phase)
             phase = "enter_failed"
             rc, out = await self.run("send-keys", "-t", _target(name), "Enter")
             if rc != 0:
