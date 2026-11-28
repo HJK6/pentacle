@@ -200,7 +200,7 @@ managed_logs.install()
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
 for message in sys.argv[3:]:
  name = "ingest" if message.startswith("ingest_pass_summary") else "store"
- logging.getLogger("chat_streamd_v2." + name).info("%s", message)
+ logging.getLogger("chat_streamd_v2." + name).info(message)
 '''
     env = {**os.environ, **env_for(cfg), 'PYTHONPATH': str(SERVICE)}
     result = subprocess.run([sys.executable, '-c', script, str(hourly_max), str(hourly_backups), *messages],
@@ -237,6 +237,24 @@ def test_hourly_includes_send_and_ingest_records(tmp_path):
     run_hourly(cfg, messages)
     lines = (tmp_path / 'hourly.log').read_text().splitlines()
     assert [line.split(' ', 3)[-1] for line in lines] == messages
+
+
+def test_malformed_hourly_records_still_reach_general_log(tmp_path):
+    cfg = config(tmp_path, 4096)
+    script = '''
+import logging, sys
+import managed_logs
+managed_logs.install()
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+logging.getLogger("chat_streamd_v2.store").info("send_start %s %s", "one")
+logging.getLogger("chat_streamd_v2.ingest").info("ingest_pass_summary %s %s", "one")
+'''
+    env = {**os.environ, **env_for(cfg), 'PYTHONPATH': str(SERVICE)}
+    result = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    general = retained(cfg, cfg.stderr).decode()
+    assert general.count('Logging error') >= 2
+    assert 'send_start %s %s' in general and 'ingest_pass_summary %s %s' in general
 
 
 def test_deployment_reads_both_managed_streams_and_retained_boot_boundary(tmp_path, monkeypatch):
