@@ -662,6 +662,7 @@ const SCENARIOS = [
   ['next-fluid-boundaries', require('./next_scenarios').fluidBoundaries],
   ['next-fluid-phone', require('./next_scenarios').fluidPhone],
   ['next-home-rail', require('./next_scenarios').homeRail],
+  ['next-shell-bridge', require('./next_shell_bridge_scenario').nextShellBridge],
   ['next-chat-card', require('./next_scenarios').chatCard],
   ['next-attachment-thumbnail', require('./next_scenarios').attachmentThumbnail],
   ['next-lanes-fixed-width', require('./next_scenarios').fixedLanesWidth],
