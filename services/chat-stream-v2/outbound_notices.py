@@ -47,7 +47,7 @@ ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
 TRACKING_INPUT_TOKEN = object()
 
 # Only kinds explicitly intended to interrupt an active turn belong here.
-_URGENT_KINDS = frozenset({"wake_urgent"})
+_URGENT_KINDS = frozenset({"wake_urgent", "screen_lease_revoked"})
 
 _TERMINAL_CODES = frozenset({
     "pool_at_cap", "pool_blocked", "pool_usage_unknown",

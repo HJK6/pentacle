@@ -108,6 +108,25 @@ def test_unlisted_notice_kind_is_not_urgent(kind: str) -> None:
     asyncio.run(run())
 
 
+def test_explicit_notice_kinds_are_delivered_urgent() -> None:
+    async def run() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            comms = _RecordingComms()
+            queue = OutboundNoticeQueue(store, comms, config=_config())
+            kinds = ("wake_urgent", "screen_lease_revoked")
+            for kind in kinds:
+                await _enqueue(queue, notice_id=f"notice-{kind}", kind=kind)
+                assert await queue.deliver_now(f"notice-{kind}")
+            assert [message["_outbound_notice_kind"] for message, _ in comms.calls] == list(kinds)
+            assert all(message["urgent"] is True for message, _ in comms.calls)
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 class _PendingComms:
     def __init__(self, proof_state: str = "pending") -> None:
         self.proof_state = proof_state
