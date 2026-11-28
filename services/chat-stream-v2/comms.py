@@ -1727,7 +1727,7 @@ class Comms:
             return False
         if isinstance(timing := request_timing.get(), SendAttempt):
             timing.proof_polls += 1
-        tail = await self.store.fetch_session_event_tail(
+        tail = await self.store.fetch_session_event_tail_for_proof(
             stream_id, limit=500, after_daemon_seq=watermark,
         )
         matches = [event for event in tail

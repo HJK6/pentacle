@@ -144,7 +144,7 @@ class DurableUserEventProof:
         try:
             read = (
                 self.store.fetch_session_event_watermark(stream_id)
-                if after is None else self.store.fetch_session_event_tail(
+                if after is None else self.store.fetch_session_event_tail_for_proof(
                     stream_id, limit=500, after_daemon_seq=after,
                 )
             )
