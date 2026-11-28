@@ -100,7 +100,6 @@ class MobileShaped:
     def __init__(self, harness, port, mode):
         self.harness, self.port, self.mode = harness, port, mode
         self.rows, self.received = [], []
-        self.frames = asyncio.Queue()
         self.last_inbound = asyncio.Event()
 
     def apply(self, event):
@@ -117,6 +116,7 @@ class MobileShaped:
         self.rows.sort(key=lambda row: row['daemon_seq'])
 
     async def open(self, stack):
+        self.frames = asyncio.Queue()
         server = self.harness['server']
         self.harness['cli_env']['AGENT_ORCH_WS_URL'] = f'ws://127.0.0.1:{self.port}'
         self.socket = await connect_client(stack, self.harness, 'pentacle-mobile')
