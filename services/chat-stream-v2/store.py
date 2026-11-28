@@ -4953,14 +4953,16 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             if pane_birth is not None:
                 intent["pane_birth"] = pane_birth
             elif "pane_birth" in intent and pane_pid and pane_pid != reservation.get("pane_pid"):
+                log.warning("spawn pane binding refused: reason=missing_birth_for_replacement")
                 return False  # do not downgrade a proven reservation to text-only
             conn.execute(
                 "UPDATE v2_stream_reservations "
-                "SET tmux_created=1, payload=?, "
+                "SET tmux_created=1, " + ("payload=?, " if pane_birth is not None else "") +
                 "    pane_pid=COALESCE(?, pane_pid), "
                 "    pane_started_at=COALESCE(?, pane_started_at) "
                 "WHERE host=? AND session_name=?",
-                (json.dumps(intent), pane_pid or None, pane_started_at or None, host, session_name),
+                ((json.dumps(intent),) if pane_birth is not None else ()) +
+                (pane_pid or None, pane_started_at or None, host, session_name),
             )
             conn.commit()
             return True
@@ -7573,8 +7575,6 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             if not isinstance(binding, dict) or binding != expected or binding.get("generation") != generation:
                 return None
             if not isinstance(binding.get("transcript"), dict):
-                return None
-            if "birth" in binding and pane_birth is None:
                 return None
             if binding.get("pane_pid") == pane_pid and (binding.get("birth") == pane_birth
                     if pane_birth is not None else canonical_start(binding.get("pane_started_at")) == pane_started_at):

@@ -1343,7 +1343,7 @@ class Ingest:
         if observation is not None:
             observation["start"] = canonical_start(record.get("start_id")) if record else ""
         if (not record or record["uid"] != os.getuid()
-                or (record.get("birth") != binding["birth"] or record.get("birth") is None
+                or (record.get("birth") != binding["birth"]
                     if "birth" in binding else canonical_start(record["start_id"]) != started)
                 or not _provider_command_matches(record["command"], str(binding.get("executable") or ""), binding.get("cursor") if row.get("provider") == "cursor" else None)):
             return None

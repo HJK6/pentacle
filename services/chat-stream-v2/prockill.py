@@ -130,7 +130,7 @@ def _linux_birth(pid: int) -> list[str | int] | None:
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         # comm can contain spaces and ')'; the suffix starts at field 3.
         ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
-        return [boot, ticks] if boot and ticks >= 0 else None
+        return [boot, ticks] if boot else None
     except (OSError, ValueError, IndexError):
         return None
 
