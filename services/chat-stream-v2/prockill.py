@@ -21,6 +21,7 @@ import select
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -124,10 +125,22 @@ def canonical_start(value: object) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
 
 
+def _linux_birth(pid: int) -> list[str | int] | None:
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        # comm can contain spaces and ')'; the suffix starts at field 3.
+        ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+        return [boot, ticks] if boot and ticks >= 0 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 async def process_record(pid: str) -> dict[str, Any] | None:
     """Read one provider root with fields supported by Darwin and Linux."""
     if not str(pid).isdecimal() or int(pid) <= 0:
         return None
+    linux = sys.platform.startswith("linux")
+    birth = await asyncio.to_thread(_linux_birth, int(pid)) if linux else None
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -141,8 +154,11 @@ async def process_record(pid: str) -> dict[str, Any] | None:
         fields = out.decode("utf-8", "replace").strip().split(None, 7)
         if len(fields) != 8 or int(fields[0]) != int(pid):
             return None
+        if linux and birth != await asyncio.to_thread(_linux_birth, int(pid)):
+            return None
         return {"pid": int(fields[0]), "uid": int(fields[1]),
-                "start_id": canonical_start(" ".join(fields[2:7])), "command": fields[7]}
+                "start_id": canonical_start(" ".join(fields[2:7])), "command": fields[7],
+                **({"birth": birth} if birth is not None else {})}
     except asyncio.CancelledError:
         await terminate_and_reap(proc)
         raise

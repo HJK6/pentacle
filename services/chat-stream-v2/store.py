@@ -3075,6 +3075,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                         "pane_pid": str(reservation.get("pane_pid") or ""),
                         "pane_started_at": str(reservation.get("pane_started_at") or ""),
                         "generation": generation,
+                        **({"birth": intent["pane_birth"]} if "pane_birth" in intent else {}),
                         **({"cursor": dict(observer["cursor"])} if cols.get("provider") == "cursor"
                            and isinstance(observer.get("cursor"), dict) else {}),
                     }
@@ -3107,6 +3108,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                         key: observer.get(key, "")
                         for key in ("executable", "pane_pid", "pane_started_at")
                     } | {"generation": generation} | (
+                        {"birth": observer["birth"]} if "birth" in observer else {}) | (
                         {"cursor": dict(observer["cursor"])} if cols.get("provider") == "cursor"
                         and isinstance(observer.get("cursor"), dict) else {})
                     cols["observer_binding"]["pane_pid"] = str(
@@ -4937,22 +4939,28 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
     async def commit_tmux_created_fenced(
         self, host: str, session_name: str, *,
         request_id: str, nonce: str | None = None,
-        pane_pid: str = "", pane_started_at: str = "",
+        pane_pid: str = "", pane_started_at: str = "", pane_birth: list | None = None,
     ) -> bool:
         """Bind only the owning request and creation nonce, unless cancellation won.
 
         Absence or a replaced reservation always fails closed. The same CAS is
         used by normal creation and restart adoption before admitting a seat."""
         def _op(conn: sqlite3.Connection) -> bool:
-            if not _spawn_reservation(conn, host, session_name, request_id, nonce):
+            reservation = _spawn_reservation(conn, host, session_name, request_id, nonce)
+            if not reservation:
                 return False
+            intent = json.loads(reservation.get("payload") or "{}")
+            if pane_birth is not None:
+                intent["pane_birth"] = pane_birth
+            elif "pane_birth" in intent and pane_pid and pane_pid != reservation.get("pane_pid"):
+                return False  # do not downgrade a proven reservation to text-only
             conn.execute(
                 "UPDATE v2_stream_reservations "
-                "SET tmux_created=1, "
+                "SET tmux_created=1, payload=?, "
                 "    pane_pid=COALESCE(?, pane_pid), "
                 "    pane_started_at=COALESCE(?, pane_started_at) "
                 "WHERE host=? AND session_name=?",
-                (pane_pid or None, pane_started_at or None, host, session_name),
+                (json.dumps(intent), pane_pid or None, pane_started_at or None, host, session_name),
             )
             conn.commit()
             return True
@@ -7536,7 +7544,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     async def rebind_observer_pane(
         self, stream_id: str, *, generation: str, pane_pid: str,
-        pane_started_at: str, expected: dict[str, Any],
+        pane_started_at: str, expected: dict[str, Any], pane_birth: list | None = None,
     ) -> dict[str, Any] | None:
         """Retarget a PROVEN binding's stale pane PID/start to the in-place
         replacement process within the SAME generation, keeping every other
@@ -7566,9 +7574,14 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 return None
             if not isinstance(binding.get("transcript"), dict):
                 return None
-            if binding.get("pane_pid") == pane_pid and canonical_start(binding.get("pane_started_at")) == pane_started_at:
+            if "birth" in binding and pane_birth is None:
+                return None
+            if binding.get("pane_pid") == pane_pid and (binding.get("birth") == pane_birth
+                    if pane_birth is not None else canonical_start(binding.get("pane_started_at")) == pane_started_at):
                 return None
             updated = {**binding, "pane_pid": pane_pid, "pane_started_at": pane_started_at}
+            if pane_birth is not None:
+                updated["birth"] = pane_birth
             conn.execute("UPDATE sessions SET observer_binding=? WHERE host=? AND session_name=?",
                          (json.dumps(updated, separators=(",", ":")), host, name))
             conn.commit()

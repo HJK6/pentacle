@@ -4308,15 +4308,22 @@ class SpawnCtl:
         A cancelled, missing, or replaced reservation cannot admit the pane."""
         pane_pid = ""
         started_at = ""
+        birth = None
         try:
             pane_pid = await tmux.pane_pid(name)
-            if pane_pid:
+            if pane_pid and host != self.sessions.local_host and self.hosts is not None:
                 started_at = await self._pane_started_at(pane_pid, host=host)
+            elif pane_pid:
+                from prockill import process_record
+                if record := await process_record(pane_pid):
+                    started_at = record["start_id"]
+                    birth = record.get("birth")
         except Exception:  # noqa: BLE001 - identity is best-effort corroboration
             pass
         return await self.store.commit_tmux_created_fenced(
             host, name, request_id=request_id, nonce=nonce,
             pane_pid=pane_pid, pane_started_at=started_at,
+            **({"pane_birth": birth} if birth is not None else {}),
         )
 
     async def _kill_uncommitted_pane(
