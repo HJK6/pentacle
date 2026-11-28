@@ -44,11 +44,12 @@ def frame(name):
 
 
 class RecordingTmux(BootReadyTmux, Tmux):
-    def __init__(self, *, screen="", after_paste=None):
+    def __init__(self, *, screen="", after_paste=None, submitted_screen=None):
         BootReadyTmux.__init__(self)
         Tmux.__init__(self)
         self.screen = screen
         self.after_paste = after_paste
+        self.submitted_screen = submitted_screen
         self.capture_fails = False
         self.actions = []
         self.body = ""
@@ -72,7 +73,8 @@ class RecordingTmux(BootReadyTmux, Tmux):
                 self.screen = self.after_paste
         if command == "send-keys":
             self.actions.append(args[-1])
-            self.screen = f"READY\n⏺ {self.body}\n{CLAUDE_COMPOSER}"
+            self.screen = (self.submitted_screen(self.body) if self.submitted_screen
+                           else f"READY\n⏺ {self.body}\n{CLAUDE_COMPOSER}")
         return 0, ""
 
 
@@ -203,7 +205,13 @@ async def test_capture_failure_does_not_block(caplog):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("screen", [TRUST, RESET_INTERSTITIAL])
+@pytest.mark.parametrize("screen", [
+    TRUST,
+    "Trust this folder?\n› 1. Trust and continue\n  2. Quit\n  enter continue · esc quit",
+    "Trust this folder?\n  1. Trust and continue\n› 2. Quit\n  enter continue · esc quit",
+    RESET_INTERSTITIAL,
+    "View account usage or redeem an earned reset\n› 1. Show usage\n  2. Redeem usage limit reset",
+])
 async def test_trust_chrome_and_reset_menu_are_not_prompts(screen):
     tmux = RecordingTmux(after_paste=screen)
     await tmux.paste(NAME, BODY)
@@ -337,9 +345,8 @@ async def test_fallback_enter_retry_requires_a_clear_observation(provider, obser
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verb", ["tell", "send"])
-@pytest.mark.parametrize("draft", [BODY, f"1. {BODY}"])
-async def test_stale_footer_above_live_composer_does_not_block_initial_paste(verb, draft):
-    tmux = RecordingTmux(screen=mixed_claude_frame(draft))
+async def test_stale_footer_above_live_composer_does_not_block_initial_paste(verb):
+    tmux = RecordingTmux(screen=mixed_claude_frame())
     async with delivery(tmux, "claude") as (_, comms, _):
         reply = await getattr(comms, verb)(message())
     assert tmux.actions == ["paste", "Enter"]
@@ -601,17 +608,77 @@ async def test_codex_approval_variants_block_enter_independently_of_footer(pane)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("composer", [CODEX_COMPOSER, "› 1. Yes, proceed\n  gpt-6.2-sol high"])
-async def test_codex_cross_thread_snapshot_above_current_composer_allows_enter(composer):
-    tmux = RecordingTmux(after_paste=f"{CODEX_CROSS_THREAD_COMMAND}\n{composer}")
+async def test_codex_cross_thread_snapshot_above_current_composer_allows_enter():
+    tmux = RecordingTmux(after_paste=f"{CODEX_CROSS_THREAD_COMMAND}\n{CODEX_COMPOSER}")
     await tmux.paste(NAME, BODY)
     assert tmux.actions == ["paste", "Enter"]
 
 
-@pytest.mark.expected_miss(reason="Review 8b30df09 and the planner's 11:58 AM CST ruling on 2026-11-28")
-def test_codex_elided_approval_heading_is_an_expected_miss():
+@pytest.mark.asyncio
+async def test_codex_elided_approval_heading_withholds_enter():
     # The pinned picker uses the only header row for its elision notice.
-    assert approval_prompt_visible(frame("codex_elided_header")) is False
+    pane = frame("codex_elided_header")
+    tmux = RecordingTmux(after_paste=pane)
+    with pytest.raises(VerbError) as error:
+        await tmux.paste(NAME, BODY)
+    assert approval_prompt_visible(pane) is True
+    assert error.value.code == CODE
+    assert error.value.extra["phase"] == "body_maybe_pasted"
+    assert tmux.actions == ["paste"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "caret", "composer"), [
+    ("claude", "❯", CLAUDE_COMPOSER),
+    ("codex", "›", CODEX_COMPOSER),
+])
+async def test_numbered_draft_refuses_before_paste_and_same_id_can_retry(provider, caret, composer):
+    draft = composer.replace(caret + " ", f"{caret} 1. {BODY} ", 1)
+    tmux = RecordingTmux(screen=draft, submitted_screen=codex_submitted_screen if provider == "codex" else None)
+    async with delivery(tmux, provider) as (store, comms, _):
+        request = message(tell_id=f"numbered-draft-{provider}")
+        with pytest.raises(VerbError) as error:
+            await comms.tell(request)
+        assert error.value.code == CODE
+        assert error.value.extra["phase"] == "not_started"
+        assert await store.get_tell_delivery(request["tell_id"]) is None
+        assert tmux.actions == []
+        tmux.screen = composer
+        delivered = await comms.tell(request)
+        duplicate = await comms.tell(request)
+    assert delivered["delivery_status"] == "delivered"
+    assert duplicate["duplicate"] is True
+    assert tmux.actions == ["paste", "Enter"]
+
+
+@pytest.mark.parametrize("caret", ["›", "❯"])
+def test_numbered_picker_selection_needs_no_heading_or_footer(caret):
+    assert approval_prompt_visible(f"Choose a workspace\n{caret} 1. First workspace") is True
+
+
+def test_claude_approval_with_clipped_selector_uses_only_the_current_footer_and_menu():
+    pane = frame("claude_bash").replace("❯ 1. Yes", "  1. Yes")
+    assert approval_prompt_visible(f"{CLAUDE_COMPOSER}\n{pane}") is True
+
+
+def codex_submitted_screen(body):
+    return f"› {body}\n\n• Acknowledged\n\n{CODEX_COMPOSER}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "pane"), [
+    pytest.param("claude", CLAUDE_COMPOSER, id="claude-idle"),
+    pytest.param("claude", frame("claude_draft_after"), id="claude-working"),
+    pytest.param("codex", CODEX_COMPOSER, id="codex-idle"),
+    pytest.param("codex", f"◦ Working (28s • esc to interrupt)\n\n{CODEX_COMPOSER}", id="codex-working"),
+])
+async def test_normal_tell_lands_on_idle_or_working_composer(provider, pane):
+    tmux = RecordingTmux(screen=pane, submitted_screen=codex_submitted_screen if provider == "codex" else None)
+    async with delivery(tmux, provider) as (_, comms, _):
+        result = await comms.tell(message())
+    assert result["delivery_status"] == "delivered"
+    assert result["submission_confirmed"] is True
+    assert tmux.actions == ["paste", "Enter"]
 
 
 @pytest.mark.asyncio
