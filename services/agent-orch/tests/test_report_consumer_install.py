@@ -1,4 +1,5 @@
 """Copied-byte verification, refresh, and clean reader dispatch regressions."""
+import asyncio
 import hashlib
 import grp
 import importlib.util
@@ -356,3 +357,219 @@ def test_root_config_parent_check_is_not_bypassed(tmp_path):
     m = load("report_consumer_cli")
     with pytest.raises(ValueError, match="unsafe reader installation"):
         m._root_path(tmp_path)
+
+
+@pytest.fixture
+def frozen_report_reader(monkeypatch, tmp_path):
+    """Import the pinned module without invoking its launcher or daemon.
+
+    Without an installed release the fixture freezes a copy of this checkout's
+    reader package, so the cases always run; deployment sets the release path
+    and module hash to exercise the installed bytes.
+    """
+    release_value = os.environ.get("PENTACLE_WORK_REPORT_RELEASE_DIR")
+    expected_sha256 = os.environ.get("PENTACLE_WORK_REPORT_MODULE_SHA256")
+    if not release_value or not expected_sha256:
+        release_value = str(tmp_path / "frozen-release")
+        shutil.copytree(
+            Path(__file__).parents[1] / "agent_orch",
+            Path(release_value) / "app/services/agent-orch/agent_orch",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        (Path(release_value) / "app/runtime-deps/websockets").mkdir(parents=True)
+        expected_sha256 = digest(
+            Path(release_value) / "app/services/agent-orch/agent_orch/work_report_cli.py"
+        )
+
+    release = Path(release_value).resolve(strict=True)
+    package_dir = release / "app/services/agent-orch/agent_orch"
+    module_path = package_dir / "work_report_cli.py"
+    assert module_path.is_file()
+    assert digest(module_path) == expected_sha256
+
+    # Load under a private package name so the repository checkout cannot
+    # satisfy relative imports in place of the immutable installed release.
+    package_name = "_pentacle_frozen_report_reader"
+    package_spec = importlib.util.spec_from_file_location(
+        package_name, package_dir / "__init__.py",
+        submodule_search_locations=[str(package_dir)],
+    )
+    assert package_spec and package_spec.loader
+    package = importlib.util.module_from_spec(package_spec)
+    sys.modules[package_name] = package
+    package_spec.loader.exec_module(package)
+
+    monkeypatch.syspath_prepend(str(release / "app/runtime-deps/websockets"))
+    reader_spec = importlib.util.spec_from_file_location(
+        package_name + ".work_report_cli", module_path,
+    )
+    assert reader_spec and reader_spec.loader
+    reader = importlib.util.module_from_spec(reader_spec)
+    sys.modules[reader_spec.name] = reader
+    reader_spec.loader.exec_module(reader)
+    assert Path(reader.__file__).resolve() == module_path.resolve()
+    try:
+        yield reader
+    finally:
+        for name in list(sys.modules):
+            if name == package_name or name.startswith(package_name + "."):
+                sys.modules.pop(name, None)
+
+
+class DisposableReportSocket:
+    """A local WebSocket-shaped fixture; it has no network or daemon endpoint."""
+
+    def __init__(self, response=None):
+        self.response = response
+        self.reply = None
+        self.sent = []
+        self.closed = False
+
+    async def send(self, raw):
+        message = json.loads(raw)
+        self.sent.append(message)
+        if message.get("type") == "work.report.get" and self.response is not None:
+            self.reply = {**self.response, "request_id": message["request_id"]}
+
+    async def recv(self):
+        if self.reply is None:
+            await asyncio.Future()
+        return json.dumps(self.reply, separators=(",", ":"))
+
+
+class DisposableReportConnection:
+    def __init__(self, socket):
+        self.socket = socket
+
+    async def __aenter__(self):
+        return self.socket
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self.socket.closed = True
+
+
+def configure_frozen_reader(reader, monkeypatch, socket, identity_calls):
+    monkeypatch.setattr(reader, "load_config", lambda: SimpleNamespace(ws_url="ws://fixture.invalid"))
+
+    def reader_identity(explicit):
+        identity_calls.append(explicit)
+        return {"fixture_identity": explicit or "ordinary-fixture-seat"}
+
+    monkeypatch.setattr(reader, "reader_identity_ready", reader_identity)
+    monkeypatch.setattr(
+        reader.wsclient, "_rpc_hello",
+        lambda config, from_stream_id=None: {"type": "hello.fixture", "from_stream_id": from_stream_id},
+    )
+
+    async def send_fixture_frame(ws, message, identity, **kwargs):
+        await ws.send(json.dumps(message, separators=(",", ":")))
+
+    monkeypatch.setattr(reader, "send_frame", send_fixture_frame)
+    monkeypatch.setattr(
+        reader.wsclient.websockets, "connect",
+        lambda *args, **kwargs: DisposableReportConnection(socket),
+    )
+
+
+def test_frozen_reader_round_trips_new_advisor_projection(frozen_report_reader, monkeypatch, capsys):
+    reader = frozen_report_reader
+    monkeypatch.setenv(reader.TOKEN_ENV, "fixture-reader-token")
+    stamp = {
+        "version": 1,
+        "verdict": "accept",
+        "operator_message_id": "fixture-message-42",
+        "fd_event_id": "fixture-tell-42",
+        "path": "docs/reference/assistant_" + "bar" + "t_context.md",
+        "base_revision": "a" * 64,
+        "new_bytes_sha256": "b" * 64,
+        "scope": {"mode": "single", "removed": ["c" * 64], "added": ["d" * 64]},
+        "advisor_stream_id": "fixture:advisor-1",
+        "advisor_generation": "fixture-advisor-generation",
+        "fd_stream_id": "fixture:fd-1",
+        "fd_generation": "fixture-fd-generation",
+        "fd_binding_revision": 12,
+        "operator_text_sha256": "e" * 64,
+    }
+    # The service-reader fixture carries the new allowlisted attestation.
+    service_response = {
+        "type": "work.report.get.ok",
+        "report_id": "fixture-report-42",
+        "status": "progress",
+        "from_stream_id": "fixture:advisor-1",
+        "provenance_qualified_spec_ids": ["spec_fixture"],
+        "created_at": "2026-11-22T20:00:00Z",
+        "advisor_rule_accept": stamp,
+        "session_generation": "fixture-advisor-generation",
+    }
+    socket = DisposableReportSocket(service_response)
+    identity_calls = []
+    configure_frozen_reader(reader, monkeypatch, socket, identity_calls)
+
+    exit_code = reader.main(["fixture-report-42"])
+    printed = capsys.readouterr().out
+    actual = json.loads(printed)
+    request = next(message for message in socket.sent if message.get("type") == "work.report.get")
+    expected = {
+        **service_response,
+        "advisor_rule_accept": stamp,
+        "session_generation": "fixture-advisor-generation",
+        "request_id": request["request_id"],
+    }
+
+    assert exit_code == 0
+    assert identity_calls == [reader.READER]
+    assert socket.closed
+    assert actual == expected
+    assert set(actual) == {
+        "type", "report_id", "status", "from_stream_id",
+        "provenance_qualified_spec_ids", "created_at", "advisor_rule_accept",
+        "session_generation", "request_id",
+    }
+
+
+def test_frozen_reader_timeout_without_service_reply_fails_closed(
+    frozen_report_reader, monkeypatch, capsys,
+):
+    reader = frozen_report_reader
+    monkeypatch.setenv(reader.TOKEN_ENV, "fixture-reader-token")
+    socket = DisposableReportSocket()
+    identity_calls = []
+    configure_frozen_reader(reader, monkeypatch, socket, identity_calls)
+
+    exit_code = reader.main(["fixture-report-timeout", "--timeout", "0.02"])
+    actual = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert actual["type"] == "work.report.get.error"
+    assert actual["error_code"] == "unavailable"
+    assert actual["request_id"].startswith("work-report-")
+    assert identity_calls == [reader.READER]
+    assert socket.closed
+
+
+def test_frozen_reader_ordinary_seat_response_has_no_advisor_stamp(
+    frozen_report_reader, monkeypatch, capsys,
+):
+    reader = frozen_report_reader
+    monkeypatch.delenv(reader.TOKEN_ENV, raising=False)
+    service_response = {
+        "type": "work.report.get.ok",
+        "report_id": "fixture-report-ordinary",
+        "status": "progress",
+        "from_stream_id": "fixture:advisor-1",
+        "provenance_qualified_spec_ids": ["spec_fixture"],
+        "created_at": "2026-11-22T20:00:00Z",
+    }
+    socket = DisposableReportSocket(service_response)
+    identity_calls = []
+    configure_frozen_reader(reader, monkeypatch, socket, identity_calls)
+
+    exit_code = reader.main(["fixture-report-ordinary"])
+    actual = json.loads(capsys.readouterr().out)
+    request = next(message for message in socket.sent if message.get("type") == "work.report.get")
+
+    assert exit_code == 0
+    assert identity_calls == [None]
+    assert actual == {**service_response, "request_id": request["request_id"]}
+    assert "advisor_rule_accept" not in actual
+    assert "session_generation" not in actual
