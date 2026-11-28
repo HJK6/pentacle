@@ -32,8 +32,9 @@ remove its contract test, and add a CHANGELOG line in one PR.
 Inventory, lane and snapshot frames are complete replacements. Measurements as
 of 2026-11-28 show session inventory at about 85–110 KB before the mobile slim
 and about 10 KB after it, lane inventory at about 140 KB, and authenticated
-hello at about 480 KB before the slim and about 169 KB after it. These are
-nightly soak measurements by frame type.
+hello at about 480 KB before the slim and about 169 KB after it. The post-slim
+figures are design samples or projections; read steady-state bytes by frame type
+from the nightly soak receipt.
 
 The daemon intends steady-state frames to a phone to stay under 256 KB. This is
 not yet enforced; it will be bound once inventory sends changes only. Assuming
