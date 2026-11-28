@@ -90,8 +90,9 @@ visibility, so a covered chat is not read while hidden. `renderer/next/chat_hist
 rules through `renderer/chat_events_lazy.js`. A chat is read once the daemon is
 connected and again after it returns to the screen, after the page reconnects,
 and after the daemon reconnects (its `__reconnect` frame), including when the
-daemon's restart grace hid the disconnect. A failed or empty read retries after 1,
-2, 4, 8 and 16 seconds. Until messages arrive the transcript says **Loading
+daemon's restart grace hid the disconnect. A complete read with no events shows
+**No messages yet.** without a retry. A failed or incomplete read retries after
+1, 2, 4, 8 and 16 seconds. Until messages arrive the transcript says **Loading
 messages…** or **Reconnecting…**; when the retries are spent it offers
 **Retry**.
 

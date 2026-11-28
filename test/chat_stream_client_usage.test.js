@@ -569,3 +569,18 @@ test('ChatStreamClient stores daemon-owned hosts.stats frames', (t) => {
     state_version: 1,
   });
 });
+
+test('history preserves positive daemon completion only for a valid event array', async (t) => {
+  const { client, ws } = openClient();
+  t.after(() => client.destroy());
+  sendFrame(ws, { type: 'snapshot', events: [], sessions: [] });
+  const read = async (reply) => {
+    const pending = client.requestStreamEvents({ streamId: 'stream-a' });
+    const request_id = ws.sent.at(-1).request_id;
+    sendFrame(ws, { type: 'request_stream_events.ok', request_id, stream_id: 'stream-a', ...reply });
+    return pending;
+  };
+  assert.equal((await read({ complete: true, events: [] })).complete, true);
+  assert.notEqual((await read({ complete: true })).complete, true);
+  assert.notEqual((await read({ events: [] })).complete, true);
+});

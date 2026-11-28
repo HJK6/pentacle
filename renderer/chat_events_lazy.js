@@ -38,6 +38,7 @@ function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, opt
       logger.warn?.('[ChatStream] requestStreamEvents failed:', id, request.error);
     } else {
       request.status = 'loaded';
+      request.completeEmpty = reply.complete === true && reply.received === 0;
       recordInitialPaging(streamState, id, reply);
     }
     options.onChange?.(id);
