@@ -1,4 +1,4 @@
-"""One-worker focused regression suite for Thoth with no daemon or pane I/O."""
+"""One-worker focused regression suite with no daemon or pane I/O."""
 
 from contextlib import asynccontextmanager
 from pathlib import Path
