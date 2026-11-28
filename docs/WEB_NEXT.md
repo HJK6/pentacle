@@ -56,9 +56,26 @@ Lanes. The phone layout still shows one section at a time and does not change.
 Use a chat's title to switch it in place. Picking the chat already in the
 other card swaps the two sessions without moving their seats. The rail still
 opens chats with its existing placement rules. Both lists show working and
-unread state and reveal Rename and Delete on hover or keyboard focus. Rename
-saves on Enter or blur; Escape cancels. Delete asks in the row before closing
-the actual session, and the configured assistant cannot be renamed or deleted.
+unread state and reveal Rename and Delete on hover or keyboard focus. An open
+chat's header also shows Rename and Delete, beside Status, Terminal, full screen
+and close. Rename edits the title in place. It saves on Enter or blur, and
+Escape cancels. Delete asks in the row or the header before closing the actual
+session, and the configured assistant cannot be renamed or deleted. Full screen
+and Leave full screen have different icons: arrows pointing out, and arrows
+pointing in.
+
+A chat closed anywhere else (another client, the agent itself, or the daemon)
+leaves the screen too. Its card closes when the daemon's open inventory marks the
+chat closed, or when the chat drops out between two inventories on the same
+connection. Every snapshot, with or without sessions, and every reconnect start a
+fresh view: only a later inventory sets the baseline, because a new view can see a
+different set of chats. A chat
+that was just started, and is not listed yet, stays open.
+
+An open Delete question closes if the card is covered (including by the
+Assistant overlay), hidden or changes full screen, and Escape answers it before
+anything else. Rename and Delete show only
+for a listed chat that the list could also rename or delete.
 
 An unread chat has a latest non-operator message different from the one last
 displayed while the page and the card were visible. The Assistant has the same
@@ -71,25 +88,38 @@ The working row sits above the composer, uses the live elapsed clock or a
 chat's reported label, and leaves off the time if neither is known. The
 Assistant uses its own elapsed clock only. The first reported time sets the
 clock, which then counts in whole seconds in the browser. A later report
-moves it only when the two disagree by more than 2.5 seconds. Reduced motion slows the working
+moves it only when the two disagree by more than 2.5 seconds; exactly 2.5
+seconds counts as heartbeat delay. Only times on screen count: a pane that is
+covered or off screen, or a card showing its terminal, stops counting and
+shows no stale time, and its time is current again when it returns or leaves
+the terminal. Reduced motion slows the working
 ring, makes the Assistant's mark still, and stops the send chevrons. The queue
 line only offers Send now when the store permits it for that specific message.
 The shared transcript and ordinary desktop/web send behavior are unchanged.
 
 ### Chat history and message formatting
 
-The Assistant and the chats in both cards are the store's focused streams, so
-traffic in other chats cannot evict their messages. `renderer/next/chat_history.js`
-applies the current web's history rules through `renderer/chat_events_lazy.js`.
-A chat is read once the daemon is connected and again after it returns to the
-screen or the connection is restored. A failed or empty read retries after 1,
-2, 4, 8 and 16 seconds. Until messages arrive the transcript says **Loading
+The Assistant and the chats in the cards actually on screen are the store's
+focused streams, so traffic in other chats cannot evict their messages. A pane
+that is closed, covered by a full-screen card or squeezed off the stage is
+released. A layout change sets focus once, after every card has its chat and
+visibility, so a covered chat is not read while hidden. `renderer/next/chat_history.js` applies the current web's history
+rules through `renderer/chat_events_lazy.js`. A chat is read once the daemon is
+connected and again after it returns to the screen, after the page reconnects,
+and after the daemon reconnects (its `__reconnect` frame), including when the
+daemon's restart grace hid the disconnect. A complete read with no events shows
+**No messages yet.** without a retry. A failed or incomplete read retries after
+1, 2, 4, 8 and 16 seconds. Until messages arrive the transcript says **Loading
 messages…** or **Reconnecting…**; when the retries are spent it offers
 **Retry**.
 
 A transcript opens on its latest 120 rows. **Show earlier messages** reveals 48
 more, asking the daemon for older pages when the store holds none, and scrolling
-up near the top does the same. The reader's place is kept when earlier rows are
+up near the top does the same. Where older history starts is taken from the
+newest read; an empty first reply is replaced by a later retry that finds more,
+and once older pages are read a fresh read keeps the deeper place. Paging stops
+as soon as the pane shows another chat or the connection drops, and a request
+from before a chat switch never reveals rows in the pane after it. The reader's place is kept when earlier rows are
 added, when new messages arrive further down, and while text is selected. A
 reader at the latest message stays there when the pane changes width or late
 content loads, but a row they open there is left where they clicked it. A card
@@ -97,7 +127,11 @@ that was hidden or showed another chat returns to its reader's place once the
 stage has its final widths.
 
 Messages from other agents, daemon notices and child reports are compact rows
-that open to the full text and stay open across updates. Tables, code, commands,
+that open to the full text and stay open across updates. A run of consecutive
+agent reports, or of answered questions, is one group. An opened group stays
+open while it shares a member with the group that was open, so it survives
+items joining at either end, and a row opened on its own that joins a group
+opens the group with it. A group its reader closed stays closed. Tables, code, commands,
 file changes and tool results have their own styles in the conversation section
 at the end of `renderer/next/style.css`. Text, code and agent rows wrap to the
 pane, so a chat never scrolls sideways. The transcript renderer marks a table

@@ -2,18 +2,21 @@
 import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from datetime import datetime
 import json
 import logging
 import os
+import time
 from types import SimpleNamespace
 
 import pytest
 import ingest as module
 import prockill
+import store as store_module
 from ingest import _IdentityGrace, _close_stream
 from tmux_transport import Tmux
 from test_ingest_identity_recovery import subject, append
-from test_ingest_provider_root_binding import PID, BIRTH, EXE
+from test_ingest_provider_root_binding import PID, BIRTH, EXE, _append_turn
 
 SID = "h:v2-root"
 
@@ -235,6 +238,8 @@ async def test_active_launch_sequence_and_disabled_idle_path(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_summary_scripted_minute_excludes_sleep_and_counts_visits(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger=module.log.name)
+    committed_at = datetime.fromisoformat("2026-09-09T16:20:02+00:00").timestamp()
+    monkeypatch.setattr(store_module, "time", SimpleNamespace(time=lambda: committed_at, monotonic=time.monotonic))
     async with ready(tmp_path, monkeypatch) as s:
         warm_proofs = s.reader._proof_calls
         body = s.reader._prove_provider_root
@@ -259,7 +264,20 @@ async def test_summary_scripted_minute_excludes_sleep_and_counts_visits(tmp_path
         assert json.loads(lines[0].split(" ", 1)[1]) == {
             "passes": 5, "pass_ms_median": 0, "pass_ms_max": 250, "seats_median": 1,
             "backoff_skips": 1, "idle_skips": 2, "proof_calls": warm_proofs + 2, "window_s": 60,
+            "transcript_commit_ms_max": 2000, "transcript_commit_ms_median": 2000,
         }
+        _append_turn(s.path, "near", "2026-09-09T16:20:01Z")
+        _append_turn(s.path, "far", "2026-09-09T16:19:59Z")
+        s.clock.now = 220
+        assert await s.reader.run_pass() == 2
+        summary = json.loads(caplog.messages[-1].split(" ", 1)[1])
+        assert summary["transcript_commit_ms_max"] == 3000
+        assert summary["transcript_commit_ms_median"] == 2000
+        s.clock.now = 280
+        assert await s.reader.run_pass() == 0
+        summary = json.loads(caplog.messages[-1].split(" ", 1)[1])
+        assert summary["transcript_commit_ms_max"] is None
+        assert summary["transcript_commit_ms_median"] is None
 
 
 @pytest.mark.parametrize("value", ["bad", "-1", "nan", "inf"])

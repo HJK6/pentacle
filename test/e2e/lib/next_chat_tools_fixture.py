@@ -28,7 +28,8 @@ def install(Server, UIVerbs, VerbError, scratch):
         for value in values:
             name = str(value.get('stream_id', '')).split(':', 1)[-1]
             active = value.get('host') == host and name in names
-            if active and name in closed:
+            # `omit` hides a still-open chat from this view, like an opener filter would.
+            if active and (name in closed or name in settings.get('omit', ())):
                 continue
             if active and name in settings.get('rows', {}):
                 value = {**value, **settings['rows'][name]}
@@ -135,7 +136,15 @@ def install(Server, UIVerbs, VerbError, scratch):
                         sent_inputs.clear()
                         log.unlink(missing_ok=True)
                     settings.update(data.get('settings', {}))
-                    if data.get('result'):
+                    if data.get('close'):
+                        closed.add(data['close'])  # a genuine close made elsewhere
+                    if data.get('snapshot'):
+                        # A daemon snapshot, populated or without sessions, never an inventory.
+                        frame = {'type': 'snapshot', 'connected': True}
+                        if data['snapshot'] == 'full':
+                            frame['sessions'] = self.sessions.list_open()
+                        await self.broadcast(frame)
+                    elif data.get('result'):
                         needle = data['result']
                         rows = [json.loads(line) for line in log.read_text().splitlines()]
                         request_id = next(row['request_id'] for row in reversed(rows)

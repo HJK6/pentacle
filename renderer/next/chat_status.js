@@ -29,7 +29,7 @@ const RESYNC_MS = 2500;
 function workingClock() {
   const starts = new Map();
   const steady = (previous, reported) =>
-    previous?.reported && Math.abs(previous.start - reported) < RESYNC_MS ? previous.start : reported;
+    previous?.reported && Math.abs(previous.start - reported) <= RESYNC_MS ? previous.start : reported;
   return {
     retain(ids) { for (const id of starts.keys()) if (!ids.has(id)) starts.delete(id); },
     // Milliseconds until a shown time next changes, or null when none is running.

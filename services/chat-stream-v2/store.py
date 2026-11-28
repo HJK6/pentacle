@@ -6249,6 +6249,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         entries: list[dict[str, Any]],
         *,
         limit: int,
+        commit_gaps_ms: list[float] | None = None,
     ) -> list[int | None | _EntryDropped] | None:
         """Append one submitted batch, fencing each lifecycle-bound row.
 
@@ -6298,7 +6299,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         if not prepared:
             return []
 
-        def _op(conn: sqlite3.Connection) -> list[int | None | _EntryDropped] | None:
+        def _op(conn: sqlite3.Connection) -> tuple[list[int | None | _EntryDropped], float | None]:
             conn.execute("BEGIN")
             try:
                 inserted: list[int | None | _EntryDropped] = []
@@ -6389,15 +6390,19 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                         )
                     inserted.append(source_id)
                 conn.commit()
-                return inserted
+                return inserted, time.time() if commit_gaps_ms is not None else None
             except BaseException:
                 conn.rollback()
                 raise
 
-        inserted = await self.submit(_op)
+        inserted, committed_at = await self.submit(_op)
         if inserted is not None:
             for entry, result in zip(entries, inserted):
                 if result is not ENTRY_DROPPED:
+                    if committed_at is not None and result is not None:
+                        transcript_at = _iso_epoch(entry["event"].get("timestamp"))
+                        if transcript_at is not None:
+                            commit_gaps_ms.append((committed_at - transcript_at) * 1000)
                     await self._reconcile_ingested_tell(entry["event"])
         return inserted
 

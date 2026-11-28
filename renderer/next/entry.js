@@ -30,7 +30,7 @@ const { createQuestions } = require('./questions');
 const { createQuestionNotifications } = require('./question_notifications');
 const { mountLanesCard, renderLaneIcon } = require('./lanes');
 const { applyVersionedConnectionState } = require('../chat_stream_connection_state');
-const { mountChatList } = require('./chat_list');
+const { mountChatList, PENCIL, TRASH } = require('./chat_list');
 const { isProtectedAssistant } = require('../chat_presentation');
 const { configuredAssistantRole } = require('../assistant_role');
 const { isWorking, hasConfirmedWork, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines, decorateAgentRows } = require('./chat_status');
@@ -95,6 +95,8 @@ const seen = createSeenMarks(storage);
 const clock = workingClock();
 const pendingNames = new Map();
 const pendingDeletes = new Set();
+const closingCards = new Set();
+let inventoryIds = null;
 const hiddenClosed = new Set();
 const role = configuredAssistantRole(config.features);
 const isProtected = session => isProtectedAssistant([session], role);
@@ -113,6 +115,9 @@ const icons = {
   update: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>',
   close: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   full: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 9V4h5m6 0h5v5M20 15v5h-5M9 20H4v-5"/></svg>',
+  unfull: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 4v5H4m11-5v5h5M9 20v-5H4m11 5v-5h5"/></svg>',
+  rename: PENCIL,
+  trash: TRASH,
   terminal: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="4.5" width="17" height="15" rx="1"/><path d="m7 9 3 3-3 3m5 0h4"/></svg>',
   status: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 6 1.5 1.5L7 5m3 1h10M3 12l1.5 1.5L7 11m3 1h10M4.5 18h.1M10 18h10"/></svg>'
 };
@@ -143,7 +148,10 @@ const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, moun
   paintTranscript, attachTranscript, transcriptPlace, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
-  onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions,
+  // The header offers only what renameChat and deleteChat will act on.
+  onRename: renameChat, onDelete: deleteChat, canEdit: s => !isProtected(s) && visibleChats().some(row => row.stream_id === s.stream_id),
+  isPending: id => pendingNames.has(id) || pendingDeletes.has(id),
+  onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions, onMode: () => paintWorking(),
 })]));
 // The bridge keeps one listener per event, so both cards' terminals are fed from here.
 cc.onPtyData((slot, data) => Object.values(cards)[slot]?.writeTerminal(data));
@@ -204,9 +212,10 @@ function closePopover() {
   unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
 function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; popover.classList.remove('chat-switch'); ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
 function sessions() { return store.getState().sessions || []; }
+const isClosed = s => !!s.closed || s.status === 'closed' || s.session_state === 'closed' || s.state === 'closed';
 function visibleChats() {
   return filterSidebarSessions(sessions()).filter(s => s.session_kind !== 'assistant_composite' &&
-    !hiddenClosed.has(s.stream_id) && !s.closed && s.status !== 'closed' && s.session_state !== 'closed' && s.state !== 'closed');
+    !hiddenClosed.has(s.stream_id) && !isClosed(s));
 }
 function chatName(s) { return pendingNames.get(s.stream_id)?.name || s.display_name || s.title || s.session_name; }
 function draftFor(s) { return s ? store.getState().drafts?.[s.stream_id] : undefined; }
@@ -253,11 +262,26 @@ async function deleteChat(id) {
   }
 }
 function beforeStoreFrame(frame) {
+  // A new or lost connection can see a different scope of sessions (for example the
+  // opener filter), so absence only counts between inventories on one connection.
+  // Every snapshot, with or without sessions, starts a fresh view; only inventories compare.
+  if (frame && (frame.connected === false || frame.type === '__reconnect' || frame.type === 'snapshot')) inventoryIds = null;
   if (!frame || frame.connected === false || !Array.isArray(frame.sessions) ||
       !['snapshot', 'session.inventory'].includes(frame.type)) return;
   const rows = frame.sessions;
   const ids = new Set(rows.map(s => s.stream_id));
   for (const id of hiddenClosed) if (!ids.has(id)) hiddenClosed.delete(id);
+  // A chat closed anywhere leaves the screen: its row says closed, or it drops out of the
+  // daemon's open inventory between two inventories on the same connection. A snapshot
+  // starts a fresh view, and a chat not listed yet (just started) stays.
+  const closed = new Set(rows.filter(isClosed).map(s => s.stream_id));
+  const inventory = frame.type === 'session.inventory';
+  for (const key of Object.keys(cards)) {
+    const id = state.layout[key];
+    if (id && id !== NEW_CHAT && (closed.has(id) || (inventory && inventoryIds?.has(id) && !ids.has(id)))) closingCards.add(key);
+  }
+  if (inventory) inventoryIds = ids;
+  if (closingCards.size) queueMicrotask(closeGoneCards);
   for (const s of rows) {
     const p = pendingNames.get(s.stream_id);
     if (p && (s.display_name || s.title || s.session_name) === p.name) {
@@ -292,8 +316,12 @@ function paintWorking() {
     draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnState?.(s.stream_id) : undefined,
       s ? store.getWorkingElapsedMs?.(s.stream_id, now) : null, now));
   };
-  tick(a, showAssistantWorking);
-  for (const card of Object.values(cards)) tick(card.session(), card.showWorking);
+  // Only times on screen are counted; a row out of view is cleared, and brought up to date when it returns.
+  if (!assistant.hidden) tick(a, showAssistantWorking);
+  for (const card of Object.values(cards)) {
+    if (card.workingShown()) tick(card.session(), card.showWorking);
+    else card.showWorking(false, '');
+  }
   // Wake just past the next whole second of a running time, so it steps evenly.
   window.clearTimeout(workingTimer);
   const wait = clock.untilNextSecond(now);
@@ -384,7 +412,7 @@ function paintRows(element, id) {
   const pane = paneFor(element);
   if (element.dataset.streamId !== (id || '')) {
     delete element.dataset.rendered;
-    Object.assign(pane, { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true, waiting: false, lastTop: 0 });
+    Object.assign(pane, { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, older: null, pinned: true, deferred: false, touched: 0, opened: true, waiting: false, lastTop: 0 });
   }
   element.dataset.streamId = id || '';
   if (!id) { element.textContent = 'Loading chat…'; return; }
@@ -444,11 +472,14 @@ async function showEarlier(element) {
   const remaining = () => store.selectSessionDetail(id, { visibleCount: pane.rows, includeDraft: false })?.remainingCount || 0;
   if (!remaining()) {
     if (!historyReads.hasOlder(id)) return;
+    // A chat switch resets the pane; a request from before it must not touch the pane after it.
+    const request = pane.older = {};
     pane.loading = true;
-    try { await historyReads.loadOlder(id, () => remaining() > 0); }
+    try { await historyReads.loadOlder(id, () => remaining() > 0, () => element.dataset.streamId === id); }
     catch (error) { console.warn('[next] earlier messages failed:', error?.message || error); }
-    finally { pane.loading = false; }
-    if (element.dataset.streamId !== id) return;
+    finally { if (pane.older === request) pane.loading = false; }
+    if (pane.older !== request || element.dataset.streamId !== id) return;
+    pane.older = null;
   }
   const more = remaining();
   if (more && !selecting(element)) {
@@ -595,9 +626,17 @@ function renderPopover() {
     limitsControl.update({ limits: store.getLimits(), hosts: state.hosts });
   }
 }
+// The chats on screen. One a pane covers is released, and read again when it returns.
+// A layout pass sets focus once, after every card has its stream and visibility:
+// the store announces a pin change at once, and a render then must not see half a layout.
+function focusOnScreen() {
+  if (layingOut) return;
+  const ids = Object.values(cards).filter(card => !card.element.hidden).map(card => card.id);
+  historyReads.focus([assistant.hidden ? null : assistantSession()?.stream_id, ...ids].filter(id => id && id !== NEW_CHAT));
+}
 function render() {
   const a = assistantSession();
-  historyReads.focus([a?.stream_id, ...Object.values(cards).map(card => card.id).filter(id => id !== NEW_CHAT)]);
+  focusOnScreen();
   paintTranscript(assistantInner, a?.stream_id); mountAssistantComposer(a?.stream_id);
   const assistantName = a?.assistant_display_name || a?.display_name || a?.title || 'Assistant'; brand.setAttribute('aria-label', assistantName); brand.title = assistantName;
   assistantTitle.textContent = assistantName;
@@ -622,7 +661,7 @@ function syncLayout(admitted = null) {
   for (const [key, card] of Object.entries(cards)) {
     const id = state.layout[key];
     card.setStream(id, id && admitted?.stream_id === id ? admitted : null);
-    card.setVisible(visible.cards.includes(key), state.layout.solo === key);
+    card.setVisible(visible.cards.includes(key), state.layout.solo === key, overlay);
   }
   designCard.hidden = !visible.cards.includes('dash') || !state.layout.dash.startsWith('design:');
   const melodyVisible = visible.cards.includes('dash') && state.layout.dash === 'melody';
@@ -657,6 +696,7 @@ function syncLayout(admitted = null) {
   lanesCard.classList.toggle('alone', !lanesCard.hidden && visible.cards.length === 1 && assistant.hidden);
   stageLayout.paint();
   layingOut = false;
+  focusOnScreen();
   for (const card of Object.values(cards)) card.settle();
   brand.classList.toggle('on', visible.assistant || overlay);
   brand.setAttribute('aria-pressed', String(visible.assistant || overlay));
@@ -783,6 +823,11 @@ function admitChat(key, id, session) {
   cards[state.layout.last]?.focus();
   render();
 }
+function closeGoneCards() {
+  const keys = [...closingCards];
+  closingCards.clear();
+  for (const key of keys) if (state.layout[key] && state.layout[key] !== NEW_CHAT) closeCard(key);
+}
 function closeCard(key) {
   state.layout = layout.shut(state.layout, key, innerWidth);
   syncLayout();
@@ -871,7 +916,7 @@ store.subscribe(() => { questionsControl.update({ sessions: sessions() }); rende
 laneListeners.add(() => { questionsControl.update({ inventory: laneInventory }); lanesControl?.render(); render(); });
 laneReads.subscribe(() => render());
 let recoveryEpoch = null; let recoveryPending = false; let readySignals = 0;
-cc.onChatStreamFrame(frame => { beforeStoreFrame(frame); store.applyFrame(frame); applyLaneFrame(frame); historyReads.setConnected(laneConnection.connected); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
+cc.onChatStreamFrame(frame => { beforeStoreFrame(frame); store.applyFrame(frame); applyLaneFrame(frame); historyReads.setConnected(laneConnection.connected); if (frame?.type === '__reconnect') historyReads.reconnected(); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
 async function loadSnapshot() {
   if (recoveryPending) return; recoveryPending = true;
   const signal = readySignals;
@@ -891,6 +936,7 @@ async function loadSnapshot() {
 }
 cc.onDisconnect?.(({ epoch }) => {
   recoveryEpoch = null;
+  inventoryIds = null;
   laneInventoryCurrent = false;
   laneConnection.connected = false;
   laneConnection.stateVersion = null;
@@ -898,7 +944,7 @@ cc.onDisconnect?.(({ epoch }) => {
   lanesControl?.render();
   store.webHostDisconnected?.(epoch);
 });
-cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); checkForUpdate(); });
+cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; inventoryIds = null; void loadSnapshot().catch(() => {}); checkForUpdate(); });
 const designRoute = initialDesignRoute(window, 'workspace');
 if (designRoute) openDesign(designRoute.target);
 else if (location.hash === '#melody') openMelody();

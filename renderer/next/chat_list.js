@@ -144,4 +144,4 @@ function mountChatList(host, { choose, rename, remove }) {
   };
 }
 
-module.exports = { mountChatList };
+module.exports = { mountChatList, PENCIL, TRASH };
