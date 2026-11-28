@@ -649,7 +649,7 @@ class Ingest:
                 n = await self._ingest_stream(row, st, budget)
             except Exception as exc:  # noqa: BLE001 - one sick stream never kills the pump
                 st.failures += 1
-                back = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** (st.failures - 1)))
+                back = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** min(st.failures - 1, 1023)))
                 st.next_attempt_monotonic = now + back
                 log.warning("ingest stream failed sid=%s (%d): %s; backing off %.0fs",
                             sid, st.failures, exc, back)
