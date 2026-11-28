@@ -198,3 +198,29 @@ including `/designs/`, continue opening in a new tab. The current web's
 attachment viewer, file downloads, and the terminal remain unchanged.
 
 A message displays Sending while delivery is being resolved. A landed receipt displays Sent; a committed send still awaiting proof displays Sent after 20 seconds, and remains checked for later receipt changes. A not-landed receipt displays Failed sending with Retry and an X to discard the local message. Failed retries use a new request ID. Receipt checks run after the reply, at 20 seconds, then after 15, 30, 60, 120 and up to 240 seconds between checks, and on reconnect. A successful lookup with no receipt after reconnect marks the send Failed once no dispatch is in flight; lookup errors leave it unresolved. Tracking ends on proof, failure, discard, or after 30 minutes.
+
+## Desktop shell bridge
+
+A desktop host can expose `window.pentacleShell` in the top-level page before
+`/next/` starts. Version 1 uses these methods.
+
+| Direction | Method | Contract |
+| --- | --- | --- |
+| Page to shell | `ready({version, chats, assistant, questions})` | Called once after the first inventory paint. This is the page's support signal. |
+| Page to shell | `setAttention({chats, assistant, questions})` | Called only when a count changes. `assistant` is 0 or 1. |
+| Shell to page | `onNavigate(callback)` | Register for `assistant`, `lanes`, `dashboards`, `chats`, or `questions`. Repeating a destination leaves it open. |
+| Shell to page | `onShowing(callback)` | Register for the Boolean indicating whether the native panel is on screen. |
+
+Send navigation before showing, with both delivered in order. Send showing
+false before hiding, reloading, or replacing a destination. The page starts
+hidden for read tracking and waits for a showing signal and a visible frame.
+Only the exposed chat can be marked seen, and the Messages and Questions
+lists protect the chat behind them. The shell badge counts chats plus the
+Assistant. Questions have their own count.
+
+The bridge is inactive in an ordinary browser, where seen marks still follow
+page visibility. The shell stores its seen marks in its own browser profile.
+Change the interface version on both sides when changing the contract.
+
+The focused checks are `node scripts/run-tests.js test/next_shell_bridge.test.js`
+and `node test/e2e/web_gate.js --scenario next-shell-bridge`.
