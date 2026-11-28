@@ -272,6 +272,7 @@ async def append_ingested_event(
     sessions: Any = None,
     _segments_prepared: bool = False,
     on_incomplete: Callable[[str], None] | None = None,
+    commit_gaps_ms: list[float] | None = None,
 ) -> int | None:
     """Append one event under its raw identity, stamping durable receipt metadata."""
     if not _segments_prepared and hasattr(store, "prepare_native_input_events"):
@@ -280,7 +281,7 @@ async def append_ingested_event(
         for segment in segments:
             seq = await append_ingested_event(store, broadcast, segment, recent_limit=recent_limit,
                 routing_integrity=routing_integrity, lifecycle=lifecycle, sessions=sessions,
-                _segments_prepared=True, on_incomplete=on_incomplete)
+                _segments_prepared=True, on_incomplete=on_incomplete, commit_gaps_ms=commit_gaps_ms)
             if seq is not None:
                 last = seq
         return last
@@ -296,7 +297,7 @@ async def append_ingested_event(
     else:
         sequences = await store.append_session_events_lifecycle_cas([
             {"stream_id": stream_id, "event": corrected, "identity": raw_identity, "lifecycle": lifecycle},
-        ], limit=recent_limit)
+        ], limit=recent_limit, commit_gaps_ms=commit_gaps_ms)
         if sequences is None or sequences[0] is ENTRY_DROPPED:
             if on_incomplete is not None:
                 on_incomplete("lifecycle_refused")
@@ -371,6 +372,7 @@ class Ingest:
         self._proof_calls = 0
         self._pass_window_started = monotonic()
         self._pass_durations: list[float] = []
+        self._pass_commit_gaps_ms: list[float] = []
         self._pass_seats: list[int] = []
         self._pass_backoff_skips = 0
         self._pass_idle_skips = 0
@@ -669,6 +671,8 @@ class Ingest:
                 "passes": len(self._pass_durations),
                 "pass_ms_median": median(self._pass_durations),
                 "pass_ms_max": max(self._pass_durations),
+                "transcript_commit_ms_max": max(self._pass_commit_gaps_ms, default=None),
+                "transcript_commit_ms_median": median(self._pass_commit_gaps_ms) if self._pass_commit_gaps_ms else None,
                 "seats_median": median(self._pass_seats),
                 "backoff_skips": self._pass_backoff_skips,
                 "idle_skips": self._pass_idle_skips,
@@ -677,6 +681,7 @@ class Ingest:
             }, separators=(",", ":")))
             self._pass_window_started = finished
             self._pass_durations.clear()
+            self._pass_commit_gaps_ms.clear()
             self._pass_seats.clear()
             self._pass_backoff_skips = self._pass_idle_skips = self._pass_proof_calls = 0
         return appended
@@ -1141,7 +1146,7 @@ class Ingest:
                 entry["lifecycle"] = lifecycle
             try:
                 sequences = await self.store.append_session_events_lifecycle_cas(
-                    entries, limit=self.recent_limit,
+                    entries, limit=self.recent_limit, commit_gaps_ms=self._pass_commit_gaps_ms,
                 )
             except Exception as exc:  # noqa: BLE001 - fail closed before broadcast
                 self._hold_position(sid, st, "append_binding_promotion")
@@ -1228,6 +1233,7 @@ class Ingest:
                 lifecycle=lifecycle,
                 sessions=self.sessions,
                 on_incomplete=lambda reason: self._hold_position(sid, st, reason),
+                commit_gaps_ms=self._pass_commit_gaps_ms,
             )
             if seq is not None:
                 appended += 1

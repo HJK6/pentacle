@@ -139,14 +139,17 @@ def test_urgent_send_adds_one_guard_for_the_escape(tmp_path):
     assert len(names) == PLAIN + GUARD, "\n".join(names)
 
 
-def test_enter_retry_adds_one_proof_read_and_one_guard(tmp_path, monkeypatch):
+def test_enter_retry_adds_one_proof_read_and_one_guard(tmp_path, monkeypatch, caplog):
     # One evidence pass per call: the draft fails the pane check once (one
     # event-tail read), Enter submits it and the second pass proves it.
     monkeypatch.setattr(comms_mod, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0.0)
+    caplog.set_level("INFO", logger="chat_streamd_v2.store")
     tmux = DraftTmux()
     reply, names = run_send(tmp_path, tmux)
     assert reply["submission_confirmed"] is True and tmux.enters == 1, reply
     assert len(names) == PLAIN + 1 + GUARD, "\n".join(names)
+    [line] = [line for line in caplog.messages if line.startswith("send_attempt ")]
+    assert json.loads(line.split(" ", 1)[1])["proof_polls"] == 1
 
 
 #: An operator send through Comms (dispatch adds no actor reads for operators):
