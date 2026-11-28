@@ -283,3 +283,80 @@ def test_request_rejects_invalid_provenance_and_closed_envelope(failure):
             assert await store.submit(lambda conn: conn.execute("SELECT COUNT(*) FROM v2_outbound_notices").fetchone()[0]) == 0
         finally: store.stop()
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("case", ["retained", "stale-generation", "router-authority"])
+def test_retained_advisor_notice_after_session_kinds_none(tmp_path, monkeypatch, case):
+    from advisor_sessions import KINDS_KEY
+    from assistant_composite import AssistantComposite, AssistantCompositeConfig
+    from front_desk_ingress_replay import HOST, harness
+    from outbound_notices import NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST, NOTICE_KIND_ASSISTANT_LANE_RULING, notice_needle
+    from v2_runtime import iso_now
+
+    async def go():
+        async with harness(tmp_path) as h:
+            store, dispatch = h["store"], h["dispatch"]
+            advisor = f"{HOST}:advisor"
+            generation = (await store.fetch_session(HOST, "advisor"))["session_generation"]
+            disabled_router = AssistantComposite(store, config=AssistantCompositeConfig(astra_stream_id=advisor))
+            # Production ingress skips the direct primary for these notices.
+            h["comms"].assistant_ingress_policy = disabled_router.suppress_routine_backend_ingress
+            monkeypatch.setattr(h["server"].lane_rulings, "_ensure_worker", lambda: None)
+            await store.put(KINDS_KEY, '["spawn"]')
+            switched = await dispatch({"type": "assistant.authority", "action": "session_kinds",
+                                       "session_kinds": "none", "request_id": "retained-mode"}, "desk")
+            assert switched["type"] == "assistant.authority.ok", switched
+            assert switched["session_kinds"] == [] and switched["stream_id"] == advisor
+            assert switched["generation"] == generation
+
+            pending = await dispatch({"type": "spawn", "host": HOST, "session_name": "pending-spawn",
+                                      "request_id": "pending-spawn", "spec_id": "spec_fixture__ingress",
+                                      "role": "lead", "objective": "Exercise retained advisor delivery"}, "desk")
+            assert pending["type"] == "spawn.pending_ruling", pending
+            ruling_id = pending["ruling_request_id"]
+            notice_id = f"assistant-lane-ruling:{ruling_id}:{generation}"
+            kind = NOTICE_KIND_ASSISTANT_LANE_RULING
+            if case == "stale-generation":
+                await h["sessions"].open(HOST, "advisor", provider="codex", pane_status="pane_alive",
+                                         session_generation="replacement")
+            if case == "router-authority":
+                notice_id, kind = "router-authority", NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST
+                await store.enqueue_outbound_notice(notice_id=notice_id, kind=kind, dedupe_key=notice_id,
+                    recipient_stream_id=advisor, tell_id=notice_id, body="Router authority scope",
+                    metadata={"authority_generation": generation})
+
+            pastes = []
+
+            async def paste(name, text):
+                stream = f"{HOST}:{name}"
+                current = await store.fetch_session(HOST, name)
+                pastes.append((stream, text))
+                await store.append_session_event(stream, {
+                    "stream_id": stream, "host": HOST, "session_name": name, "provider": "codex",
+                    "session_id": current["session_generation"], "timestamp": iso_now(), "kind": "USER", "text": text,
+                }, identity=f"fixture-paste:{len(pastes)}", limit=500)
+
+            monkeypatch.setattr(h["provider"], "paste", paste)
+            delivered = await h["queue"].drain_once(kinds=[kind])
+            notices = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT notice_id, tell_id, recipient_stream_id, attempts, delivered_at, terminal_reason "
+                "FROM v2_outbound_notices WHERE kind=?", (kind,))])
+            assert len(notices) == 1
+            notice = notices[0]
+            assert (notice["notice_id"], notice["tell_id"], notice["recipient_stream_id"], notice["attempts"]) == (
+                notice_id, notice_id, advisor, 1,
+            )
+            receipt = await store.get_tell_delivery(notice_id)
+            if case == "retained":
+                assert delivered == 1, (notice["terminal_reason"], len(pastes))
+                assert notice["delivered_at"] and notice["terminal_reason"] is None
+                assert len(pastes) == 1 and pastes[0][0] == advisor
+                assert notice_needle(notice_id) in pastes[0][1] and ruling_id in pastes[0][1]
+                assert receipt["reply"]["submission_confirmed"] is True
+            else:
+                expected = {"stale-generation": "bound assistant authority generation is gone",
+                            "router-authority": "configured assistant authority changed"}
+                assert delivered == 0 and not pastes and receipt is None
+                assert notice["delivered_at"] is None and notice["terminal_reason"] == expected[case]
+
+    asyncio.run(go())
