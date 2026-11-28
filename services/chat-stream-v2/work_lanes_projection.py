@@ -668,19 +668,15 @@ class WorkLanesInventory:
             log.exception("work lanes question attribution unavailable")
             return None
 
-    async def _source_snapshot(self, *, include_done=False, select_rows=None):
+    async def _source_snapshot(self, *, include_done=False):
         snapshot = getattr(self.store, "work_lane_snapshot", None)
         if snapshot is not None:
-            return await snapshot(include_done=include_done, select_rows=select_rows)
+            return await snapshot(include_done=include_done)
         # Compatibility for consumers implementing the older Store protocol.
         return await self.store.work_lane_rows(include_done=include_done), await self.store.work_index_status()
 
     async def current(self) -> dict[str, Any]:
-        def select_rows(rows):
-            # Match build_frame's state/order/cap before any lazy hue write.
-            ordered = server_order([{**row, "state": lane_state(row)[0]} for row in rows])
-            return [row for row in ordered if row["state"] != "done"][:LANE_FRAME_CAP]
-        rows, work_index = await self._source_snapshot(select_rows=select_rows)
+        rows, work_index = await self._source_snapshot()
         return build_frame(rows, presence_index(self.sessions.list_open()),
                            work_index=work_index,
                            worked_by_spec=self.worked.values,
@@ -697,12 +693,11 @@ class WorkLanesInventory:
                 cursor = (before_updated_at, before_lane_id or "\uffff")
                 ordered = [row for row in ordered if key(row) < cursor]
             return ordered[:limit]
-        rows, work_index = await self._source_snapshot(include_done=include_done, select_rows=select_rows)
+        rows, work_index = await self._source_snapshot(include_done=include_done)
         lanes = project_lanes(rows, presence_index(self.sessions.list_open()),
                               worked_by_spec=self.worked.values,
                               questions_by_spec=await self.questions_by_spec())
         page = select_rows(lanes)
-        # One lookahead determines continuation without allocating its hue.
         more = sorted(lanes, key=key, reverse=True)
         if before_updated_at:
             cursor = (before_updated_at, before_lane_id or "\uffff")
