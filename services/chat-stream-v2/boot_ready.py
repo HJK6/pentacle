@@ -10,60 +10,57 @@ from __future__ import annotations
 import re
 
 _APPROVAL_OPTION = re.compile(r"^\s*(?:([❯›])\s+)?\d+\.(?:\s|$)")
-_CLAUDE_SHORT_APPROVAL = re.compile(r"^(?:Ready to code\?|Do you want to (?:make this edit|create |overwrite ))")
-_CODEX_APPROVAL_HEADING = re.compile(
-    r'^[ \t]*(?:Would\s+you\s+like\s+to\s+(?:run\s+the\s+following\s+command'
-    r'|make\s+the\s+following\s+edits'
-    r'|send\s+input\s+to\s+(?:the\s+existing\s+terminal|terminal\s+[^\s?]+))'
-    r'|Do\s+you\s+want\s+to\s+approve\s+network\s+access\s+to\s+"[^"]+")\?[ \t]*$',
-    re.M,
+_CLAUDE_APPROVAL_HEADING = re.compile(
+    r"^(?:Ready to code\?|Do you want to (?:proceed\?|make this edit|create |overwrite ))"
+)
+_CODEX_TRUST_CHOICES = {
+    "trust and continue", "quit", "back to agent command center", "keep current directory",
+    "yes, continue", "no, quit", "no, exit",
+}
+_CLAUDE_PERMISSION_FOOTERS = (
+    "⏵⏵ bypass permissions",
+    "⏸ manual mode on",
+    "⏵⏵ accept edits on",
+    "⏸ plan mode on",
+    "⏵⏵ auto mode on",
+)
+_CODEX_MODEL_FOOTER = re.compile(
+    r"gpt-[\w.-]+\s+(?:default|minimal|low|medium|high|xhigh|max|ultra)(?:\s+·\s+[^\n]+)?", re.I,
 )
 
 
-def _codex_approval_visible(lines: list[str]) -> bool:
-    # The pinned picker ends the modal header with a selected numbered row.
-    # Its key hints can wrap, change with key bindings, or be omitted.
+def approval_prompt_visible(pane_text: str) -> bool:
+    """Withhold input on a numbered choice unless the pane ends in composer chrome."""
+    lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
     carets = (index for index in range(len(lines) - 1, -1, -1)
               if lines[index].lstrip().startswith(("›", "❯")))
-    selected = next(carets, None)
-    if selected is None:
-        return False
-    option = _APPROVAL_OPTION.match(lines[selected])
-    if not option or option[1] != "›":
-        return False
-    # Earlier caret-delimited output belongs to a previous view.
-    return bool(_CODEX_APPROVAL_HEADING.search("\n".join(lines[next(carets, -1) + 1:selected])))
+    latest = next(carets, -1)
+    option = _APPROVAL_OPTION.match(lines[latest]) if latest >= 0 else None
+    if option:
+        if codex_reset_interstitial_visible(pane_text):
+            return False
+        if option[1] == "›" and lines[latest][option.end():].strip().casefold() in _CODEX_TRUST_CHOICES:
+            # Strip the selector only for the trust check in this picker.
+            # The native trust handler keeps its existing predicate and behavior.
+            picker = [*lines[next(carets, -1) + 1:latest], lines[latest].lstrip()[1:], *lines[latest + 1:]]
+            if codex_trust_dialog_visible("\n".join(picker)):
+                return False
+        footer = lines[-1].strip()
+        return not (footer.startswith(_CLAUDE_PERMISSION_FOOTERS) or _CODEX_MODEL_FOOTER.fullmatch(footer))
 
-
-def approval_prompt_visible(pane_text: str) -> bool:
-    """Recognize the pinned approval menus at the bottom of a pane capture."""
-    lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
-    if not lines:
-        return False
-    if _codex_approval_visible(lines):
-        return True
-    footer = lines.pop().lstrip()
-    if footer not in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
+    # A clipped Claude approval may retain the heading, choices and footer
+    # without rendering its selector. Inspect only rows after the last caret.
+    tail = lines[latest + 1:]
+    if not tail or tail.pop().lstrip() not in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
         return False
     options = 0
-    selected = 0
-    while lines:
-        if option := _APPROVAL_OPTION.match(lines[-1]):
-            selected += option[1] == "❯"
+    while tail:
+        if _APPROVAL_OPTION.match(tail[-1]):
             options += 1
-        elif not lines[-1].startswith("     "):
+        elif not tail[-1].startswith("     "):
             break  # wrapped option descriptions are indented
-        lines.pop()
-    if selected != 1 or options < 2:
-        return False
-    if footer == "Esc to cancel · Tab to amend":
-        return True
-    heading_lines = []
-    for line in reversed(lines):
-        if line.lstrip().startswith(("❯", "›")):
-            break
-        heading_lines.append(line)
-    return any(_CLAUDE_SHORT_APPROVAL.match(line.lstrip()) for line in heading_lines)
+        tail.pop()
+    return options >= 2 and any(_CLAUDE_APPROVAL_HEADING.match(line.lstrip()) for line in tail)
 
 
 # A Codex reset interstitial is an operator-only decision point: accepting it
@@ -187,10 +184,7 @@ def codex_composer_empty(pane_text: str) -> bool:
     # possible draft. Unknown/footer-wrapped layouts defer automatic input.
     below = [sgr.sub("", line).strip() for line in lines[inputs[-1] + 1:]
              if sgr.sub("", line).strip()]
-    if len(below) != 1 or not re.fullmatch(
-        r"gpt-[\w.-]+\s+(?:minimal|low|medium|high|xhigh|max|ultra)(?:\s+·\s+[^\n]+)?",
-        below[0], re.I,
-    ):
+    if len(below) != 1 or not _CODEX_MODEL_FOOTER.fullmatch(below[0]):
         return False
     return True
 
@@ -264,8 +258,7 @@ def claude_composer_empty(pane_text: str) -> bool:
         if set(content) == {"─"} and not seen_permission_footer:
             seen_lower_divider = True
             continue
-        if (not seen_main
-                and content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on"))):
+        if not seen_main and content.startswith(_CLAUDE_PERMISSION_FOOTERS):
             seen_permission_footer = True
             continue
         if seen_permission_footer and _is_claude_update_footer(content):
@@ -597,7 +590,7 @@ def claude_command_exactly_in_active_draft(pane_text: str, command: str) -> bool
         content = line.strip()
         if not content or set(content) == {"─"}:
             continue
-        if content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on")):
+        if content.startswith(_CLAUDE_PERMISSION_FOOTERS):
             break
         if content.startswith(("✻ ", "✶ ", "✳ ", "⏺ ", "⎿ ", "● ")):
             return False

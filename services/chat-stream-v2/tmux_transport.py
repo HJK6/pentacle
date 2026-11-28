@@ -528,7 +528,6 @@ class Tmux:
             except VerbError as exc:
                 log.warning("pre_enter_capture_failed code=%s", exc.code)
                 pane = ""
-            # A live draft above stale approval chrome is a composer frame.
             if approval_prompt_visible(pane):
                 raise VerbError(PROVIDER_PROMPT_WAITING, _PROMPT_WAITING_MESSAGE, phase=phase)
             phase = "enter_failed"
