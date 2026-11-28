@@ -254,6 +254,17 @@ const headerTools = isolated(async ctx => {
   const hb = (seat, label) => `${card(seat)} .card-head [aria-label="${label}"]`;
   ctx.report.ok('open chat header shows Rename and Delete beside full screen and close',
     await ctx.session.eval(`${shown(hb('chat', 'Rename'))} && ${shown(hb('chat', 'Delete'))} && ${shown(hb('chat', 'Full screen'))} && ${shown(hb('chat', 'Close'))}`));
+  const fits = seat => `(() => { const h=${query(card(seat) + ' .card-head')}, c=${query(card(seat))}.getBoundingClientRect();
+    return h.scrollWidth <= h.clientWidth && [...h.querySelectorAll('button')].filter(b => b.getClientRects().length).every(b => { const r=b.getBoundingClientRect(); return r.left >= c.left && r.right <= c.right; }); })()`;
+  const askFits = async seat => {
+    await ctx.session.click(hb(seat, 'Delete'));
+    await wait(ctx, shown(card(seat) + ' .next-chat-question'), 'question open for fit');
+    const ok = await ctx.session.eval(fits(seat));
+    await ctx.session.click(card(seat) + ' .next-chat-cancel');
+    return ok;
+  };
+  ctx.report.ok('header and Delete question fit two side-by-side cards', await ctx.session.eval(fits('chat')) && await ctx.session.eval(fits('chat2'))
+    && await askFits('chat') && await askFits('chat2'));
   const enterIcon = await ctx.session.eval(`${query(hb('chat2', 'Full screen'))}.innerHTML`);
   await ctx.session.click(hb('chat2', 'Full screen'));
   await wait(ctx, shown(hb('chat2', 'Leave full screen')), 'full screen entered');
@@ -275,8 +286,9 @@ const headerTools = isolated(async ctx => {
   await ctx.session.click(hb('chat', 'Delete'));
   await wait(ctx, `${text(card('chat') + ' .next-chat-question')}==='Delete chat?'`, 'header confirmation');
   await ctx.session.click(card('chat') + ' .next-chat-cancel');
-  ctx.report.ok('header Cancel restores the header without a close request',
-    !calls(ctx).some(r => r.verb === 'close') && await ctx.session.eval(`${shown(hb('chat', 'Delete'))} && !${query(card('chat') + ' .next-chat-question')}`));
+  ctx.report.ok('header Cancel restores every control and focus without a close request',
+    !calls(ctx).some(r => r.verb === 'close') && await ctx.session.eval(`${['Rename', 'Delete', 'Full screen', 'Close'].map(l => shown(hb('chat', l))).join(' && ')}
+      && !${query(card('chat') + ' .next-chat-question')} && document.activeElement === ${query(hb('chat', 'Delete'))}`));
   await ctx.session.click(hb('chat', 'Delete'));
   await ctx.session.click(card('chat') + ' .next-chat-confirm');
   const close = await waitCall(ctx, r => r.verb === 'close' && r.session_name === A);
@@ -285,6 +297,12 @@ const headerTools = isolated(async ctx => {
   await select(ctx, C, title('chat2'));
   await wait(ctx, `${query(card('chat2') + ' .thread-inner')}.dataset.streamId==='local:${C}'`, 'protected chat open');
   ctx.report.ok('protected chat header has no Rename or Delete', await ctx.session.eval(`!${shown(hb('chat2', 'Rename'))} && !${shown(hb('chat2', 'Delete'))}`));
+  await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await select(ctx, B);
+  await wait(ctx, `[...document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].some(el => el.dataset.streamId==='local:${B}')`, 'phone chat open');
+  const seat = await ctx.session.eval(`document.querySelector('.chat-card:not([hidden])').dataset.pane`);
+  ctx.report.ok('phone header shows Rename and Delete and fits, with and without the question',
+    await ctx.session.eval(`${shown(hb(seat, 'Rename'))} && ${shown(hb(seat, 'Delete'))}`) && await ctx.session.eval(fits(seat)) && await askFits(seat));
 });
 
 const unread = isolated(async ctx => {

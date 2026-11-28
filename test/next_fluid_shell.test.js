@@ -652,6 +652,8 @@ test('an open chat renames and deletes from its header with the list rules and c
   head('chat').querySelector('.next-chat-cancel').click();
   assert.equal(s.calls.filter(c => c[0] === 'close').length, 0, 'Cancel closes nothing');
   assert.equal(head('chat').querySelector('.next-chat-question'), null);
+  assert.deepEqual(labels('chat'), ['Status', 'Terminal', 'Rename', 'Delete', 'Full screen', 'Close'], 'Cancel restores every header control');
+  assert.equal(s.window.document.activeElement, head('chat').querySelector('[aria-label=Delete]'), 'Cancel returns focus to Delete');
   head('chat').querySelector('[aria-label=Delete]').click();
   head('chat').querySelector('.next-chat-confirm').click(); await flush();
   assert.deepEqual(JSON.parse(JSON.stringify(s.calls.filter(c => c[0] === 'close'))), [['close', 'local', 'a', {operatorConfirm: true, force: true}]]);
@@ -681,6 +683,25 @@ test('a chat closed elsewhere leaves the screen; the other card stays', async t 
   assert.equal(s.calls.filter(c => c[0] === 'close').length, 0, 'closing the card sends no close of its own');
 });
 
+test('a chat missing after a reconnect or in a snapshot is a new view, not a close', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const shown = id => [...s.window.document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].map(el => el.dataset.streamId).includes(id);
+  s.inventory(); await flush();
+  const others = s.rows.filter(row => row.stream_id !== 'fixture:a');
+  s.frame({ type: '__reconnect', generation: 1, next_generation: 2 });
+  s.frame({ type: 'session.inventory', sessions: others }); s.update(); await flush();
+  assert.ok(shown('fixture:a'), 'the first inventory on a new connection may have a different scope');
+  s.frame({ connected: false, error: 'Stream disconnected' });
+  s.frame({ type: 'session.inventory', sessions: others }); s.update(); await flush();
+  assert.ok(shown('fixture:a'), 'nor after a disconnect');
+  s.frame({ type: 'snapshot', sessions: others }); s.update(); await flush();
+  assert.ok(shown('fixture:a'), 'a snapshot starts a fresh view');
+  s.frame({ type: 'session.inventory', sessions: s.rows }); await flush();
+  s.frame({ type: 'session.inventory', sessions: others }); s.update(); await flush();
+  assert.ok(!shown('fixture:a'), 'two inventories on one connection still close it');
+});
+
 test('full screen and leaving it use different icons', async t => {
   const s = openShell(t);
   await flush(); s.choose('a'); s.choose('b');
@@ -694,12 +715,35 @@ test('full screen and leaving it use different icons', async t => {
   assert.equal(full().innerHTML, enter);
 });
 
-test('a new-chat card shows no Rename or Delete', async t => {
+test('a card that switches to the new-chat form hides Rename and Delete', async t => {
   const s = openShell(t);
-  await flush();
-  s.$("button[aria-label^=Chats]").click(); s.$('.popover .next-chat-new').click();
-  const head = s.$('.chat-card:not([hidden]) .card-head');
-  for (const label of ['Rename', 'Delete']) assert.equal(head.querySelector(`[aria-label=${label}]`).hidden, true, label + ' is hidden on the new-chat form');
+  await flush(); s.choose('a');
+  const control = label => s.$(`[data-pane=chat] .card-head [aria-label=${label}]`);
+  const shown = label => !!control(label) && !control(label).hidden;
+  assert.ok(shown('Rename') && shown('Delete'), 'an open chat offers both');
+  s.$('[data-pane=chat] .next-chat-title').click(); s.$('.popover .next-chat-new').click();
+  assert.ok(s.$('[data-pane=chat] .new-chat-host') && !s.$('[data-pane=chat] .new-chat-host').hidden, 'the same card shows the new-chat form');
+  assert.ok(!shown('Rename') && !shown('Delete'), 'the new-chat form offers neither');
+});
+
+test('a Delete question does not outlive full screen or coverage, and Escape answers it', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const key = (el, key) => el.dispatchEvent(new s.window.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
+  const question = pane => s.$(`[data-pane=${pane}] .next-chat-question`);
+  const shown = (pane, label) => { const b = s.$(`[data-pane=${pane}] .card-head [aria-label="${label}"]`); return !!b && !b.hidden; };
+  s.$('[data-pane=chat] .card-head [aria-label=Delete]').click();
+  assert.ok(question('chat'));
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  assert.equal(question('chat'), null, 'covering the card dismisses its question');
+  assert.ok(shown('chat', 'Full screen') && shown('chat', 'Close') && shown('chat', 'Delete'), 'and restores its controls');
+  s.$('[data-pane=chat] [aria-label="Full screen"]').click();
+  s.$('[data-pane=chat] .card-head [aria-label=Delete]').click();
+  key(s.$('[data-pane=chat] .next-chat-cancel'), 'Escape');
+  assert.equal(question('chat'), null, 'Escape answers the question');
+  assert.ok(shown('chat', 'Leave full screen'), 'and does not also leave full screen');
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0);
 });
 
 test('U1 Settings applies an exact shared width, keeps focus during renders and restores invalid input', async t => {

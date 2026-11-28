@@ -41,7 +41,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   // Rename and Delete follow the chat list: Enter or blur saves, Escape cancels,
   // and Delete asks in place before closing the session.
   const controls = [statusButton, terminalButton, renameButton, deleteButton, fullButton, closeButton];
-  let editing = null, asking = null;
+  let editing = null, asking = null, wasSolo = false;
 
   const body = node('div', 'thread', card);
   const inner = node('div', 'thread-inner', body);
@@ -160,7 +160,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     return !!s && mode !== 'new' && canEdit(s);
   }
 
-  function finishRename(edit, save) {
+  function finishRename(edit, save, restoreFocus) {
     if (editing !== edit) return; // Escape may cause a subsequent blur.
     editing = null;
     const name = edit.input.value.trim();
@@ -168,7 +168,8 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     title.hidden = false;
     if (save && name && name !== edit.name) void onRename(edit.id, name);
     else render();
-    title.focus();
+    // Enter and Escape return focus to the title; a blur leaves it where the reader put it.
+    if (restoreFocus) title.focus();
   }
 
   function startRename() {
@@ -181,12 +182,12 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     input.autocomplete = 'off';
     input.setAttribute('aria-label', 'Chat name');
     const edit = editing = { id: s.stream_id, name: input.value, input };
-    input.addEventListener('blur', () => finishRename(edit, true));
+    input.addEventListener('blur', () => finishRename(edit, true, false));
     input.addEventListener('keydown', event => {
       if (event.isComposing || !['Enter', 'Escape'].includes(event.key)) return;
       event.preventDefault();
       event.stopPropagation();
-      finishRename(edit, event.key === 'Enter');
+      finishRename(edit, event.key === 'Enter', true);
     });
     title.hidden = true;
     heading.prepend(input);
@@ -224,6 +225,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     const form = mode === 'new';
     const edit = editable();
     terminalButton.hidden = form;
+    fullButton.hidden = closeButton.hidden = false;
     renameButton.hidden = deleteButton.hidden = !edit;
     statusButton.hidden = form || !session()?.status_card;
     body.hidden = mode !== 'thread';
@@ -324,6 +326,9 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
       void composer?.cancelRecording();
       disposeTerminal();
     }
+    // A pending Delete question never outlives a change of what the card shows.
+    if (asking && (!visible || !wasVisible || solo !== wasSolo)) endAsk(false);
+    wasSolo = solo;
     card.hidden = !visible;
     fullButton.setAttribute('aria-label', solo ? 'Leave full screen' : 'Full screen');
     fullButton.title = fullButton.getAttribute('aria-label');
@@ -340,6 +345,13 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   terminalButton.onclick = () => setMode('terminal');
   renameButton.onclick = startRename;
   deleteButton.onclick = startDelete;
+  // Escape answers an open Delete question before the page uses it (for example to leave full screen).
+  card.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !asking) return;
+    event.preventDefault();
+    event.stopPropagation();
+    endAsk(true);
+  });
 
   return { element: card, transcript: inner, title, render, setStream, setVisible, showWorking, session, saveHistory,
     // The working row is on screen only in a visible card whose composer shows.

@@ -148,7 +148,8 @@ const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, moun
   paintTranscript, attachTranscript, transcriptPlace, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
-  onRename: renameChat, onDelete: deleteChat, canEdit: s => !isProtected(s),
+  // The header offers only what renameChat and deleteChat will act on.
+  onRename: renameChat, onDelete: deleteChat, canEdit: s => !isProtected(s) && visibleChats().some(row => row.stream_id === s.stream_id),
   isPending: id => pendingNames.has(id) || pendingDeletes.has(id),
   onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions, onMode: () => paintWorking(),
 })]));
@@ -261,17 +262,22 @@ async function deleteChat(id) {
   }
 }
 function beforeStoreFrame(frame) {
+  // A new or lost connection can see a different scope of sessions (for example the
+  // opener filter), so absence only counts between inventories on one connection.
+  if (frame && (frame.connected === false || frame.type === '__reconnect')) inventoryIds = null;
   if (!frame || frame.connected === false || !Array.isArray(frame.sessions) ||
       !['snapshot', 'session.inventory'].includes(frame.type)) return;
   const rows = frame.sessions;
   const ids = new Set(rows.map(s => s.stream_id));
   for (const id of hiddenClosed) if (!ids.has(id)) hiddenClosed.delete(id);
-  // A chat closed anywhere leaves the screen: its row says closed, or it drops out of
-  // the daemon's open inventory after being in it. A chat not yet listed (just started) stays.
+  // A chat closed anywhere leaves the screen: its row says closed, or it drops out of the
+  // daemon's open inventory between two inventories on the same connection. A snapshot
+  // starts a fresh view, and a chat not listed yet (just started) stays.
   const closed = new Set(rows.filter(isClosed).map(s => s.stream_id));
+  const previous = frame.type === 'session.inventory' ? inventoryIds : null;
   for (const key of Object.keys(cards)) {
     const id = state.layout[key];
-    if (id && id !== NEW_CHAT && (closed.has(id) || (inventoryIds?.has(id) && !ids.has(id)))) closingCards.add(key);
+    if (id && id !== NEW_CHAT && (closed.has(id) || (previous?.has(id) && !ids.has(id)))) closingCards.add(key);
   }
   inventoryIds = ids;
   if (closingCards.size) queueMicrotask(closeGoneCards);
@@ -929,6 +935,7 @@ async function loadSnapshot() {
 }
 cc.onDisconnect?.(({ epoch }) => {
   recoveryEpoch = null;
+  inventoryIds = null;
   laneInventoryCurrent = false;
   laneConnection.connected = false;
   laneConnection.stateVersion = null;
@@ -936,7 +943,7 @@ cc.onDisconnect?.(({ epoch }) => {
   lanesControl?.render();
   store.webHostDisconnected?.(epoch);
 });
-cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); checkForUpdate(); });
+cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; inventoryIds = null; void loadSnapshot().catch(() => {}); checkForUpdate(); });
 const designRoute = initialDesignRoute(window, 'workspace');
 if (designRoute) openDesign(designRoute.target);
 else if (location.hash === '#melody') openMelody();

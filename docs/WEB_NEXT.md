@@ -65,9 +65,15 @@ and Leave full screen have different icons: arrows pointing out, and arrows
 pointing in.
 
 A chat closed anywhere else (another client, the agent itself, or the daemon)
-leaves the screen too. Its card closes as soon as the daemon's open inventory
-marks the chat closed or no longer lists it. A chat that was just started, and
-is not listed yet, stays open.
+leaves the screen too. Its card closes when the daemon's open inventory marks the
+chat closed, or when the chat drops out between two inventories on the same
+connection. After a reconnect or a fresh snapshot the first list only sets the
+baseline, because a new connection can see a different set of chats. A chat
+that was just started, and is not listed yet, stays open.
+
+An open Delete question closes if the card is covered, hidden or changes full
+screen, and Escape answers it before anything else. Rename and Delete show only
+for a listed chat that the list could also rename or delete.
 
 An unread chat has a latest non-operator message different from the one last
 displayed while the page and the card were visible. The Assistant has the same
