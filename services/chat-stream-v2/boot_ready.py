@@ -23,35 +23,8 @@ _CODEX_MODEL_FOOTER = re.compile(
 )
 
 
-def _numbered_paste_matches_composer(lines: list[str], latest: int, text: str) -> bool:
-    """Match the complete draft above known composer chrome, including quoted carets."""
-    end = len(lines) - 1
-    footer = lines[end].strip()
-    if footer.startswith(_CLAUDE_PERMISSION_FOOTERS):
-        caret = "❯"
-        if end and set(lines[end - 1].strip()) == {"─"}:
-            end -= 1
-    elif _CODEX_MODEL_FOOTER.fullmatch(footer):
-        caret = "›"
-    else:
-        return False
-    if latest >= end:
-        return False
-    expected = _normalize_for_claude_pane_match(text)
-    for start in range(latest, -1, -1):
-        marker, *content = lines[start].split(maxsplit=1)
-        if marker != caret:
-            continue
-        visible = _normalize_for_claude_pane_match("\n".join([*content, *lines[start + 1:end]]))
-        if visible == expected:
-            return True
-        if len(visible) >= len(expected):
-            break
-    return False
-
-
-def approval_prompt_visible(pane_text: str, *, pasted_text: str | None = None) -> bool:
-    """Withhold input on a numbered choice unless it is the body just pasted."""
+def approval_prompt_visible(pane_text: str) -> bool:
+    """Withhold input on a numbered choice unless the pane ends in composer chrome."""
     lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
     carets = (index for index in range(len(lines) - 1, -1, -1)
               if lines[index].lstrip().startswith(("›", "❯")))
@@ -66,7 +39,8 @@ def approval_prompt_visible(pane_text: str, *, pasted_text: str | None = None) -
             picker = [*lines[next(carets, -1) + 1:latest], lines[latest].lstrip()[1:], *lines[latest + 1:]]
             if codex_trust_dialog_visible("\n".join(picker)):
                 return False
-        return pasted_text is None or not _numbered_paste_matches_composer(lines, latest, pasted_text)
+        footer = lines[-1].strip()
+        return not (footer.startswith(_CLAUDE_PERMISSION_FOOTERS) or _CODEX_MODEL_FOOTER.fullmatch(footer))
 
     # A clipped Claude approval may retain the heading, choices and footer
     # without rendering its selector. Inspect only rows after the last caret.

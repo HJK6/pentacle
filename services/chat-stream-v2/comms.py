@@ -1637,7 +1637,7 @@ class Comms:
         # only when this exact body (or its exact collapsed placeholder) is
         # still in the editable Codex composer.  It is never a re-paste.
         pane = await tmux.capture(name)
-        if approval_prompt_visible(pane, pasted_text=body):
+        if approval_prompt_visible(pane):
             refusal = approval_prompt_refusal(stream_id, "retry", "enter_failed")
             return False, 1, False, replace(proof, reason=refusal.code), watermark, refusal.extra["phase"]
         in_draft = (
@@ -1966,7 +1966,7 @@ class Comms:
     @staticmethod
     def _assert_fallback_retry_composer(target: str, provider: str, body: str, observation: list[str]) -> None:
         pane = observation[-1] if observation else ""
-        if approval_prompt_visible(pane, pasted_text=body):
+        if approval_prompt_visible(pane):
             raise approval_prompt_refusal(target, "retry", "enter_failed")
         draft = DRAFT_PREDICATES.get(provider)
         if not (pane and draft and draft(pane, body)):
@@ -2029,7 +2029,7 @@ class Comms:
             return True, 1, False, provider, None
         if provider == "claude":
             pane = await tmux.capture(name)
-            if approval_prompt_visible(pane, pasted_text=plan.wire_text):
+            if approval_prompt_visible(pane):
                 raise approval_prompt_refusal(target, "retry", "enter_failed")
             if not claude_prompt_in_active_draft(pane, plan.wire_text):
                 return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
@@ -2061,7 +2061,7 @@ class Comms:
                 claude_prompt_in_active_draft(pane, plan.wire_text) if provider == "claude" else False
             ), provider, pane_mode_reason or enter_mode_reason
         pane = await tmux.capture(name)
-        if approval_prompt_visible(pane, pasted_text=plan.wire_text):
+        if approval_prompt_visible(pane):
             raise approval_prompt_refusal(target, "retry", "enter_failed")
         if not codex_prompt_in_active_draft(pane, plan.wire_text, exact=True):
             return False, 1, False, provider, pane_mode_reason

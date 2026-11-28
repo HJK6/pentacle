@@ -628,25 +628,16 @@ async def test_codex_elided_approval_heading_withholds_enter():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("provider", "caret", "composer"), [
-    ("claude", "❯", CLAUDE_COMPOSER),
-    ("codex", "›", CODEX_COMPOSER),
-])
-async def test_numbered_draft_refuses_before_paste_and_same_id_can_retry(provider, caret, composer):
-    draft = composer.replace(caret + " ", f"{caret} 1. {BODY} ", 1)
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_tell_lands_when_composer_already_has_numbered_draft(provider):
+    draft = numbered_draft(provider, "1. Existing draft")
     tmux = RecordingTmux(screen=draft, submitted_screen=codex_submitted_screen if provider == "codex" else None)
-    async with delivery(tmux, provider) as (store, comms, _):
+    async with delivery(tmux, provider) as (_, comms, _):
         request = message(tell_id=f"numbered-draft-{provider}")
-        with pytest.raises(VerbError) as error:
-            await comms.tell(request)
-        assert error.value.code == CODE
-        assert error.value.extra["phase"] == "not_started"
-        assert await store.get_tell_delivery(request["tell_id"]) is None
-        assert tmux.actions == []
-        tmux.screen = composer
         delivered = await comms.tell(request)
         duplicate = await comms.tell(request)
     assert delivered["delivery_status"] == "delivered"
+    assert delivered["submission_confirmed"] is True
     assert duplicate["duplicate"] is True
     assert tmux.actions == ["paste", "Enter"]
 
@@ -734,11 +725,15 @@ async def test_operator_numbered_draft_allows_enter_retry(verb, provider, body, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["claude", "codex"])
-async def test_wrapped_numbered_draft_allows_enter(provider):
-    pane = numbered_draft(provider, "1. go ahead with\n   the proposed change\n  2. no")
+@pytest.mark.parametrize(("provider", "draft", "body"), [
+    ("claude", "1. go ahead with\n   the proposed change\n  2. no", "1. go ahead with the proposed change\n2. no"),
+    ("codex", "1. go ahead with\n   the proposed change\n  2. no", "1. go ahead with the proposed change\n2. no"),
+    pytest.param("codex", "1. yes\n2. no", "1. yes", id="extra-numbered-row"),
+])
+async def test_numbered_composer_allows_enter(provider, draft, body):
+    pane = numbered_draft(provider, draft)
     tmux = RecordingTmux(after_paste=pane)
-    await tmux.paste(NAME, "1. go ahead with the proposed change\n2. no")
+    await tmux.paste(NAME, body)
     assert tmux.actions == ["paste", "Enter"]
 
 
@@ -747,7 +742,6 @@ async def test_wrapped_numbered_draft_allows_enter(provider):
     pytest.param(frame("claude_bash").replace("❯ 1. Yes", "❯ 1. yes"), id="claude-matching-choice"),
     pytest.param(frame("codex_elided_header"), id="codex-elided-heading"),
     pytest.param("Choose a workspace\n❯ 1. yes", id="bare-workspace-picker"),
-    pytest.param(numbered_draft("codex", "1. yes\n2. no"), id="extra-numbered-row"),
 ])
 async def test_numbered_body_does_not_release_a_real_picker(pane):
     tmux = RecordingTmux(after_paste=pane)
