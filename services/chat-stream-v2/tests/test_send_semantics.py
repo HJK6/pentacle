@@ -198,8 +198,58 @@ def test_send_attempt_logs(tmp_path, monkeypatch, caplog, markers, expected_clas
     assert finish["outcome"] == outcome
     assert finish["submission_confirmed"] is (outcome == "landed")
     assert finish["proof_polls"] == 0
-    assert finish["user_append_to_confirm_ms"] is None
-    assert finish["user_append_to_confirm_reason"]
+    assert "user_append_to_confirm_ms" not in finish
+    assert "user_append_to_confirm_reason" not in finish
+
+
+@pytest.mark.parametrize("fault", ["classification", "completion_fields"])
+def test_send_timing_fault_preserves_reply_and_counts_failure(tmp_path, monkeypatch, caplog, fault):
+    counter = SendTiming()
+    monkeypatch.setattr(comms_module, "send_counter", counter)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+
+    if fault == "classification":
+        classify = comms_module.qa_dispatch.classified
+        fail_once = True
+
+        def classify_with_fault(msg, row):
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise ValueError("fixture classification failure")
+            return classify(msg, row)
+
+        monkeypatch.setattr(comms_module.qa_dispatch, "classified", classify_with_fault)
+    else:
+        def invalid_fields(_timing):
+            raise ValueError("fixture completion fields failure")
+
+        monkeypatch.setattr(send_timing.SendAttempt, "fields", invalid_fields)
+
+    async def go():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open(comms, sessions)
+            result = await comms.send({"stream_id": f"{HOST}:{NAME}", "text": "fixture message",
+                                       "request_id": "fixture-timing-fault"})
+            assert result["type"] == "send.result"
+            assert result["delivery"] == "landed"
+            assert result["submission_confirmed"] is True
+            assert tmux.pastes == ["fixture message"]
+        finally:
+            store.stop()
+
+    _run(go())
+    assert counter.failures == 1
+    completions = [json.loads(line.split(" ", 1)[1]) for line in caplog.messages
+                   if line.startswith("send_attempt ")]
+    if fault == "classification":
+        [completion] = completions
+        assert completion["class"] == "unknown"
+        assert completion["request_hash"] == hashlib.sha256(b"fixture-timing-fault").hexdigest()[:16]
+    else:
+        assert completions == []
 
 
 def test_send_attempt_emits_after_comms_returns_and_counts_log_failure(tmp_path, monkeypatch):

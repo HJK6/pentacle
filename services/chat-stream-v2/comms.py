@@ -1919,7 +1919,12 @@ class Comms:
 
     async def _attempt_send_delivery_bound(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:
         """Submit one prepared plan: one paste, then at most one Enter retry."""
-        measure = request_timing.get().measure
+        if isinstance(timing := request_timing.get(), SendAttempt):
+            measure = timing.measure
+        else:
+            async def measure(_field, action, *args, **kwargs):
+                return await action(*args, **kwargs)
+
         target = str(plan.route["final_target"])
         host, name = self.sessions.split(target)
         row = self.sessions.get(target) or await self.store.fetch_session(host, name)
@@ -2393,14 +2398,22 @@ class Comms:
 
     async def send(self, msg: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
-        from account_pool_control import operator
         request_id = str(msg.get("request_id") or f"send-{uuid.uuid4()}")
         backend = bool(msg.get("_assistant_composite_backend_dispatch"))
-        kind = ("backend" if backend else "qa_commission" if qa_dispatch.classified(msg, {})
-                else "operator" if operator(msg.get("_auth_context") or {}) else "ordinary")
-        digest = hashlib.sha256(request_id.encode(errors="surrogatepass")).hexdigest()[:16]
+        digest = None
+        try:
+            from account_pool_control import operator
+            digest = hashlib.sha256(request_id.encode(errors="surrogatepass")).hexdigest()[:16]
+            kind = ("backend" if backend else "qa_commission" if qa_dispatch.classified(msg, {})
+                    else "operator" if operator(msg.get("_auth_context") or {}) else "ordinary")
+        except Exception:
+            kind = "unknown"
+            send_counter.failures += 1
         identity = {"request_hash": digest, "class": kind}
-        send_counter.emit("send_start", identity)
+        try:
+            send_counter.emit("send_start", identity)
+        except Exception:
+            send_counter.failures += 1
         timing = SendAttempt()
         timing.parent = request_timing.get()
         token = request_timing.set(timing)
@@ -2412,13 +2425,15 @@ class Comms:
             request_timing.reset(token)
             timing.closed = True
             # Writer time overlaps proof polling on tail reads. proof_polls counts those reads.
-            send_counter.emit("send_attempt", {**identity, **timing.fields(),
-                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                "outcome": "coalesced" if result.get("coalesced") else result.get("delivery", "error"),
-                "submission_confirmed": result.get("submission_confirmed") is True,
-                "paste_ms": round(timing.paste_ms, 3), "proof_poll_ms": round(timing.proof_poll_ms, 3),
-                "proof_polls": timing.proof_polls, "user_append_to_confirm_ms": None,
-                "user_append_to_confirm_reason": "user_append_time_unavailable"})
+            try:
+                send_counter.emit("send_attempt", {**identity, **timing.fields(),
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                    "outcome": "coalesced" if result.get("coalesced") else result.get("delivery", "error"),
+                    "submission_confirmed": result.get("submission_confirmed") is True,
+                    "paste_ms": round(timing.paste_ms, 3), "proof_poll_ms": round(timing.proof_poll_ms, 3),
+                    "proof_polls": timing.proof_polls})
+            except Exception:
+                send_counter.failures += 1
         return result
 
     async def _send(self, msg: dict[str, Any], request_id: str) -> dict[str, Any]:
