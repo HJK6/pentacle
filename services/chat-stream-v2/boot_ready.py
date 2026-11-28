@@ -17,9 +17,15 @@ _CODEX_TRUST_CHOICES = {
     "trust and continue", "quit", "back to agent command center", "keep current directory",
     "yes, continue", "no, quit", "no, exit",
 }
-_CLAUDE_PERMISSION_FOOTERS = ("⏵⏵ bypass permissions", "⏸ manual mode on")
+_CLAUDE_PERMISSION_FOOTERS = (
+    "⏵⏵ bypass permissions",
+    "⏸ manual mode on",
+    "⏵⏵ accept edits on",
+    "⏸ plan mode on",
+    "⏵⏵ auto mode on",
+)
 _CODEX_MODEL_FOOTER = re.compile(
-    r"gpt-[\w.-]+\s+(?:minimal|low|medium|high|xhigh|max|ultra)(?:\s+·\s+[^\n]+)?", re.I,
+    r"gpt-[\w.-]+\s+(?:default|minimal|low|medium|high|xhigh|max|ultra)(?:\s+·\s+[^\n]+)?", re.I,
 )
 
 

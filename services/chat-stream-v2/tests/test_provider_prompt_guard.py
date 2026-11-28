@@ -628,9 +628,18 @@ async def test_codex_elided_approval_heading_withholds_enter():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["claude", "codex"])
-async def test_tell_lands_when_composer_already_has_numbered_draft(provider):
-    draft = numbered_draft(provider, "1. Existing draft")
+@pytest.mark.parametrize(("provider", "footer"), [
+    pytest.param("claude", "", id="claude-bypass"),
+    pytest.param("codex", "", id="codex-high"),
+    # Accept-edits also appears in the native queue fixture in test_send_semantics.py.
+    pytest.param("claude", "⏵⏵ accept edits on", id="claude-accept-edits"),
+    # The pinned Claude 2.1.312 mode indicator uses this glyph and label.
+    pytest.param("claude", "⏸ plan mode on", id="claude-plan"),
+    pytest.param("claude", "⏵⏵ auto mode on (shift+tab to cycle)", id="claude-auto"),
+    pytest.param("codex", "GPT-6.2-Sol default · ~/scratch", id="codex-default"),
+])
+async def test_tell_lands_when_composer_already_has_numbered_draft(provider, footer):
+    draft = numbered_draft(provider, "1. Existing draft", footer=footer)
     tmux = RecordingTmux(screen=draft, submitted_screen=codex_submitted_screen if provider == "codex" else None)
     async with delivery(tmux, provider) as (_, comms, _):
         request = message(tell_id=f"numbered-draft-{provider}")
@@ -670,9 +679,9 @@ def operator_message(body):
     return message(message=body, _auth_context={"operator_authenticated": True})
 
 
-def numbered_draft(provider, body):
+def numbered_draft(provider, body, *, footer=""):
     composer = CLAUDE_COMPOSER if provider == "claude" else CODEX_COMPOSER
-    footer = composer.splitlines()[-1]
+    footer = footer or composer.splitlines()[-1]
     if provider == "claude":
         divider = "─" * 40
         return f"{divider}\n❯ {body}\n{divider}\n{footer}"
