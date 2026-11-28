@@ -194,12 +194,13 @@ def run_hourly(cfg, messages, hourly_max=1024, hourly_backups=3):
     script = '''
 import logging, sys
 import managed_logs
-managed_logs.DEFAULT_MAX_BYTES = int(sys.argv[1])
+managed_logs.DEFAULT_MAX_BYTES = int(sys.argv[1]) // 4
 managed_logs.DEFAULT_BACKUPS = int(sys.argv[2])
 managed_logs.install()
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
-log = logging.getLogger("chat_streamd_v2.store")
-for message in sys.argv[3:]: log.info("%s", message)
+for message in sys.argv[3:]:
+ name = "ingest" if message.startswith("ingest_pass_summary") else "store"
+ logging.getLogger("chat_streamd_v2." + name).info("%s", message)
 '''
     env = {**os.environ, **env_for(cfg), 'PYTHONPATH': str(SERVICE)}
     result = subprocess.run([sys.executable, '-c', script, str(hourly_max), str(hourly_backups), *messages],
@@ -228,6 +229,14 @@ def test_hourly_rotation_obeys_its_own_cap(tmp_path):
     assert all(path.exists() and path.stat().st_size <= 128 for path in files)
     assert 'send_latency ' + '11' * 20 in files[0].read_text()
     cfg.validate((io.StringIO(), io.StringIO()))
+
+
+def test_hourly_includes_send_and_ingest_records(tmp_path):
+    cfg = config(tmp_path, 1024, 1)
+    messages = ['send_start one', 'send_attempt two', 'ingest_pass_summary three']
+    run_hourly(cfg, messages)
+    lines = (tmp_path / 'hourly.log').read_text().splitlines()
+    assert [line.split(' ', 3)[-1] for line in lines] == messages
 
 
 def test_deployment_reads_both_managed_streams_and_retained_boot_boundary(tmp_path, monkeypatch):
