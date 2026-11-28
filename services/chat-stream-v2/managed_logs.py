@@ -209,6 +209,21 @@ def install(env: Mapping[str, str] | None = None) -> None:
     except BaseException:
         stdout.close()
         raise
+    try:
+        hourly_config = Config(config.stdout, config.stderr, 4 * DEFAULT_MAX_BYTES, DEFAULT_BACKUPS)
+        hourly = ManagedStream(config.stderr.with_name("hourly.log"), hourly_config, originals[1], originals[1])
+    except BaseException:
+        stdout.close()
+        stderr.close()
+        raise
+    from logging_config import UTCFormatter
+    handler = logging.StreamHandler(hourly)
+    handler.setFormatter(UTCFormatter("%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s %(message)s",
+                                      datefmt="%Y-%m-%dT%H:%M:%S"))
+    handler.addFilter(lambda record: isinstance(record.msg, str) and record.msg.startswith(
+        ("store_call_top", "store_read_top", "send_latency", "send_start", "send_attempt", "ingest_pass_summary")))
+    for name in ("store", "ingest"):
+        logging.getLogger("chat_streamd_v2." + name).addHandler(handler)
     _streams = stdout, stderr
     sys.stdout, sys.stderr = _streams
 
