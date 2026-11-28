@@ -841,6 +841,8 @@ for (const confirmed of [false, true]) for (const firstDiscard of ['A', 'B'] as 
     const known={last_text:'Confirmed server summary',last_kind:'AGENT',last_event_at:'2020-01-15T07:00:00.000Z'};
     const snapshotSessions=c.getState().sessions.map(s=>s.stream_id===STREAM && confirmed?{...s,...known}:s);
     c.applyFrame({type:'snapshot',connected:true,events:[],sessions:snapshotSessions});
+    const initial=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+    const expected={last_text:initial.last_text,last_kind:initial.last_kind,last_event_at:initial.last_event_at};
     c.setSendBridge(async ({requestId})=>{calls.push(requestId);return {ok:true};});
     c.setSendReceiptBridge(async ()=>{calls.push('receipt');return {found:false,receipts:[]};});
     const a=c.sendTurn(STREAM,'failed A'); await flush();
@@ -852,16 +854,26 @@ for (const confirmed of [false, true]) for (const firstDiscard of ['A', 'B'] as 
     const b=c.sendTurn(STREAM,'failed B'); await flush();
     c.applyFrame({type:'send.result',request_id:calls[1],delivery:'not_landed'});
     const beforeDiscard=[...calls];
-    assert.equal(c.discardFailedOptimisticSend(firstDiscard==='A'?a:b),true);
-    assert.equal(c.discardFailedOptimisticSend(firstDiscard==='A'?b:a),true); await flush();
-    assert.deepEqual(calls,beforeDiscard,'discard sends no RPC');
-    const summary=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
-    if (confirmed) assert.deepEqual({last_text:summary.last_text,last_kind:summary.last_kind,last_event_at:summary.last_event_at},known);
-    else assert.ok(!summary.last_text,'empty server summary stays empty');
-    const rows=c.selectSessionDetail(STREAM)!.transcriptItems;
-    assert.equal(rows.some(row=>row.isUser),false,'no discarded send appears in the next render');
-    assert.equal(rows.some(row=>row.text==='failed A'||row.text==='failed B'),false);
-    assert.equal(c.getState().sessions.find(s=>s.stream_id===STREAM)?.last_text,confirmed?known.last_text:summary.last_text);
+    const order=firstDiscard==='A'?[a,b]:[b,a];
+    for (let i=0;i<order.length;i++) {
+      assert.equal(c.discardFailedOptimisticSend(order[i]),true); await flush();
+      assert.deepEqual(calls,beforeDiscard,'discard sends no RPC');
+      const summary=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+      assert.deepEqual({last_text:summary.last_text,last_kind:summary.last_kind,last_event_at:summary.last_event_at},expected,`confirmed summary after X ${i+1}`);
+      const rows=c.selectSessionDetail(STREAM)!.transcriptItems;
+      assert.equal(rows.some(row=>row.optimisticId===order[i]),false,'discarded row stays gone');
+      if (confirmed) assert.ok(rows.some(row=>row.text===known.last_text),'confirmed summary appears on next render');
+      else assert.equal(rows.some(row=>row.text==='failed A'||row.text==='failed B'),i===0);
+      if (i===0) {
+        const remaining=rows.find(row=>row.optimisticId===order[1]);
+        assert.equal(remaining?.sendState,'failed');
+        const html=renderTranscriptItemHtml(remaining!,undefined,{allowFailedDiscard:true});
+        assert.match(html,/aria-label="Retry sending"/);
+        assert.match(html,/aria-label="Cancel and delete"/);
+      } else assert.equal(rows.some(row=>row.isUser),false);
+      const afterRender=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+      assert.deepEqual({last_text:afterRender.last_text,last_kind:afterRender.last_kind,last_event_at:afterRender.last_event_at},expected);
+    }
   });
 }
 
@@ -877,7 +889,7 @@ test('a buffered send frame after dispose cannot rearm receipt work', async t =>
   assert.equal(c.getState().optimisticSends![id].status,before); assert.equal(queries,0);
 });
 
-test('discard of one same-text failure does not own a newer failed row summary', async t => {
+test('discard of one same-text failure restores the confirmed summary', async t => {
   t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
   const c=store(t), requests:string[]=[];
   const known={last_text:'Earlier confirmed',last_kind:'AGENT',last_event_at:'2020-01-01T00:00:00.000Z'};
@@ -886,11 +898,10 @@ test('discard of one same-text failure does not own a newer failed row summary',
   const first=c.sendTurn(STREAM,'same text'); await flush(); c.applyFrame({type:'send.result',request_id:requests[0],delivery:'not_landed'});
   t.mock.timers.tick(1000);
   const second=c.sendTurn(STREAM,'same text'); await flush(); c.applyFrame({type:'send.result',request_id:requests[1],delivery:'not_landed'});
-  const newer={...c.getState().sessions.find(s=>s.stream_id===STREAM)!};
   c.discardFailedOptimisticSend(first);
   const afterFirst=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
   assert.deepEqual({last_text:afterFirst.last_text,last_kind:afterFirst.last_kind,last_event_at:afterFirst.last_event_at},
-    {last_text:newer.last_text,last_kind:newer.last_kind,last_event_at:newer.last_event_at});
+    known);
   c.discardFailedOptimisticSend(second);
   const final=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
   assert.deepEqual({last_text:final.last_text,last_kind:final.last_kind,last_event_at:final.last_event_at},known);

@@ -1107,13 +1107,25 @@ export class ChatStoreController {
     this.originalRequests.delete(optimisticId);
     this.sendSessionGenerations.delete(optimisticId);
     const write = this.summaryWrites.get(optimisticId);
-    const ownsSummary = !!write && this.summaryOwners.get(send.stream_id) === optimisticId;
+    const ownerId = this.summaryOwners.get(send.stream_id);
+    const owner = ownerId && this.summaryWrites.get(ownerId);
     let next = pruneOptimisticSend(this.state, optimisticId);
     next = mutatePentacleEventBuckets(next, { type: 'optimistic-remove', streamId: send.stream_id, optimisticId });
     const session = next.sessions.find(item => item.stream_id === send.stream_id);
-    if (write && ownsSummary && session && session.session_generation === write.generation
-        && sameSummary(summaryFields(session), write.written)) {
-      let restored = write.previous;
+    if (owner && session && session.session_generation === owner.generation
+        && sameSummary(summaryFields(session), owner.written)) {
+      // Walk past every still-local predecessor: even a remaining failed row
+      // must not become the list preview after a discard.
+      let predecessor = owner;
+      let restored = predecessor.previous;
+      const visited = new Set<string>();
+      while (predecessor.previousOwner && !visited.has(predecessor.previousOwner)) {
+        visited.add(predecessor.previousOwner);
+        const prior = this.summaryWrites.get(predecessor.previousOwner);
+        if (!prior || !sameSummary(restored, prior.written)) break;
+        predecessor = prior;
+        restored = prior.previous;
+      }
       let restoredAt = Date.parse(String(restored.last_event_at || ''));
       for (const event of selectPentacleDerivedEventIndex(next).byStream.get(send.stream_id) ?? []) {
         const at = Date.parse(String(event.timestamp || ''));
@@ -1126,9 +1138,7 @@ export class ChatStoreController {
         restoredAt = at;
       }
       next = { ...next, sessions: next.sessions.map(item => item === session ? { ...item, ...restored } : item) };
-      if (write.previousOwner && next.optimisticSends?.[write.previousOwner] && this.summaryWrites.has(write.previousOwner)) {
-        this.summaryOwners.set(send.stream_id, write.previousOwner);
-      } else this.summaryOwners.delete(send.stream_id);
+      this.summaryOwners.delete(send.stream_id);
     }
     // A later optimistic summary may have used this discarded row as its
     // predecessor. Skip it rather than resurrecting it on a later discard.
