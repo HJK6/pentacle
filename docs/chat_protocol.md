@@ -27,6 +27,20 @@ version, raise the maximum, add a table row and its contract test, and add a
 CHANGELOG line in one PR. To drop one, raise the minimum, mark its row `dropped`,
 remove its contract test, and add a CHANGELOG line in one PR.
 
+## Frame sizes and client allowance
+
+Inventory, lane and snapshot frames are complete replacements. Measurements as
+of 2026-11-28 show session inventory at about 85–110 KB before the mobile slim
+and about 10 KB after it, lane inventory at about 140 KB, and authenticated
+hello at about 480 KB before the slim and about 169 KB after it. These are
+nightly soak measurements by frame type.
+
+The daemon intends steady-state frames to a phone to stay under 256 KB. This is
+not yet enforced; it will be bound once inventory sends changes only. Assuming
+a 0.5 Mbps design floor (link capacity has not been measured), clients should
+allow at least about 4.2 seconds for a complete 256 KB frame, and longer for the
+first snapshot after connecting.
+
 ## Handshake
 
 The server sends `welcome` first:
