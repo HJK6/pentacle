@@ -564,8 +564,16 @@ class SpawnCtl:
             )
         # The whole-tree walk runs once, off the event loop; every id below
         # resolves from that one snapshot.
+        source_bindings = normalize_spec_binding_provenance(
+            source_row.get("spec_binding_provenance"), spec_ids=source_row.get("spec_ids"),
+        ) if inherited else ()
         try:
-            view = await spec_resolution_view(self.specs)
+            if qa_dispatch.classified(msg, msg):
+                ids = (*explicit, *(binding["spec_id"] for binding in source_bindings),
+                       effective_assignment(source_row) if inherited else None)
+                view = await spec_resolution_view(self.specs, ids=ids, admission=True)
+            else:
+                view = await spec_resolution_view(self.specs)
         except SpecResolutionUnavailable:
             raise VerbError("spec_unavailable", "fresh spec identity is unavailable") from None
         if source_row:
@@ -628,11 +636,6 @@ class SpawnCtl:
 
         granted_at = iso_now()
         if inherited:
-            source_bindings = normalize_spec_binding_provenance(
-                source_row.get("spec_binding_provenance"),
-                spec_ids=source_row.get("spec_ids"),
-            )
-
             def source_identity(value: str | None) -> str | None:
                 if not callable(canonicalizer):
                     return None
@@ -752,16 +755,19 @@ class SpawnCtl:
             view = getattr(binding, "spec_view", None)
             root = getattr(self.specs, "memory_root", None)
             def read():
-                try:
-                    if callable(getattr(view, "read_spec_text", None)):
-                        return {identity: small_tag(view.read_spec_text(identity)) for identity in ids}
-                    if root is None:
-                        raise ValueError("spec_root_unavailable")
-                    reader = SpecReader(root, identity_only=True)
-                    return {identity: small_tag(reader.read(identity)[3]) for identity in ids}
-                except (ValueError, OSError, UnicodeError, YAMLError):
-                    raise VerbError("spec_unavailable", "Restore readable canonical spec content before resubmitting.") from None
-            small = await asyncio.to_thread(read) if ids else {}
+                if callable(getattr(view, "read_spec_text", None)):
+                    return {identity: small_tag(view.read_spec_text(identity)) for identity in ids}
+                if root is None:
+                    raise ValueError("spec_root_unavailable")
+                reader = SpecReader(root, identity_only=True)
+                return {identity: small_tag(reader.read(identity)[3]) for identity in ids}
+            try:
+                if ids and qa and getattr(view, "admission_seal", None) is not None:
+                    small = await spec_resolution_view(self.specs, admission=True, tag_view=view, read_tags=read)
+                else:
+                    small = await asyncio.to_thread(read) if ids else {}
+            except (ValueError, OSError, UnicodeError, YAMLError):
+                raise VerbError("spec_unavailable", "Restore readable canonical spec content before resubmitting.") from None
             if isinstance(binding, _SpecBinding):
                 binding.small_read = (ids, small)
         if qa and any(small.values()):
