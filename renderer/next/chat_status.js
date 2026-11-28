@@ -114,8 +114,8 @@ const DRAWINGS = {
   sent: ['Sent', 'check'],
   queued: ['Queued', 'chevron'],
   cancelled: ['Cancelled', null],
-  failed: ['Failed to send', null],
-  indeterminate: ['Delivery uncertain', null],
+  failed: ['Failed sending', 'alert'],
+  indeterminate: ['Sending', 'stream'],
 };
 function sendLine(state, sendNowAllowed) {
   const [label, glyph] = DRAWINGS[state] ?? [];
@@ -156,7 +156,7 @@ function decorateSendLines(element, store) {
       const run = row.ownerDocument.createElement('span');
       for (let i = 0; i < 4; i++) run.append(row.ownerDocument.createElement('i'));
       glyph.append(run);
-    } else glyph.textContent = line.glyph === 'check' ? '✓' : '›';
+    } else glyph.textContent = line.glyph === 'check' ? '✓' : line.glyph === 'alert' ? '!' : '›';
     const text = row.firstChild;
     if (text?.nodeType === 3) text.nodeValue = line.label;
     row.prepend(glyph);

@@ -518,7 +518,7 @@ def test_get_work_lane_result_matches_fresh_oracle(tmp_path, packets):
         assert isinstance(shown["_unblocks"], dict)
         assert isinstance(shown["_trail_events"], list)
         assert shown["_work_index"]["available"] is True
-        assert shown["lane"]["hue"] is not None         # a hue was allocated once
+        assert shown["lane"]["hue"] is not None         # hue was allocated during adopt
 
     run(body, path=str(tmp_path / "db.sqlite"))
 

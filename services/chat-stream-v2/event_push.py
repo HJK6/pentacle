@@ -58,6 +58,7 @@ from ingest import _identity_key, broadcast_assistant_mirror, codex_source_pane_
 from machine_stats import WIRE_VERSION as STATS_WIRE_VERSION, validate_machine_stats
 from message_envelopes import annotate_message_envelope
 from store import ENTRY_DROPPED
+from tell_proof import is_native_input_event
 
 log = logging.getLogger("chat_streamd_v2.event_push")
 
@@ -672,7 +673,9 @@ class EventPush:
         try:
             expanded = []
             for entry in entries:
-                segments = await self.store.prepare_native_input_events([entry["event"]])
+                segments = [entry["event"]]
+                if is_native_input_event(entry["event"]):
+                    segments = await self.store.prepare_native_input_events(segments)
                 expanded.extend({**entry, "event": segment, "identity": _identity_key(segment)} for segment in segments)
             entries = expanded
             for entry in entries:

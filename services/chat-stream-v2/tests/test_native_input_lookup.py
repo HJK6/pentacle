@@ -99,6 +99,16 @@ def test_original_event_equality_first_sight_replay_and_retention(text):
     with_store(check)
 
 
+@pytest.mark.parametrize("kind", ["USER", "TELL", "ASSIST_TEXT", "TOOL_USE", None])
+def test_original_split_kind_parity(kind):
+    def check(conn):
+        seat(conn)
+        proof(conn, WIRE_A, "a")
+        event = {**source("operator\n" + WIRE_A), "kind": kind}
+        assert tell_proof.split_native_input(conn, event) == legacy.split_native_input(conn, event)
+    with_store(check)
+
+
 def test_original_event_equality_other_seat_and_recreated_session():
     def check(conn):
         seat(conn)

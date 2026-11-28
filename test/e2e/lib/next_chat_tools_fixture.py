@@ -20,6 +20,7 @@ def install(Server, UIVerbs, VerbError, scratch):
     original_bind, original_close = Server.bind, Server.close
     original_rename, original_delete = Server._on_rename, Server._on_close
     original_send, original_interrupt = Server._on_send, UIVerbs.send_interrupt
+    original_receipt_get = Server._on_send_receipt_get
     server = None
 
     def project(self, *args, **kwargs):
@@ -43,7 +44,7 @@ def install(Server, UIVerbs, VerbError, scratch):
 
     def record(verb, message):
         keys = ('host', 'session_name', 'display_name', 'force', 'operator_confirm',
-                'text', 'request_id', 'optimistic_id', 'queued_send_now')
+                'text', 'request_id', 'optimistic_id', 'queued_send_now', 'to_stream_id', 'original_request')
         with log.open('a') as out:
             out.write(json.dumps({'verb': verb, **{k: message[k] for k in keys if k in message}}) + '\n')
 
@@ -78,6 +79,9 @@ def install(Server, UIVerbs, VerbError, scratch):
 
     receipts = {}
     sent_inputs = {}
+    # Durable send receipts the scenario sets per message; absent means the
+    # daemon never recorded the request.
+    durable = {}
     echo_number = 12000
 
     async def send(self, msg):
@@ -93,7 +97,41 @@ def install(Server, UIVerbs, VerbError, scratch):
         receipts[request_id] = {'type': 'send.result', 'request_id': request_id,
                                 'delivery': 'not_landed' if 'failed' in text else 'landed',
                                 'provider_queued': 'queued' in text}
+        # The daemon's two committed replies (comms.py _send_result): a brief
+        # left in the provider draft, and a brief that left it without proof.
+        committed = {'to_stream_id': host + ':' + msg['session_name'], 'receipt_id': 'fixture-receipt-' + request_id,
+                     'submission_confirmed': False, 'attempts': 1, 'action_status': 'committed',
+                     'confirmation_status': 'pending', 'action_committed': True,
+                     'confirmation_pending': True, 'do_not_resubmit': True, 'reconcile': 'send_receipt'}
+        if 'stuck' in text:
+            receipts[request_id] = {'type': 'send.result', 'request_id': request_id, **committed,
+                                    'delivery': 'not_landed', 'reason': 'active_draft'}
+        elif 'pending' in text:
+            receipts[request_id] = {'type': 'send.result', 'request_id': request_id, **committed,
+                                    'delivery': 'committed_pending_proof', 'state': 'accepted',
+                                    'reason': 'submit_unconfirmed'}
         return {'type': 'send.accepted', 'ok': True, 'request_id': request_id}
+
+    async def receipt_get(self, msg):
+        request_id = msg.get('request_id')
+        if request_id not in sent_inputs:
+            return await original_receipt_get(self, msg)
+        record('send.receipt.get', msg)
+        state = durable.get(request_id)
+        if not state:
+            return {'type': 'send.receipt.get.ok', 'found': False, 'receipts': []}
+        delivery = 'committed_pending_proof' if state == 'accepted' else state
+        return {'type': 'send.receipt.get.ok', 'found': True, 'receipts': [{
+            'receipt_id': 'fixture-receipt-' + request_id, 'request_id': request_id,
+            'to_stream_id': sent_inputs[request_id]['stream_id'], 'state': state,
+            'content_kind': 'text', 'attachment_count': 0, 'delivery': delivery,
+            'submission_confirmed': state == 'landed',
+            'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}]}
+
+    def request_for(needle):
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        return next(row['request_id'] for row in reversed(rows)
+                    if row.get('verb') == 'send' and row.get('text') == needle)
 
     async def interrupt(self, msg):
         selected = msg.get('queued_send_now')
@@ -134,10 +172,13 @@ def install(Server, UIVerbs, VerbError, scratch):
                         closed.clear()
                         receipts.clear()
                         sent_inputs.clear()
+                        durable.clear()
                         log.unlink(missing_ok=True)
                     settings.update(data.get('settings', {}))
                     if data.get('close'):
                         closed.add(data['close'])  # a genuine close made elsewhere
+                    for needle, state in data.get('receipt', {}).items():
+                        durable[request_for(needle)] = state
                     if data.get('snapshot'):
                         # A daemon snapshot, populated or without sessions, never an inventory.
                         frame = {'type': 'snapshot', 'connected': True}
@@ -145,12 +186,13 @@ def install(Server, UIVerbs, VerbError, scratch):
                             frame['sessions'] = self.sessions.list_open()
                         await self.broadcast(frame)
                     elif data.get('result'):
-                        needle = data['result']
-                        rows = [json.loads(line) for line in log.read_text().splitlines()]
-                        request_id = next(row['request_id'] for row in reversed(rows)
-                                          if row.get('text') == needle)
-                        await self.broadcast(receipts[request_id])
-                    else:
+                        request_id = request_for(data['result'])
+                        await self.broadcast({**receipts[request_id], **data.get('frame', {})})
+                    elif data.get('drop_clients'):
+                        # Cut the web host's daemon socket; it reconnects on its own.
+                        for client in list(self._clients):
+                            await client.close()
+                    elif not data.get('receipt'):
                         await emit(self)
                     for name, elapsed in data.get('elapsed', {}).items():
                         await self.broadcast({'type': 'working.state', 'stream_id': host + ':' + name,
@@ -185,4 +227,5 @@ def install(Server, UIVerbs, VerbError, scratch):
     Server._filter_sessions_for_client = project
     Server._on_rename, Server._on_close = rename, remove
     Server._on_send, UIVerbs.send_interrupt = send, interrupt
+    Server._on_send_receipt_get = receipt_get
     Server.bind, Server.close = bind, close

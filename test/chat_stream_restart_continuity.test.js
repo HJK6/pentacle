@@ -278,3 +278,20 @@ test('renderer disconnected status preserves drafts until an explicit snapshot r
  h.apply({ type: 'ready', snapshot: false, connected: true });
  assert.equal(h.draft(), draft);
 });
+
+test('actual restart handshake marks restart survivors for receipt lookup', t => {
+  const f=fixture(t); f.drop(); f.client._connect(); const next=f.open(); f.ready(next);
+  assert.equal(f.frames.filter(frame=>frame.type==='__reconnect').at(-1).daemon_restarted,true);
+});
+
+test('restart marker survives recovery grace expiry until authenticated handshake', t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const f=fixture(t); f.drop(); t.mock.timers.tick(5000);
+  f.client._connect(); const next=f.open(); f.ready(next);
+  assert.equal(f.frames.filter(frame=>frame.type==='__reconnect').at(-1).daemon_restarted,true);
+});
+
+test('ordinary non-restart reconnect does not claim a daemon restart', t => {
+  const f=fixture(t); f.drop(1011); f.client._connect(); const next=f.open(); f.ready(next);
+  assert.equal(f.frames.filter(frame=>frame.type==='__reconnect').at(-1).daemon_restarted,undefined);
+});

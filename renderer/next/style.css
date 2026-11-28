@@ -594,3 +594,9 @@ div.slot-chat-disclosure,.slot-chat-disclosure>summary{display:flex;align-items:
 /* xterm names its own root .terminal too; only the mount carries the frame.
    The inset is on xterm's root, which is where its fit measures padding. */
 .terminal>.terminal{flex:none;height:100%;margin:0;padding:10px 4px 6px 12px;border-radius:0}
+
+.next-app .slot-chat-send-status.is-failed{color:var(--amber);display:flex;align-items:center;justify-content:flex-end;gap:4px}
+.next-app .slot-chat-send-status .slot-chat-send-retry,.next-app .slot-chat-send-status .slot-chat-send-discard{border:0;background:none;padding:0;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.next-app .slot-chat-send-status .slot-chat-send-retry{color:var(--accent);margin-left:6px}
+.next-app .slot-chat-send-status .slot-chat-send-discard{color:var(--faint);margin-left:10px}
+.next-app .next-send-glyph.alert{color:var(--amber);margin-right:0}
