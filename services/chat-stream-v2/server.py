@@ -5324,7 +5324,8 @@ class Server:
                     existing = set(shown["lane"]["members"])
                     specs = self.work_lanes.specs if self.work_lanes is not None else None
                     for identity in members:
-                        if identity not in existing and (specs is None or specs.resolution_for(identity) != "resolved"):
+                        if identity not in existing and (
+                                specs is None or await asyncio.to_thread(specs.resolution_for, identity) != "resolved"):
                             raise VerbError("work_lane_member_unresolved", f"{identity} is not a resolved spec")
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
         except (WorkLaneCloseBlocked, WorkLanePauseRefused) as exc:
