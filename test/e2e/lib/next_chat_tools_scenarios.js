@@ -305,6 +305,45 @@ const headerTools = isolated(async ctx => {
     await ctx.session.eval(`${shown(hb(seat, 'Rename'))} && ${shown(hb(seat, 'Delete'))}`) && await ctx.session.eval(fits(seat)) && await askFits(seat));
 });
 
+// Advisor ruling 4a0ab377: coverage by the Assistant overlay cancels a Delete question,
+// a snapshot never lets the first inventory omission close an open card, and a genuine
+// close still closes only its own card. One reproduction per scenario, so each can fail alone.
+const seatOf = name => `[...document.querySelectorAll('.chat-card')].find(c => c.querySelector('.thread-inner')?.dataset.streamId==='local:${name}')`;
+const isOpen = name => `(!!(${seatOf(name)}) && !(${seatOf(name)}).hidden)`;
+const headerCover = isolated(async ctx => {
+  await select(ctx, A); await select(ctx, B);
+  await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 900, deviceScaleFactor: 1, mobile: false });
+  await wait(ctx, isOpen(A), 'chat A on screen at 900 px');
+  const seatA = await ctx.session.eval(`(${seatOf(A)}).dataset.pane`);
+  await ctx.session.click(`${card(seatA)} .card-head [aria-label="Delete"]`);
+  await wait(ctx, shown(card(seatA) + ' .next-chat-question'), 'Delete question armed in A');
+  await ctx.session.click('.rail .brand');
+  await wait(ctx, `!!document.querySelector('.assistant-overlay:not([hidden])')`, 'Assistant overlay over A');
+  await ctx.session.click('.rail .brand');
+  await wait(ctx, `!document.querySelector('.assistant-overlay:not([hidden])') && ${isOpen(A)}`, 'overlay dismissed');
+  ctx.report.ok('Assistant overlay coverage cancels the Delete question', await ctx.session.eval(
+    `!${query(card(seatA) + ' .next-chat-question')} && ${shown(card(seatA) + ' .card-head [aria-label="Delete"]')}`));
+  ctx.report.ok('the overlay round trip sends no close', !calls(ctx).some(r => r.verb === 'close'));
+});
+const snapshotThenOmission = kind => isolated(async ctx => {
+  await select(ctx, A); await select(ctx, B);
+  await wait(ctx, `${isOpen(A)} && ${isOpen(B)}`, 'two chats open');
+  await command(ctx, {});
+  await command(ctx, { snapshot: kind });
+  await command(ctx, { settings: { omit: [A] } });
+  await sleep(1500);
+  ctx.report.ok(`after a ${kind === 'full' ? 'populated snapshot' : 'snapshot without sessions'} the first omission keeps the open card`,
+    await ctx.session.eval(`${isOpen(A)} && ${isOpen(B)}`));
+  // A genuine close, seen by two comparable inventories, closes only its own card.
+  await command(ctx, { settings: { omit: [] } });
+  await command(ctx, {});
+  await command(ctx, { close: A });
+  await wait(ctx, `!${isOpen(A)} && ${isOpen(B)}`, 'genuine close dismisses only the matching card');
+  ctx.report.ok('a genuine close dismisses only the matching card, with no close request', !calls(ctx).some(r => r.verb === 'close'));
+});
+const headerSnapshot = snapshotThenOmission('full');
+const headerBareSnapshot = snapshotThenOmission('bare');
+
 const unread = isolated(async ctx => {
   await select(ctx, A);
   await command(ctx, { settings:{ rows:{[B]: {last_kind:'ASSIST',last_text:'New offstage answer'} } } });
@@ -419,4 +458,4 @@ const phone = isolated(async ctx => {
   await wait(ctx, shown('[data-pane=chat] .slot-chat-send-status .stream'), 'phone send status visible');
 }, { width: 440 });
 
-module.exports = { switching, head, renaming, deleting, headerTools, unread, work, sendStatus, phone };
+module.exports = { switching, head, renaming, deleting, headerTools, headerCover, headerSnapshot, headerBareSnapshot, unread, work, sendStatus, phone };

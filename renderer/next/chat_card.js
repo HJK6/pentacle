@@ -41,7 +41,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   // Rename and Delete follow the chat list: Enter or blur saves, Escape cancels,
   // and Delete asks in place before closing the session.
   const controls = [statusButton, terminalButton, renameButton, deleteButton, fullButton, closeButton];
-  let editing = null, asking = null, wasSolo = false;
+  let editing = null, asking = null, wasSolo = false, wasCovered = false;
 
   const body = node('div', 'thread', card);
   const inner = node('div', 'thread-inner', body);
@@ -152,6 +152,9 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
       const place = !card.hidden && mode === 'thread' ? restoredScroll : null;
       if (paintTranscript(inner, s.stream_id, place)) restoredScroll = null;
       if (mode === 'status') renderStatus(s);
+    } else if (mode !== 'new' && !asking) {
+      // A chat whose row is gone offers nothing the list would refuse.
+      renameButton.hidden = deleteButton.hidden = true;
     }
   }
 
@@ -319,16 +322,18 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     render();
   }
 
-  function setVisible(visible, solo) {
+  function setVisible(visible, solo, covered = false) {
     const wasVisible = !card.hidden;
     if (wasVisible && !visible) {
       if (selected && mode === 'thread') restoredScroll = transcriptPlace(inner);
       void composer?.cancelRecording();
       disposeTerminal();
     }
-    // A pending Delete question never outlives a change of what the card shows.
-    if (asking && (!visible || !wasVisible || solo !== wasSolo)) endAsk(false);
+    // A pending Delete question never outlives a change of what the card shows,
+    // including the Assistant overlay coming over it or going away.
+    if (asking && (!visible || !wasVisible || solo !== wasSolo || covered !== wasCovered)) endAsk(false);
     wasSolo = solo;
+    wasCovered = covered;
     card.hidden = !visible;
     fullButton.setAttribute('aria-label', solo ? 'Leave full screen' : 'Full screen');
     fullButton.title = fullButton.getAttribute('aria-label');

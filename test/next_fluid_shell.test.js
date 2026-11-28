@@ -702,6 +702,40 @@ test('a chat missing after a reconnect or in a snapshot is a new view, not a clo
   assert.ok(!shown('fixture:a'), 'two inventories on one connection still close it');
 });
 
+test('the Assistant overlay covering a card cancels its Delete question', async t => {
+  const s = openShell(t, 900);
+  await flush(); s.choose('a'); s.choose('b');
+  const seat = [...s.window.document.querySelectorAll('.chat-card')].find(c => c.querySelector('.thread-inner').dataset.streamId === 'fixture:a').dataset.pane;
+  s.$(`[data-pane=${seat}] .card-head [aria-label=Delete]`).click();
+  assert.ok(s.$(`[data-pane=${seat}] .next-chat-question`), 'Delete is armed');
+  s.$('.rail .brand').click();
+  assert.equal(s.$('.assistant-overlay').hidden, false, 'the Assistant overlay covers the card');
+  s.$('.rail .brand').click();
+  assert.ok(!s.$('.assistant-overlay') || s.$('.assistant-overlay').hidden, 'the overlay is dismissed');
+  assert.equal(s.$(`[data-pane=${seat}] .next-chat-question`), null, 'the question did not survive coverage');
+  assert.equal(s.$(`[data-pane=${seat}] .card-head [aria-label=Delete]`).hidden, false, 'Delete is offered again');
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0);
+});
+
+test('after a populated or sessionless snapshot the first inventory omission keeps the card; a real close does not', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const shown = id => [...s.window.document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].map(el => el.dataset.streamId).includes(id);
+  const others = () => s.rows.filter(row => row.stream_id !== 'fixture:a');
+  for (const snapshot of [{ type: 'snapshot', connected: true, sessions: s.rows }, { type: 'snapshot', connected: true }]) {
+    s.inventory(); await flush();
+    s.frame(snapshot); s.update(); await flush();
+    s.frame({ type: 'session.inventory', sessions: others() }); s.update(); await flush();
+    assert.ok(shown('fixture:a') && shown('fixture:b'),
+      (snapshot.sessions ? 'a populated' : 'a sessionless') + ' snapshot does not let the first omission close an open card');
+  }
+  s.frame({ type: 'session.inventory', sessions: s.rows }); await flush();
+  s.frame({ type: 'session.inventory', sessions: others() }); s.update(); await flush();
+  assert.ok(!shown('fixture:a'), 'two comparable inventories still close the dropped chat');
+  assert.ok(shown('fixture:b'), 'and only that chat');
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0);
+});
+
 test('full screen and leaving it use different icons', async t => {
   const s = openShell(t);
   await flush(); s.choose('a'); s.choose('b');

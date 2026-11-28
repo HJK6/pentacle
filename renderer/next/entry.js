@@ -264,7 +264,8 @@ async function deleteChat(id) {
 function beforeStoreFrame(frame) {
   // A new or lost connection can see a different scope of sessions (for example the
   // opener filter), so absence only counts between inventories on one connection.
-  if (frame && (frame.connected === false || frame.type === '__reconnect')) inventoryIds = null;
+  // Every snapshot, with or without sessions, starts a fresh view; only inventories compare.
+  if (frame && (frame.connected === false || frame.type === '__reconnect' || frame.type === 'snapshot')) inventoryIds = null;
   if (!frame || frame.connected === false || !Array.isArray(frame.sessions) ||
       !['snapshot', 'session.inventory'].includes(frame.type)) return;
   const rows = frame.sessions;
@@ -274,12 +275,12 @@ function beforeStoreFrame(frame) {
   // daemon's open inventory between two inventories on the same connection. A snapshot
   // starts a fresh view, and a chat not listed yet (just started) stays.
   const closed = new Set(rows.filter(isClosed).map(s => s.stream_id));
-  const previous = frame.type === 'session.inventory' ? inventoryIds : null;
+  const inventory = frame.type === 'session.inventory';
   for (const key of Object.keys(cards)) {
     const id = state.layout[key];
-    if (id && id !== NEW_CHAT && (closed.has(id) || (previous?.has(id) && !ids.has(id)))) closingCards.add(key);
+    if (id && id !== NEW_CHAT && (closed.has(id) || (inventory && inventoryIds?.has(id) && !ids.has(id)))) closingCards.add(key);
   }
-  inventoryIds = ids;
+  if (inventory) inventoryIds = ids;
   if (closingCards.size) queueMicrotask(closeGoneCards);
   for (const s of rows) {
     const p = pendingNames.get(s.stream_id);
@@ -660,7 +661,7 @@ function syncLayout(admitted = null) {
   for (const [key, card] of Object.entries(cards)) {
     const id = state.layout[key];
     card.setStream(id, id && admitted?.stream_id === id ? admitted : null);
-    card.setVisible(visible.cards.includes(key), state.layout.solo === key);
+    card.setVisible(visible.cards.includes(key), state.layout.solo === key, overlay);
   }
   designCard.hidden = !visible.cards.includes('dash') || !state.layout.dash.startsWith('design:');
   const melodyVisible = visible.cards.includes('dash') && state.layout.dash === 'melody';
