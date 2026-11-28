@@ -3,6 +3,8 @@
 import json
 import os
 import signal
+import shutil
+import sys
 
 import pytest
 from websockets.exceptions import ConnectionClosed
@@ -190,15 +192,74 @@ def test_c4_overlapping_send_and_disconnected_initiator(chat):
     assert sum(frame.body.get("request_id") == second_id for frame in retrying.frames[retry_start:]) == 1
 
 
-def test_c5_honest_send_failure(chat):
+def _shift_linux_ps(chat):
+    if not sys.platform.startswith("linux"):
+        return
+    root = chat.daemon.root
+    shim = root / "ps"
+    real_ps = shutil.which("ps", path=chat.daemon.env()["PATH"])
+    assert real_ps, "ps shift: real ps unavailable"
+    shim.write_text(f"""#!{sys.executable}
+import datetime, fcntl, json, os, pathlib, subprocess, sys
+args = sys.argv[1:]
+real = {real_ps!r}
+if len(args) != 5 or args[:2] != ['-ww', '-p'] or args[3:] != ['-o', 'pid=,uid=,lstart=,command=']:
+    os.execv(real, [real, *args])
+p = subprocess.run([real, *args], capture_output=True)
+if p.returncode:
+    sys.stdout.buffer.write(p.stdout); sys.stderr.buffer.write(p.stderr); sys.exit(p.returncode)
+fields = p.stdout.decode().strip().split(None, 7)
+if len(fields) != 8:
+    sys.stdout.buffer.write(p.stdout); sys.exit(0)
+pid = args[2]
+path = pathlib.Path({str(root)!r}) / ('ps-shift-' + pid)
+birth = [pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+         int(pathlib.Path('/proc/' + pid + '/stat').read_text().rsplit(')', 1)[1].split()[19])]
+with path.open('a+') as log:
+    fcntl.flock(log, fcntl.LOCK_EX)
+    log.seek(0); lines = log.read().splitlines()
+    if not lines:
+        start = ' '.join(fields[2:7]); phase = 'capture'
+    else:
+        first = json.loads(lines[0]); start = first['start']; phase = 'shift'
+        if birth != first['birth']:
+            sys.stderr.write('ps shift: birth changed'); sys.exit(1)
+        shifted = datetime.datetime.strptime(start, '%a %b %d %H:%M:%S %Y') + datetime.timedelta(seconds=60)
+        fields[2:7] = shifted.strftime('%a %b %d %H:%M:%S %Y').split()
+    log.seek(0, 2); log.write(json.dumps(dict(phase=phase, start=start, rendered=' '.join(fields[2:7]), birth=birth)) + '\\n'); log.flush()
+sys.stdout.write(' '.join(fields) + '\\n')
+""", encoding="utf-8")
+    shim.chmod(0o755)
+    chat.daemon.extra_env["PATH"] = os.pathsep.join((str(root), chat.daemon.env()["PATH"]))
+
+
+def _prove_ps_shift(chat, client, seat, record_property):
+    if not sys.platform.startswith("linux"):
+        return
+    binding = chat.inspect(client, seat.stream_id, event_tail=0)["session"]["observer_binding"]
+    path = chat.daemon.root / ("ps-shift-" + str(binding["pane_pid"]))
+    records = observed(lambda: [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else [],
+                       lambda rows: len(rows) >= 2, description="shifted ps before send", timeout=5)
+    assert records[0]["phase"] == "capture" and records[0]["start"] == " ".join(binding["pane_started_at"].split()), (
+        "ps shift: spawn capture was not first exact-form observation", records, binding)
+    assert (records[1]["phase"] == "shift" and records[1]["birth"] == records[0]["birth"]
+            and records[1]["rendered"] != records[0]["rendered"]), (
+        "ps shift: no stable-birth shifted observation before first ingest", records)
+    record_property("ps_shift_" + seat.name, json.dumps(records[:2]))
+
+
+def test_c5_honest_send_failure(chat, record_property):
     """C5: comms.py:1118-1161,2017-2077,2216-2253; docs/chat_protocol.md send receipt guidance."""
+    _shift_linux_ps(chat)
     chat.start()
     client = chat.client()
     client.subscribe()
     closed = chat.spawn(client, unique("closed"))
+    _prove_ps_shift(chat, client, closed, record_property)
     assert chat.close_seat(client, closed)["type"] == "close.ok"
     chat.hold_user()
     held = chat.spawn(client, unique("withheld"))
+    _prove_ps_shift(chat, client, held, record_property)
     before = [chat.inputs(seat) for seat in (closed, held)]
 
     for target in (closed.stream_id, f"{LOCAL_HOST}:{unique('unknown')}"):
@@ -227,12 +288,14 @@ def test_c5_honest_send_failure(chat):
     assert _input_texts(chat, held) == [text]
 
 
-def test_c9_send_receipts_across_restart(chat):
+def test_c9_send_receipts_across_restart(chat, record_property):
     """C9: docs/restart-continuity.md send cancellation; comms.py:2179-2181,2324-2347."""
+    _shift_linux_ps(chat)
     chat.start()
     client = chat.client()
     client.subscribe()
     landed = chat.spawn(client, unique("acknowledged"))
+    _prove_ps_shift(chat, client, landed, record_property)
     old_id, text = unique("send"), unique("landed")
     payload = {"to_stream_id": landed.stream_id, "text": text, "optimistic_id": unique("optimistic")}
     acknowledged = client.call("send", request_id=old_id, **payload)
@@ -253,6 +316,7 @@ def test_c9_send_receipts_across_restart(chat):
 
     chat.hold_user()
     held = chat.spawn(client, unique("interrupted"))
+    _prove_ps_shift(chat, client, held, record_property)
     held_id, text = unique("send"), unique("interrupted")
     payload = {"to_stream_id": held.stream_id, "text": text, "optimistic_id": unique("optimistic")}
     start = len(client.frames)
