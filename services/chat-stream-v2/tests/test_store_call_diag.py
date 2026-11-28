@@ -193,6 +193,7 @@ def test_hourly_line_group_totals(caplog):
         "lane_episodes": {"calls": 1, "execution_ms": 125.0},
         "closed_awaiters": {"calls": 1, "execution_ms": 125.0},
         "history_pages": {"calls": 1, "execution_ms": 125.0},
+        "proof_reads": {"calls": 0, "execution_ms": 0.0},
     }
     assert line["feature_total"] == {"calls": 10, "execution_ms": 1750.0}
     assert line["all_calls"] == {"calls": 13, "execution_ms": 2000.0}

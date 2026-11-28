@@ -81,8 +81,8 @@ edge('seen marks key by stream, survive temporary absence and reload, collapse i
 edge('send states have exactly the approved words, glyph and queued-only gate', () => {
   const {sendLine}=status;
   for (const [state,label,glyph] of [['sending','Sending','stream'],['sent','Sent','check'],
-    ['queued','Queued','chevron'],['cancelled','Cancelled',null],['failed','Failed to send',null],
-    ['indeterminate','Delivery uncertain',null]]) {
+    ['queued','Queued','chevron'],['cancelled','Cancelled',null],['failed','Failed sending','alert'],
+    ['indeterminate','Sending','stream']]) {
     assert.deepEqual(sendLine(state,true),{label,glyph,sendNow:state==='queued'});
     assert.deepEqual(sendLine(state,false),{label,glyph,sendNow:false});
   }
@@ -103,4 +103,16 @@ edge('assistant composite suppresses a known model and effort in the shared form
   const metadata={model:'claude-sonnet-5',effort:'low',effective_model:'claude-opus-5-5',effective_effort:'high'};
   assert.equal(modelAndEffort({...metadata,session_kind:'session'}),'Opus 5.5 · high');
   assert.equal(modelAndEffort({...metadata,session_kind:'assistant_composite'}),'');
+});
+
+edge('a report exactly 2.5 s off keeps the running clock; only a larger disagreement moves it', () => {
+  const {workingClock}=status;
+  const row={stream_id:'fixture:a', session_generation:'a', working:true};
+  const turn={phase:'working', optimisticId:'send-a', sentAt:1};
+  const held=workingClock();
+  assert.equal(held.elapsed(row,null,turn,7000,10000),'7s');
+  assert.equal(held.elapsed(row,null,turn,10500,11000),'8s','a disagreement of exactly 2.5 s is heartbeat delay');
+  const moved=workingClock();
+  assert.equal(moved.elapsed(row,null,turn,7000,10000),'7s');
+  assert.equal(moved.elapsed(row,null,turn,10501,11000),'10s','beyond 2.5 s the report wins');
 });

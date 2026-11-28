@@ -354,6 +354,9 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     counts, progress = _junit_counts(junit), summarize_progress(journal)
     terminated = not timed_out and (_TERMINATION_REQUESTED or (facts.get("termination") or {}).get("kind") == "external_signal")
     reason, secondary = _classify(code=code, timed_out=timed_out, terminated=terminated, counts=counts, tier=tier, progress=progress, output=facts.get("output") or {})
+    if selection is not None and shard_index is not None and code == 5 and reason == "no_tests_collected" and not secondary:
+        print("[v2-gate] no selected tests for this shard")
+        reason = None
     result = _result(tier, code=code, passed=reason is None, reason=reason, command=command, timed_out=timed_out, junit=junit, log=log, counts=counts, soak=soak,
                      bound_s=timeout, subprocess_returncode=facts.get("subprocess_returncode"), termination=facts.get("termination"), output=facts.get("output"), progress=progress)
     result["secondary_outcomes"] = secondary

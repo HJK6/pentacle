@@ -12,7 +12,8 @@ const NEW_CHAT = '__new__';
 // store remains the source for transcript/status, and drafts stay per stream.
 function mountChatCard(stage, { key, slot, icons, node, button, sessions, store, cc, config,
   drafts, history, paintTranscript, attachTranscript, transcriptPlace, catalogLoader,
-  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor, recorderOptions }) {
+  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor, recorderOptions, onMode,
+  onRename, onDelete, canEdit, isPending }) {
   const env = stage.ownerDocument.defaultView;
   const card = node('section', 'card chat-card', stage);
   card.dataset.pane = key;
@@ -32,9 +33,15 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   title.onclick = () => onSwitch(key);
   const statusButton = button('Status', icons.status, 'icon-button');
   const terminalButton = button('Terminal', icons.terminal, 'icon-button');
+  const renameButton = button('Rename', icons.rename, 'icon-button');
+  const deleteButton = button('Delete', icons.trash, 'icon-button');
   const fullButton = button('Full screen', icons.full, 'icon-button fullscreen');
   const closeButton = button('Close', icons.close, 'icon-button');
-  head.append(statusButton, terminalButton, fullButton, closeButton);
+  head.append(statusButton, terminalButton, renameButton, deleteButton, fullButton, closeButton);
+  // Rename and Delete follow the chat list: Enter or blur saves, Escape cancels,
+  // and Delete asks in place before closing the session.
+  const controls = [statusButton, terminalButton, renameButton, deleteButton, fullButton, closeButton];
+  let editing = null, asking = null, wasSolo = false, wasCovered = false;
 
   const body = node('div', 'thread', card);
   const inner = node('div', 'thread-inner', body);
@@ -137,16 +144,92 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
       title.title = getSessionName(s);
       model.textContent = modelAndEffort(s);
       model.hidden = !model.textContent;
-      statusButton.hidden = !s.status_card;
+      if (!asking) {
+        statusButton.hidden = !s.status_card;
+        renameButton.hidden = deleteButton.hidden = !editable();
+        renameButton.disabled = deleteButton.disabled = isPending(s.stream_id);
+      }
       const place = !card.hidden && mode === 'thread' ? restoredScroll : null;
       if (paintTranscript(inner, s.stream_id, place)) restoredScroll = null;
       if (mode === 'status') renderStatus(s);
+    } else if (mode !== 'new' && !asking) {
+      // A chat whose row is gone offers nothing the list would refuse.
+      renameButton.hidden = deleteButton.hidden = true;
     }
+  }
+
+  function editable() {
+    const s = selected && selected !== NEW_CHAT ? session() : null;
+    return !!s && mode !== 'new' && canEdit(s);
+  }
+
+  function finishRename(edit, save, restoreFocus) {
+    if (editing !== edit) return; // Escape may cause a subsequent blur.
+    editing = null;
+    const name = edit.input.value.trim();
+    edit.input.remove();
+    title.hidden = false;
+    if (save && name && name !== edit.name) void onRename(edit.id, name);
+    else render();
+    // Enter and Escape return focus to the title; a blur leaves it where the reader put it.
+    if (restoreFocus) title.focus();
+  }
+
+  function startRename() {
+    const s = session();
+    if (!editable() || editing || asking || isPending(s.stream_id)) return;
+    const input = node('input', 'next-chat-edit');
+    input.type = 'text';
+    input.value = getSessionName(s);
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.setAttribute('aria-label', 'Chat name');
+    const edit = editing = { id: s.stream_id, name: input.value, input };
+    input.addEventListener('blur', () => finishRename(edit, true, false));
+    input.addEventListener('keydown', event => {
+      if (event.isComposing || !['Enter', 'Escape'].includes(event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishRename(edit, event.key === 'Enter', true);
+    });
+    title.hidden = true;
+    heading.prepend(input);
+    input.focus(); input.select();
+  }
+
+  function endAsk(restore) {
+    if (!asking) return;
+    asking.remove();
+    asking = null;
+    renderMode();
+    if (restore) deleteButton.focus();
+  }
+
+  function startDelete() {
+    const s = session();
+    if (!editable() || editing || asking || isPending(s.stream_id)) return;
+    const id = s.stream_id;
+    const ask = asking = node('span', 'next-chat-ask');
+    const question = node('span', 'next-chat-question', ask);
+    question.textContent = 'Delete chat?';
+    const cancel = button('Cancel', '', 'next-chat-cancel');
+    cancel.textContent = 'Cancel';
+    const confirm = button('Delete', '', 'next-chat-confirm');
+    confirm.textContent = 'Delete';
+    ask.append(cancel, confirm);
+    cancel.onclick = () => endAsk(true);
+    confirm.onclick = () => { endAsk(false); void onDelete(id); };
+    for (const control of controls) control.hidden = true;
+    head.append(ask);
+    cancel.focus();
   }
 
   function renderMode() {
     const form = mode === 'new';
+    const edit = editable();
     terminalButton.hidden = form;
+    fullButton.hidden = closeButton.hidden = false;
+    renameButton.hidden = deleteButton.hidden = !edit;
     statusButton.hidden = form || !session()?.status_card;
     body.hidden = mode !== 'thread';
     composerMount.hidden = mode === 'terminal' || form;
@@ -155,6 +238,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     newChatMount.hidden = !form;
     terminalButton.classList.toggle('active', mode === 'terminal');
     statusButton.classList.toggle('active', mode === 'status');
+    if (asking) for (const control of controls) control.hidden = true;
   }
 
   function startTerminal() {
@@ -178,6 +262,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     renderMode();
     if (mode === 'terminal') startTerminal();
     render();
+    onMode?.();
   }
 
   async function paintNewChat(generation) {
@@ -207,6 +292,8 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   function setStream(id, seed) {
     if (id === selected) return;
     ++selection;
+    if (editing) { const edit = editing; editing = null; edit.input.remove(); title.hidden = false; }
+    endAsk(false);
     newChatControl?.destroy();
     newChatControl = null;
     disposeTerminal();
@@ -235,16 +322,22 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     render();
   }
 
-  function setVisible(visible, solo) {
+  function setVisible(visible, solo, covered = false) {
     const wasVisible = !card.hidden;
     if (wasVisible && !visible) {
       if (selected && mode === 'thread') restoredScroll = transcriptPlace(inner);
       void composer?.cancelRecording();
       disposeTerminal();
     }
+    // A pending Delete question never outlives a change of what the card shows,
+    // including the Assistant overlay coming over it or going away.
+    if (asking && (!visible || !wasVisible || solo !== wasSolo || covered !== wasCovered)) endAsk(false);
+    wasSolo = solo;
+    wasCovered = covered;
     card.hidden = !visible;
     fullButton.setAttribute('aria-label', solo ? 'Leave full screen' : 'Full screen');
     fullButton.title = fullButton.getAttribute('aria-label');
+    fullButton.innerHTML = solo ? icons.unfull : icons.full;
     if (visible && mode === 'terminal' && (!wasVisible || !terminal)) startTerminal();
     if (!wasVisible && visible) render();
   }
@@ -255,8 +348,19 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   fullButton.onclick = () => onFullScreen(key);
   statusButton.onclick = () => setMode('status');
   terminalButton.onclick = () => setMode('terminal');
+  renameButton.onclick = startRename;
+  deleteButton.onclick = startDelete;
+  // Escape answers an open Delete question before the page uses it (for example to leave full screen).
+  card.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !asking) return;
+    event.preventDefault();
+    event.stopPropagation();
+    endAsk(true);
+  });
 
   return { element: card, transcript: inner, title, render, setStream, setVisible, showWorking, session, saveHistory,
+    // The working row is on screen only in a visible card whose composer shows.
+    workingShown: () => !card.hidden && !composerMount.hidden,
     // After a layout pass: take a saved place that was waiting for final widths.
     settle() { if (restoredScroll !== null) render(); },
     writeTerminal(data) { terminal?.term.write(data); },

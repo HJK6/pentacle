@@ -364,6 +364,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     chatSpawnV2: (options) => call('chat-stream:spawn', options || {}),
     chatSpawnCatalog: () => call('chat-stream:spawn-catalog'),
     chatSend: (hostId, sessionName, text) => call('chat-stream:send', hostId || 'local', sessionName, text),
+    chatSendReceipt: (streamId, requestId, originalRequest) => call('chat-stream:send-receipt', streamId, requestId, originalRequest),
     chatSendCorrelated: (hostId, sessionName, text, requestId, optimisticId, attachments, reply) => call('chat-stream:send', hostId || 'local', sessionName, text, requestId, optimisticId, attachments, reply),
     chatTranscribeBlob: (payload) => call('chat-stream:transcribe-blob', payload || {}),
     chatUploadBlob: (payload) => call('chat-stream:upload-blob', payload || {}),

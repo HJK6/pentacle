@@ -59,6 +59,7 @@ export type TranscriptRenderOptions = {
   showDashboardLinks?: boolean;
   pictureCards?: boolean;
   allowQueuedSendNow?: boolean;
+  allowFailedDiscard?: boolean;
   resolvedQuestions?: readonly ResolvedQuestionRecord[];
 };
 
@@ -390,16 +391,16 @@ function renderChatBody(text: string, options: TranscriptRenderOptions = {}): st
 // operator's ask). Confirmed rows pass sendState undefined and render nothing.
 const ACTIONABLE_ASSISTANT_STATES = new Set(['waiting_for_operator', 'waiting_for_dependency', 'uncertain', 'failed', 'cancelled']);
 
-function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string, streamId?: string, allowSendNow = false): string {
-  const label = sendState === 'indeterminate' ? 'Delivery uncertain' : sendState === 'sent' ? 'Sent' : sendState === 'queued'
+function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string, streamId?: string, allowSendNow = false, allowDiscard = false): string {
+  const label = sendState === 'indeterminate' ? 'sending…' : sendState === 'sent' ? 'Sent' : sendState === 'queued'
     ? 'Queued'
     : sendState === 'sending'
       ? 'sending…'
       : sendState === 'cancelled'
         ? 'Cancelled'
         : 'Failed to send';
-  const retry = (sendState === 'failed' || sendState === 'indeterminate') && optimisticId
-    ? `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}">Retry</button>`
+  const retry = sendState === 'failed' && optimisticId
+    ? allowDiscard ? `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}" aria-label="Retry sending"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" class="slot-chat-send-discard" data-optimistic-id="${escapeHtml(optimisticId)}" aria-label="Cancel and delete"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>` : `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}">Retry</button>`
     : '';
   const sendNow = sendState === 'queued' && allowSendNow && optimisticId && streamId
     ? `<button type="button" class="slot-chat-send-now" data-stream-id="${escapeHtml(streamId)}" data-optimistic-id="${escapeHtml(optimisticId)}">Send now</button>` : '';
@@ -475,13 +476,31 @@ function renderDisclosure(item: PentacleTranscriptItem, options: TranscriptRende
     : `<div class="slot-chat-disclosure">${heading}${renderCopyButton(body, 'Copy message', 'slot-chat-message-copy')}</div>`;
 }
 
+function groupMembers(el: HTMLElement): string[] {
+  try { return JSON.parse(el.dataset.groupMembers || '[]'); } catch { return []; }
+}
+
 // Keys survive same-stream HTML refreshes; a different stream has a separate namespace.
+// A group is a run of consecutive items, so it also stays open while it shares a
+// member with an open group, as items join at either end. A row opened on its own
+// that has since joined a group opens that group too, so its text stays on screen.
 export function replaceTranscriptHtml(container: HTMLElement, html: string): void {
-  const open = new Set([...container.querySelectorAll<HTMLDetailsElement>('details[open][data-disclosure-key]')].map(el => el.dataset.disclosureKey));
+  const opened = [...container.querySelectorAll<HTMLDetailsElement>('details[open][data-disclosure-key]')];
+  const open = new Set(opened.map(el => el.dataset.disclosureKey));
+  const alone = new Set(opened.filter(el => !el.parentElement?.closest('details')).map(el => el.dataset.disclosureKey));
+  const members = new Set(opened.flatMap(groupMembers));
   container.innerHTML = html;
   for (const el of container.querySelectorAll<HTMLDetailsElement>('details[data-disclosure-key]')) {
-    el.open = open.has(el.dataset.disclosureKey);
+    el.open = open.has(el.dataset.disclosureKey) || groupMembers(el).some(member => members.has(member));
   }
+  for (const el of container.querySelectorAll<HTMLDetailsElement>('details[open][data-disclosure-key]')) {
+    if (!alone.has(el.dataset.disclosureKey)) continue;
+    for (let group = el.parentElement?.closest('details'); group; group = group.parentElement?.closest('details')) group.open = true;
+  }
+}
+
+function groupMembersAttr(items: PentacleTranscriptItem[], options: TranscriptRenderOptions): string {
+  return escapeHtml(JSON.stringify(items.map(item => JSON.stringify([options.streamId || '', item.id]))));
 }
 
 const LANE_UPDATE_KIND_LABEL: Record<string, string> = {
@@ -557,7 +576,7 @@ function renderTranscriptItemBodyHtml(
       ? sendState : item.providerQueued ? 'queued' : item.receiptCaption || (sendState === 'queued' ? 'sending' : sendState);
     const invalidVoiceAnswers = item.voiceAnswersInvalid === true && sendState === 'failed';
     const droppedVoiceAnswers = item.voiceAnswersStatus?.state === 'dropped';
-    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId, options.streamId, item.providerQueued === true && options.allowQueuedSendNow === true) : '';
+    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId, options.streamId, item.providerQueued === true && options.allowQueuedSendNow === true, options.allowFailedDiscard === true) : '';
     const plainVoice = invalidVoiceAnswers && item.optimisticId
       ? `<button type="button" data-question-voice-plain data-optimistic-id="${escapeHtml(item.optimisticId)}">Send as plain voice note</button>` : '';
     const voiceAnswersStatus = invalidVoiceAnswers || droppedVoiceAnswers
@@ -682,8 +701,8 @@ function renderSubagents(items: PentacleTranscriptItem[], options: TranscriptRen
   if (items.length === 1) return renderSubagent(items[0], options);
   const blockers = items.filter(item => statusFromText(item.text || '') === 'BLOCKER').length;
   const last = items[items.length - 1];
-  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, last.id, 'subagent-group']));
-  return `<details class="slot-chat-v3-subagent-group" data-disclosure-key="${key}" data-transcript-key="${key}">
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, 'subagent-group']));
+  return `<details class="slot-chat-v3-subagent-group" data-disclosure-key="${key}" data-transcript-key="${key}" data-group-members="${groupMembersAttr(items, options)}">
     <summary title="${escapeHtml(last.timestamp || '')}" aria-label="Show ${items.length} subagent updates">
       <span class="slot-chat-v3-group-dots" aria-hidden="true">${items.slice(0, 3).map(item => `<i class="slot-chat-v3-dot is-${escapeHtml(statusFromText(item.text || '').toLowerCase() || 'neutral')}"></i>`).join('')}</span>
       <span>${items.length} subagent updates</span>${blockers ? `<span class="slot-chat-v3-blocker-count">${blockers} blocker${blockers === 1 ? '' : 's'}</span>` : ''}
@@ -706,8 +725,8 @@ function renderAnswers(items: PentacleTranscriptItem[], options: TranscriptRende
     const [head, ...tail] = raw.split('\n');
     return [{ item, answer: head.replace(/^Operator answered:\s*/i, '').trim() || head.trim(), note: tail.join('\n').replace(/^\s*Note:\s*/i, '').trim(), header: '' }];
   });
-  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, items[items.length - 1].id, 'answers']));
-  return `<details class="slot-chat-v3-answers" data-disclosure-key="${key}" data-transcript-key="${key}">
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, 'answers']));
+  return `<details class="slot-chat-v3-answers" data-disclosure-key="${key}" data-transcript-key="${key}" data-group-members="${groupMembersAttr(items, options)}">
     <summary title="${escapeHtml(items[items.length - 1].timestamp || '')}" aria-label="Show ${answers.length} answered question${answers.length === 1 ? '' : 's'}">
       <span class="slot-chat-v3-answer-check" aria-hidden="true">✓</span><span>You answered ${answers.length} question${answers.length === 1 ? '' : 's'}</span>
       <span class="slot-chat-v3-chevron" aria-hidden="true">›</span>

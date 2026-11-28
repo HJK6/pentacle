@@ -334,6 +334,17 @@ function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, catalog = n
   return file;
 }
 
+function fixtureDaemonEnv(extra) {
+  const env = { ...process.env, ...extra };
+  for (const key of [
+    'PENTACLE_DAEMON_PROGRESS_PATH', 'PENTACLE_DAEMON_INSTANCE_ID',
+    'PENTACLE_DAEMON_STDOUT_PATH', 'PENTACLE_DAEMON_STDERR_PATH',
+    'PENTACLE_DOT_TLS_PORT', 'PENTACLE_DOT_TLS_BINDS',
+    'PENTACLE_DOT_TLS_CERT', 'PENTACLE_DOT_TLS_KEY',
+  ]) delete env[key];
+  return env;
+}
+
 async function startDaemon(args, scratch, runtime, fixtures = [
   FIXTURE,
   { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' },
@@ -381,7 +392,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [
       // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
       '--disable-reconciler',
     ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog],
-      env: { ...process.env, ...runtime.modelerFixture?.policyEnv, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
+      env: fixtureDaemonEnv({ ...runtime.modelerFixture?.policyEnv, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' }) });
     runtime.daemonProc = proc;
     let dead = false;
     proc.once('exit', () => { dead = true; });
@@ -676,7 +687,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
           // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
           '--disable-reconciler',
         ], { cwd: ROOT, stdio: ['ignore', dlog, dlog],
-          env: { ...process.env, ...runtime.modelerFixture?.policyEnv, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
+          env: fixtureDaemonEnv({ ...runtime.modelerFixture?.policyEnv, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' }) });
         runtime.daemonProc = proc;
         let dead = false;
         proc.once('exit', () => { dead = true; });
@@ -798,4 +809,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, stopOwnedGroup, allocateReportDir, resolveChrome };
+module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, stopOwnedGroup, allocateReportDir, resolveChrome, fixtureDaemonEnv };

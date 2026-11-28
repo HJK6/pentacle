@@ -134,7 +134,7 @@ test('server failure shows the reason; Retry sends once through the client path 
   await take.run();
   const sends = deps.calls.filter(c => c[0] === 'send');
   assert.equal(sends.length, 1); assert.equal(deps.calls.filter(c => c[0] === 'upload').length, 1);
-  assert.deepEqual(sends[0][1].identity, { requestId: committedIo.last.send_mandate.request_id, optimisticId: committedIo.last.send_mandate.optimistic_id });
+  assert.deepEqual(sends[0][1].identity, { requestId: committedIo.last.send_mandate.request_id, optimisticId: committedIo.last.send_mandate.optimistic_id, originalRequest: committedIo.last.send_mandate.original_request });
 });
 test('a lost mandate (operation_forbidden) hands the take back to the client path', async () => {
   const deps = committedIo([{ ok: false, error_code: 'operation_forbidden' }]);
