@@ -36,6 +36,7 @@ import shlex
 import shutil
 import uuid
 import hashlib
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -443,7 +444,7 @@ def _claude_command(
     *, launch_model: str | None, launch_effort: str | None,
     operator_facing: bool = False,
     resume: bool = False,
-    resume_cwd: str | None = None,
+    launch_cwd: str | None = None,
 ) -> str:
     """The claude launch shell command (v1 session.py:1417). `launch_model`/
     `launch_effort` are the flags v1 passes ONLY when the client explicitly asked
@@ -458,7 +459,7 @@ def _claude_command(
     )
     identity_flag = "--resume" if resume else "--session-id"
     return (
-        f"cd {shlex.quote(resume_cwd or machine.cwd)} && "
+        f"cd {shlex.quote(launch_cwd or machine.cwd)} && "
         f"{agent_orch_path_export(machine, provider_bin=claude_bin)}"
         f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
         f"exec {shlex.quote(claude_bin)} "
@@ -696,17 +697,23 @@ def build_launch(
     stream_token_file = stream_token_file_for(machine, tmux_session)
     if provider == "claude":
         session_id = resume_session_id or str(uuid.uuid4())
+        if cwd and not resume_cwd and not machine.resolve_cwd_locally:
+            cwd = None
+        elif cwd and not resume_cwd and not Path(cwd).resolve().is_relative_to(Path(machine.cwd).resolve()):
+            logging.getLogger(__name__).warning("Ignoring Claude cwd %s: folder trust is not established", cwd)
+            cwd = None
+        effective_cwd = resume_cwd or cwd or machine.cwd
         command = _claude_command(
             machine, tmux_session, session_id, stream_token_file,
             launch_model=launch_model, launch_effort=launch_effort,
             operator_facing=operator_facing,
             resume=resume_session_id is not None,
-            resume_cwd=resume_cwd,
+            launch_cwd=effective_cwd,
         )
         jsonl_path = (
             resume_jsonl_path
             if resume_session_id is not None and resume_jsonl_path
-            else jsonl_path_for(machine, machine.cwd, session_id)
+            else jsonl_path_for(machine, effective_cwd, session_id)
         )
         return LaunchPlan(
             command=command,
