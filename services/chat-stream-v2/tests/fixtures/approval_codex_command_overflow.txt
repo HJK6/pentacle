@@ -1,0 +1,13 @@
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow a marker to be created in the scratch directory?
+
+  $ touch /path/to/scratch/marker
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `/usr/bin/
+     touch /path/to/scratch/marker
+↓
+  Press enter to confirm or esc to cancel

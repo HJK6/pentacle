@@ -9,6 +9,62 @@ from __future__ import annotations
 
 import re
 
+_APPROVAL_OPTION = re.compile(r"^\s*(?:([❯›])\s+)?\d+\.(?:\s|$)")
+_CLAUDE_SHORT_APPROVAL = re.compile(r"^(?:Ready to code\?|Do you want to (?:make this edit|create |overwrite ))")
+_CODEX_APPROVAL_HEADING = re.compile(
+    r'^[ \t]*(?:Would\s+you\s+like\s+to\s+(?:run\s+the\s+following\s+command'
+    r'|make\s+the\s+following\s+edits'
+    r'|send\s+input\s+to\s+(?:the\s+existing\s+terminal|terminal\s+[^\s?]+))'
+    r'|Do\s+you\s+want\s+to\s+approve\s+network\s+access\s+to\s+"[^"]+")\?[ \t]*$',
+    re.M,
+)
+
+
+def _codex_approval_visible(lines: list[str]) -> bool:
+    # The pinned picker ends the modal header with a selected numbered row.
+    # Its key hints can wrap, change with key bindings, or be omitted.
+    carets = (index for index in range(len(lines) - 1, -1, -1)
+              if lines[index].lstrip().startswith(("›", "❯")))
+    selected = next(carets, None)
+    if selected is None:
+        return False
+    option = _APPROVAL_OPTION.match(lines[selected])
+    if not option or option[1] != "›":
+        return False
+    # Earlier caret-delimited output belongs to a previous view.
+    return bool(_CODEX_APPROVAL_HEADING.search("\n".join(lines[next(carets, -1) + 1:selected])))
+
+
+def approval_prompt_visible(pane_text: str) -> bool:
+    """Recognize the pinned approval menus at the bottom of a pane capture."""
+    lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    if _codex_approval_visible(lines):
+        return True
+    footer = lines.pop().lstrip()
+    if footer not in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
+        return False
+    options = 0
+    selected = 0
+    while lines:
+        if option := _APPROVAL_OPTION.match(lines[-1]):
+            selected += option[1] == "❯"
+            options += 1
+        elif not lines[-1].startswith("     "):
+            break  # wrapped option descriptions are indented
+        lines.pop()
+    if selected != 1 or options < 2:
+        return False
+    if footer == "Esc to cancel · Tab to amend":
+        return True
+    heading_lines = []
+    for line in reversed(lines):
+        if line.lstrip().startswith(("❯", "›")):
+            break
+        heading_lines.append(line)
+    return any(_CLAUDE_SHORT_APPROVAL.match(line.lstrip()) for line in heading_lines)
+
 
 # A Codex reset interstitial is an operator-only decision point: accepting it
 # consumes provider quota, so automated input stops while that surface replaces

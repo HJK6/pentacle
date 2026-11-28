@@ -67,6 +67,7 @@ from boot_ready import (
     CODEX_RESET_BLOCKED,
     READY_PREDICATES,
     SUBMIT_PREDICATES,
+    approval_prompt_visible,
     codex_reset_interstitial_visible,
     codex_tui_readiness,
 )
@@ -1479,7 +1480,7 @@ class SpawnCtl:
 
     async def _await_provider_ready(
         self, name: str, provider: str, tmux: "tmux_transport.Tmux",
-        *, absolute_deadline: float | None = None,
+        *, absolute_deadline: float | None = None, guard_approval: bool = False,
     ) -> "BootReadyOutcome":
         """Poll readiness against one absolute deadline."""
         predicate = READY_PREDICATES[provider]
@@ -1501,6 +1502,8 @@ class SpawnCtl:
                     raise
                 # A capture timeout is transport ambiguity, not a dead pane.
             now = time.monotonic()
+            if guard_approval and approval_prompt_visible(pane_text):
+                return _outcome(False, reason=tmux_transport.PROVIDER_PROMPT_WAITING)
             if provider == "codex" and pane_text:
                 if codex_tui_readiness(pane_text) == CODEX_RESET_BLOCKED:
                     return _outcome(False, reason=CODEX_RESET_BLOCKED)
@@ -1590,6 +1593,7 @@ class SpawnCtl:
         self, name: str, marker: str, timeout: float, *, since: str | None = None,
         tmux: tmux_transport.Tmux | None = None, reset_guard: bool = False,
         absolute_deadline: float | None = None,
+        observation: list[str] | None = None,
     ) -> bool:
         """Poll a boot or receipt marker; `since` excludes an old matching echo."""
         tmux = tmux or self.tmux
@@ -1609,6 +1613,8 @@ class SpawnCtl:
             except VerbError as exc:
                 if exc.code != "tmux_timeout":
                     raise
+            if observation is not None:
+                observation[:] = [raw_capture]
             if reset_guard and raw_capture and codex_reset_interstitial_visible(raw_capture):
                 raise VerbError(
                     CODEX_RESET_BLOCKED,
@@ -2830,6 +2836,7 @@ class SpawnCtl:
                         raise
                     if (
                         full_brief and created[0]
+                        and getattr(exc, "code", None) != tmux_transport.PROVIDER_PROMPT_WAITING
                         and await self._admitted_live_pane(
                             host, name, tmux, expected_generation=spawn_generation,
                         )
@@ -2910,6 +2917,9 @@ class SpawnCtl:
                 if isinstance(exc, SpecInputsUnavailable):
                     exc = VerbError("spec_source_changed", "source lifecycle or spec binding changed")
                 reason = getattr(exc, "code", None) or "spawn_failed"
+                prompt_refused = reason == tmux_transport.PROVIDER_PROMPT_WAITING
+                if prompt_refused:
+                    exc = tmux_transport.approval_prompt_refusal(f"{host}:{name}", "spawn", exc.extra["phase"])
                 if await self.store.spawn_cancelled(host, name, request_id):
                     keep_reservation = intent_recorded
                     if not created[0] and not creation_uncertain[0]:
@@ -3116,7 +3126,8 @@ class SpawnCtl:
                 # kill that itself times out must not mask the original failure nor
                 # skip recording the outcome (SessionReconciler re-collects a stray pane).
                 row = None
-                if created[0]:
+                pane_gone = False
+                if created[0] and not prompt_refused:
                     rolled_back = await self._rollback_kill(
                         host, name, tmux, expected_generation=spawn_generation,
                     )
@@ -3137,7 +3148,7 @@ class SpawnCtl:
                     # marks a row closed over a live remote pane (the
                     # `row_closed_tree_alive` cascade the close ladder forbids).
                     pane_gone = await tmux.session_state(name) == "gone"
-                elif admission is not None and admission.done():
+                elif not prompt_refused and admission is not None and admission.done():
                     row = await self.store.fetch_session(host, name)
                 # Key the FAILED outcome (DATA-only) so a same-key retry finds this
                 # terminal failure after the reservation is released and replays it
@@ -3717,6 +3728,8 @@ class SpawnCtl:
         if brief:
             before = await tmux.capture(name)  # anchor the receipt (QA #15)
             stream_id = f"{host}:{name}"
+            if approval_prompt_visible(before):
+                raise VerbError(tmux_transport.PROVIDER_PROMPT_WAITING, phase="not_started")
             watermark = None
             # Watermark-to-paste is the one window a shutdown drain must not cut:
             # once the intent carries the pre-paste watermark, adoption may never
@@ -4676,6 +4689,11 @@ class SpawnCtl:
         outcome_identity = self._reconcile_outcome_identity(res)
         intent = tmux_transport._intent(res.get("payload"))
         queued_outcome = await self.store.get_spawn_outcome(host, name)
+        if (queued_outcome and queued_outcome.get("request_id") == request_id
+                and (queued_outcome.get("delivery_receipt") or {}).get("failure_code")
+                == tmux_transport.PROVIDER_PROMPT_WAITING):
+            await self.store.release_stream_id_fenced(host, name, request_id)
+            return "released"
         if str((queued_outcome or {}).get("state") or "") == "queued":
             # The runtime FIFO is intentionally not replayed after a daemon
             # restart. No pane has been created, so fail the durable handle and
@@ -5058,6 +5076,9 @@ class SpawnCtl:
             return "deferred"
         if isinstance(receipt, dict) and state == "delivered" and receipt.get("delivery_failed_at"):
             receipt = {**receipt, "delivered_late_at": iso_now()}
+        if evidence == tmux_transport.PROVIDER_PROMPT_WAITING:
+            receipt = {**(receipt or {}), "state": "failed", "delivery_status": "failed",
+                       "failure_code": evidence, "failure_reason": reason}
         if isinstance(receipt, dict) and state == "delivered":
             receipt = {
                 **receipt,
@@ -5531,7 +5552,11 @@ class SpawnCtl:
         stream_id = f"{host}:{name}"
         ready = await self._await_provider_ready(
             name, provider, tmux, absolute_deadline=time.monotonic() + ADOPTION_BOOT_DEADLINE_S,
+            guard_approval=True,
         )
+        if ready.reason == tmux_transport.PROVIDER_PROMPT_WAITING:
+            refusal = tmux_transport.approval_prompt_refusal(stream_id, "spawn", "not_started")
+            return ("failed", refusal.code, str(refusal)), receipt
         if not ready.ready:
             if not await tmux.has_session(name):
                 return ("failed", "pane_died_during_boot", "adopted pane died before its brief was delivered"), receipt
@@ -5556,7 +5581,13 @@ class SpawnCtl:
         input_runtime=getattr(self,"account_runtime",None)
         async with (input_runtime.input_guard(await self.store.fetch_session(host,name) or {},phase="admitted_spawn")
                     if input_runtime is not None else nullcontext()):
-            await tmux.paste(name, brief)
+            try:
+                await tmux.paste(name, brief)
+            except VerbError as exc:
+                if exc.code != tmux_transport.PROVIDER_PROMPT_WAITING:
+                    raise
+                refusal = tmux_transport.approval_prompt_refusal(stream_id, "spawn", exc.extra["phase"])
+                return ("failed", refusal.code, str(refusal)), receipt
         log.info("adoption pasted the never-delivered brief once for %s", stream_id)
         return None, receipt
 
