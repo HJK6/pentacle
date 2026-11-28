@@ -559,3 +559,103 @@ def test_get_work_lane_negative_control_duplicate_resolution_detected(tmp_path, 
         assert len(counter) > 1                        # the duplication the sound test forbids
 
     run(body, path=str(tmp_path / "db.sqlite"))
+
+def test_batched_latest_reports_and_open_episodes(tmp_path, monkeypatch):
+    from store import Store
+    from store_work_lanes import enrich_latest_reports_conn; root = tmp_path / "batch-memory"
+    monkeypatch.delenv("PENTACLE_ITEM_TRACKING_RELEASE", raising=False)
+    def legacy(conn, members):
+        for member in members:
+            row = conn.execute("""SELECT l.kind,l.at,l.report_id,
+                json_extract(r.status_freshness,'$.covers_event'), json_extract(r.status_freshness,'$.spec_id'),
+                json_extract(r.status_freshness,'$.report_id'), json_extract(r.status_freshness,'$.source_revisions'), r.created_at
+                FROM v2_work_item_latest_report l LEFT JOIN v2_reports r USING(report_id) WHERE l.spec_id=?""",
+                (member["spec_id"],)).fetchone()
+            member["_latest_event"] = {"kind": row[0], "at": row[1]} if row else None
+            member["_latest_report_id"] = row[2] if row else None
+            member["_latest_report_epoch"] = row[7] if row else None
+            if row and row[3] and row[4] == member["spec_id"] and row[5] == row[2]:
+                member["_status_reflected_report"] = row[2]
+            if row and row[6] and row[4] == member["spec_id"] and row[5] == row[2] and json.loads(row[6]) == member.get("_progress_source_revisions"):
+                member["_progress_precedes_report"] = row[2]
+    async def body(env):
+        target, legacy_lane, done = await _seed_lanes(env, root, target_members=40)
+        def seed(conn):
+            for i in range(2):
+                spec, report = f"spec_demo__n{i:02}", f"report-{i}"
+                raw = conn.execute("SELECT record_json FROM v2_work_item_observations WHERE spec_id=?", (spec,)).fetchone()[0]
+                record = json.loads(raw); record["progress_source_revisions"] = {"spec.md": "r1"}
+                conn.execute("UPDATE v2_work_item_observations SET record_json=? WHERE spec_id=?", (json.dumps(record), spec))
+                freshness = {"covers_event": True, "spec_id": spec, "report_id": report, "source_revisions": {"spec.md": "r1"}}
+                conn.execute("INSERT INTO v2_reports(report_id,from_stream_id,status,ingested_at,created_at,status_freshness) VALUES (?,?,?, ?,?,?)",
+                             (report, "fixture:lead", "done", "2026-01-01", 1767225600.0, json.dumps(freshness)))
+                conn.execute("INSERT INTO v2_work_item_latest_report VALUES (?,?,?,?)", (spec, "review_passed", "2026-01-01T00:00:00Z", report))
+            conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='done' WHERE lane_id=?", (legacy_lane,))
+            other = conn.execute("SELECT lane_id FROM v2_assistant_composite_lanes WHERE adoption_key='request:other'").fetchone()[0]
+            conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='active' WHERE lane_id=?", (other,))
+            for lane in (target, legacy_lane):
+                conn.execute("INSERT INTO v2_work_lane_episodes(episode_id,lane_id,kind,sequence,opened_at,fact_json) VALUES (?,?,?,?,?,?)",
+                             (lane+':lead_lost:1', lane, 'lead_lost', 1, '2026-01-01', '{}'))
+            conn.commit()
+            backup = sqlite3.connect(str(tmp_path / "reference.db")); conn.backup(backup); backup.close()
+        await env.store.submit(seed)
+        reference = Store(str(tmp_path / "reference.db")); reference.start()
+        async def legacy_reconcile(store):
+            from dataclasses import asdict
+            from store_work_lane_episodes import LaneEpisodeFact, lane_progress, lane_estimate_missing, lane_lead_lost, lane_status_behind, member_status_behind
+            stamp = "2026-02-01T00:00:00Z"
+            def evaluate(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                open_lanes = {r[0] for r in conn.execute("SELECT DISTINCT lane_id FROM v2_work_lane_episodes WHERE cleared_at IS NULL")}
+                for lane in store_work_lanes.work_lane_rows_conn(conn, include_done=True):
+                    conn.execute("UPDATE v2_assistant_composite_lanes SET lead_reported_done=? WHERE lane_id=?", (lane["_lead_reported_done"], lane["lane_id"]))
+                    if lane["work_state"] == "done" and lane["lane_id"] not in open_lanes: continue
+                    facts = lane_progress(lane, now_iso=stamp)
+                    for kind, condition in (("completed", facts["completion_pending"]), ("stale", facts["stale"]), ("estimate_missing", lane_estimate_missing(lane)), ("lead_lost", lane_lead_lost(lane)), ("status_behind", lane_status_behind(lane, stamp))):
+                        current = conn.execute("SELECT * FROM v2_work_lane_episodes WHERE lane_id=? AND kind=? AND cleared_at IS NULL", (lane["lane_id"], kind)).fetchone()
+                        if condition is False and current is not None:
+                            conn.execute("UPDATE v2_work_lane_episodes SET cleared_at=? WHERE episode_id=?", (stamp, current["episode_id"]))
+                        elif condition is True and current is None:
+                            sequence = conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM v2_work_lane_episodes WHERE lane_id=? AND kind=?", (lane["lane_id"], kind)).fetchone()[0]
+                            episode_id = f"{lane['lane_id']}:{kind}:{sequence}"
+                            items = sorted((m for m in lane.get("_members", []) if member_status_behind(m, stamp, True)), key=lambda m: (m["_latest_event"]["at"], m["spec_id"]))[:3] if kind == "status_behind" else None
+                            fact = asdict(LaneEpisodeFact(lane["lane_id"], kind, episode_id, stamp, items=[m["spec_id"] for m in items] if items is not None else None))
+                            if kind != "status_behind": fact.pop("items")
+                            conn.execute("INSERT INTO v2_work_lane_episodes(episode_id,lane_id,kind,sequence,opened_at,emitted_ref,fact_json) VALUES (?,?,?,?,?,NULL,?)", (episode_id, lane["lane_id"], kind, sequence, stamp, json.dumps(fact, sort_keys=True, separators=(",", ":"))))
+                conn.commit()
+            await store.submit(evaluate)
+        async def read_all(store, *, old=False):
+            detail = await store.get_work_lane(target)
+            snapshot = await store.work_lane_snapshot(include_done=True)
+            await (legacy_reconcile(store) if old else store.reconcile_work_lane_episodes(None, now_iso="2026-02-01T00:00:00Z"))
+            episode_rows = await store.submit(lambda conn: [dict(row) for row in conn.execute("SELECT * FROM v2_work_lane_episodes ORDER BY lane_id,kind,sequence")])
+            pending = await store.submit(lambda conn: [dict(row) for row in conn.execute("SELECT episode_id,fact_json FROM v2_work_lane_episodes WHERE emitted_ref IS NULL AND (?=0 OR kind!='status_behind') ORDER BY lane_id,kind,sequence", (0,))])
+            return detail, snapshot, pending, episode_rows
+        try:
+            monkeypatch.setattr(store_work_lanes, "enrich_latest_reports_conn", legacy)
+            expected = await read_all(reference, old=True)
+            monkeypatch.setattr(store_work_lanes, "enrich_latest_reports_conn", enrich_latest_reports_conn)
+            statements = []
+            await env.store.submit(lambda conn: conn.set_trace_callback(statements.append))
+            detail = await env.store.get_work_lane(target); detail_end = len(statements)
+            snapshot = await env.store.work_lane_snapshot(include_done=True); snapshot_end = len(statements)
+            await env.store.reconcile_work_lane_episodes(None, now_iso="2026-02-01T00:00:00Z"); episode_end = len(statements)
+            await env.store.submit(lambda conn: conn.set_trace_callback(None))
+            episode_rows = await env.store.submit(lambda conn: [dict(row) for row in conn.execute("SELECT * FROM v2_work_lane_episodes ORDER BY lane_id,kind,sequence")])
+            pending = await env.store.submit(lambda conn: [dict(row) for row in conn.execute("SELECT episode_id,fact_json FROM v2_work_lane_episodes WHERE emitted_ref IS NULL AND (?=0 OR kind!='status_behind') ORDER BY lane_id,kind,sequence", (0,))])
+            assert json.dumps((detail, snapshot, pending, episode_rows), ensure_ascii=False, default=str) == json.dumps(expected, ensure_ascii=False, default=str)
+            members = detail["_projection_row"]["_members"]
+            assert len(members) >= 30 and sum(bool(m.get("goal_id")) for m in members) >= 20
+            assert any(m.get("_status_reflected_report") for m in members) and any(m.get("_progress_precedes_report") for m in members)
+            assert any(m.get("_latest_report_id") is None for m in members)
+            assert any(r["lane_id"] == legacy_lane and r["cleared_at"] for r in episode_rows)
+            assert not any(r["lane_id"] == done for r in episode_rows)
+            assert any(r["lane_id"] == target and r["cleared_at"] for r in episode_rows)
+            assert any(r["kind"] == "lead_lost" and r["lane_id"] not in (target, legacy_lane) and not r["cleared_at"] for r in episode_rows)
+            chunks = (statements[:detail_end], statements[detail_end:snapshot_end], statements[snapshot_end:episode_end])
+            lookups = [sum("FROM v2_work_item_latest_report l LEFT JOIN" in s for s in chunk) for chunk in chunks]
+            episode_reads = sum("FROM v2_work_lane_episodes" in s and "cleared_at IS NULL" in s and s.lstrip().upper().startswith("SELECT") for s in chunks[2])
+            assert (lookups, episode_reads) == ([1, 1, 1], 1), (lookups, episode_reads)
+        finally:
+            reference.stop()
+    run(body, path=str(tmp_path / "batch.db"))

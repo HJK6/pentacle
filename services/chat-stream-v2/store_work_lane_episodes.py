@@ -161,8 +161,9 @@ class WorkLaneEpisodesStoreMixin:
                 # clear unless it already has an uncleared episode, so skip the
                 # episode checks for done lanes with none. The lead_reported_done
                 # write and the pending drain below stay unconditional.
-                open_episode_lanes = {r[0] for r in conn.execute(
-                    "SELECT DISTINCT lane_id FROM v2_work_lane_episodes WHERE cleared_at IS NULL")}
+                open_episodes = {(r["lane_id"], r["kind"]): r for r in conn.execute(
+                    "SELECT * FROM v2_work_lane_episodes WHERE cleared_at IS NULL")}
+                open_episode_lanes = {lane_id for lane_id, _ in open_episodes}
                 import work_item_tracking as tracking
                 lanes = work_lane_rows_conn(conn, include_done=True, external_config=getattr(self, "external_work_config", None))
                 per_item = tracking.activate(conn, stamp)
@@ -178,12 +179,12 @@ class WorkLaneEpisodesStoreMixin:
                                             ("estimate_missing", lane_estimate_missing(lane)),
                                             ("lead_lost", lane_lead_lost(lane)),
                                             ("status_behind", False if per_item else lane_status_behind(lane, stamp))):
-                        current = conn.execute("SELECT * FROM v2_work_lane_episodes "
-                                               "WHERE lane_id=? AND kind=? AND cleared_at IS NULL",
-                                               (lane["lane_id"], kind)).fetchone()
+                        key = (lane["lane_id"], kind)
+                        current = open_episodes.get(key)
                         if condition is False and current is not None:
                             conn.execute("UPDATE v2_work_lane_episodes SET cleared_at=? WHERE episode_id=?",
                                          (stamp, current["episode_id"]))
+                            del open_episodes[key]
                         elif condition is True and current is None:
                             sequence = conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM v2_work_lane_episodes "
                                                     "WHERE lane_id=? AND kind=?", (lane["lane_id"], kind)).fetchone()[0]
@@ -200,6 +201,7 @@ class WorkLaneEpisodesStoreMixin:
                                          "VALUES (?,?,?,?,?,NULL,?)",
                                          (episode_id, lane["lane_id"], kind, sequence, stamp,
                                           json.dumps(fact_data, sort_keys=True, separators=(",", ":"))))
+                            open_episodes[key] = {"episode_id": episode_id}
                 # A clear is silent but does not discard an unhanded opening.
                 pending = [dict(r) for r in conn.execute("SELECT episode_id,fact_json FROM v2_work_lane_episodes "
                            "WHERE emitted_ref IS NULL AND (?=0 OR kind!='status_behind') ORDER BY lane_id,kind,sequence", (per_item,))]
