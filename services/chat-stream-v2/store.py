@@ -122,6 +122,8 @@ from v2_runtime import iso_now, primary_assistant_name
 
 log = logging.getLogger("chat_streamd_v2.store")
 
+_WRITER_CACHE_KIB = 64 * 1024
+
 EVENT_PUSH_TARGET_SHA_KEY = "event_push.target_sha"
 EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY = "event_push.target_sha.previous"
 _FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
@@ -1835,6 +1837,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ).fetchone() is None
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(f"PRAGMA cache_size=-{_WRITER_CACHE_KIB}")
             conn.execute("BEGIN")
             conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
             conn.execute(SESSIONS_DDL)
@@ -2228,14 +2231,14 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     self._read_ready.wait_for(lambda: reader.queue or self._closing)
                     if not reader.queue:
                         return
-                    fn, fut, loop, queued, name, quiet, caller, deadline = reader.queue.popleft()
+                    fn, fut, loop, queued, name, quiet, caller, deadline, timing = reader.queue.popleft()
                     reader.active = True
-                    closing = self._closing
+                    is_closing = self._closing
                 started = time.monotonic()
                 if fut.cancelled() or (deadline is not None and started >= deadline):
                     reader.diag.expired += 1
                     complete, outcome = _set_exception, TimeoutError("store read expired before execution")
-                elif closing:
+                elif is_closing:
                     complete, outcome = _set_exception, RuntimeError("store stopped before this read ran")
                 else:
                     try:
@@ -2266,7 +2269,11 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                         complete, outcome = _set_exception, exc
                     else:
                         complete = _set_result
-                    reader.diag.record(name, quiet, loop, queued, started, time.monotonic(), caller)
+                    finished = time.monotonic()
+                    reader.diag.record(name, quiet, loop, queued, started, finished, caller)
+                    if timing is not None:
+                        with suppress(RuntimeError):
+                            loop.call_soon_threadsafe(timing.add, queued, started, finished)
                 # A caller can cancel its future and close its loop mid-read.
                 with suppress(RuntimeError):
                     loop.call_soon_threadsafe(complete, fut, outcome)
@@ -2317,7 +2324,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                                           name=f"store-{reader.diag.worker}", daemon=True)
                 thread.start()
                 reader.thread = thread
-            reader.queue.append((fn, fut, loop, time.monotonic(), name, quiet, caller, deadline))
+            timing = request_timing.get() if reader is self._history else None
+            reader.queue.append((fn, fut, loop, time.monotonic(), name, quiet, caller, deadline, timing))
             self._read_ready.notify_all()
         return await fut
 
@@ -7378,7 +7386,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             finally:
                 conn.execute("RELEASE session_history_snapshot")
 
-        return await (self.read_history if history else self.submit)(snapshot)
+        if history:
+            snapshot.__qualname__ = store_call_diag.WIRE_HISTORY_PAGE
+            return await self.read_history(snapshot)
+        return await self.submit(snapshot)
 
     def _session_event_page_reader(
         self,
