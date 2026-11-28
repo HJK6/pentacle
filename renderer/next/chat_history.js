@@ -37,6 +37,12 @@ function createChatHistory({ cc, store, onChange, logger = console, setTimer }) 
     delete state.historyLoads[id];
   };
 
+  function restart() {
+    state.eventsLoadedFor.clear();
+    state.historyLoads = {};
+    for (const id of focused) ensure(id);
+  }
+
   function ensure(id) {
     if (!id || !state.connected) return;
     lazy.ensureChatEventsLoaded(state, id, cc, logger, { onChange });
@@ -67,9 +73,12 @@ function createChatHistory({ cc, store, onChange, logger = console, setTimer }) 
     setConnected(connected) {
       if (state.connected === !!connected) return;
       state.connected = !!connected;
-      state.eventsLoadedFor.clear();
-      state.historyLoads = {};
-      for (const id of focused) ensure(id);
+      restart();
+    },
+    // The daemon reconnected without the page ever seeing it go away (its
+    // restart grace hides the disconnect), so the open chats are read again.
+    reconnected() {
+      if (state.connected) restart();
     },
     retry(id) {
       if (!id || !state.connected) return;
@@ -83,8 +92,9 @@ function createChatHistory({ cc, store, onChange, logger = console, setTimer }) 
     },
     hasOlder: id => lazy.historyHasOlder(state, id),
     loadingOlder: id => !!state.historyPaging[id]?.loading,
-    loadOlder: (id, hasNewRows) => lazy.requestOlderHistory(state, id, cc, logger, {
+    loadOlder: (id, hasNewRows, stillWanted) => lazy.requestOlderHistory(state, id, cc, logger, {
       onChange, hasNewRows, expand: stream => store.setHistoryExpanded?.(stream),
+      stillWanted: stream => focused.includes(stream) && (!stillWanted || stillWanted(stream)),
     }),
   };
 }
