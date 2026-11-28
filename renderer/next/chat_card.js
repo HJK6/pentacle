@@ -12,7 +12,7 @@ const NEW_CHAT = '__new__';
 // store remains the source for transcript/status, and drafts stay per stream.
 function mountChatCard(stage, { key, slot, icons, node, button, sessions, store, cc, config,
   drafts, history, paintTranscript, attachTranscript, transcriptPlace, catalogLoader,
-  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor, recorderOptions }) {
+  hostPresentation, terminalDeps, onClose, onFullScreen, onStarted, onUse, onSwitch, nameFor, recorderOptions, onMode }) {
   const env = stage.ownerDocument.defaultView;
   const card = node('section', 'card chat-card', stage);
   card.dataset.pane = key;
@@ -178,6 +178,7 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
     renderMode();
     if (mode === 'terminal') startTerminal();
     render();
+    onMode?.();
   }
 
   async function paintNewChat(generation) {
@@ -257,6 +258,8 @@ function mountChatCard(stage, { key, slot, icons, node, button, sessions, store,
   terminalButton.onclick = () => setMode('terminal');
 
   return { element: card, transcript: inner, title, render, setStream, setVisible, showWorking, session, saveHistory,
+    // The working row is on screen only in a visible card whose composer shows.
+    workingShown: () => !card.hidden && !composerMount.hidden,
     // After a layout pass: take a saved place that was waiting for final widths.
     settle() { if (restoredScroll !== null) render(); },
     writeTerminal(data) { terminal?.term.write(data); },

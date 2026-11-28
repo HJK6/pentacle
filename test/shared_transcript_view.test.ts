@@ -502,6 +502,33 @@ test('an opened group of agent reports or answers stays open as the group grows'
   assert.equal(container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!.open, false, 'another chat starts closed');
 });
 
+test('an opened agent row stays readable when it becomes a group, and an open group survives older rows joining it', () => {
+  const agent = (n: number) => assistantItem({ id: `agent-${n}`, timestamp: `2026-09-26T10:00:0${n}Z`, tone: 'agent', displayRule: 'bubble:agent', label: `v2-${n}`, text: `GATE — step ${n}` });
+  const answer = (n: number) => userItem({ id: `answer-${n}`, timestamp: `2026-09-26T10:01:0${n}Z`, eventCase: 'agent-question-answer', text: `Operator answered: ${n}` });
+  const paint = (container: HTMLElement, items: unknown[], streamId = STREAM) =>
+    replaceTranscriptHtml(container, renderTranscriptTimelineHtml({ streamId, transcriptItems: items } as never, CHROME));
+  const shownText = (el: Element) => { for (let d = el.closest('details'); d; d = d.parentElement!.closest('details')) if (!(d as HTMLDetailsElement).open) return false; return true; };
+  const { container } = newDom();
+  paint(container, [agent(2)]);
+  container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent')!.open = true;
+  paint(container, [agent(2), agent(3)]);
+  const child = container.querySelector('details.slot-chat-v3-subagent-group details.slot-chat-v3-subagent pre')!;
+  assert.match(child.textContent || '', /step 2/);
+  assert.equal(shownText(child), true, 'the opened report is still on screen inside its new group');
+  paint(container, [agent(2), agent(3), answer(2), answer(3)]);
+  for (const el of container.querySelectorAll<HTMLDetailsElement>('details.slot-chat-v3-subagent-group, details.slot-chat-v3-answers')) el.open = true;
+  paint(container, [agent(1), agent(2), agent(3), answer(1), answer(2), answer(3)]);
+  assert.equal(container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!.open, true, 'older reports joining at the top keep the group open');
+  assert.equal(container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-answers')!.open, true, 'older answers joining at the top keep them open');
+  const group = container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!;
+  group.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent')!.open = true;
+  group.open = false;
+  paint(container, [agent(1), agent(2), agent(3), agent(4)]);
+  assert.equal(container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!.open, false, 'a group its reader closed stays closed');
+  paint(container, [agent(1), agent(2), agent(3)], 'other:stream');
+  assert.equal(container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!.open, false, 'another chat starts closed');
+});
+
 test('bubble:assistant renders an assistant card with escaped text', () => {
   const controller = controllerWithEvents([
     makeEvent({ daemon_seq: 11, kind: 'ASSIST', text: 'Here is a plan <b>bold</b>' }),

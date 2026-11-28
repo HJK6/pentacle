@@ -143,7 +143,7 @@ const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, moun
   paintTranscript, attachTranscript, transcriptPlace, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
-  onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions,
+  onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions, onMode: () => paintWorking(),
 })]));
 // The bridge keeps one listener per event, so both cards' terminals are fed from here.
 cc.onPtyData((slot, data) => Object.values(cards)[slot]?.writeTerminal(data));
@@ -294,7 +294,7 @@ function paintWorking() {
   };
   // Only times on screen are counted; one a pane covers is brought up to date when it returns.
   if (!assistant.hidden) tick(a, showAssistantWorking);
-  for (const card of Object.values(cards)) if (!card.element.hidden) tick(card.session(), card.showWorking);
+  for (const card of Object.values(cards)) if (card.workingShown()) tick(card.session(), card.showWorking);
   // Wake just past the next whole second of a running time, so it steps evenly.
   window.clearTimeout(workingTimer);
   const wait = clock.untilNextSecond(now);
@@ -385,7 +385,7 @@ function paintRows(element, id) {
   const pane = paneFor(element);
   if (element.dataset.streamId !== (id || '')) {
     delete element.dataset.rendered;
-    Object.assign(pane, { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, pinned: true, deferred: false, touched: 0, opened: true, waiting: false, lastTop: 0 });
+    Object.assign(pane, { rows: FIRST_ROWS, tail: null, anchor: null, loading: false, older: null, pinned: true, deferred: false, touched: 0, opened: true, waiting: false, lastTop: 0 });
   }
   element.dataset.streamId = id || '';
   if (!id) { element.textContent = 'Loading chat…'; return; }
@@ -445,11 +445,14 @@ async function showEarlier(element) {
   const remaining = () => store.selectSessionDetail(id, { visibleCount: pane.rows, includeDraft: false })?.remainingCount || 0;
   if (!remaining()) {
     if (!historyReads.hasOlder(id)) return;
+    // A chat switch resets the pane; a request from before it must not touch the pane after it.
+    const request = pane.older = {};
     pane.loading = true;
     try { await historyReads.loadOlder(id, () => remaining() > 0, () => element.dataset.streamId === id); }
     catch (error) { console.warn('[next] earlier messages failed:', error?.message || error); }
-    finally { pane.loading = false; }
-    if (element.dataset.streamId !== id) return;
+    finally { if (pane.older === request) pane.loading = false; }
+    if (pane.older !== request || element.dataset.streamId !== id) return;
+    pane.older = null;
   }
   const more = remaining();
   if (more && !selecting(element)) {
@@ -597,12 +600,16 @@ function renderPopover() {
   }
 }
 // The chats on screen. One a pane covers is released, and read again when it returns.
-function onScreen(assistantShown, ids) {
-  return [assistantShown ? assistantSession()?.stream_id : null, ...ids].filter(id => id && id !== NEW_CHAT);
+// A layout pass sets focus once, after every card has its stream and visibility:
+// the store announces a pin change at once, and a render then must not see half a layout.
+function focusOnScreen() {
+  if (layingOut) return;
+  const ids = Object.values(cards).filter(card => !card.element.hidden).map(card => card.id);
+  historyReads.focus([assistant.hidden ? null : assistantSession()?.stream_id, ...ids].filter(id => id && id !== NEW_CHAT));
 }
 function render() {
   const a = assistantSession();
-  historyReads.focus(onScreen(!assistant.hidden, Object.values(cards).filter(card => !card.element.hidden).map(card => card.id)));
+  focusOnScreen();
   paintTranscript(assistantInner, a?.stream_id); mountAssistantComposer(a?.stream_id);
   const assistantName = a?.assistant_display_name || a?.display_name || a?.title || 'Assistant'; brand.setAttribute('aria-label', assistantName); brand.title = assistantName;
   assistantTitle.textContent = assistantName;
@@ -623,7 +630,6 @@ function syncLayout(admitted = null) {
   assistant.classList.toggle('assistant-overlay', overlay);
   keepButton.hidden = !overlay;
   for (const [key, card] of Object.entries(cards)) if (card.id !== state.layout[key]) card.saveHistory();
-  historyReads.focus(onScreen(!assistant.hidden, Object.keys(cards).filter(key => visible.cards.includes(key)).map(key => state.layout[key])));
   layingOut = true;
   for (const [key, card] of Object.entries(cards)) {
     const id = state.layout[key];
@@ -663,6 +669,7 @@ function syncLayout(admitted = null) {
   lanesCard.classList.toggle('alone', !lanesCard.hidden && visible.cards.length === 1 && assistant.hidden);
   stageLayout.paint();
   layingOut = false;
+  focusOnScreen();
   for (const card of Object.values(cards)) card.settle();
   brand.classList.toggle('on', visible.assistant || overlay);
   brand.setAttribute('aria-pressed', String(visible.assistant || overlay));

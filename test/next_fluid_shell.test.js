@@ -267,6 +267,85 @@ test('a chat covered by a full-screen card is released and read again when it co
   assert.equal(reads('fixture:b'), 1, 'the chat that stayed on screen is not');
 });
 
+test('with a store that notifies at once, a covered chat is released once and read only when it returns', async t => {
+  const s = openShell(t);
+  // The real store tells its subscribers inside setFocusedChatStreams.
+  const pin = s.window.PentacleChatStore.setFocusedChatStreams;
+  s.window.PentacleChatStore.setFocusedChatStreams = ids => { pin(ids); s.update(); };
+  await flush(); s.choose('a'); s.choose('b'); await flush();
+  const reads = id => s.calls.filter(c => c[0] === 'history' && c[1] === id).length;
+  assert.equal(reads('fixture:a'), 1);
+  const hid = s.focused.length;
+  s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
+  await flush();
+  assert.deepEqual(s.focused.slice(hid), [['fixture:b']], 'one pin change, never back to the covered chat');
+  assert.equal(reads('fixture:a'), 1, 'a covered chat is not read');
+  const back = s.focused.length;
+  s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
+  await flush();
+  assert.deepEqual(s.focused.slice(back), [['fixture:a', 'fixture:b']]);
+  assert.equal(reads('fixture:a'), 2, 'read once on return');
+  assert.equal(reads('fixture:b'), 1);
+});
+
+test('an earlier-messages request from before a chat switch cannot move the pane that came back', async t => {
+  const s = openShell(t);
+  const pending = [];
+  let older = 0;
+  s.window.cc.requestStreamEvents = args => {
+    s.calls.push(['history', args.streamId, args.beforeDaemonSeq ?? null]);
+    if (!args.beforeDaemonSeq) return Promise.resolve({ ok: true, received: 500, nextBeforeDaemonSeq: 900 });
+    return new Promise(resolve => pending.push(resolve));
+  };
+  let shown = 0;
+  const select = s.window.PentacleChatStore.selectSessionDetail;
+  s.window.PentacleChatStore.selectSessionDetail = (id, options) => {
+    if (id !== 'fixture:a') return select(id, options);
+    shown = Math.min(120 + older, options.visibleCount);
+    return { transcriptItems: Array.from({ length: shown }, (_, i) => ({ id: 'm' + i })), remainingCount: 120 + older - shown };
+  };
+  s.window.PentacleChatView.renderTranscriptTimelineHtml = detail => `<p>${detail?.transcriptItems?.length ?? 0} rows</p>`;
+  await flush(); s.choose('a'); await flush();
+  const show = id => { s.$('[data-pane=chat] .next-chat-title').click(); s.$(`.popover:not([hidden]) [data-stream-id="fixture:${id}"]`).click(); };
+  const earlier = () => s.$('[data-pane=chat] .next-history-earlier');
+  earlier().click();
+  await flush();
+  assert.equal(pending.length, 1, 'the first older page is on its way');
+  show('b'); await flush();
+  show('a'); await flush();
+  earlier().click();
+  await flush();
+  assert.equal(pending.length, 2, 'the returning chat asks again');
+  older = 60;
+  pending[0]({ ok: true, received: 500, nextBeforeDaemonSeq: 400 });
+  await flush(); await flush();
+  assert.equal(shown, 120, 'the old request does not reveal rows in the new pane');
+  assert.match(s.$('[data-pane=chat] .thread-inner').textContent, /Loading earlier messages/, 'the new request still shows its loading line');
+  pending[1]({ ok: true, received: 500, nextBeforeDaemonSeq: 400 });
+  await flush(); await flush();
+  assert.equal(shown, 168, 'the request the reader is waiting on reveals 48 more');
+});
+
+test('a running time on a card showing its terminal schedules no redraws and is current when the thread returns', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a');
+  const a = s.rows[1]; a.working = true;
+  s.elapsed[a.stream_id] = 7000;
+  s.update();
+  s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
+  await flush();
+  const realTimeout = s.window.setTimeout;
+  const scheduled = [];
+  s.window.setTimeout = (fn, ms, ...rest) => { if (fn?.name === 'paintWorking') scheduled.push(ms); return realTimeout.call(s.window, fn, ms, ...rest); };
+  s.update();
+  s.window.setTimeout = realTimeout;
+  assert.deepEqual(scheduled, [], 'the working row is hidden behind the terminal');
+  s.elapsed[a.stream_id] = 20000;
+  s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
+  assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '20s', 'leaving the terminal brings the time up to date');
+  a.working = false; s.update();
+});
+
 test('a daemon reconnect reads the open chats again even with no disconnect frame', async t => {
   const s = openShell(t);
   await flush(); s.choose('a');
