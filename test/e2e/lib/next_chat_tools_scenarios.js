@@ -133,6 +133,7 @@ async function restoreFixtureBaseline(ctx, baseline, restoreNextAfterNavigation)
 }
 function isolated(run, { width = 1440, restoreNextAfterNavigation = false } = {}) {
   return async ctx => {
+    await wait(ctx, `location.origin === ${JSON.stringify(new URL(ctx.url).origin)} && document.readyState === 'complete'`, 'initial web origin loaded');
     const baseline = await saveFixtureBaseline(ctx);
     try {
       await command(ctx, { reset: true, settings: { enabled: true } });
@@ -438,8 +439,129 @@ const sendStatus = isolated(async ctx => {
   const failed = 'Chat tools failed';
   await send(ctx,'chat',failed);
   await command(ctx,{result:failed});
-  await wait(ctx, `${text(line('failed'))}==='Failed to sendRetry' && !!${query(line('failed')+' .slot-chat-send-retry')} && !${query(line('failed')+' .next-send-glyph')}`, 'failed send is unchanged and retryable');
+  await wait(ctx, `${text(line('failed'))}==='!Failed sending' && !!${query(line('failed')+' .slot-chat-send-retry')} && !!${query(line('failed')+' .slot-chat-send-discard')}`, 'failed send is retryable and discardable');
 });
+
+// Operator 2026-11-28: a /next/ message is Sent or Failed, never "Delivery
+// uncertain". The fixture answers with the daemon's real committed replies and
+// durable receipts; soft checks keep a full record of what each row showed.
+const sendDelivery = isolated(async ctx => {
+  const misses = [];
+  const userRow = value => `[...document.querySelectorAll('[data-pane=chat] article.slot-chat-row.is-user')]
+    .find(row => row.querySelector('.slot-chat-user-bubble')?.textContent.trim()===${JSON.stringify(value)})`;
+  const lineOf = value => `(${userRow(value)})?.querySelector('.slot-chat-send-status')`;
+  const observe = value => ctx.session.eval(`(() => { const row=${userRow(value)}, line=${lineOf(value)};
+    return { row: !!row, line: line ? { className: line.className, text: line.textContent.trim(),
+      buttons: [...line.querySelectorAll('button')].map(b => b.getAttribute('aria-label') || b.textContent.trim()) } : null,
+      uncertain: /uncertain/i.test(${query('[data-pane=chat]')}?.textContent || '') }; })()`);
+  async function expect(value, label, condition, timeoutMs = ctx.timeoutMs) {
+    try { await wait(ctx, condition, label, timeoutMs); ctx.report.ok(label, true); return true; }
+    catch { const seen = await observe(value); misses.push({ label, seen }); ctx.report.diagnostic('MISSED ' + label, seen); return false; }
+  }
+  const noUncertain = `!/uncertain/i.test(${query('[data-pane=chat]')}?.textContent || '')`;
+  const sending = value => `(() => { const line=${lineOf(value)};
+    return !!line && line.classList.contains('is-sending') && line.textContent.trim()==='Sending' && ${noUncertain}; })()`;
+  const sent = value => `(() => { const row=${userRow(value)}, line=${lineOf(value)};
+    return !!row && !!line && line.classList.contains('is-sent') && !!line.querySelector('.check') && ${noUncertain}; })()`;
+  const failed = value => `(() => { const line=${lineOf(value)}; if (!line?.classList.contains('is-failed')) return false;
+    const glyph=line.querySelector('.next-send-glyph.alert'), buttons=[...line.querySelectorAll('button')];
+    const retry=line.querySelector('.slot-chat-send-retry'), discard=line.querySelector('.slot-chat-send-discard');
+    const label=[...line.childNodes].filter(n => n.nodeType===3).map(n => n.nodeValue).join('').trim();
+    return glyph?.textContent==='!' && label==='Failed sending' && buttons.length===2 && buttons[0]===retry && buttons[1]===discard
+      && retry.getAttribute('aria-label')==='Retry sending' && discard.getAttribute('aria-label')==='Cancel and delete'
+      && !retry.textContent.trim() && !discard.textContent.trim() && ${noUncertain}; })()`;
+  const requestOf = async value => (await waitCall(ctx, r => r.verb === 'send' && r.text === value)).request_id;
+  const queried = (id, after = 0) => calls(ctx).slice(after).some(r => r.verb === 'send.receipt.get' && r.request_id === id && r.to_stream_id === 'local:' + A);
+  async function expectQuery(id, label, after = 0) {
+    const limit = Date.now() + ctx.timeoutMs;
+    while (Date.now() < limit && !queried(id, after)) await sleep(100);
+    if (queried(id, after)) ctx.report.ok(label, true);
+    else { misses.push({ label }); ctx.report.diagnostic('MISSED ' + label, { calls: calls(ctx).filter(r => r.verb !== 'send').length }); }
+  }
+  async function reconnect() {
+    // The web host reconnects by itself; the store hears it as __reconnect.
+    await command(ctx, { drop_clients: true });
+  }
+  await ctx.session.eval(`(() => {
+    window.__deliveryUncertainSeen = false;
+    const check = value => { if (/delivery uncertain/i.test(value || '')) window.__deliveryUncertainSeen = true; };
+    const observer = new MutationObserver(records => { for (const record of records) {
+      check(record.oldValue); check(record.target?.textContent);
+      for (const node of record.addedNodes) check(node.textContent);
+      for (const node of record.removedNodes) check(node.textContent);
+    } });
+    observer.observe(document.body, {subtree:true,childList:true,characterData:true,characterDataOldValue:true});
+    window.__deliveryUncertainObserver = observer; return true;
+  })()`);
+  await select(ctx, A);
+
+  // 1. Draft-stuck: not_landed with action_committed is a real failure.
+  const stuck = 'Chat tools stuck draft';
+  await send(ctx, 'chat', stuck);
+  const stuckFirst = await requestOf(stuck);
+  await command(ctx, { result: stuck });
+  if (await expect(stuck, 'not_landed with action_committed shows Failed sending with Retry and X', failed(stuck))) {
+    const before = calls(ctx).length;
+    await ctx.session.eval(`${lineOf(stuck)}.querySelector('.slot-chat-send-retry').click(); true`);
+    const retry = await waitCall(ctx, r => r.verb === 'send' && r.text === stuck && r.request_id !== stuckFirst);
+    ctx.report.ok('Retry of a known failure sends a new request id', !!retry && calls(ctx).length > before);
+    await command(ctx, { result: stuck });
+    await expect(stuck, 'retried draft-stuck send is Failed again', failed(stuck));
+    const quiet = calls(ctx).length;
+    await ctx.session.eval(`${lineOf(stuck)}.querySelector('.slot-chat-send-discard').click(); true`);
+    await expect(stuck, 'X removes the failed message at once', `!(${userRow(stuck)})
+      && !Object.values(window.PentacleChatStore.getState().optimisticSends || {}).some(s => s.text === ${JSON.stringify(stuck)})`, 2000);
+    await sleep(1500);
+    ctx.report.ok('X sends nothing to the daemon', calls(ctx).length === quiet, calls(ctx).slice(quiet));
+  }
+
+  // 2. Committed, never recorded durably: Sending, then Failed after a reconnect.
+  const lost = 'Chat tools pending lost';
+  await send(ctx, 'chat', lost);
+  const lostId = await requestOf(lost);
+  await command(ctx, { result: lost });
+  await expect(lost, 'committed-pending reply shows Sending', sending(lost));
+  await expectQuery(lostId, 'committed-pending reply queries send.receipt.get');
+  await sleep(1500);
+  await expect(lost, 'no receipt before a reconnect stays Sending', sending(lost), 2000);
+  const lostCalls = calls(ctx).length;
+  await reconnect();
+  await expectQuery(lostId, 'reconnect re-queries the receipt', lostCalls);
+  await expect(lost, 'no receipt after a reconnect is Failed', failed(lost));
+
+  // 3. Committed, then the durable receipt proves landing: Sent.
+  const landed = 'Chat tools pending landed';
+  await send(ctx, 'chat', landed);
+  const landedId = await requestOf(landed);
+  await command(ctx, { receipt: { [landed]: 'landed' } });
+  await command(ctx, { result: landed });
+  await expectQuery(landedId, 'landed lookup uses the send identity');
+  await expect(landed, 'landed receipt shows Sent well before the proof bound', sent(landed), 10000);
+
+  // 4. Still accepted past the daemon's 20 s bound: Sent, and still followed.
+  const bound = 'Chat tools pending bound', later = 'Chat tools pending later';
+  for (const value of [bound, later]) {
+    await send(ctx, 'chat', value);
+    await command(ctx, { receipt: { [value]: 'accepted' } });
+    await command(ctx, { result: value });
+  }
+  const sentAt = Date.now();
+  await expect(bound, 'accepted receipt shows Sending inside the bound', sending(bound));
+  await sleep(Math.max(0, 8000 - (Date.now() - sentAt)));
+  await expect(bound, 'still Sending 8 s after the reply', sending(bound), 1000);
+  await expect(bound, 'still accepted after the 20 s bound shows Sent', sent(bound), 40000);
+  await expect(later, 'second accepted send is Sent after the bound', sent(later), 40000);
+  ctx.report.note('Sent after ' + Math.round((Date.now() - sentAt) / 1000) + ' s');
+  await command(ctx, { result: bound, frame: { delivery: 'not_landed', state: 'not_landed', reason: 'active_draft' } });
+  await expect(bound, 'a later not_landed frame turns a Sent row Failed', failed(bound));
+  await command(ctx, { receipt: { [later]: 'not_landed' } });
+  await reconnect();
+  await expect(later, 'a later not_landed receipt (after reconnect) turns a Sent row Failed', failed(later));
+
+  await expect(later, 'no row ever shows Delivery uncertain', `${noUncertain} && !window.__deliveryUncertainSeen`, 1000);
+  await ctx.session.eval('window.__deliveryUncertainObserver.disconnect(); true');
+  ctx.report.ok('every /next/ send ends Sent or Failed with the agreed affordances', misses.length === 0, misses);
+}, { width: 1440 });
 
 const phone = isolated(async ctx => {
   await select(ctx, A);
@@ -458,4 +580,4 @@ const phone = isolated(async ctx => {
   await wait(ctx, shown('[data-pane=chat] .slot-chat-send-status .stream'), 'phone send status visible');
 }, { width: 440 });
 
-module.exports = { switching, head, renaming, deleting, headerTools, headerCover, headerSnapshot, headerBareSnapshot, unread, work, sendStatus, phone };
+module.exports = { switching, head, renaming, deleting, headerTools, headerCover, headerSnapshot, headerBareSnapshot, unread, work, sendStatus, sendDelivery, phone };

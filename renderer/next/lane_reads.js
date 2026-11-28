@@ -378,22 +378,16 @@ function createLaneReads({ show, now = () => Date.now() } = {}) {
           hold(entry, entry.waitingReply.reply, entry.waitingReply.revision);
           continue;
         }
-        const revisionChanged = oldRevision !== nextRevision;
+        if (oldRevision === nextRevision) continue;
         restart(entry, {
-          countRevision: revisionChanged,
           preserveReply: entry.detailRevision === nextRevision,
-          resetRestarts: !revisionChanged,
         });
         continue;
       }
 
       if (entry.status === 'loading') {
-        const revisionChanged = oldRevision !== nextRevision;
-        restart(entry, {
-          countRevision: revisionChanged,
-          preserveReply: !revisionChanged && entry.detailRevision === nextRevision,
-          resetRestarts: false,
-        });
+        if (oldRevision === nextRevision) continue;
+        restart(entry, { preserveReply: false });
       } else {
         const revisionChanged = oldRevision !== nextRevision;
         if (revisionChanged) {

@@ -851,10 +851,8 @@ class _WorkLanesStoreMixin:
             updates = [{"update_id": e["update_id"], "kind": e["update_kind"],
                         "event_id": e["publication_event_id"], "ts": e["created_at"],
                         "source_id": e["source_id"]} for e in events if e.get("update_kind")]
-            prepare_hues_conn(conn, [lane_id])
             row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id,
                        external_config=getattr(self, "external_work_config", None), ids_snapshot=snapshot)), None)
-            lane = lane_row_conn(conn, lane_id, snapshot)
             internal_members = row["_members"] if row is not None else members_conn(conn, lane, snapshot)
             # Public Store members retain the observation contract. Projection
             # keeps its private last-good/freshness inputs in _projection_row.
@@ -865,7 +863,7 @@ class _WorkLanesStoreMixin:
                     "_projection_row": row, "_work_index": index_status_conn(conn),
                     "_trail_events": trail_events_conn(conn, lane_id), "_unblocks": unblocks_conn(conn)}
         def coherent(conn):
-            with hue_transaction(conn):
+            with hue_transaction(conn, begin="BEGIN"):
                 return _op(conn)
         return await self.submit(coherent)
 
@@ -906,24 +904,11 @@ class _WorkLanesStoreMixin:
         """Spec IDs the due worked-time census reads; no enriched projection."""
         return await self.submit(work_lane_census_ids_conn)
 
-    async def work_lane_snapshot(self, *, include_done: bool = False,
-                                 select_rows: Callable | None = None):
-        """Select wire rows before lazy allocation, in one coherent writer turn.
-
-        The projection supplies a pure selection function; all rows remain in
-        the snapshot for uncapped inventory counts and membership aggregates.
-        """
+    async def work_lane_snapshot(self, *, include_done: bool = False):
+        """Read rows and index status in one coherent transaction."""
         def _op(conn):
-            with hue_transaction(conn):
+            with hue_transaction(conn, begin="BEGIN"):
                 rows = work_lane_rows_conn(conn, include_done=include_done, external_config=getattr(self, "external_work_config", None))
-                if select_rows is not None:
-                    selected = select_rows(rows)
-                    prepare_hues_conn(conn, [row["lane_id"] for row in selected])
-                    # Authorized collider repair can affect an existing colour
-                    # outside this page; refresh colours without allocating it.
-                    hues = dict(conn.execute("SELECT lane_id,hue FROM v2_assistant_composite_lanes"))
-                    for row in rows:
-                        row["hue"] = hues.get(row["lane_id"])
                 return rows, index_status_conn(conn)
         return await self.submit(_op)
 

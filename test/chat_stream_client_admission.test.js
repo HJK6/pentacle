@@ -214,3 +214,14 @@ test('wrong correlation, non-send error and timeout cannot grant a send retry',a
  const q=command('send','wrong-type');client._handleCommandResponse({...refusal('wrong-type'),type:'rename.error'});await assert.rejects(q);
  t.mock.timers.tick(1000);assert.equal(sent.length,2);
 });
+
+test('late send frame is relayed but cannot settle the receipt lookup with the same id', async t => {
+ const {client}=fixture(t), frames=[]; client._forwardFrame=frame=>frames.push(frame);
+ const pending=client.getSendReceipt({streamId:'test:chat',requestId:'same-id'});
+ const send={type:'send.result',request_id:'same-id',delivery:'committed_pending_proof'};
+ const receipt={type:'send.receipt.get.ok',request_id:'same-id',found:false,receipts:[]};
+ assert.equal(client._handleCommandResponse(send),true);
+ assert.equal(client._pending.has('same-id'),true);
+ assert.equal(client._handleCommandResponse(receipt),true);
+ assert.deepEqual(await pending,receipt); assert.deepEqual(frames,[send]);
+});

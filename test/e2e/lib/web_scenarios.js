@@ -652,6 +652,7 @@ const SCENARIOS = [
   ['next-chats-unread', require('./next_chat_tools_scenarios').unread],
   ['next-chats-working', require('./next_chat_tools_scenarios').work],
   ['next-chats-send', require('./next_chat_tools_scenarios').sendStatus],
+  ['next-send-delivery', require('./next_chat_tools_scenarios').sendDelivery],
   ['next-chats-phone', require('./next_chat_tools_scenarios').phone],
   ['next-fluid-rail', require('./next_scenarios').fluidRail],
   ['next-fluid-assistant-switch', require('./next_scenarios').fluidBartSwitch],
