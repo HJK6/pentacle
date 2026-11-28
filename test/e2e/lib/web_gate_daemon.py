@@ -224,7 +224,11 @@ else:
                         else:
                             raise ValueError('unknown client seam action')
                         await emitter.emit_if_changed(immediate=True)
-                        scratch.joinpath('client-seam-command.done').write_text(action)
+                        # The browser reads the marker as soon as it exists.
+                        done = scratch / 'client-seam-command.done'
+                        temporary = done.with_suffix('.done.tmp')
+                        temporary.write_text(action)
+                        temporary.replace(done)
                     await asyncio.sleep(0.05)
             finally:
                 if emitter._flush_task is not None:
