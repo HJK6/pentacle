@@ -7246,14 +7246,48 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         The connection keeps its delivery lookup across unrelated local writes.
         A caller's outer transaction always gets a private lookup instead.
         """
-        if not stream_id or limit <= 0:
+        read = self._session_event_page_reader(
+            stream_id, before_daemon_seq=before_daemon_seq, limit=limit,
+            generation=generation, after_daemon_seq=after_daemon_seq,
+        )
+        if read is None:
             return []
+
+        def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            shared = not conn.in_transaction
+            conn.execute("SAVEPOINT session_history_snapshot")
+            try:
+                newest_first = read(conn)
+                if newest_first is None:
+                    return []
+                deliveries = self._history_deliveries(conn, shared)
+                try:
+                    return list(reversed(_project_session_events_conn(
+                        conn, newest_first, deliveries=deliveries)))
+                finally:
+                    deliveries.reuse = None
+            finally:
+                conn.execute("RELEASE session_history_snapshot")
+
+        return await self.submit(snapshot)
+
+    def _session_event_page_reader(
+        self,
+        stream_id: str,
+        *,
+        before_daemon_seq: int | None,
+        limit: int,
+        generation: str | None,
+        after_daemon_seq: int | None,
+    ) -> Callable[[sqlite3.Connection], list[dict[str, Any]] | None] | None:
+        if not stream_id or limit <= 0:
+            return None
 
         host, separator, session_name = str(stream_id or "").partition(":")
         if not separator or not host or not session_name:
-            return []
+            return None
 
-        def _op(conn: sqlite3.Connection, shared: bool) -> list[dict[str, Any]]:
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]] | None:
             where = "t.stream_id = ? AND t.session_created_at = s.created_at"
             params: list[Any] = [host, session_name, stream_id]
             if generation is not None:
@@ -7264,7 +7298,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     (host, session_name, generation),
                 ).fetchone()
                 if proof is None:
-                    return []
+                    return None
                 where = "t.stream_id = ? AND t.session_created_at = ?"
                 params = [stream_id, proof[0]]
             if before_daemon_seq is not None:
@@ -7298,19 +7332,45 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     # value here as on its live broadcast (append_session_event).
                     event["daemon_seq"] = int(row["event_id"])
                     newest_first.append(event)
-            deliveries = self._history_deliveries(conn, shared)
-            try:
-                return list(reversed(_project_session_events_conn(
-                    conn, newest_first, deliveries=deliveries)))
-            finally:
-                deliveries.reuse = None
+            return newest_first
+
+        return read
+
+    async def fetch_session_event_tail_for_proof(
+        self, stream_id: str, *, after_daemon_seq: int, limit: int, generation: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read bounded proof rows in the current or requested lifecycle."""
+        from tell_proof import delivery_wire, input_origin
+
+        read = self._session_event_page_reader(
+            stream_id, before_daemon_seq=None, limit=limit, generation=generation,
+            after_daemon_seq=after_daemon_seq,
+        )
+        if read is None:
+            return []
 
         def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             shared = not conn.in_transaction
+            deliveries = None
             conn.execute("SAVEPOINT session_history_snapshot")
             try:
-                return _op(conn, shared)
+                events = []
+                for row in read(conn) or []:
+                    event = _strip_reserved_daemon_notice(row)
+                    if event.get("kind") == "TELL":
+                        # History uses the full wire for non-peer native TELLs.
+                        wire = delivery_wire(event)
+                        if wire != event.get("text"):
+                            if deliveries is None:
+                                deliveries = self._history_deliveries(conn, shared)
+                            origin = input_origin(conn, event, event["daemon_seq"], deliveries=deliveries)
+                            if origin["kind"] != "peer":
+                                event["text"] = wire
+                    events.append(event)
+                return list(reversed(events))
             finally:
+                if deliveries is not None:
+                    deliveries.reuse = None
                 conn.execute("RELEASE session_history_snapshot")
 
         return await self.submit(snapshot)
