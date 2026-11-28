@@ -19,6 +19,7 @@ import {
   renderStreamTranscript,
   renderTranscriptTimelineHtml,
   renderTranscriptItemHtml,
+  replaceTranscriptHtml,
   mountSlotTranscript,
   type ViewChrome,
 } from '../renderer/src/shared_transcript_view';
@@ -480,6 +481,25 @@ test('consecutive subagents and answers group with accessible expandable bodies'
   assert.ok(answers);
   assert.match(answers!.querySelector('summary')!.getAttribute('aria-label') || '', /2 answered questions/);
   assert.match(answers!.textContent || '', /Keep this note/);
+});
+
+test('an opened group of agent reports or answers stays open as the group grows', () => {
+  const agent = (n: number) => assistantItem({ id: `agent-${n}`, timestamp: `2026-09-26T10:00:0${n}Z`, tone: 'agent', displayRule: 'bubble:agent', label: `v2-${n}`, text: `GATE — step ${n}` });
+  const answer = (n: number) => userItem({ id: `answer-${n}`, timestamp: `2026-09-26T10:01:0${n}Z`, eventCase: 'agent-question-answer', text: `Operator answered: ${n}` });
+  const html = (agents: number, answers: number) => renderTranscriptTimelineHtml({ streamId: STREAM, transcriptItems: [
+    ...Array.from({ length: agents }, (_, i) => agent(i + 1)), ...Array.from({ length: answers }, (_, i) => answer(i + 1)),
+  ] } as never, CHROME);
+  const { container } = newDom();
+  replaceTranscriptHtml(container, html(2, 2));
+  container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!.open = true;
+  container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-answers')!.open = true;
+  replaceTranscriptHtml(container, html(3, 3));
+  const group = container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!;
+  assert.match(group.querySelector('summary')!.getAttribute('aria-label') || '', /3 subagent updates/);
+  assert.equal(group.open, true, 'a third agent report does not close the group');
+  assert.equal(container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-answers')!.open, true, 'a third answer does not close the answers');
+  replaceTranscriptHtml(container, renderTranscriptTimelineHtml({ streamId: 'other:stream', transcriptItems: [agent(1), agent(2), agent(3)] } as never, CHROME));
+  assert.equal(container.querySelector<HTMLDetailsElement>('details.slot-chat-v3-subagent-group')!.open, false, 'another chat starts closed');
 });
 
 test('bubble:assistant renders an assistant card with escaped text', () => {

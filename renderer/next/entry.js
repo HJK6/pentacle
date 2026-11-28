@@ -292,8 +292,9 @@ function paintWorking() {
     draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnState?.(s.stream_id) : undefined,
       s ? store.getWorkingElapsedMs?.(s.stream_id, now) : null, now));
   };
-  tick(a, showAssistantWorking);
-  for (const card of Object.values(cards)) tick(card.session(), card.showWorking);
+  // Only times on screen are counted; one a pane covers is brought up to date when it returns.
+  if (!assistant.hidden) tick(a, showAssistantWorking);
+  for (const card of Object.values(cards)) if (!card.element.hidden) tick(card.session(), card.showWorking);
   // Wake just past the next whole second of a running time, so it steps evenly.
   window.clearTimeout(workingTimer);
   const wait = clock.untilNextSecond(now);
@@ -445,7 +446,7 @@ async function showEarlier(element) {
   if (!remaining()) {
     if (!historyReads.hasOlder(id)) return;
     pane.loading = true;
-    try { await historyReads.loadOlder(id, () => remaining() > 0); }
+    try { await historyReads.loadOlder(id, () => remaining() > 0, () => element.dataset.streamId === id); }
     catch (error) { console.warn('[next] earlier messages failed:', error?.message || error); }
     finally { pane.loading = false; }
     if (element.dataset.streamId !== id) return;
@@ -595,9 +596,13 @@ function renderPopover() {
     limitsControl.update({ limits: store.getLimits(), hosts: state.hosts });
   }
 }
+// The chats on screen. One a pane covers is released, and read again when it returns.
+function onScreen(assistantShown, ids) {
+  return [assistantShown ? assistantSession()?.stream_id : null, ...ids].filter(id => id && id !== NEW_CHAT);
+}
 function render() {
   const a = assistantSession();
-  historyReads.focus([a?.stream_id, ...Object.values(cards).map(card => card.id).filter(id => id !== NEW_CHAT)]);
+  historyReads.focus(onScreen(!assistant.hidden, Object.values(cards).filter(card => !card.element.hidden).map(card => card.id)));
   paintTranscript(assistantInner, a?.stream_id); mountAssistantComposer(a?.stream_id);
   const assistantName = a?.assistant_display_name || a?.display_name || a?.title || 'Assistant'; brand.setAttribute('aria-label', assistantName); brand.title = assistantName;
   assistantTitle.textContent = assistantName;
@@ -618,6 +623,7 @@ function syncLayout(admitted = null) {
   assistant.classList.toggle('assistant-overlay', overlay);
   keepButton.hidden = !overlay;
   for (const [key, card] of Object.entries(cards)) if (card.id !== state.layout[key]) card.saveHistory();
+  historyReads.focus(onScreen(!assistant.hidden, Object.keys(cards).filter(key => visible.cards.includes(key)).map(key => state.layout[key])));
   layingOut = true;
   for (const [key, card] of Object.entries(cards)) {
     const id = state.layout[key];
@@ -871,7 +877,7 @@ store.subscribe(() => { questionsControl.update({ sessions: sessions() }); rende
 laneListeners.add(() => { questionsControl.update({ inventory: laneInventory }); lanesControl?.render(); render(); });
 laneReads.subscribe(() => render());
 let recoveryEpoch = null; let recoveryPending = false; let readySignals = 0;
-cc.onChatStreamFrame(frame => { beforeStoreFrame(frame); store.applyFrame(frame); applyLaneFrame(frame); historyReads.setConnected(laneConnection.connected); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
+cc.onChatStreamFrame(frame => { beforeStoreFrame(frame); store.applyFrame(frame); applyLaneFrame(frame); historyReads.setConnected(laneConnection.connected); if (frame?.type === '__reconnect') historyReads.reconnected(); questionNotifications.frame(frame); if (frame?.type === 'hosts.stats' && frame.hosts) state.hosts = frame.hosts; if (state.popover === 'limits') renderPopover(); if (frame?.connected === true || frame?.type === '__reconnect') { readySignals++; if (recoveryEpoch !== null) void loadSnapshot().catch(() => {}); } });
 async function loadSnapshot() {
   if (recoveryPending) return; recoveryPending = true;
   const signal = readySignals;

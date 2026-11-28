@@ -682,7 +682,8 @@ function renderSubagents(items: PentacleTranscriptItem[], options: TranscriptRen
   if (items.length === 1) return renderSubagent(items[0], options);
   const blockers = items.filter(item => statusFromText(item.text || '') === 'BLOCKER').length;
   const last = items[items.length - 1];
-  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, last.id, 'subagent-group']));
+  // Keyed by its first report only, so an opened group stays open as reports join it.
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, 'subagent-group']));
   return `<details class="slot-chat-v3-subagent-group" data-disclosure-key="${key}" data-transcript-key="${key}">
     <summary title="${escapeHtml(last.timestamp || '')}" aria-label="Show ${items.length} subagent updates">
       <span class="slot-chat-v3-group-dots" aria-hidden="true">${items.slice(0, 3).map(item => `<i class="slot-chat-v3-dot is-${escapeHtml(statusFromText(item.text || '').toLowerCase() || 'neutral')}"></i>`).join('')}</span>
@@ -706,7 +707,7 @@ function renderAnswers(items: PentacleTranscriptItem[], options: TranscriptRende
     const [head, ...tail] = raw.split('\n');
     return [{ item, answer: head.replace(/^Operator answered:\s*/i, '').trim() || head.trim(), note: tail.join('\n').replace(/^\s*Note:\s*/i, '').trim(), header: '' }];
   });
-  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, items[items.length - 1].id, 'answers']));
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, 'answers']));
   return `<details class="slot-chat-v3-answers" data-disclosure-key="${key}" data-transcript-key="${key}">
     <summary title="${escapeHtml(items[items.length - 1].timestamp || '')}" aria-label="Show ${answers.length} answered question${answers.length === 1 ? '' : 's'}">
       <span class="slot-chat-v3-answer-check" aria-hidden="true">✓</span><span>You answered ${answers.length} question${answers.length === 1 ? '' : 's'}</span>

@@ -135,6 +135,24 @@ async function openedRowStays() {
   inner.innerHTML = real;
   return result;
 }
+// Runs in the page. An opened group of agent reports, and of answers, stays open
+// when the transcript repaints with one more of each.
+function openGroupGrows() {
+  const inner = document.querySelector('.card .thread-inner');
+  const real = inner.innerHTML;
+  const view = window.PentacleChatView;
+  const agent = n => ({ id: 'agent-' + n, text: 'GATE — step ' + n, displayRule: 'bubble:agent', tone: 'agent', label: 'v2-gate' + n, timestamp: '2026-01-01T00:00:0' + n + 'Z' });
+  const answer = n => ({ id: 'answer-' + n, text: 'Operator answered: ' + n, isUser: true, eventCase: 'agent-question-answer', timestamp: '2026-01-01T00:01:0' + n + 'Z' });
+  const html = count => view.renderTranscriptTimelineHtml({ streamId: 'local:layout', transcriptItems: [
+    ...Array.from({ length: count }, (_, i) => agent(i + 1)), ...Array.from({ length: count }, (_, i) => answer(i + 1)) ] });
+  view.replaceTranscriptHtml(inner, html(2));
+  for (const details of inner.querySelectorAll('details.slot-chat-v3-subagent-group, details.slot-chat-v3-answers')) details.open = true;
+  view.replaceTranscriptHtml(inner, html(3));
+  const group = inner.querySelector('details.slot-chat-v3-subagent-group'), answers = inner.querySelector('details.slot-chat-v3-answers');
+  const result = { label: group?.querySelector('summary')?.getAttribute('aria-label') || '', group: !!group?.open, answers: !!answers?.open };
+  inner.innerHTML = real;
+  return result;
+}
 const shortCells = layout => JSON.stringify(layout.short) === JSON.stringify(['0', 'lead']) && layout.headLines === 1 && layout.shortLines === 1
   && layout.shortWrap.every(value => value === (layout.frame > 520 ? 'nowrap' : 'normal'));
 async function chatCard(ctx) {
@@ -181,6 +199,8 @@ async function chatCard(ctx) {
   }
   report.ok('an agent row opened at the latest message stays where it was clicked', opened.atLatest && opened.grew > 400 && Math.abs(opened.after - opened.before) < 2, opened);
   report.ok('code and lists stand apart from the text above them', opened.codeGap >= 8 && opened.listGap >= 8, opened);
+  const grows = await session.eval(`(${openGroupGrows})()`);
+  report.ok('an opened group of agent reports or answers stays open as one more arrives', /3 subagent updates/.test(grows.label) && grows.group && grows.answers, grows);
   await session.click('[aria-label="Close"]'); report.ok('closing the card returns to Assistant', await session.eval("document.querySelector('.card').hidden && !document.querySelector('.pane').hidden"));
   await session.click('.chats-button'); report.ok('closing the card leaves the session in the list', await session.eval("!!document.querySelector('.popover [data-stream-id=\"local:web-gate-survivor\"]')"));
   report.ok('closing the card does not close its daemon session', await session.eval("window.cc.getChatStreamState().then(s=>(s.sessions||[]).some(x=>x.stream_id==='local:web-gate-survivor' && x.status!=='closed' && !x.closed_at))"));

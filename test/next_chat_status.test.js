@@ -104,3 +104,15 @@ edge('assistant composite suppresses a known model and effort in the shared form
   assert.equal(modelAndEffort({...metadata,session_kind:'session'}),'Opus 5.5 · high');
   assert.equal(modelAndEffort({...metadata,session_kind:'assistant_composite'}),'');
 });
+
+edge('a report exactly 2.5 s off keeps the running clock; only a larger disagreement moves it', () => {
+  const {workingClock}=status;
+  const row={stream_id:'fixture:a', session_generation:'a', working:true};
+  const turn={phase:'working', optimisticId:'send-a', sentAt:1};
+  const held=workingClock();
+  assert.equal(held.elapsed(row,null,turn,7000,10000),'7s');
+  assert.equal(held.elapsed(row,null,turn,10500,11000),'8s','a disagreement of exactly 2.5 s is heartbeat delay');
+  const moved=workingClock();
+  assert.equal(moved.elapsed(row,null,turn,7000,10000),'7s');
+  assert.equal(moved.elapsed(row,null,turn,10501,11000),'10s','beyond 2.5 s the report wins');
+});

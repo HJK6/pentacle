@@ -56,18 +56,22 @@ function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, opt
 // paging backwards with beforeDaemonSeq. One page is one daemon window.
 const HISTORY_PAGE_EVENTS = 500;
 
-// Seed the older-history cursor from the first (newest-window) load. A window
-// shorter than a page means the stream has nothing older. Reconnect refetches
-// keep an existing deeper cursor: the store still holds those older rows.
+// Seed the older-history cursor from the newest-window load. A window shorter
+// than a page means the stream has nothing older. Refetches keep an existing
+// cursor, which may be deeper: the store still holds those older rows. A seed
+// that found nothing older before any page was read is replaced, so an empty
+// first reply cannot hide a boundary a retry finds.
 function recordInitialPaging(streamState, id, reply) {
   const paging = streamState.historyPaging || (streamState.historyPaging = {});
-  if (paging[id]) return;
+  const current = paging[id];
+  if (current && (!current.exhausted || current.paged || current.loading)) return;
   const received = Number.isFinite(reply?.received) ? reply.received : null;
   const cursor = Number.isFinite(reply?.nextBeforeDaemonSeq) ? reply.nextBeforeDaemonSeq : null;
   paging[id] = {
     cursor,
     exhausted: cursor === null || (received !== null && received < HISTORY_PAGE_EVENTS),
     loading: false,
+    paged: false,
   };
 }
 
@@ -78,11 +82,15 @@ function historyHasOlder(streamState, streamId) {
 
 // Fetch older daemon pages until `hasNewRows()` reports a revealed message row or
 // the stream is exhausted. `expand(streamId)` lifts the store's per-stream cap
-// before the first page so the older rows are kept.
+// before the first page so the older rows are kept. The walk stops once
+// `stillWanted(streamId)` says the reader left, the connection drops, or a fresh
+// read replaced this paging.
 async function requestOlderHistory(streamState, streamId, cc, logger = console, options = {}) {
   const id = String(streamId || '');
   const paging = streamState?.historyPaging?.[id];
   if (!paging || paging.exhausted || paging.loading || !streamState.connected) return;
+  const current = () => streamState.connected && streamState.historyPaging?.[id] === paging
+    && (typeof options.stillWanted !== 'function' || options.stillWanted(id));
   paging.loading = true;
   options.onChange?.(id);
   options.expand?.(id);
@@ -91,10 +99,12 @@ async function requestOlderHistory(streamState, streamId, cc, logger = console, 
       const reply = await cc.requestStreamEvents({
         streamId: id, beforeDaemonSeq: paging.cursor, limit: HISTORY_PAGE_EVENTS, ...generationOf(options),
       });
+      if (!current()) return;
       if (!reply || reply.ok === false) {
         logger.warn?.('[ChatStream] older history failed:', id, reply?.error);
         return;
       }
+      paging.paged = true;
       const next = Number.isFinite(reply.nextBeforeDaemonSeq) ? reply.nextBeforeDaemonSeq : null;
       // A short or empty page is the history start.
       if (next === null || reply.exhausted) paging.exhausted = true;
