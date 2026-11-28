@@ -24,7 +24,7 @@ from work_lane_members import validate_members, validate_title
 from _shared.lane_icons import validate_icon
 from _shared.work_goals import EPIC_ID, derive_lane_id, goal_id, goal_progress, lane_work_status
 from work_lane_progress import lane_lead_lost, seat_live, seat_working, working_spec_ids
-from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
+from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn, _SPEC_ID_CHUNK,
                               effective_membership_conn, effective_membership_ids_conn,
                               effective_member_ids, enrich_goals_conn)
 from store_work_lane_episodes import (ensure_work_lane_episodes_schema, lead_reported_done_conn,
@@ -350,14 +350,20 @@ def record_latest_report_conn(conn, report: dict) -> bool:
 
 
 def enrich_latest_reports_conn(conn, members: list[dict]) -> None:
-    for member in members:
-        row = conn.execute("""SELECT l.kind,l.at,l.report_id,
+    ids = list(dict.fromkeys(member["spec_id"] for member in members))
+    reports = {}
+    for start in range(0, len(ids), _SPEC_ID_CHUNK):
+        chunk = ids[start:start + _SPEC_ID_CHUNK]
+        marks = ",".join("?" for _ in chunk)
+        reports.update((row[0], row[1:]) for row in conn.execute(f"""SELECT l.spec_id,l.kind,l.at,l.report_id,
             json_extract(r.status_freshness,'$.covers_event'),
             json_extract(r.status_freshness,'$.spec_id'),
             json_extract(r.status_freshness,'$.report_id'),
             json_extract(r.status_freshness,'$.source_revisions'), r.created_at
             FROM v2_work_item_latest_report l LEFT JOIN v2_reports r USING(report_id)
-            WHERE l.spec_id=?""", (member["spec_id"],)).fetchone()
+            WHERE l.spec_id IN ({marks})""", chunk))
+    for member in members:
+        row = reports.get(member["spec_id"])
         member["_latest_event"] = {"kind": row[0], "at": row[1]} if row else None
         member["_latest_report_id"] = row[2] if row else None
         member["_latest_report_epoch"] = row[7] if row else None
@@ -721,10 +727,11 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
                                     decoded=snapshot["members"] if reuse else None,
                                     decoded_ids=set(named) if reuse else None), False
     for lane in lanes:
+        lane["_members"] = members_conn(conn, lane, snapshot)
+    enrich_latest_reports_conn(conn, [member for lane in lanes for member in lane["_members"]])
+    for lane in lanes:
         lane["_external_packets"] = external
         lane["_activity_external_known"] = external_known
-        lane["_members"] = members_conn(conn, lane, snapshot)
-        enrich_latest_reports_conn(conn, lane["_members"])
         enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
         lane["_has_work_seat"] = _has_work_seat_conn(conn, lane)

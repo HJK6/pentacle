@@ -97,7 +97,8 @@ async def test_slow_ordinary_actor_and_internal_calls_each_log_one_named_line(st
     slow = lines(caplog, "store_call_slow")
     assert [line["name"] for line in slow] == ["slow_client_op", "slow_actor_op", "slow_job_op"]
     for line in slow:
-        assert set(line) == {"name", "queue_ms", "execution_ms", "caller"}
+        assert set(line) == {"name", "queue_ms", "execution_ms", "caller", "worker"}
+        assert line["worker"] == "writer"
         assert line["execution_ms"] >= 50 and line["queue_ms"] >= 0
     assert timing.calls == 2
 
@@ -193,10 +194,11 @@ def test_hourly_line_group_totals(caplog):
         "lane_episodes": {"calls": 1, "execution_ms": 125.0},
         "closed_awaiters": {"calls": 1, "execution_ms": 125.0},
         "history_pages": {"calls": 1, "execution_ms": 125.0},
+        "wire_history_pages": {"calls": 0, "execution_ms": 0.0},
         "proof_reads": {"calls": 0, "execution_ms": 0.0},
     }
     assert line["feature_total"] == {"calls": 10, "execution_ms": 1750.0}
-    assert line["all_calls"] == {"calls": 13, "execution_ms": 2000.0}
+    assert line["all_calls"] == {"calls": 12, "execution_ms": 2000.0}
 
 
 @pytest.mark.asyncio
@@ -220,6 +222,24 @@ async def test_snapshot_and_other_notice_reads_are_named_separately(store, caplo
     assert names.count("ErrorAlerts.notice_rows.locals.read") == 1
 
 
+@pytest.mark.parametrize("worker", ["writer", "advisory", "history"])
+def test_store_hourly_bucket_excludes_post_boundary_completion(caplog, worker):
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    label = "store_call_top" if worker == "writer" else "store_read_top"
+    options = {} if worker == "writer" else {"worker": worker}
+    diag = store_call_diag.StoreCallDiag(summary_label=label, flush_send=False, **options)
+    diag.record("old", True, None, 999.0, 999.5, 1000.0)
+    assert not lines(caplog, label)
+    diag.record("new", True, None, 4598.0, 4599.0, 4600.25)
+    [old] = lines(caplog, label)
+    assert [op["name"] for op in old["top"]] == ["old"]
+    assert old["worker"] == worker
+    diag.record("next", True, None, 8200.0, 8200.0, 8200.0)
+    new = lines(caplog, label)[1]
+    assert [op["name"] for op in new["top"]] == ["new"]
+    assert [line["worker"] for line in lines(caplog, "store_call_slow")] == [worker, worker]
+
+
 def test_hourly_line_lists_top_five_by_total_execution(caplog):
     caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
     diag = store_call_diag.StoreCallDiag()
@@ -238,7 +258,7 @@ def test_hourly_line_lists_top_five_by_total_execution(caplog):
     assert top["window_s"] == 3600.0 and top["instrumentation_failures"] == 0
     # Totals reset each hour.
     diag.record("g", False, None, 1000.0 + 7200, 1000.0 + 7200, 1000.0 + 7200.5)
-    assert [op["name"] for op in lines(caplog, "store_call_top")[1]["top"]] == ["g"]
+    assert [op["name"] for op in lines(caplog, "store_call_top")[1]["top"]] == ["fast"]
 
 
 @pytest.mark.asyncio

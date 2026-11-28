@@ -499,6 +499,8 @@ class _EncodedFrame:
 
     frame_type: str
     payload: str
+    event_count: int = 0
+    wire_bytes: int = 0
 
 
 def _encode_frame(payload: Any) -> str:
@@ -645,6 +647,7 @@ def _assemble_event_frames(
         return [_EncodedFrame(
             direct_type,
             (direct_prefix + b",".join(event_json) + direct_suffix).decode("utf-8"),
+            len(events), direct_size,
         )]
 
     chunk_type = "request_stream_events.chunk"
@@ -666,7 +669,7 @@ def _assemble_event_frames(
         payload = chunk_prefix + b",".join(ordered) + chunk_suffix
         if len(payload) > STREAM_EVENTS_FRAME_BUDGET_BYTES:  # pragma: no cover
             raise RuntimeError("request_stream_events chunk exceeded its byte budget")
-        frames.append(_EncodedFrame(chunk_type, payload.decode("utf-8")))
+        frames.append(_EncodedFrame(chunk_type, payload.decode("utf-8"), len(ordered), len(payload)))
 
     for event, encoded_event in zip(reversed(events), reversed(event_json)):
         if base_size + len(encoded_event) > STREAM_EVENTS_FRAME_BUDGET_BYTES:
@@ -695,7 +698,8 @@ def _encoded_stream_events_error(request_id: Any, error: str) -> _EncodedFrame:
     }
     if request_id is not None:
         payload["request_id"] = request_id
-    return _EncodedFrame("request_stream_events.error", _json_bytes(payload).decode("utf-8"))
+    encoded = _json_bytes(payload)
+    return _EncodedFrame("request_stream_events.error", encoded.decode("utf-8"), wire_bytes=len(encoded))
 
 # v1 handshake parity: the daemon SPEAKS FIRST with an unsolicited `welcome`
 # frame the instant a client connects (v1 chat_streamd.py:19120-19139). The
@@ -5801,12 +5805,14 @@ class Server:
         if requested_chunk_limit:
             page_size = min(page_size, requested_chunk_limit)
 
+        connection = self._connection_diagnostics.get(msg.get("_client_websocket"))
         return self._stream_request_stream_events(
             stream_id=stream_id,
             request_id=msg.get("request_id"),
             limit=effective_limit,
             before_daemon_seq=before_daemon_seq,
             page_size=page_size,
+            client_kind=connection.client_kind if connection is not None else "unknown",
             **({"generation": history_generation} if recovered_history else {}),
         )
 
@@ -5836,22 +5842,38 @@ class Server:
         before_daemon_seq: int | None,
         page_size: int,
         generation: str | None = None,
+        client_kind: str = "unknown",
     ) -> Any:
         """Walk a bounded cursor page at a time, yielding wire-ready frames."""
         remaining = limit
         cursor = before_daemon_seq
         sent_frame = False
         sent_chunks = False
+        timing = RequestTiming()
+        pages = events = wire_bytes = 0
+        frame_s = 0.0
+
+        async def assemble(page, *, force_chunks):
+            nonlocal frame_s
+            started = _monotonic()
+            try:
+                return await asyncio.to_thread(_assemble_event_frames, page, request_id=request_id,
+                                               stream_id=stream_id, force_chunks=force_chunks)
+            finally:
+                frame_s += _monotonic() - started
+
         try:
             while remaining > 0 and page_size > 0:
                 quota = min(page_size, remaining)
                 query_limit = quota + (1 if remaining > quota else 0)
-                rows = await self.store.fetch_session_event_page(
-                    stream_id,
-                    before_daemon_seq=cursor,
-                    limit=query_limit,
-                    **({"generation": generation} if generation is not None else {}),
-                )
+                token = request_timing.set(timing)
+                try:
+                    rows = await self.store.fetch_session_event_page(
+                        stream_id, before_daemon_seq=cursor, limit=query_limit, history=True,
+                        **({"generation": generation} if generation is not None else {}),
+                    )
+                finally:
+                    request_timing.reset(token)
                 has_more = remaining > quota and len(rows) > quota
                 page = rows[-quota:] if has_more else rows[:quota]
                 if not page:
@@ -5860,18 +5882,15 @@ class Server:
                 _page_composite = self._composite_for(stream_id)
                 if _page_composite is not None:
                     page = await _page_composite.enrich_events(page)
-                frames = await asyncio.to_thread(
-                    _assemble_event_frames,
-                    page,
-                    request_id=request_id,
-                    stream_id=stream_id,
-                    force_chunks=sent_chunks or has_more,
-                )
+                frames = await assemble(page, force_chunks=sent_chunks or has_more)
                 for frame in frames:
                     sent_frame = True
                     if frame.frame_type == "request_stream_events.chunk":
                         sent_chunks = True
                     yield frame
+                    events += frame.event_count
+                    wire_bytes += frame.wire_bytes
+                pages += 1
 
                 remaining -= len(page)
                 if not has_more:
@@ -5886,17 +5905,22 @@ class Server:
                 cursor = next_cursor
 
             if sent_chunks or not sent_frame:
-                terminal = await asyncio.to_thread(
-                    _assemble_event_frames,
-                    [],
-                    request_id=request_id,
-                    stream_id=stream_id,
-                    force_chunks=False,
-                )
+                terminal = await assemble([], force_chunks=False)
                 yield terminal[0]
+                wire_bytes += terminal[0].wire_bytes
         except Exception as exc:
             log.exception("request_stream_events failed stream_id=%s", stream_id)
-            yield await asyncio.to_thread(_encoded_stream_events_error, request_id, str(exc))
+            error = await asyncio.to_thread(_encoded_stream_events_error, request_id, str(exc))
+            yield error
+            wire_bytes += error.wire_bytes
+        finally:
+            timing.closed = True
+            request_hash = hashlib.sha256(json.dumps(request_id).encode()).hexdigest()[:16]
+            log.info("wire_history_timing %s", json.dumps({
+                "request_hash": request_hash, "client_kind": client_kind, "pages": pages,
+                "events": events, "bytes": wire_bytes, "frame_ms": round(frame_s * 1000, 3),
+                **timing.fields(),
+            }, separators=(",", ":")))
 
     def _admission_snapshot(self) -> dict[str, Any]:
         """Current holders only; no await, request data, raw identities or history."""

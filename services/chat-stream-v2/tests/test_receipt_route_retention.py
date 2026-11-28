@@ -5,6 +5,7 @@ Failure injection is at durable boundaries, never a mocked successful archive.
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -82,6 +83,62 @@ async def admit(store, identity):
         body="question", attachments=[], reply_to_message_id=None, reply_to_question_id=None,
         actor_stream_id="operator:synthetic", direct_primary=True,
         direct_target_stream_id="fixture:backend", direct_target_generation=root["session_generation"])
+
+
+def test_writer_cache_setting_readback_is_connection_local(tmp_path):
+    async def run():
+        store = running(tmp_path)
+        try:
+            def cache_size(conn):
+                return conn.execute("PRAGMA main.cache_size").fetchone()[0]
+
+            with closing(sqlite3.connect(":memory:")) as defaults:
+                assert await store.read(cache_size) == cache_size(defaults)
+            assert await store.submit(cache_size) == -65536
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_writer_cache_change_leaves_mmap_and_durability_default(tmp_path):
+    async def run():
+        store = running(tmp_path)
+        try:
+            def settings(conn):
+                return tuple(conn.execute(f"PRAGMA {name}").fetchone()[0]
+                             for name in ("mmap_size", "journal_mode", "synchronous"))
+
+            assert await store.submit(settings) == (0, "wal", 1)
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_cache_tuning_preserves_wal_reader_and_retained_receipt_parity(tmp_path):
+    async def run():
+        store = running(tmp_path)
+        try:
+            await append(store)
+            hot = await append(store, "still-hot", stamp=NOW.isoformat())
+            retained = await store.get_send_receipt(TARGET, "send-one")
+            assert retained["receipt_id"] == "receipt-send-one"
+
+            def read_hot(conn):
+                return [tuple(row) for row in conn.execute(
+                    "SELECT rowid, state FROM v2_send_receipts WHERE request_id=?", ("still-hot",))]
+
+            expected = [(hot["receipt_rowid"], "landed")]
+            assert await store.read(read_hot) == expected
+            assert (await move(store))["moved"] == 1
+            assert await hot_count(store) == 1
+            assert await store.get_send_receipt(TARGET, "send-one") == retained
+            assert await store.read(read_hot) == expected
+        finally:
+            store.stop()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("seconds,moved", [(-1, 1), (0, 1), (1, 0)])

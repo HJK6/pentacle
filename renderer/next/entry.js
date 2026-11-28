@@ -38,6 +38,7 @@ const { createReadingWidth } = require('./reading_width');
 const { createMicrophonePreference } = require('./microphone');
 const { mountSettingsFields } = require('./settings_fields');
 const { trackScroll } = require('./scroll_activity');
+const { createShellBridge } = require('./shell_bridge');
 const { FIRST_ROWS, PAGE_ROWS, newTailRows, createChatHistory } = require('./chat_history');
 const store = window.PentacleChatStore;
 const view = window.PentacleChatView;
@@ -92,6 +93,10 @@ let settingsFields = null;
 const microphone = createMicrophonePreference(window, storage, () => settingsFields?.paintMicrophone());
 trackScroll(document);
 const seen = createSeenMarks(storage);
+const shellTransport = window.pentacleShell;
+const shellBridge = createShellBridge(shellTransport, {
+  navigate: showShellView, repaint: paintChatStatus, nextFrame: callback => requestAnimationFrame(callback),
+});
 const clock = workingClock();
 const pendingNames = new Map();
 const pendingDeletes = new Set();
@@ -204,13 +209,20 @@ let assistantComposerControl = null; let assistantComposerStream = null; let lim
 let unmountQuestionList = null;
 function mountAssistantComposer(id) { if (!id || id === assistantComposerStream) return; assistantComposerControl?.dispose(); assistantComposerStream = id; assistantComposerControl = mountComposer({ host: assistantComposer, transcript: assistantVoice, streamId: id, drafts, cc, chatStore: store, env: window, recorderOptions: microphone.recorderOptions }); }
 function closePopover() {
+  if (shellBridge && (state.popover === 'chats' || state.popover === 'questions')) {
+    queueMicrotask(paintChatStatus);
+  }
   settingsFields?.destroy(); settingsFields = null;
   chatList?.destroy(); chatList = null;
   if (switchSeat) cards[switchSeat].title.setAttribute('aria-expanded', 'false');
   switchSeat = null;
   chatsButton.setAttribute('aria-expanded', 'false');
   unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
-function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; popover.classList.remove('chat-switch'); ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
+function showPopover(name) { if (state.popover === name) return; closePopover(); state.popover = name; popover.hidden = false; popover.classList.remove('chat-switch'); ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
+function togglePopover(name) {
+  if (state.popover === name) closePopover();
+  else showPopover(name);
+}
 function sessions() { return store.getState().sessions || []; }
 const isClosed = s => !!s.closed || s.status === 'closed' || s.session_state === 'closed' || s.state === 'closed';
 function visibleChats() {
@@ -290,16 +302,20 @@ function beforeStoreFrame(frame) {
     }
   }
   inventorySeen ||= rows.length > 0;
+  shellBridge?.receiveInventory();
 }
 function paintChatStatus() {
   const a = assistantSession();
   const active = new Set(Object.values(cards).filter(card => !card.element.hidden && card.id !== NEW_CHAT).map(card => card.id));
   if (a && !assistant.hidden) active.add(a.stream_id);
-  seen.update(sessions().filter(s => !hiddenClosed.has(s.stream_id)), active, !document.hidden, inventorySeen);
+  const pageVisible = shellTransport ? shellBridge?.canMarkSeen(document.hidden, state.popover) === true : !document.hidden;
+  seen.update(sessions().filter(s => !hiddenClosed.has(s.stream_id)), active, pageVisible, inventorySeen);
   const unread = visibleChats().filter(s => seen.unread(s)).length;
   if (unread) chatsButton.dataset.count = String(unread); else delete chatsButton.dataset.count;
   chatsButton.setAttribute('aria-label', unread ? 'Chats, ' + unread + ' unread' : 'Chats');
-  brand.classList.toggle('assistant-unread', assistant.hidden && seen.unread(a));
+  const assistantUnread = seen.unread(a);
+  brand.classList.toggle('assistant-unread', assistant.hidden && assistantUnread);
+  shellBridge?.publish({ chats: unread, assistant: Number(assistantUnread) });
   clock.retain(new Set(sessions().filter(s => {
     const turn = store.getTurnState?.(s.stream_id);
     return hasConfirmedWork(s, draftFor(s), turn?.phase);
@@ -839,20 +855,27 @@ function toggleChatFullScreen(key) {
   state.layout = layout.toggleFullScreen(state.layout, key, innerWidth);
   syncLayout();
 }
-brand.onclick = () => {
+function showAssistant() {
   closePopover();
   const wasOnStage = layout.fits(state.layout, innerWidth).assistant;
   const wasOverlay = state.layout.overlay;
   state.layout = layout.toAssistant(state.layout, innerWidth);
   syncLayout();
   if (!wasOnStage && !wasOverlay && !assistant.hidden && innerWidth >= layout.PHONE_WIDTH) assistantComposerControl?.focus();
-};
+}
+brand.onclick = showAssistant;
 keepButton.onclick = () => {
   state.layout = layout.keepAssistant(state.layout, innerWidth);
   syncLayout();
   if (!assistant.hidden) assistantComposerControl?.focus();
 };
-lanesButton.onclick = () => { closePopover(); state.layout = layout.fits(state.layout, innerWidth).cards.includes('lanes') ? layout.shut(state.layout, 'lanes', innerWidth) : layout.show(state.layout, 'lanes', true, innerWidth); syncLayout(); };
+function lanesVisible() { return layout.fits(state.layout, innerWidth).cards.includes('lanes'); }
+function setLanesVisible(visible) {
+  closePopover();
+  state.layout = visible ? layout.show(state.layout, 'lanes', true, innerWidth) : layout.shut(state.layout, 'lanes', innerWidth);
+  syncLayout();
+}
+lanesButton.onclick = () => setLanesVisible(!lanesVisible());
 dashboardsButton.onclick = () => {
   if (innerWidth < layout.PHONE_WIDTH) {
     closePopover();
@@ -863,6 +886,30 @@ dashboardsButton.onclick = () => {
   togglePopover('dashboards');
   dashboardsButton.setAttribute('aria-expanded', String(state.popover === 'dashboards'));
 };
+function showShellView(destination) {
+  switch (destination) {
+    case 'assistant':
+      showAssistant();
+      break;
+    case 'lanes':
+      if (lanesVisible()) closePopover();
+      else setLanesVisible(true);
+      break;
+    case 'dashboards':
+      if (innerWidth < layout.PHONE_WIDTH) {
+        if (designCard.hidden) openDesign();
+        else closePopover();
+      } else {
+        showPopover('dashboards');
+        dashboardsButton.setAttribute('aria-expanded', 'true');
+      }
+      break;
+    case 'chats':
+    case 'questions':
+      showPopover(destination);
+      break;
+  }
+}
 chatsButton.onclick = () => togglePopover('chats');
 questionsButton.onclick = () => togglePopover('questions');
 limitsButton.onclick = () => togglePopover('limits');
@@ -911,7 +958,7 @@ questionsControl = createQuestions({ document, cc, laneReads, renderLaneIcon, ge
   onOpenSpec: specId => { const placement = questionsControl.getSnapshot().list.find(item => item.placement?.specId === specId)?.placement; closePopover(); if (placement?.laneId) { openLaneTarget(placement.laneId, placement.goalId); lanesControl?.openSpec(placement.laneId, placement.goalId, specId); } },
   onOpenChat: streamId => { closePopover(); openChat(streamId); } });
 let laneRenderPending = false;
-questionsControl.subscribe(snapshot => { questionsButton.dataset.count = String(snapshot.openCount); questionsButton.setAttribute('aria-label', snapshot.openCount ? `Questions (${snapshot.openCount})` : 'Questions'); if (lanesControl && !laneRenderPending) { laneRenderPending = true; queueMicrotask(() => { laneRenderPending = false; lanesControl?.render(); }); } });
+questionsControl.subscribe(snapshot => { shellBridge?.publish({ questions: snapshot.openCount }); questionsButton.dataset.count = String(snapshot.openCount); questionsButton.setAttribute('aria-label', snapshot.openCount ? `Questions (${snapshot.openCount})` : 'Questions'); if (lanesControl && !laneRenderPending) { laneRenderPending = true; queueMicrotask(() => { laneRenderPending = false; lanesControl?.render(); }); } });
 lanesControl = mountLanesCard(lanesCard, { getState: () => ({ inventory: laneInventory, current: laneInventoryCurrent }), reads: laneReads, questions: questionsControl,
   navigation: { onClose: () => { state.layout = layout.shut(state.layout, 'lanes', innerWidth); syncLayout(); } } });
 store.subscribe(() => { questionsControl.update({ sessions: sessions() }); render(); });
@@ -954,4 +1001,5 @@ else syncLayout();
 document.addEventListener('visibilitychange', paintChatStatus);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
 document.addEventListener('selectionchange', () => { if (transcripts.some(transcript => paneFor(transcript).deferred && !selecting(transcript))) render(); });
+shellBridge?.bind();
 void loadSnapshot().catch(() => render());

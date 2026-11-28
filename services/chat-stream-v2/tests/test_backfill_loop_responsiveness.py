@@ -54,6 +54,7 @@ class _Store(SubmissionReadStoreStub):
         *,
         before_daemon_seq: int | None,
         limit: int,
+        history: bool = False,
     ) -> list[dict]:
         eligible = [
             event for event in self.events

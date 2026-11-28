@@ -83,3 +83,43 @@ def test_qa_admission_never_walks_the_tree_on_the_store_thread(tmp_path, monkeyp
             store.stop()
 
     asyncio.run(run())
+
+
+def test_warm_qa_send_reads_no_unbound_spec_bytes(tmp_path, monkeypatch, caplog) -> None:
+    _spec(tmp_path, "in_progress", SPEC.removeprefix("spec_"), SPEC)
+    _spec(tmp_path, "unknown_bucket", "pentacle__other", "spec_pentacle__other")
+    service = _service(tmp_path)
+    read = service._read_identity_input
+    reads = []
+
+    def capture(path, **kwargs):
+        result = read(path, **kwargs)
+        # Count the descriptor-bound read, including the inner call for a bound document.
+        if path.name == "spec.md" and kwargs.get("directory_fd") is not None and result[1] is not None:
+            reads.append(path.parent.name)
+        return result
+
+    monkeypatch.setattr(service, "_read_identity_input", capture)
+    caplog.set_level("INFO", logger="_shared.specs_service")
+
+    async def run():
+        store, _, _, comms, _, _ = await state()
+        try:
+            store.set_spec_identity_resolver(service.canonical_spec_identity,
+                                             service.canonical_spec_identities)
+            assert (await comms.send(send_msg("qa1")))["delivery"] == "landed"
+            assert "pentacle__other" in reads
+            reads.clear()
+            assert (await comms.send(send_msg("qa2")))["delivery"] == "landed"
+            assert reads == [SPEC.removeprefix("spec_")]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+    messages = [record.getMessage() for record in caplog.records if record.getMessage().startswith("qa_spec_capture ")]
+    assert len(messages) == 2
+    for message, outcome in zip(messages, ("strict", "reuse"), strict=True):
+        prefix, result, *timings = message.split()
+        assert prefix == "qa_spec_capture" and result == f"outcome={outcome}"
+        assert [field.split("=")[0] for field in timings] == ["executor_queue_ms", "capture_work_ms", "shared_wait_ms"]
+        assert SPEC not in message and str(tmp_path) not in message
