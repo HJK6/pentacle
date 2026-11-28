@@ -120,6 +120,8 @@ from v2_runtime import iso_now, primary_assistant_name
 
 log = logging.getLogger("chat_streamd_v2.store")
 
+_WRITER_CACHE_KIB = 64 * 1024
+
 EVENT_PUSH_TARGET_SHA_KEY = "event_push.target_sha"
 EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY = "event_push.target_sha.previous"
 _FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
@@ -1810,6 +1812,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             ).fetchone() is None
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(f"PRAGMA cache_size=-{_WRITER_CACHE_KIB}")
             conn.execute("BEGIN")
             conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
             conn.execute(SESSIONS_DDL)
