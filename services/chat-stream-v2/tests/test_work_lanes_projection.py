@@ -379,3 +379,37 @@ def test_parked_shared_fixture_and_order():
     rows.append({**parked, "updated_at": "2026-01-02T00:00:00Z"})
     projected = project_lanes(rows, {}, "2026-01-03T00:00:00Z")
     assert [row["lane_id"] for row in projected] == ["blocked", "active", parked["lane_id"], "paused"]
+
+
+def test_reader_routes_show_and_emission(tmp_path, monkeypatch):
+    from test_store_reader import record_calls
+    seen = record_calls(monkeypatch)
+    async def body(env):
+        lid = (await env.adopt(key="stream:reader", state="paused", owner="operator"))["lane"]["lane_id"]
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
+        await sessions.refresh()
+        server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
+        server.work_lanes = WorkLanesInventory(env.store, sessions, env._broadcast)
+        auth = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+        await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+        await server.work_lanes.emit_if_changed()
+        assert any("get_work_lane" in name for name in seen[env.store.read_diag])
+        assert any("work_lane_snapshot" in name for name in seen[env.store.read_diag])
+    run(body, path=str(tmp_path / "routing.db"))
+
+
+def test_reader_front_desk_projection_matches_writer(tmp_path):
+    from store_work_lanes import work_lane_rows_conn
+    async def body(env):
+        lead = await env.seat("reader-fd", role="lead", parent_stream_id=FD)
+        await env.adopt(key="stream:reader-fd", state="paused", owner="operator", lead=lead)
+        def projected(conn):
+            return project_lanes(work_lane_rows_conn(conn), {})[0]["lead"]
+        assert (await env.store.submit(projected))["qualifies"] is True
+        env.store.lifecycle_front_desk = {"name": env.composite.config.name,
+                                          "env_binding": {"stream_id": lead[0], "generation": lead[1]}}
+        writer = await env.store.submit(projected)
+        reader = await env.store.read(projected)
+        assert writer["qualifies"] is False
+        assert (reader["qualifies"], reader["eta_stale"]) == (writer["qualifies"], writer["eta_stale"])
+    run(body, path=str(tmp_path / "parity.db"))
