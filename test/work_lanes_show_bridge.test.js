@@ -189,3 +189,52 @@ test('old-tab replay through the real web bridge isolates stable sender objects'
   await show(reopened,{membersLimit:32});assert.equal(calls,4,'a reopened connection is a new session');
   bridge.closeAll();
 });
+
+test('known replies expire five minutes after completion while in-flight calls keep joining', async t => {
+  let now=0,calls=0,finish; t.mock.method(Date,'now',()=>now); const revision='a'.repeat(64);
+  const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision}]}}),
+    workLanesShow:()=>{calls++;return new Promise(resolve=>{finish=resolve;});}};
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}},detail={type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}};
+  const first=show(event,'lane_fixture',{});now=600000;
+  const joined=show(event,'lane_fixture',{});assert.equal(calls,1,'pending work remains joined even after five minutes');
+  finish(detail);await Promise.all([first,joined]);
+  now+=299999;await show(event,'lane_fixture',{});assert.equal(calls,1);
+  now+=1;const refreshed=show(event,'lane_fixture',{});assert.equal(calls,2,'a five-minute-old completed reply is refreshed');
+  finish(detail);await refreshed;
+});
+
+test('per-sender cache keeps only the 64 most recently used completed pages', async () => {
+  const revision='a'.repeat(64);let calls=0;
+  const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision}]}}),workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}}}};
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
+  for(let i=0;i<64;i++) await show(event,'lane_fixture',{membersAfter:'spec_fixture__'+i});
+  await show(event,'lane_fixture',{membersAfter:'spec_fixture__0'});
+  await show(event,'lane_fixture',{membersAfter:'spec_fixture__64'});assert.equal(calls,65);
+  await show(event,'lane_fixture',{membersAfter:'spec_fixture__0'});assert.equal(calls,65,'recently used page remains');
+  await show(event,'lane_fixture',{membersAfter:'spec_fixture__1'});assert.equal(calls,66,'least recently used page was evicted');
+});
+
+test('unknown-revision counter flushes trailing calls after one minute without more requests', async t => {
+  t.mock.timers.enable({apis:['setTimeout']}); let now=100000; t.mock.method(Date,'now',()=>now);
+  const logs=[];t.mock.method(console,'info',(...args)=>logs.push(args));
+  const client={snapshot:()=>({work_lanes:{lanes:[]}}),workLanesShow:async()=>({type:'work_lanes.show.ok'})};
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
+  await show(event,'missing_lane',{});await show(event,'missing_lane',{});
+  assert.equal(logs.length,1);now+=59999;t.mock.timers.tick(59999);assert.equal(logs.length,1);
+  now+=1;t.mock.timers.tick(1);assert.equal(logs.length,2);assert.equal(logs[1][0].count,1);
+});
+
+test('the completed-entry cap never evicts an in-flight request', async () => {
+  const revision='a'.repeat(64), pending=[]; let calls=0;
+  const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision}]}}),
+    workLanesShow:()=>{calls++;return new Promise(resolve=>pending.push(resolve));}};
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}},promises=[];
+  for(let i=0;i<65;i++) promises.push(show(event,'lane_fixture',{membersAfter:'spec_fixture__'+i}));
+  const joined=show(event,'lane_fixture',{membersAfter:'spec_fixture__0'});assert.equal(calls,65);
+  const reply={type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}};
+  pending.forEach(resolve=>resolve(reply));await Promise.all([...promises,joined]);
+});

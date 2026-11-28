@@ -137,13 +137,31 @@ function createCcHandlers({
   const laneShowsBySender = new WeakMap();
   let unknownRevisionCount = 0;
   let unknownRevisionLastLog = -Infinity;
-  function countUnknownRevision() {
-    unknownRevisionCount += 1;
-    const now = Date.now();
-    if (now - unknownRevisionLastLog < 60000) return;
+  let unknownRevisionTimer = null;
+  function flushUnknownRevisions() {
+    unknownRevisionTimer = null;
+    if (!unknownRevisionCount) return;
     console.info({ subsystem: 'work_lanes', event: 'unknown_revision_passthrough', count: unknownRevisionCount });
     unknownRevisionCount = 0;
-    unknownRevisionLastLog = now;
+    unknownRevisionLastLog = Date.now();
+  }
+  function countUnknownRevision() {
+    unknownRevisionCount += 1;
+    const remaining = 60000 - (Date.now() - unknownRevisionLastLog);
+    if (remaining <= 0) {
+      if (unknownRevisionTimer !== null) clearTimeout(unknownRevisionTimer);
+      flushUnknownRevisions();
+    } else if (unknownRevisionTimer === null) {
+      unknownRevisionTimer = setTimeout(flushUnknownRevisions, remaining);
+      unknownRevisionTimer.unref?.();
+    }
+  }
+  function trimLaneShows(entries) {
+    let completed = [...entries.values()].filter(entry => !entry.pending).length;
+    for (const [key, entry] of entries) {
+      if (completed <= 64) break;
+      if (!entry.pending) { entries.delete(key); completed -= 1; }
+    }
   }
 
   function publicConfig() {
@@ -228,15 +246,24 @@ function createCcHandlers({
       if (!entries) { entries = new Map(); laneShowsBySender.set(sender, entries); }
       const key = JSON.stringify([laneId, page.goalId ?? null, page.membersAfter ?? null, page.membersLimit ?? 32]);
       const previous = entries.get(key);
-      if (previous?.revision === revision && (revision !== null || previous.pending)) return previous.promise;
+      if (previous?.revision === revision && (previous.pending
+        || (revision !== null && Date.now() - previous.completedAt < 300000))) {
+        entries.delete(key); entries.set(key, previous);
+        return previous.promise;
+      }
       if (revision === null) countUnknownRevision();
-      const entry = { revision, pending: true, promise: null };
+      const entry = { revision, pending: true, completedAt: null, promise: null };
+      entries.delete(key);
       entry.promise = Promise.resolve(chatStreamClient.workLanesShow(laneId, page)).then(reply => {
         entry.pending = false;
+        entry.completedAt = Date.now();
         const validDetail = reply?.type === 'work_lanes.show.ok'
           && typeof reply.detail_revision === 'string' && /^[a-f0-9]{64}$/.test(reply.detail_revision)
           && reply.lane?.lane_id === laneId && reply.projection?.lane_id === laneId;
-        if ((revision === null || !validDetail) && entries.get(key) === entry) entries.delete(key);
+        if (entries.get(key) === entry) {
+          if (revision === null || !validDetail) entries.delete(key);
+          else { entries.delete(key); entries.set(key, entry); trimLaneShows(entries); }
+        }
         return reply;
       }, error => {
         if (entries.get(key) === entry) entries.delete(key);
