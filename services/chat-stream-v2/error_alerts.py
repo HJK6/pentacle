@@ -677,7 +677,9 @@ class ErrorAlerts:
                         break
                     by_ids(wanted)
             return list(rows.values())
-        if snapshot: read.__qualname__ = "ErrorAlerts.advisory_snapshot"
+        if snapshot:
+            read.__qualname__ = "ErrorAlerts.advisory_snapshot"
+            return await self.store.read(read)
         return await self.store.submit(read)
 
     async def reconcile(self, now=None):

@@ -174,15 +174,17 @@ def test_non_finite_timeout_is_rejected_not_an_indefinite_wait(bad):
 def test_transition_lock_and_join_share_one_timeout_budget(monkeypatch):
     clock = [0.0]
     waits = {}
+    native_lock = threading.Lock()
 
     class Lock:
-        def acquire(self, *, timeout):
-            waits["lock"] = timeout
-            clock[0] += 0.15
-            return True
+        def acquire(self, blocking=True, *, timeout=-1):
+            if blocking:
+                waits["lock"] = timeout
+                clock[0] += 0.15
+            return native_lock.acquire(blocking, timeout)
 
         def release(self):
-            pass
+            native_lock.release()
 
     class Worker:
         def is_alive(self):
@@ -195,6 +197,7 @@ def test_transition_lock_and_join_share_one_timeout_budget(monkeypatch):
     store = Store(":memory:")
     worker = Worker()
     store._lock = Lock()
+    store._read_ready = threading.Condition(store._lock)
     store._thread = worker
     monkeypatch.setattr(store_mod, "time", SimpleNamespace(monotonic=lambda: clock[0]))
 

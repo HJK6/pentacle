@@ -194,6 +194,14 @@ class ManagedStream(io.TextIOBase):
 _streams: tuple[ManagedStream, ManagedStream] | None = None
 
 
+def _hourly_filter(record: logging.LogRecord) -> bool:
+    try:
+        return record.getMessage().startswith(
+            ("store_call_top", "store_read_top", "send_latency", "send_start", "send_attempt", "ingest_pass_summary"))
+    except Exception:
+        return False
+
+
 def install(env: Mapping[str, str] | None = None) -> None:
     global _streams
     if _streams is not None:
@@ -220,8 +228,7 @@ def install(env: Mapping[str, str] | None = None) -> None:
     handler = logging.StreamHandler(hourly)
     handler.setFormatter(UTCFormatter("%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s %(message)s",
                                       datefmt="%Y-%m-%dT%H:%M:%S"))
-    handler.addFilter(lambda record: isinstance(record.msg, str) and record.msg.startswith(
-        ("store_call_top", "store_read_top", "send_latency", "send_start", "send_attempt", "ingest_pass_summary")))
+    handler.addFilter(_hourly_filter)
     for name in ("store", "ingest"):
         logging.getLogger("chat_streamd_v2." + name).addHandler(handler)
     _streams = stdout, stderr
