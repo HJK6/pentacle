@@ -64,6 +64,11 @@ session, and the configured assistant cannot be renamed or deleted. Full screen
 and Leave full screen have different icons: arrows pointing out, and arrows
 pointing in.
 
+A chat closed anywhere else (another client, the agent itself, or the daemon)
+leaves the screen too. Its card closes as soon as the daemon's open inventory
+marks the chat closed or no longer lists it. A chat that was just started, and
+is not listed yet, stays open.
+
 An unread chat has a latest non-operator message different from the one last
 displayed while the page and the card were visible. The Assistant has the same
 check on its mark when aside. The first inventory seeds the browser's marks.

@@ -95,6 +95,8 @@ const seen = createSeenMarks(storage);
 const clock = workingClock();
 const pendingNames = new Map();
 const pendingDeletes = new Set();
+const closingCards = new Set();
+let inventoryIds = null;
 const hiddenClosed = new Set();
 const role = configuredAssistantRole(config.features);
 const isProtected = session => isProtectedAssistant([session], role);
@@ -209,9 +211,10 @@ function closePopover() {
   unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
 function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; popover.classList.remove('chat-switch'); ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
 function sessions() { return store.getState().sessions || []; }
+const isClosed = s => !!s.closed || s.status === 'closed' || s.session_state === 'closed' || s.state === 'closed';
 function visibleChats() {
   return filterSidebarSessions(sessions()).filter(s => s.session_kind !== 'assistant_composite' &&
-    !hiddenClosed.has(s.stream_id) && !s.closed && s.status !== 'closed' && s.session_state !== 'closed' && s.state !== 'closed');
+    !hiddenClosed.has(s.stream_id) && !isClosed(s));
 }
 function chatName(s) { return pendingNames.get(s.stream_id)?.name || s.display_name || s.title || s.session_name; }
 function draftFor(s) { return s ? store.getState().drafts?.[s.stream_id] : undefined; }
@@ -263,6 +266,15 @@ function beforeStoreFrame(frame) {
   const rows = frame.sessions;
   const ids = new Set(rows.map(s => s.stream_id));
   for (const id of hiddenClosed) if (!ids.has(id)) hiddenClosed.delete(id);
+  // A chat closed anywhere leaves the screen: its row says closed, or it drops out of
+  // the daemon's open inventory after being in it. A chat not yet listed (just started) stays.
+  const closed = new Set(rows.filter(isClosed).map(s => s.stream_id));
+  for (const key of Object.keys(cards)) {
+    const id = state.layout[key];
+    if (id && id !== NEW_CHAT && (closed.has(id) || (inventoryIds?.has(id) && !ids.has(id)))) closingCards.add(key);
+  }
+  inventoryIds = ids;
+  if (closingCards.size) queueMicrotask(closeGoneCards);
   for (const s of rows) {
     const p = pendingNames.get(s.stream_id);
     if (p && (s.display_name || s.title || s.session_name) === p.name) {
@@ -803,6 +815,11 @@ function admitChat(key, id, session) {
   syncLayout(session);
   cards[state.layout.last]?.focus();
   render();
+}
+function closeGoneCards() {
+  const keys = [...closingCards];
+  closingCards.clear();
+  for (const key of keys) if (state.layout[key] && state.layout[key] !== NEW_CHAT) closeCard(key);
 }
 function closeCard(key) {
   state.layout = layout.shut(state.layout, key, innerWidth);

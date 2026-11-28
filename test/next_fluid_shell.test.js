@@ -659,6 +659,28 @@ test('an open chat renames and deletes from its header with the list rules and c
   assert.equal(s.$('[data-pane=chat2]').hidden, false, 'the other chat stays');
 });
 
+test('a chat closed elsewhere leaves the screen; the other card stays', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const shown = id => [...s.window.document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].map(el => el.dataset.streamId).includes(id);
+  assert.ok(shown('fixture:a') && shown('fixture:b'));
+  s.inventory(); await flush();
+  assert.ok(shown('fixture:a') && shown('fixture:b'), 'an unchanged inventory closes nothing');
+  const a = s.rows.findIndex(row => row.stream_id === 'fixture:a');
+  const [removed] = s.rows.splice(a, 1);
+  s.inventory(); await flush();
+  assert.ok(!shown('fixture:a'), 'a chat that drops out of the open inventory closes its card');
+  assert.ok(shown('fixture:b'), 'the other chat stays');
+  s.rows.splice(a, 0, removed);
+  s.choose('a');
+  assert.ok(shown('fixture:a') && shown('fixture:b'));
+  s.rows.find(row => row.stream_id === 'fixture:b').status = 'closed';
+  s.inventory(); await flush();
+  assert.ok(!shown('fixture:b'), 'a chat whose row says closed closes its card');
+  assert.ok(shown('fixture:a'));
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0, 'closing the card sends no close of its own');
+});
+
 test('full screen and leaving it use different icons', async t => {
   const s = openShell(t);
   await flush(); s.choose('a'); s.choose('b');
