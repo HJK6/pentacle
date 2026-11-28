@@ -134,6 +134,17 @@ function createCcHandlers({
   hostedDashboardAuthMode = 'unknown',
 }) {
   const telemetry = [];
+  const laneShowsBySender = new WeakMap();
+  let unknownRevisionCount = 0;
+  let unknownRevisionLastLog = -Infinity;
+  function countUnknownRevision() {
+    unknownRevisionCount += 1;
+    const now = Date.now();
+    if (now - unknownRevisionLastLog < 60000) return;
+    console.info({ subsystem: 'work_lanes', event: 'unknown_revision_passthrough', count: unknownRevisionCount });
+    unknownRevisionCount = 0;
+    unknownRevisionLastLog = now;
+  }
 
   function publicConfig() {
     const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
@@ -203,8 +214,34 @@ function createCcHandlers({
           ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
       }));
     target.handle('chat-stream:request-stream-events', (_event, args) => command(() => chatStreamClient.requestStreamEvents(args)));
-    target.handle('chat-stream:work-lanes-show', (_event, laneId, options = {}) =>
-      chatStreamClient.workLanesShow(laneId, options || {}));
+    target.handle('chat-stream:work-lanes-show', (event, laneId, options = {}) => {
+      const page = options || {};
+      const sender = event?.sender;
+      const value = chatStreamClient.snapshot?.({ includeEvents: false }).work_lanes?.lanes
+        ?.find(lane => lane.lane_id === laneId)?.detail_revision;
+      const revision = typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null;
+      if (!sender || (typeof sender !== 'object' && typeof sender !== 'function')) {
+        if (revision === null) countUnknownRevision();
+        return chatStreamClient.workLanesShow(laneId, page);
+      }
+      let entries = laneShowsBySender.get(sender);
+      if (!entries) { entries = new Map(); laneShowsBySender.set(sender, entries); }
+      const key = JSON.stringify([laneId, page.goalId ?? null, page.membersAfter ?? null, page.membersLimit ?? null]);
+      const previous = entries.get(key);
+      if (previous?.revision === revision && (revision !== null || previous.pending)) return previous.promise;
+      if (revision === null) countUnknownRevision();
+      const entry = { revision, pending: true, promise: null };
+      entry.promise = Promise.resolve(chatStreamClient.workLanesShow(laneId, page)).then(reply => {
+        entry.pending = false;
+        if (revision === null && entries.get(key) === entry) entries.delete(key);
+        return reply;
+      }, error => {
+        if (entries.get(key) === entry) entries.delete(key);
+        throw error;
+      });
+      entries.set(key, entry);
+      return entry.promise;
+    });
     target.handle('chat-stream:queued-send-now', (_event, host, sessionName, originalRequestId, optimisticId, expectedSessionGeneration) =>
       command(() => chatStreamClient.queuedSendNow({ host, sessionName, originalRequestId, optimisticId, expectedSessionGeneration })));
     target.handle('chat-stream:interrupt', (_event, host, sessionName, expectedSessionGeneration) =>
