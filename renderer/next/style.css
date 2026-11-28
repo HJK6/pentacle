@@ -366,6 +366,12 @@ html[data-rail] .next-app>.popover.chat-switch{right:auto;bottom:auto;left:var(-
 .next-chat-question{padding-left:12px;flex:1}
 .popover .next-chat-cancel,.popover .next-chat-confirm{width:auto;padding:5px 8px}
 .popover .next-chat-confirm{color:var(--accent)}
+.card-title .next-chat-edit{padding:4px 8px;font:inherit;color:var(--text)}
+.card-head .next-chat-ask{display:flex;align-items:center;gap:2px;flex:none}
+.card-head .next-chat-question{padding:0 6px 0 0;flex:none;color:var(--text);font-size:13px}
+.card-head .next-chat-cancel,.card-head .next-chat-confirm{padding:5px 9px;border-radius:9px;color:var(--dim)}
+.card-head .next-chat-cancel:hover,.card-head .next-chat-confirm:hover{background:var(--hover);color:var(--text)}
+.card-head .next-chat-confirm{color:var(--accent)}
 .rail-button.chats-button[data-count]::after{background:var(--accent)}
 .rail-button.update-button{color:var(--accent)}
 .brand.assistant-unread::after{content:'';position:absolute;top:2px;right:2px;width:9px;height:9px;margin:0}
