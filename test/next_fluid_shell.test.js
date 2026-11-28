@@ -627,6 +627,59 @@ test('rename suppresses Escape/blur saves, rejects empty names and rolls back a 
   assert.equal(s.$('[data-pane=chat2]').hidden,false);
 });
 
+test('an open chat renames and deletes from its header with the list rules and confirm', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const head = pane => s.$(`[data-pane=${pane}] .card-head`);
+  const key = (el, key) => el.dispatchEvent(new s.window.KeyboardEvent('keydown',{key,bubbles:true}));
+  const labels = pane => [...head(pane).querySelectorAll(':scope > button:not([hidden])')].map(b => b.getAttribute('aria-label'));
+  assert.deepEqual(labels('chat'), ['Status', 'Terminal', 'Rename', 'Delete', 'Full screen', 'Close'], 'Rename and Delete sit beside status, terminal, full screen and close');
+  const startRename = () => { head('chat').querySelector('[aria-label=Rename]').click(); return head('chat').querySelector('.next-chat-edit'); };
+  let input = startRename();
+  assert.equal(input.value, 'a'); assert.equal(s.window.document.activeElement, input);
+  input.value = 'cancelled'; key(input, 'Escape'); input.blur();
+  assert.equal(head('chat').querySelector('.next-chat-edit'), null, 'Escape restores the title');
+  assert.equal(s.$('[data-pane=chat] .next-chat-title').hidden, false);
+  input = startRename(); input.value = '   '; input.blur();
+  assert.equal(s.calls.filter(c => c[0] === 'rename').length, 0, 'an empty or cancelled name is not saved');
+  input = startRename(); input.value = 'from header'; key(input, 'Enter');
+  assert.equal(s.$('[data-pane=chat] .next-chat-title').textContent, 'from header', 'the new name shows at once');
+  await flush();
+  assert.deepEqual(s.calls.filter(c => c[0] === 'rename'), [['rename', 'local', 'a', 'from header']]);
+  head('chat').querySelector('[aria-label=Delete]').click();
+  assert.equal(head('chat').querySelector('.next-chat-question').textContent, 'Delete chat?');
+  assert.equal(s.window.document.activeElement, head('chat').querySelector('.next-chat-cancel'), 'the confirm takes focus on Cancel');
+  head('chat').querySelector('.next-chat-cancel').click();
+  assert.equal(s.calls.filter(c => c[0] === 'close').length, 0, 'Cancel closes nothing');
+  assert.equal(head('chat').querySelector('.next-chat-question'), null);
+  head('chat').querySelector('[aria-label=Delete]').click();
+  head('chat').querySelector('.next-chat-confirm').click(); await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(s.calls.filter(c => c[0] === 'close'))), [['close', 'local', 'a', {operatorConfirm: true, force: true}]]);
+  assert.equal(s.$('[data-pane=chat]').hidden, true, 'the deleted chat leaves the screen');
+  assert.equal(s.$('[data-pane=chat2]').hidden, false, 'the other chat stays');
+});
+
+test('full screen and leaving it use different icons', async t => {
+  const s = openShell(t);
+  await flush(); s.choose('a'); s.choose('b');
+  const full = () => s.$('[data-pane=chat2] .fullscreen');
+  const enter = full().innerHTML;
+  full().click();
+  assert.equal(full().getAttribute('aria-label'), 'Leave full screen');
+  assert.notEqual(full().innerHTML, enter, 'leaving full screen has its own icon');
+  full().click();
+  assert.equal(full().getAttribute('aria-label'), 'Full screen');
+  assert.equal(full().innerHTML, enter);
+});
+
+test('a new-chat card shows no Rename or Delete', async t => {
+  const s = openShell(t);
+  await flush();
+  s.$("button[aria-label^=Chats]").click(); s.$('.popover .next-chat-new').click();
+  const head = s.$('.chat-card:not([hidden]) .card-head');
+  for (const label of ['Rename', 'Delete']) assert.equal(head.querySelector(`[aria-label=${label}]`).hidden, true, label + ' is hidden on the new-chat form');
+});
+
 test('U1 Settings applies an exact shared width, keeps focus during renders and restores invalid input', async t => {
   const s = openShell(t, 1440, null, false, window => window.localStorage.setItem('pentacle.next.read', '640'));
   await flush();

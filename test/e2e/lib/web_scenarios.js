@@ -645,6 +645,7 @@ const SCENARIOS = [
   ['next-chats-head', require('./next_chat_tools_scenarios').head],
   ['next-chats-rename', require('./next_chat_tools_scenarios').renaming],
   ['next-chats-delete', require('./next_chat_tools_scenarios').deleting],
+  ['next-chat-header-tools', require('./next_chat_tools_scenarios').headerTools],
   ['next-chats-unread', require('./next_chat_tools_scenarios').unread],
   ['next-chats-working', require('./next_chat_tools_scenarios').work],
   ['next-chats-send', require('./next_chat_tools_scenarios').sendStatus],

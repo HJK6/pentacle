@@ -56,9 +56,13 @@ Lanes. The phone layout still shows one section at a time and does not change.
 Use a chat's title to switch it in place. Picking the chat already in the
 other card swaps the two sessions without moving their seats. The rail still
 opens chats with its existing placement rules. Both lists show working and
-unread state and reveal Rename and Delete on hover or keyboard focus. Rename
-saves on Enter or blur; Escape cancels. Delete asks in the row before closing
-the actual session, and the configured assistant cannot be renamed or deleted.
+unread state and reveal Rename and Delete on hover or keyboard focus. An open
+chat's header also shows Rename and Delete, beside Status, Terminal, full screen
+and close. Rename edits the title in place. It saves on Enter or blur, and
+Escape cancels. Delete asks in the row or the header before closing the actual
+session, and the configured assistant cannot be renamed or deleted. Full screen
+and Leave full screen have different icons: arrows pointing out, and arrows
+pointing in.
 
 An unread chat has a latest non-operator message different from the one last
 displayed while the page and the card were visible. The Assistant has the same

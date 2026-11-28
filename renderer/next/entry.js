@@ -30,7 +30,7 @@ const { createQuestions } = require('./questions');
 const { createQuestionNotifications } = require('./question_notifications');
 const { mountLanesCard, renderLaneIcon } = require('./lanes');
 const { applyVersionedConnectionState } = require('../chat_stream_connection_state');
-const { mountChatList } = require('./chat_list');
+const { mountChatList, PENCIL, TRASH } = require('./chat_list');
 const { isProtectedAssistant } = require('../chat_presentation');
 const { configuredAssistantRole } = require('../assistant_role');
 const { isWorking, hasConfirmedWork, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines, decorateAgentRows } = require('./chat_status');
@@ -113,6 +113,9 @@ const icons = {
   update: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>',
   close: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   full: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 9V4h5m6 0h5v5M20 15v5h-5M9 20H4v-5"/></svg>',
+  unfull: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 4v5H4m11-5v5h5M9 20v-5H4m11 5v-5h5"/></svg>',
+  rename: PENCIL,
+  trash: TRASH,
   terminal: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="4.5" width="17" height="15" rx="1"/><path d="m7 9 3 3-3 3m5 0h4"/></svg>',
   status: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 6 1.5 1.5L7 5m3 1h10M3 12l1.5 1.5L7 11m3 1h10M4.5 18h.1M10 18h10"/></svg>'
 };
@@ -143,6 +146,8 @@ const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, moun
   paintTranscript, attachTranscript, transcriptPlace, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
+  onRename: renameChat, onDelete: deleteChat, canEdit: s => !isProtected(s),
+  isPending: id => pendingNames.has(id) || pendingDeletes.has(id),
   onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions, onMode: () => paintWorking(),
 })]));
 // The bridge keeps one listener per event, so both cards' terminals are fed from here.
