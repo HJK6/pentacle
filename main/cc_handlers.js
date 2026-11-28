@@ -232,6 +232,8 @@ function createCcHandlers({
         return { ...receipt, ok: receipt.delivery === 'landed' || receipt.action_committed === true,
           ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
       }));
+    target.handle('chat-stream:send-receipt', (_event, streamId, requestId, originalRequest) =>
+      command(() => chatStreamClient.getSendReceipt({ streamId, requestId, originalRequest })));
     target.handle('chat-stream:request-stream-events', (_event, args) => command(() => chatStreamClient.requestStreamEvents(args)));
     target.handle('chat-stream:work-lanes-show', (event, laneId, options = {}) => {
       const page = options || {};
