@@ -21,6 +21,10 @@ def document(root, folder='fixture__one', identity='spec_fixture__one', status='
     return path
 
 
+def admission(subject, *ids):
+    return asyncio.run(spec_resolution_view(subject, ids=ids, admission=True))
+
+
 def test_incremental_snapshot_is_immutable_and_retains_only_current_inputs(tmp_path, monkeypatch):
     first = document(tmp_path)
     second = document(tmp_path, 'fixture__two', 'spec_fixture__two')
@@ -52,14 +56,28 @@ def test_incremental_snapshot_is_immutable_and_retains_only_current_inputs(tmp_p
     assert len(subject._identity_cache) == 1
 
 
-@pytest.mark.parametrize('change', ['rename', 'status', 'duplicate', 'remove_duplicate', 'replace_inode', 'replace_id', 'missing_file'])
-def test_polling_matches_cold_uncached_identity_oracle(tmp_path, change):
+@pytest.mark.parametrize('change', ['rename', 'case_rename', 'case_spec', 'status', 'duplicate',
+                                    'remove_duplicate', 'replace_inode', 'replace_id', 'missing_file', 'add_file'])
+def test_polling_matches_cold_uncached_identity_oracle(tmp_path, monkeypatch, change):
     path = document(tmp_path)
     duplicate = document(tmp_path, 'fixture__other', 'spec_fixture__one', 'completed') if change == 'remove_duplicate' else None
     subject = service(tmp_path)
-    subject.spec_resolution_snapshot()
+    if change == 'add_file':
+        new_path = tmp_path / 'work/in_progress/fixture__new/spec.md'
+        new_path.parent.mkdir()
+    admission(subject)
+    scan = subject._scan_folders_by_id
+    probes = []
+    def record(*args, **kwargs):
+        probes.append(kwargs.get('probe', False))
+        return scan(*args, **kwargs)
+    monkeypatch.setattr(subject, '_scan_folders_by_id', record)
     if change == 'rename':
         path.parent.rename(path.parent.with_name('fixture__renamed'))
+    elif change in ('case_rename', 'case_spec'):
+        source = path.parent if change == 'case_rename' else path
+        intermediate = source.rename(source.with_name('temporary_name'))
+        intermediate.rename(source.with_name(source.name.upper()))
     elif change == 'status':
         target = tmp_path / 'work/completed'
         target.mkdir(); path.parent.rename(target / path.parent.name)
@@ -73,8 +91,12 @@ def test_polling_matches_cold_uncached_identity_oracle(tmp_path, change):
         path.write_text('---\nid: spec_fixture__new\n---\n')
     elif change == 'missing_file':
         path.unlink()
+    elif change == 'add_file':
+        document(tmp_path, 'fixture__new', 'spec_fixture__new')
     values = ['fixture__one', 'spec_fixture__one', 'spec_fixture__new', 'fixture__renamed', 'spec_fixture__missing']
-    assert subject.canonical_spec_identities(values) == service(tmp_path).canonical_spec_identities(values)
+    warm = admission(subject, *values)
+    assert probes == [True, False]
+    assert {value: warm.canonical_spec_identity(value) for value in values} == service(tmp_path).canonical_spec_identities(values)
 
 
 def test_read_failure_never_authorizes_last_success(tmp_path, monkeypatch):
@@ -130,6 +152,53 @@ def test_async_capture_coalesces_and_bounds_waiters_without_worker_queue(tmp_pat
         assert sum(isinstance(item, asyncio.CancelledError) for item in results) == 1
         assert len(calls) == 1
     asyncio.run(run())
+
+
+def test_overlapping_warm_admissions_share_probe_but_read_each_bound_spec(tmp_path, monkeypatch):
+    first = document(tmp_path)
+    second = document(tmp_path, 'fixture__two', 'spec_fixture__two')
+    subject = service(tmp_path)
+    admission(subject)
+    scan, read = subject._scan_folders_by_id, subject._read_identity_input
+    entered, release = threading.Event(), threading.Event()
+    probes, bound_reads = [], []
+
+    def block(*args, **kwargs):
+        probes.append(kwargs.get('probe', False))
+        entered.set()
+        assert release.wait(5)
+        return scan(*args, **kwargs)
+
+    def observe(path, **kwargs):
+        captured = read(path, **kwargs)
+        if kwargs.get('directory_fd') is not None and captured[1] is not None:
+            bound_reads.append(path)
+        return captured
+
+    monkeypatch.setattr(subject, '_scan_folders_by_id', block)
+    monkeypatch.setattr(subject, '_read_identity_input', observe)
+
+    async def run():
+        started = asyncio.Event()
+
+        async def follow():
+            started.set()
+            return await spec_resolution_view(subject, ids=('fixture__two',), admission=True)
+
+        owner = asyncio.create_task(spec_resolution_view(subject, ids=('fixture__one',), admission=True))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            follower = asyncio.create_task(follow())
+            await started.wait()
+        finally:
+            release.set()
+        left, right = await asyncio.gather(owner, follower)
+        assert left.canonical_spec_identity('fixture__one') == 'spec_fixture__one'
+        assert right.canonical_spec_identity('fixture__two') == 'spec_fixture__two'
+
+    asyncio.run(run())
+    assert probes == [True]
+    assert sorted(bound_reads) == sorted([first, second])
 
 
 def test_environment_root_status_config_preserved_mtime_matches_cold_oracle(tmp_path, monkeypatch):
@@ -197,6 +266,55 @@ def test_same_metadata_changed_id_matches_current_bytes(tmp_path, monkeypatch):
     assert before.canonical_spec_identity('spec_fixture__one') == 'spec_fixture__one'
 
 
+@pytest.mark.parametrize('bound', [False, True])
+def test_same_metadata_warm_edit_reseals_on_bound_read_or_expiry(tmp_path, monkeypatch, bound):
+    path = document(tmp_path)
+    document(tmp_path, 'fixture__other', 'spec_fixture__other')
+    alias_file_timestamps(path, monkeypatch)
+    subject = service(tmp_path)
+    now = [0]
+    monkeypatch.setattr(subject, '_monotonic', lambda: now[0])
+    ids = ('fixture__one',) if bound else ('fixture__other',)
+    before = admission(subject, *ids)
+    fingerprint = subject._identity_fingerprint(path)
+    path.write_text('---\nid: spec_fixture__new\n---\n')
+    assert subject._identity_fingerprint(path) == fingerprint
+    now[0] = 599
+    current = admission(subject, *ids)
+    if not bound:
+        assert current.canonical_spec_identity('fixture__one') == 'spec_fixture__one'
+        now[0] = 600
+        current = admission(subject, *ids)
+    assert current.canonical_spec_identity('fixture__one') is None
+    assert current.canonical_spec_identity('fixture__new') == 'spec_fixture__new'
+    assert before.canonical_spec_identity('fixture__one') == 'spec_fixture__one'
+
+
+def test_early_tuple_change_during_probe_reseals_before_binding(tmp_path, monkeypatch):
+    first = document(tmp_path, 'fixture__aaa')
+    second = document(tmp_path, 'fixture__zzz', 'spec_fixture__two')
+    subject = service(tmp_path)
+    admission(subject, 'fixture__two')
+    iterdir = Path.iterdir
+    read = subject._read_identity_input
+
+    def ordered(path):
+        entries = iterdir(path)
+        return iter(sorted(entries)) if path == first.parent.parent else entries
+
+    def mutate_late(path, **kwargs):
+        result = read(path, **kwargs)
+        if path == second and kwargs.get('metadata_only'):
+            first.write_text('---\nid: spec_fixture__new\n---\n\nChanged during the probe.\n')
+        return result
+
+    monkeypatch.setattr(Path, 'iterdir', ordered)
+    monkeypatch.setattr(subject, '_read_identity_input', mutate_late)
+    current = admission(subject, 'fixture__two')
+    assert current.canonical_spec_identity('fixture__one') is None
+    assert current.canonical_spec_identity('fixture__new') == 'spec_fixture__new'
+
+
 def test_same_metadata_changed_status_never_authorizes_removed_bucket(tmp_path, monkeypatch):
     import json
     document(tmp_path, status='allowed')
@@ -205,11 +323,11 @@ def test_same_metadata_changed_status_never_authorizes_removed_bucket(tmp_path, 
     alias_file_timestamps(config, monkeypatch)
     monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(tmp_path.resolve()))
     subject = SpecsSubsystem(session_summaries=lambda: [], changed_callback=lambda ids: None)
-    assert subject.canonical_spec_identity('spec_fixture__one') == 'spec_fixture__one'
+    assert admission(subject, 'spec_fixture__one').canonical_spec_identity('spec_fixture__one') == 'spec_fixture__one'
     fingerprint = subject._identity_fingerprint(config)
     config.write_text(json.dumps({'statuses': [{'name': 'removed', 'order': 1}]}))
     assert subject._identity_fingerprint(config) == fingerprint
-    assert subject.canonical_spec_identity('spec_fixture__one') is None
+    assert admission(subject, 'spec_fixture__one').canonical_spec_identity('spec_fixture__one') is None
     assert subject._statuses_fingerprint[0] == fingerprint
 
 
@@ -225,6 +343,21 @@ def test_same_metadata_scan_to_consume_changed_identity_is_rejected(tmp_path, mo
     with pytest.raises(ValueError, match='spec_changed'):
         reader.read('spec_fixture__one')
     assert reader.service._identity_cache[path][0] == fingerprint
+
+
+def test_snapshot_tag_read_keeps_its_captured_digest_after_new_snapshot(tmp_path, monkeypatch):
+    path = document(tmp_path)
+    alias_file_timestamps(path, monkeypatch)
+    subject = service(tmp_path)
+    before = admission(subject, 'spec_fixture__one')
+    path.write_text(path.read_text().replace('id:', 'ID:'))
+    subject.spec_resolution_snapshot()
+    with pytest.raises(ValueError, match='spec_changed'):
+        before.read_spec_text('spec_fixture__one')
+    with pytest.raises(ValueError, match='spec_changed'):
+        asyncio.run(spec_resolution_view(subject, admission=True, tag_view=before,
+                                         read_tags=lambda: before.read_spec_text('spec_fixture__one')))
+    assert admission(subject).canonical_spec_identity('spec_fixture__one') is None
 
 
 def deny_fixture_open(path, monkeypatch, *, alternating=False):
@@ -251,10 +384,90 @@ def deny_fixture_open(path, monkeypatch, *, alternating=False):
 def test_same_metadata_warm_unreadable_spec_never_authorizes(tmp_path, monkeypatch):
     path = document(tmp_path)
     subject = service(tmp_path)
-    subject.spec_resolution_snapshot()
-    deny_fixture_open(path, monkeypatch)
+    admission(subject)
+    calls = deny_fixture_open(path, monkeypatch)
+    with pytest.raises(SpecResolutionUnavailable):
+        admission(subject)
+    assert len(calls) == 3  # Warm open, then both strict attempts.
+    assert subject._admission_seal is None
+
+
+@pytest.mark.parametrize('operation', ['list', 'stat'])
+def test_probe_errors_fall_back_to_strict(tmp_path, monkeypatch, operation):
+    path = document(tmp_path)
+    subject = service(tmp_path)
+    admission(subject)
+    calls = []
+    parent = path.parent.stat()
+    original_list, original_stat = os.listdir, os.stat
+    def fail_once(fd):
+        if isinstance(fd, int) and os.fstat(fd).st_ino == parent.st_ino and not calls:
+            calls.append(1)
+            raise OSError('fixture listing failed')
+        return original_list(fd)
+    def fail_stat(name, *args, **kwargs):
+        fd = kwargs.get('dir_fd')
+        if name == path.name and fd is not None and os.fstat(fd).st_ino == parent.st_ino and not calls:
+            calls.append(1)
+            raise OSError('fixture stat failed')
+        return original_stat(name, *args, **kwargs)
+    scan = subject._scan_folders_by_id
+    probes = []
+    def record(*args, **kwargs):
+        probes.append(kwargs.get('probe', False))
+        return scan(*args, **kwargs)
+    monkeypatch.setattr(subject, '_scan_folders_by_id', record)
+    if operation == 'list':
+        monkeypatch.setattr(os, 'listdir', fail_once)
+    else:
+        monkeypatch.setattr(os, 'stat', fail_stat)
+    assert admission(subject, 'fixture__one').canonical_spec_identity('fixture__one') == 'spec_fixture__one'
+    assert calls == [1]
+    assert probes == [True, False]
+
+
+def test_post_open_read_error_is_delayed_only_for_unbound_spec(tmp_path, monkeypatch):
+    document(tmp_path)
+    path = document(tmp_path, 'fixture__other', 'spec_fixture__other')
+    subject = service(tmp_path)
+    admission(subject, 'fixture__one')
+    inode, fdopen = path.stat().st_ino, os.fdopen
+    class BrokenData:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            raise OSError('fixture data read failed')
+
+    monkeypatch.setattr(os, 'fdopen', lambda fd, *a, **k: BrokenData() if os.fstat(fd).st_ino == inode else fdopen(fd, *a, **k))
+    assert admission(subject, 'fixture__one').canonical_spec_identity('fixture__one') == 'spec_fixture__one'
     with pytest.raises(SpecResolutionUnavailable):
         subject.spec_resolution_snapshot()
+    with pytest.raises(SpecResolutionUnavailable):
+        admission(subject, 'fixture__other')
+    assert subject._admission_seal is None
+
+
+def test_coarse_ctime_disables_reuse_until_next_precise_capture(tmp_path, monkeypatch, caplog):
+    document(tmp_path)
+    subject = service(tmp_path)
+    opened = subject._opened_fingerprint
+    def coarse(path, value):
+        *parts, ctime = opened(path, value)
+        return (*parts, ctime - ctime % 1_000_000_000)
+    caplog.set_level('INFO', logger='_shared.specs_service')
+    with monkeypatch.context() as patch:
+        patch.setattr(SpecsSubsystem, '_opened_fingerprint', staticmethod(coarse))
+        admission(subject)
+        admission(subject)
+    admission(subject)
+    admission(subject)
+    results = [record.getMessage().split()[1] for record in caplog.records
+               if record.getMessage().startswith('qa_spec_capture ')]
+    assert results == ['outcome=strict', 'outcome=strict', 'outcome=strict', 'outcome=reuse']
 
 
 def patch_identity_parse(monkeypatch, after_parse):
@@ -306,9 +519,11 @@ def test_same_metadata_perpetual_mutation_exhausts_two_attempts(tmp_path, monkey
         identity = 'new' if len(calls) % 2 else 'one'
         path.write_text(f'---\nid: spec_fixture__{identity}\n---\n')
     patch_identity_parse(monkeypatch, mutate)
+    subject = service(tmp_path)
     with pytest.raises(SpecResolutionUnavailable):
-        service(tmp_path).spec_resolution_snapshot()
+        admission(subject)
     assert len(calls) == 2
+    assert subject._admission_seal is None
 
 
 @pytest.mark.parametrize('alternating', [False, True])

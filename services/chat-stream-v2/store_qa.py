@@ -370,7 +370,7 @@ def _commission_for_report(conn, report):
 
 
 class QaStoreMixin:
-    async def _resolve_spec_inputs(self, ids, *, warn_single=False):
+    async def _resolve_spec_inputs(self, ids, *, warn_single=False, admission=False):
         """Bound submissions, including single-only callers, before to_thread.
 
         An abandoned worker retains its slot until completion. Missing batch
@@ -404,7 +404,7 @@ class QaStoreMixin:
                 service = getattr(batch, "__self__", None)
                 if service is not None and hasattr(service, "spec_resolution_snapshot"):
                     from _shared.specs_service import spec_resolution_view
-                    view = await spec_resolution_view(service)
+                    view = await spec_resolution_view(service, ids=ids, admission=admission)
                     values = {value: view.canonical_spec_identity(value) for value in ids}
                 else:
                     values = await asyncio.to_thread(
@@ -559,7 +559,7 @@ class QaStoreMixin:
             identity_inputs += normalize_spec_ids([scope["spec_id"]])
         identity_inputs = list(dict.fromkeys(identity_inputs))
         try:
-            identities = (await self._resolve_spec_inputs(identity_inputs)).values
+            identities = (await self._resolve_spec_inputs(identity_inputs, admission=True)).values
         except SpecInputsUnavailable:
             identities = {}
 
