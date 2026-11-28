@@ -258,6 +258,73 @@ def test_failed_walk_only_fails_its_own_waiters_and_caches_nothing(tmp_path, mon
     assert attempts == [(False, False)] * 3
 
 
+@pytest.mark.parametrize('verb', ['assistant.advise', 'work_lane.set_members'])
+def test_daemon_spec_walk_does_not_block_loop_behind_cold_capture(tmp_path, monkeypatch, verb):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / 'chat-stream-v2'))
+    from server import Server
+
+    spec_id = 'spec_fixture__one'
+    document(tmp_path)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(tmp_path))
+    subject = service(tmp_path)
+    scan = SpecsSubsystem._scan_folders_by_id
+    release_cold = threading.Event()
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.current_thread()
+        cold_entered, lookup_entered = asyncio.Event(), asyncio.Event()
+
+        def observe(resolver, *args, **kwargs):
+            if resolver is subject and kwargs.get('manifest') is not None:
+                # _run_capture already holds the real process-wide walk lock here.
+                loop.call_soon_threadsafe(cold_entered.set)
+                assert release_cold.wait(5)
+            else:
+                loop.call_soon_threadsafe(lookup_entered.set)
+                assert threading.current_thread() is not loop_thread, 'daemon loop entered a contended identity walk'
+            return scan(resolver, *args, **kwargs)
+
+        monkeypatch.setattr(SpecsSubsystem, '_scan_folders_by_id', observe)
+        store = SimpleNamespace(submit=AsyncMock(return_value=None), get_work_lane=AsyncMock(return_value={
+            'lane': {'version': 1, 'members': []}, 'members': [],
+        }))
+        server = Server(store=store)
+        server.work_lanes = SimpleNamespace(specs=subject)
+        server.assistant_composite = SimpleNamespace(is_stream=lambda _: True, operation=AsyncMock(
+            return_value={'type': 'assistant.operation.ok'}))
+        rulings = server.lane_rulings
+        rulings.request_binding = AsyncMock(return_value={})
+        rulings._create = AsyncMock(return_value={'state': 'done', 'ruling_request_id': 'fixture'})
+
+        cold = asyncio.create_task(spec_resolution_view(subject))
+        try:
+            await asyncio.wait_for(cold_entered.wait(), 5)
+            if verb == 'assistant.advise':
+                lookup = rulings.advise({'work_item': spec_id, 'body': 'Fixture advice'},
+                                        actor_stream_id='fixture:lead', actor_generation='generation')
+            else:
+                lookup = server._on_assistant_operation({
+                    'operation': verb, 'lane_id': 'fixture', 'expected_lane_version': 1,
+                    'payload': {'members': [spec_id]},
+                    '_auth_context': {'token_verified': True, 'stream_id': 'fixture:lead'},
+                })
+            response = asyncio.create_task(lookup)
+            await asyncio.wait_for(lookup_entered.wait(), 5)
+            lookup_waited = not response.done()
+        finally:
+            release_cold.set()
+            await cold
+        result = await response
+        assert lookup_waited
+        assert result['type'] == ('assistant.advise.ok' if verb == 'assistant.advise' else 'assistant.operation.ok')
+
+    asyncio.run(run())
+
+
 def test_overlapping_warm_admissions_share_probe_but_read_each_bound_spec(tmp_path, monkeypatch):
     first = document(tmp_path)
     second = document(tmp_path, 'fixture__two', 'spec_fixture__two')

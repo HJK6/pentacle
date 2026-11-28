@@ -592,7 +592,7 @@ class AssistantLaneRulings:
         prior = await self.store.submit(lambda c: c.execute(
             "SELECT work_item FROM v2_assistant_lane_rulings WHERE request_key=?", (key,)).fetchone())
         item, error = (({"spec_id": prior[0]}, None) if prior else
-                       (None, None) if spec == "none" else _work_item(spec))
+                       (None, None) if spec == "none" else await asyncio.to_thread(_work_item, spec))
         if not spec or error:
             raise ValueError(error or "assistant_advice_work_item_required")
         body = msg.get("body")
@@ -700,7 +700,7 @@ class AssistantLaneRulings:
             original = json.loads(known["intent_json"])["envelope"]
             frozen = {**frozen, "envelope": {**frozen["envelope"], "spec_id": original.get("spec_id")}}
         spec = str(frozen["envelope"].get("spec_id") or "")
-        item, error = _work_item(spec) if spec else (None, "no_spec")
+        item, error = await asyncio.to_thread(_work_item, spec) if spec else (None, "no_spec")
         if item is not None:
             item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec)]
         questions = await self.server.notify._db.call("list_agent_questions", producer_stream_id=producer)
@@ -856,7 +856,7 @@ class AssistantLaneRulings:
             if message.get("assignment_exempt"):
                 spec_id = ""
             if spec_id:
-                item, item_error = _work_item(spec_id)
+                item, item_error = await asyncio.to_thread(_work_item, spec_id)
                 if item_error:
                     correction(item_error, "spec_id", "Restore readable canonical spec content before resubmitting."
                                if item_error == "spec_unavailable" else "Supply a uniquely resolvable canonical --spec-id.")
@@ -937,7 +937,7 @@ class AssistantLaneRulings:
         intent = {"to_stream_id": target, "target_generation": generation, "msg_id": msg.get("msg_id", 0),
                   "body": body, "inbox": msg.get("inbox"), "attachments": attachments,
                   "from_stream_id": str(msg.get("from_stream_id") or auth["stream_id"])}
-        item, error = _work_item(str(spec_id)) if spec_id else (None, None)
+        item, error = await asyncio.to_thread(_work_item, str(spec_id)) if spec_id else (None, None)
         if item is not None:
             item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec_id)]
         request = await self._create(action="send", key=key,
