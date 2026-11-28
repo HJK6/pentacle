@@ -634,13 +634,17 @@ def delivery_wire(event):
     return raw.get('peer_wire_text') if isinstance(raw.get('peer_wire_text'), str) else event.get('text')
 
 
+def is_native_input_event(event):
+    return event.get('kind') in {'USER', 'TELL'}
+
+
 def split_native_input(conn, event, *, lookup_deadline=None):
     """Locate only unique, unconsumed exact delivery spans in an admitted input.
 
     The original record and full text remain in raw. Textual headers are never
     a boundary oracle. Leftovers retain unknown origin until dispatch proof.
     """
-    if event.get('kind') not in {'USER', 'TELL'}:
+    if not is_native_input_event(event):
         return [event]
     text = delivery_wire(event)
     target = event.get('stream_id')

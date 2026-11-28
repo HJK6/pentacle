@@ -7026,8 +7026,6 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         target = str(event.get("stream_id") or "")
         wire = delivery_wire(event)
         def bind_send_occurrence(conn):
-            if not isinstance(wire, str):
-                return
             for payload, row in send_proofs(conn, target, wire):
                 if payload["delivery"].get("proof_event_id") is not None:
                     continue
@@ -7044,7 +7042,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     attempts=row["attempts"], created_at=iso_now(), from_stream_id=row["from_stream_id"],
                     actor_stream_id=row["actor_stream_id"], actor_trusted=bool(row["actor_trusted"]),
                     meta_json=json.dumps(meta, separators=(",", ":")))
-        await self.submit(bind_send_occurrence)
+        if isinstance(wire, str):
+            await self.submit(bind_send_occurrence)
         raw = event.get("raw")
         tell_id = raw.get("tell_id") if event.get("kind") == "TELL" and isinstance(raw, dict) else None
         if (not isinstance(tell_id, str) or not tell_id) and event.get("kind") == "USER":

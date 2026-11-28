@@ -5,10 +5,11 @@ import json
 
 import pytest
 
-from ingest import Ingest, IngestConfig, _close_stream
+from ingest import Ingest, IngestConfig, _close_stream, append_ingested_event
 from routing_integrity import RoutingIntegrity
 from sessions import Sessions
 from store import Store
+from store_call_diag import call_name
 
 
 STAMP = "2026-10-01T00:00:00Z"
@@ -76,7 +77,7 @@ def write(path, items):
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
-def test_stored_replay_preserves_per_event_store_work(tmp_path, provider):
+def test_stored_output_replay_skips_prepare_and_keeps_wire_binding(tmp_path, provider):
     async def run():
         path = tmp_path / "transcript.jsonl"
         write(path, records(provider, 30))
@@ -96,12 +97,63 @@ def test_stored_replay_preserves_per_event_store_work(tmp_path, provider):
             after = await store.fetch_session_event_tail("fixture:replay", limit=500)
             assert before == after
             assert not [f for f in frames if f["type"] == "chat.event"]
-            assert any("prepare_native_input_events" in name for name in calls)
+            assert not any("prepare_native_input_events" in name for name in calls)
             assert any("bind_send_occurrence" in name for name in calls)
         finally:
             close_pump(first)
             if replay is not None:
                 close_pump(replay)
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind,text,raw,expected", [
+    pytest.param("USER", "some input", {}, (6, 4), id="user"),
+    pytest.param("TELL", "some input", {"tell_id": "fixture-tell"}, (7, 5), id="tell"),
+    pytest.param("TELL", None, {"tell_id": "fixture-tell"}, (5, 3), id="tell-without-wire"),
+    pytest.param("ASSIST_TEXT", "some output", {}, (4, 2), id="output"),
+    pytest.param("TOOL_USE", None, {}, (3, 1), id="non-wire"),
+    pytest.param("TOOL_USE", None, {"peer_wire_text": "wire"}, (4, 2), id="raw-wire"),
+])
+def test_ingest_writer_trips_by_event_kind(tmp_path, kind, text, raw, expected, monkeypatch, record_property):
+    async def run():
+        store, _ = await fixture(tmp_path / "transcript.jsonl", "claude")
+        frames = []
+        calls = []
+        original = store.submit
+
+        async def count(fn, **options):
+            calls.append(call_name(fn))
+            return await original(fn, **options)
+
+        async def broadcast(frame):
+            frames.append(frame)
+
+        try:
+            target = "fixture:replay"
+            lifecycle = await store.fetch_open_session_lifecycle(target, pane_pid="4321")
+            assert lifecycle is not None
+            event = {"kind": kind, "text": text, "stream_id": target, "provider": "claude",
+                     "timestamp": STAMP, "raw": {"jsonl_record_uuid": "one", **raw}}
+            with monkeypatch.context() as patch:
+                patch.setattr(store, "submit", count)
+                seq = await append_ingested_event(store, broadcast, event, recent_limit=500,
+                                                 lifecycle=lifecycle)
+            assert seq is not None
+            inserted_calls = calls.copy()
+            calls.clear()
+            before = await store.fetch_session_event_tail(target, limit=500)
+            with monkeypatch.context() as patch:
+                patch.setattr(store, "submit", count)
+                duplicate = await append_ingested_event(store, broadcast, event, recent_limit=500,
+                                                       lifecycle=lifecycle)
+            assert duplicate is None
+            assert await store.fetch_session_event_tail(target, limit=500) == before
+            assert len(frames) == 1
+            counts = len(inserted_calls), len(calls)
+            record_property("writer_trips_insert_duplicate", json.dumps(counts))
+            assert counts == expected, {"insert": inserted_calls, "duplicate": calls}
+        finally:
             store.stop()
     asyncio.run(run())
 
@@ -224,10 +276,11 @@ def test_plain_stored_input_becomes_ambiguous_after_delivery_change():
     asyncio.run(run())
 
 
-def test_stored_tell_repairs_promotion_after_crash(monkeypatch):
+@pytest.mark.parametrize("replay_wire", ["string", "non-string"])
+def test_stored_tell_repairs_promotion_after_crash(monkeypatch, replay_wire):
     import comms as comms_module
     from codex_rollout_norm import normalize_codex_rollout_record
-    from ingest import _identity_key, append_ingested_event
+    from ingest import _identity_key
     from test_tell_late_proof_controls import setup
     monkeypatch.setattr(comms_module, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0.01)
     monkeypatch.setattr(comms_module, "SUBMISSION_EVIDENCE_POLL_S", 0.001)
@@ -241,6 +294,7 @@ def test_stored_tell_repairs_promotion_after_crash(monkeypatch):
                 "payload": {"type": "message", "role": "user", "content": [
                     {"type": "input_text", "text": tmux.pastes[0]}]}},
                 host="localhost", session_name="v2-late-proof", session_id="native")[0]
+            event["raw"]["jsonl_record_uuid"] = "stored-tell"
             # Simulate the exact crash boundary: row committed, reconciliation
             # did not execute. Restore the real method before replay.
             reconcile = store._reconcile_ingested_tell
@@ -252,17 +306,22 @@ def test_stored_tell_repairs_promotion_after_crash(monkeypatch):
             store._reconcile_ingested_tell = reconcile
             before = await store.get_tell_delivery(request["tell_id"])
             assert before["delivery"]["delivery_status"] == "committed_pending_proof"
-            row = await store.fetch_session("localhost", "v2-late-proof")
+            stored_rows = await store.fetch_session_event_tail(request["stream_id"], limit=500)
             await store.submit(lambda c: (c.execute("UPDATE sessions SET pane_pid='4321' "
                 "WHERE host='localhost' AND session_name='v2-late-proof'"), c.commit()))
             lifecycle = await store.fetch_open_session_lifecycle(request["stream_id"], pane_pid="4321")
             frames = []
             async def broadcast(frame):
                 frames.append(frame)
-            await append_ingested_event(store, broadcast, event, recent_limit=500, lifecycle=lifecycle)
+            if replay_wire == "non-string":
+                raw = {k: v for k, v in event["raw"].items() if k != "peer_wire_text"}
+                event = {**event, "text": None, "raw": raw}
+            assert await append_ingested_event(store, broadcast, event, recent_limit=500,
+                                               lifecycle=lifecycle) is None
             after = await store.get_tell_delivery(request["tell_id"])
             assert after["delivery"]["delivery_status"] == "delivered"
             assert after["delivery"]["proof_event_id"] == seq
+            assert await store.fetch_session_event_tail(request["stream_id"], limit=500) == stored_rows
             assert frames == []
         finally:
             store.stop()
@@ -292,7 +351,8 @@ def test_first_replay_boundary_log_and_steady_state(tmp_path, caplog):
             # Replace the unfinished trailing line with a retained duplicate.
             write(path, items + [items[-1]])
             await drain(pump, path)
-            assert any("prepare_native_input_events" in name for name in calls)
+            assert not any("prepare_native_input_events" in name for name in calls)
+            assert any("bind_send_occurrence" in name for name in calls)
             logs = [json.loads(r.message.split("ingest_replay_complete ", 1)[1])
                     for r in caplog.records if r.message.startswith("ingest_replay_complete ")]
             assert len(logs) == 1
@@ -336,8 +396,9 @@ def test_replay_completion_when_read_passes_captured_boundary(tmp_path, caplog):
     asyncio.run(run())
 
 
-def test_stored_send_repairs_unbound_receipt_after_crash(tmp_path):
-    from ingest import _identity_key, append_ingested_event
+@pytest.mark.parametrize("repair_from", ["user", "output"])
+def test_stored_send_repairs_unbound_receipt_after_crash(tmp_path, repair_from):
+    from ingest import _identity_key
     from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
     async def run():
         comms, store, sessions = _new_comms(FakeTmux(), tmp_path)
@@ -355,6 +416,10 @@ def test_stored_send_repairs_unbound_receipt_after_crash(tmp_path):
                 pass
             store._reconcile_ingested_tell = crash_gap
             seq = await store.append_session_event(target, event, identity=_identity_key(event), limit=500)
+            if repair_from == "output":
+                event = {**event, "kind": "ASSIST_TEXT", "raw": {"jsonl_record_uuid": "receipt-gap-output"}}
+                event.pop("request_id")
+                await store.append_session_event(target, event, identity=_identity_key(event), limit=500)
             store._reconcile_ingested_tell = reconcile
             await store.submit(lambda c: (c.execute("UPDATE sessions SET pane_pid='4321' "
                 "WHERE host=? AND session_name=?", (HOST, NAME)), c.commit()))
