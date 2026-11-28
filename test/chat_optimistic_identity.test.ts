@@ -793,3 +793,142 @@ test('a receipt lookup started before expiry can establish commitment when its r
   t.mock.timers.tick(20000); await flush(); assert.equal(c.getState().optimisticSends![id].status,'acked');
   assert.equal(queries,before,'late receipt creates no further I/O');
 });
+
+for (const outcome of ['not_landed','landed']) {
+  test(`a fresh Retry on an aged failed row reads its own ${outcome} receipt`, async t => {
+    t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+    const c=store(t); const sends: string[]=[], lookups:string[]=[];
+    c.setSendBridge(async ({requestId})=>{sends.push(requestId);return {ok:true};});
+    c.setSendReceiptBridge(async ({streamId,requestId})=>{lookups.push(requestId);return {ok:true,found:true,receipts:[{to_stream_id:streamId,request_id:requestId,state:outcome,delivery:outcome}]};});
+    const id=c.sendTurn(STREAM,'old failure'); await flush();
+    const created=c.getState().optimisticSends![id].created_at; const first=sends[0];
+    c.applyFrame({type:'send.result',request_id:first,delivery:'not_landed'});
+    t.mock.timers.tick(1801000); assert.equal(c.retryOptimisticSend(id),true); await flush();
+    assert.equal(sends.length,2); const fresh=sends[1]; assert.notEqual(fresh,first);
+    assert.equal(c.getState().optimisticSends![id].created_at,created,'transcript order retains the original creation time');
+    c.applyFrame({type:'send.result',request_id:fresh,delivery:'committed_pending_proof',action_committed:true}); await flush();
+    assert.ok(lookups.includes(fresh),'fresh attempt must receive its own receipt read');
+    assert.equal(c.getState().optimisticSends![id].status,outcome==='landed'?'acked':'failed');
+    t.mock.timers.tick(20000); await flush();
+    assert.equal(c.getState().optimisticSends![id].status,outcome==='landed'?'acked':'failed','the proof bound cannot override a definitive receipt');
+    assert.equal(sends.length,2);
+  });
+}
+
+test('discard preserves the confirmed summary when history was not loaded', async t => {
+  const c=store(t); const calls:string[]=[];
+  const known={last_text:'Confirmed summary',last_kind:'AGENT',last_event_at:'2020-01-15T07:00:00.000Z'};
+  c.applyFrame({type:'snapshot',connected:true,events:[],sessions:c.getState().sessions.map(s=>s.stream_id===STREAM?{...s,...known}:s)});
+  c.setSendBridge(async ({requestId})=>{calls.push(requestId);return {ok:true};});
+  c.setSendReceiptBridge(async ()=>{calls.push('receipt');return {found:false,receipts:[]};});
+  const id=c.sendTurn(STREAM,'failed before history loads'); await flush(); const request=calls[0];
+  assert.equal(c.getState().sessions.find(s=>s.stream_id===STREAM)?.last_text,'failed before history loads');
+  c.applyFrame({type:'send.result',request_id:request,delivery:'not_landed'});
+  assert.equal(c.discardFailedOptimisticSend(id),true); await flush();
+  const session=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+  assert.deepEqual({last_text:session.last_text,last_kind:session.last_kind,last_event_at:session.last_event_at},known);
+  assert.equal(c.getState().optimisticSends?.[id],undefined); assert.deepEqual(calls,[request]);
+  const detail=c.selectSessionDetail(STREAM)!;
+  assert.equal(detail.transcriptItems.some(row=>row.optimisticId===id),false);
+  assert.ok(detail.transcriptItems.some(row=>row.text===known.last_text),'the next render retains the confirmed summary');
+  assert.equal(c.getState().sessions.find(s=>s.stream_id===STREAM)?.last_text,known.last_text,'render selection does not lose the summary');
+});
+
+test('a buffered send frame after dispose cannot rearm receipt work', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const c=store(t); let request='',queries=0;
+  c.setSendBridge(async args=>{request=args.requestId;return {ok:true};});
+  c.setSendReceiptBridge(async()=>{queries++;return {found:false,receipts:[]};});
+  const id=c.sendTurn(STREAM,'buffered response'); await flush(); const before=c.getState().optimisticSends![id].status;
+  c.dispose(); c.applyFrame({type:'send.result',request_id:request,delivery:'committed_pending_proof'});
+  assert.equal((c as any).receiptTracking.size,0);
+  t.mock.timers.tick(20000); await flush();
+  assert.equal(c.getState().optimisticSends![id].status,before); assert.equal(queries,0);
+});
+
+test('discard of one same-text failure does not own a newer failed row summary', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const c=store(t), requests:string[]=[];
+  const known={last_text:'Earlier confirmed',last_kind:'AGENT',last_event_at:'2020-01-01T00:00:00.000Z'};
+  c.applyFrame({type:'snapshot',connected:true,events:[],sessions:c.getState().sessions.map(s=>s.stream_id===STREAM?{...s,...known}:s)});
+  c.setSendBridge(async ({requestId})=>{requests.push(requestId);return {ok:true};});
+  const first=c.sendTurn(STREAM,'same text'); await flush(); c.applyFrame({type:'send.result',request_id:requests[0],delivery:'not_landed'});
+  t.mock.timers.tick(1000);
+  const second=c.sendTurn(STREAM,'same text'); await flush(); c.applyFrame({type:'send.result',request_id:requests[1],delivery:'not_landed'});
+  const newer={...c.getState().sessions.find(s=>s.stream_id===STREAM)!};
+  c.discardFailedOptimisticSend(first);
+  const afterFirst=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+  assert.deepEqual({last_text:afterFirst.last_text,last_kind:afterFirst.last_kind,last_event_at:afterFirst.last_event_at},
+    {last_text:newer.last_text,last_kind:newer.last_kind,last_event_at:newer.last_event_at});
+  c.discardFailedOptimisticSend(second);
+  const final=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+  assert.deepEqual({last_text:final.last_text,last_kind:final.last_kind,last_event_at:final.last_event_at},known);
+});
+
+test('discard cannot overwrite a newer authoritative USER with the same text and timestamp', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const c=store(t); let request='';
+  c.setSendBridge(async args=>{request=args.requestId;return {ok:true};});
+  const id=c.sendTurn(STREAM,'same words'); await flush();
+  c.applyFrame({type:'send.result',request_id:request,delivery:'not_landed'});
+  const stamp=new Date().toISOString();
+  c.applyFrame({type:'chat.event',event:{...echo('foreign-id','same words',501),timestamp:stamp}});
+  const before={...c.getState().sessions.find(s=>s.stream_id===STREAM)!};
+  c.discardFailedOptimisticSend(id);
+  const after=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+  assert.deepEqual({last_text:after.last_text,last_kind:after.last_kind,last_event_at:after.last_event_at},
+    {last_text:before.last_text,last_kind:before.last_kind,last_event_at:before.last_event_at});
+});
+
+test('a fresh Retry on an aged row keeps its own reconnect replay window', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const c=store(t);const requests:string[]=[];
+  c.setSendBridge(async ({requestId})=>{requests.push(requestId);return {ok:true};});
+  const id=c.sendTurn(STREAM,'old row reconnect');await flush(); const original=requests[0];
+  c.applyFrame({type:'send.result',request_id:original,delivery:'not_landed'});
+  t.mock.timers.tick(1801000); c.retryOptimisticSend(id); await flush(); const fresh=requests[1];
+  c.applyFrame({type:'__reconnect',generation:0,next_generation:1}); await flush();
+  assert.notEqual(fresh,original); assert.deepEqual(requests,[original,fresh,fresh]);
+});
+
+test('discard restores a newer cached predecessor when the prior summary is older', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const c=store(t); let request='';
+  const old={last_text:'Old summary',last_kind:'AGENT',last_event_at:'2020-01-01T00:00:00.000Z'};
+  c.applyFrame({type:'snapshot',connected:true,events:[],sessions:c.getState().sessions.map(s=>s.stream_id===STREAM?{...s,...old}:s)});
+  const previous={host:'peer',provider:'claude',stream_id:STREAM,session_name:'ordinary-chat',daemon_seq:17,
+    timestamp:'2026-01-01T00:00:00.000Z',kind:'ASSIST_TEXT',text:'Cached confirmed predecessor'};
+  c.applyFrame({type:'stream_events',stream_id:STREAM,events:[previous]});
+  c.setSendBridge(async args=>{request=args.requestId;return {ok:true};});
+  const id=c.sendTurn(STREAM,'local failed'); await flush(); c.applyFrame({type:'send.result',request_id:request,delivery:'not_landed'});
+  c.discardFailedOptimisticSend(id);
+  const summary=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+  assert.deepEqual({last_text:summary.last_text,last_kind:summary.last_kind,last_event_at:summary.last_event_at},
+    {last_text:previous.text,last_kind:previous.kind,last_event_at:previous.timestamp});
+});
+
+test('discard rebuilds a missing summary from a cached predecessor at the same timestamp', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const c=store(t); let request=''; const stamp='2026-01-01T00:00:00.000Z';
+  c.applyFrame({type:'snapshot',connected:true,events:[],sessions:c.getState().sessions.map(s=>s.stream_id===STREAM?{...s,last_text:'',last_kind:'',last_event_at:stamp}:s)});
+  const previous={host:'peer',provider:'claude',stream_id:STREAM,session_name:'ordinary-chat',daemon_seq:17,timestamp:stamp,kind:'ASSIST_TEXT',text:'Cached predecessor'};
+  c.applyFrame({type:'stream_events',stream_id:STREAM,events:[previous]});
+  c.setSendBridge(async args=>{request=args.requestId;return {ok:true};});
+  const id=c.sendTurn(STREAM,'failed input');await flush();c.applyFrame({type:'send.result',request_id:request,delivery:'not_landed'});
+  c.discardFailedOptimisticSend(id);
+  const summary=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+  assert.deepEqual({last_text:summary.last_text,last_kind:summary.last_kind,last_event_at:summary.last_event_at},
+    {last_text:previous.text,last_kind:previous.kind,last_event_at:stamp});
+});
+
+test('a fresh Retry on an aged row retains browser-host recovery for its own attempt', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const c=store(t); const requests:string[]=[];
+  c.setSendBridge(async ({requestId})=>{requests.push(requestId); if(requests.length===2) throw webLoss(1); return {ok:true};});
+  c.setSendReceiptBridge(async()=>({ok:false}));
+  const id=c.sendTurn(STREAM,'old row web recovery'); await flush(); const first=requests[0];
+  c.applyFrame({type:'send.result',request_id:first,delivery:'not_landed'});
+  t.mock.timers.tick(1801000); c.webHostDisconnected(1); c.retryOptimisticSend(id); await flush();
+  const fresh=requests[1]; c.webHostReady(2); await flush(); await flush();
+  assert.notEqual(fresh,first); assert.deepEqual(requests,[first,fresh,fresh]);
+});

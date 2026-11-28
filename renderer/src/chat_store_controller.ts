@@ -207,6 +207,17 @@ export type ReturnedToPromptDraft = {
 };
 
 type QueueEscapeBudget = { generation: string; rows: Set<string> };
+type SendAttempt = { created_at: number; attempt_started_at?: number };
+type SummaryFields = Pick<PentacleSessionSummary, 'last_text' | 'last_kind' | 'last_event_at' | 'last_text_provenance'>;
+type SummaryWrite = { streamId: string; generation?: string; previous: SummaryFields; previousOwner?: string; written: SummaryFields };
+
+function summaryFields(session: PentacleSessionSummary): SummaryFields {
+  return { last_text: session.last_text, last_kind: session.last_kind, last_event_at: session.last_event_at,
+    last_text_provenance: session.last_text_provenance };
+}
+function sameSummary(a: SummaryFields, b: SummaryFields): boolean {
+  return a.last_text === b.last_text && a.last_kind === b.last_kind && a.last_event_at === b.last_event_at;
+}
 
 export class ChatStoreController {
   private state: PentacleStreamState;
@@ -227,6 +238,8 @@ export class ChatStoreController {
   // A local Sent caption survives its own correlated USER echo.
   private echoedSentCaptions = new Map<string, { streamId: string; latestUserKey: string }>();
   private originalRequests = new Map<string, unknown>();
+  private summaryWrites = new Map<string, SummaryWrite>();
+  private summaryOwners = new Map<string, string>();
   private sendDispatches = new Set<string>();
   private reconcilingDispatches = new Set<string>();
   private webRecovery = new Map<string, { optimisticId: string; lostEpoch: number; attemptedEpoch?: number }>();
@@ -274,6 +287,17 @@ export class ChatStoreController {
 
   setSendReceiptBridge(bridge: typeof this.receiptBridge): void { this.receiptBridge = bridge; }
 
+  private attemptStartedAt(send: SendAttempt): number {
+    return typeof send.attempt_started_at === 'number' ? send.attempt_started_at : send.created_at;
+  }
+
+  private startFreshAttempt(state: PentacleStreamState, optimisticId: string, requestId: string, now: number): PentacleStreamState {
+    const rotated = rotateOptimisticSendRequestId(state, optimisticId, requestId);
+    const send = rotated.optimisticSends?.[optimisticId];
+    return send ? { ...rotated, optimisticSends: { ...rotated.optimisticSends,
+      [optimisticId]: { ...send, attempt_started_at: now } } } : rotated;
+  }
+
   private stopReceiptTracking(requestId: string): void {
     const tracking = this.receiptTracking.get(requestId);
     if (tracking?.timer) clearTimeout(tracking.timer);
@@ -311,7 +335,7 @@ export class ChatStoreController {
     if (!send || send.request_id !== requestId) return;
     // Never restart receipt I/O after its age bound, but a newly learned
     // commitment still owns its independent 20-second display deadline.
-    if (Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) {
+    if (Date.now() - this.attemptStartedAt(send) >= RECONNECT_REPLAY_MAX_AGE_MS) {
       if (committed) {
         const tracking = this.receiptTracking.get(requestId);
         const committedAt = tracking?.committedAt ?? Date.now();
@@ -343,7 +367,7 @@ export class ChatStoreController {
     const delays = [20000, 15000, 30000, 60000, 120000, 240000];
     const send = this.state.optimisticSends?.[tracking.optimisticId];
     if (!send || send.request_id !== requestId) { this.stopReceiptTracking(requestId); return; }
-    const remaining = send.created_at + RECONNECT_REPLAY_MAX_AGE_MS - Date.now();
+    const remaining = this.attemptStartedAt(send) + RECONNECT_REPLAY_MAX_AGE_MS - Date.now();
     if (remaining <= 0) { this.expireReceiptTracking(requestId); return; }
     const backoff = delays[Math.min(tracking.step, delays.length - 1)];
     const proofRemaining = tracking.committedAt !== undefined && !tracking.assumedSent
@@ -354,7 +378,7 @@ export class ChatStoreController {
     tracking.timer = setTimeout(() => {
       tracking.timer = undefined;
       const send = this.state.optimisticSends?.[tracking.optimisticId];
-      if (!send || send.request_id !== requestId || Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) {
+      if (!send || send.request_id !== requestId || Date.now() - this.attemptStartedAt(send) >= RECONNECT_REPLAY_MAX_AGE_MS) {
         this.expireReceiptTracking(requestId); return;
       }
       if (tracking.committedAt !== undefined && Date.now() - tracking.committedAt >= 20000 && !tracking.assumedSent) {
@@ -372,7 +396,7 @@ export class ChatStoreController {
     if (reconnect) tracking.reconnectPending = true;
     if (tracking.inFlight || this.sendDispatches.has(requestId) || this.reconcilingDispatches.has(requestId)) return;
     const send = this.state.optimisticSends?.[tracking.optimisticId];
-    if (!send || send.request_id !== requestId || Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) { this.expireReceiptTracking(requestId); return; }
+    if (!send || send.request_id !== requestId || Date.now() - this.attemptStartedAt(send) >= RECONNECT_REPLAY_MAX_AGE_MS) { this.expireReceiptTracking(requestId); return; }
     const afterReconnect = tracking.reconnectPending;
     tracking.reconnectPending = false;
     tracking.inFlight = true;
@@ -388,7 +412,7 @@ export class ChatStoreController {
           && result.receipts.length === 1 ? result.receipts[0] : null;
         const status = receipt?.state || receipt?.receipt_state || receipt?.delivery;
         if (!this.receiptTracking.has(requestId) && current?.request_id === requestId
-            && current.status === 'indeterminate' && Date.now() - current.created_at >= RECONNECT_REPLAY_MAX_AGE_MS
+            && current.status === 'indeterminate' && Date.now() - this.attemptStartedAt(current) >= RECONNECT_REPLAY_MAX_AGE_MS
             && receipt?.request_id === requestId && receipt?.to_stream_id === current.stream_id
             && receipt?.delivery !== 'not_landed' && receipt?.receipt_state !== 'not_landed'
             && (status === 'accepted' || status === 'committed_pending_proof')) {
@@ -643,6 +667,19 @@ export class ChatStoreController {
       }
     }
     this.state = next;
+    for (const [streamId, id] of this.summaryOwners) {
+      const record = this.summaryWrites.get(id);
+      const session = next.sessions.find(item => item.stream_id === streamId);
+      if (!record || !session || session.session_generation !== record.generation
+          || !next.optimisticSends?.[id] || !sameSummary(summaryFields(session), record.written)) this.summaryOwners.delete(streamId);
+    }
+    for (const [id, record] of this.summaryWrites) {
+      if (next.optimisticSends?.[id]) continue;
+      // A pruned predecessor became authoritative; retain its summary as a
+      // value, but no longer treat its local identity as an owner.
+      for (const other of this.summaryWrites.values()) if (other.previousOwner === id) other.previousOwner = undefined;
+      this.summaryWrites.delete(id);
+    }
     for (const [requestId, timer] of this.proofBoundTimers) {
       const id = next.optimisticByRequestId?.[requestId];
       const send = id && next.optimisticSends?.[id];
@@ -863,6 +900,8 @@ export class ChatStoreController {
     for (const timer of this.proofBoundTimers.values()) clearTimeout(timer);
     this.proofBoundTimers.clear();
     this.echoedSentCaptions.clear();
+    this.summaryWrites.clear();
+    this.summaryOwners.clear();
     this.sendDispatches.clear();
     this.reconcilingDispatches.clear();
     this.webRecovery.clear();
@@ -964,6 +1003,8 @@ export class ChatStoreController {
     const sessionGeneration = this.state.sessions.find(item => item.stream_id === streamId)?.session_generation;
     if (sessionGeneration) this.sendSessionGenerations.set(optimisticId, sessionGeneration);
 
+    const previousSession = this.state.sessions.find(item => item.stream_id === streamId);
+    const previousOwner = this.summaryOwners.get(streamId);
     let optimistic = sendOptimisticMessage(this.state, {
       streamId,
       text: sendText,
@@ -986,6 +1027,17 @@ export class ChatStoreController {
         type: 'optimistic-replace', streamId, optimisticId,
         event: { ...event, meta: { voice } } as PentacleEvent,
       });
+    }
+    const writtenSession = optimistic.sessions.find(item => item.stream_id === streamId);
+    const ownEvent = selectPentacleDerivedEventIndex(optimistic).byStream.get(streamId)?.find(item => item.optimistic_id === optimisticId);
+    if (previousSession && writtenSession && ownEvent && ownEvent.client_origin === true
+        && writtenSession.last_text === ownEvent.text && writtenSession.last_kind === ownEvent.kind
+        && writtenSession.last_event_at === ownEvent.timestamp) {
+      const previousRecord = previousOwner && this.summaryWrites.get(previousOwner);
+      const priorOwner = previousRecord && sameSummary(summaryFields(previousSession), previousRecord.written) ? previousOwner : undefined;
+      this.summaryWrites.set(optimisticId, { streamId, generation: writtenSession.session_generation,
+        previous: summaryFields(previousSession), previousOwner: priorOwner, written: summaryFields(writtenSession) });
+      this.summaryOwners.set(streamId, optimisticId);
     }
     this.setState(optimistic);
 
@@ -1027,7 +1079,7 @@ export class ChatStoreController {
       const now = Date.now();
       let next = rearmOptimisticSend(this.state, optimisticId, now);
       next = recordOptimisticSendAcceptanceByRequestId(next, send.request_id, { action_committed: false });
-      next = rotateOptimisticSendRequestId(next, optimisticId, requestId);
+      next = this.startFreshAttempt(next, optimisticId, requestId, now);
       if (session?.session_kind !== 'assistant_composite' && this.getTurnPhase(send.stream_id) === 'idle'
           && !this.hasConfirmedWork(session) && !this.hasProviderQueuedRows(send.stream_id)) {
         next = beginPentacleTurn(next, send.stream_id, optimisticId, now);
@@ -1054,13 +1106,33 @@ export class ChatStoreController {
     this.voiceMetas.delete(optimisticId);
     this.originalRequests.delete(optimisticId);
     this.sendSessionGenerations.delete(optimisticId);
+    const write = this.summaryWrites.get(optimisticId);
+    const ownsSummary = !!write && this.summaryOwners.get(send.stream_id) === optimisticId;
     let next = pruneOptimisticSend(this.state, optimisticId);
     next = mutatePentacleEventBuckets(next, { type: 'optimistic-remove', streamId: send.stream_id, optimisticId });
     const session = next.sessions.find(item => item.stream_id === send.stream_id);
-    if (session && String(session.last_kind || '').toUpperCase() === 'USER' && session.last_text === send.text) {
-      const previous = (selectPentacleDerivedEventIndex(next).byStream.get(send.stream_id) ?? []).at(-1);
-      next = { ...next, sessions: next.sessions.map(item => item === session ? { ...item, last_text: previous?.text ?? '', last_kind: previous?.kind ?? '', last_event_at: previous?.timestamp ?? item.last_event_at } : item) };
+    if (write && ownsSummary && session && session.session_generation === write.generation
+        && sameSummary(summaryFields(session), write.written)) {
+      let restored = write.previous;
+      let restoredAt = Date.parse(String(restored.last_event_at || ''));
+      for (const event of selectPentacleDerivedEventIndex(next).byStream.get(send.stream_id) ?? []) {
+        const at = Date.parse(String(event.timestamp || ''));
+        if (event.kind === 'DRAFT' || !event.text || !Number.isFinite(at)
+            || (Number.isFinite(restoredAt) && (at < restoredAt || (at === restoredAt && !!restored.last_text)))) continue;
+        restored = { ...restored, last_text: event.text, last_kind: event.kind, last_event_at: event.timestamp };
+        restoredAt = at;
+      }
+      next = { ...next, sessions: next.sessions.map(item => item === session ? { ...item, ...restored } : item) };
+      if (write.previousOwner && next.optimisticSends?.[write.previousOwner] && this.summaryWrites.has(write.previousOwner)) {
+        this.summaryOwners.set(send.stream_id, write.previousOwner);
+      } else this.summaryOwners.delete(send.stream_id);
     }
+    // A later optimistic summary may have used this discarded row as its
+    // predecessor. Skip it rather than resurrecting it on a later discard.
+    if (write) for (const other of this.summaryWrites.values()) if (other.previousOwner === optimisticId) {
+      other.previous = write.previous; other.previousOwner = write.previousOwner;
+    }
+    this.summaryWrites.delete(optimisticId);
     this.setState(next);
     return true;
   }
@@ -1078,9 +1150,10 @@ export class ChatStoreController {
     // before notifying listeners so another click cannot dispatch this twice.
     this.voiceMetas.set(optimisticId, { voice });
     const requestId = this.nextRequestId('retry');
-    const rearmed = rearmOptimisticSend(this.state, optimisticId, Date.now());
+    const now = Date.now();
+    const rearmed = rearmOptimisticSend(this.state, optimisticId, now);
     const fresh = recordOptimisticSendAcceptanceByRequestId(rearmed, send.request_id, { action_committed: false });
-    this.setState(rotateOptimisticSendRequestId(fresh, optimisticId, requestId));
+    this.setState(this.startFreshAttempt(fresh, optimisticId, requestId, now));
     this.dispatchOptimistic(send.stream_id, optimisticId, requestId, send.text, this.socketGeneration, send.attachments ?? []);
     return true;
   }
@@ -1112,7 +1185,7 @@ export class ChatStoreController {
       }
       if (send.status !== 'indeterminate' || this.webEpoch <= recovery.lostEpoch
           || recovery.attemptedEpoch === this.webEpoch
-          || Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) continue;
+          || Date.now() - this.attemptStartedAt(send) >= RECONNECT_REPLAY_MAX_AGE_MS) continue;
       if (send.action_committed === true) {
         this.webRecovery.delete(requestId);
         void this.queryReceipt(requestId, true);
@@ -1131,7 +1204,12 @@ export class ChatStoreController {
   }
 
   private replayReconnectSurvivors(generation: number): void {
-    for (const optimisticId of eligibleReconnectReplayOptimisticIds(this.state, generation)) {
+    // The replay helper orders by original row time, but its age predicate
+    // must inspect the current attempt rather than the original row.
+    const optimisticSends = Object.fromEntries(Object.entries(this.state.optimisticSends ?? {}).map(([id, send]) => [id,
+      { ...send, created_at: this.attemptStartedAt(send), queued_at: send.queued_at ?? send.created_at }]));
+    const replayState = { ...this.state, optimisticSends };
+    for (const optimisticId of eligibleReconnectReplayOptimisticIds(replayState, generation)) {
       const send = this.state.optimisticSends?.[optimisticId];
       if (!send || this.webRecovery.has(send.request_id) || send.action_committed === true) continue;
       this.dispatchOptimistic(send.stream_id, optimisticId, send.request_id, send.text, generation, send.attachments ?? [], false, true);
@@ -1491,7 +1569,7 @@ export class ChatStoreController {
    * additive. Returns the resulting state.
    */
   applyFrame(frame: RawFrame | null | undefined): PentacleStreamState {
-    if (!frame || typeof frame !== 'object') return this.state;
+    if (this.disposed || !frame || typeof frame !== 'object') return this.state;
     const type = frame.type;
 
     if (type === 'snapshot') {
@@ -1575,11 +1653,17 @@ export class ChatStoreController {
       const hook = this.diagnosticsHook;
       const beforeCount = hook ? this.countEventsForStream(event.stream_id) : 0;
       const isServerUser = String(event.kind || '').toUpperCase() === 'USER' && event.client_origin !== true;
-      if (isServerUser) {
-        this.setState(this.applyServerUserEventWithReconciliation(event));
-      } else {
-        this.setState(applyPentacleEvent(this.state, event));
+      const owner = this.summaryOwners.get(event.stream_id);
+      const matchedOwner = isServerUser && owner && this.findMatchingOptimisticId(event) === owner;
+      const next = isServerUser ? this.applyServerUserEventWithReconciliation(event) : applyPentacleEvent(this.state, event);
+      if (owner && isServerUser && !matchedOwner) {
+        const summary = next.sessions.find(item => item.stream_id === event.stream_id);
+        // A distinct authoritative USER may have the same text and timestamp.
+        // Its identity, not those values alone, determines summary ownership.
+        if (summary && summary.last_text === event.text && summary.last_kind === event.kind
+            && summary.last_event_at === event.timestamp) this.summaryOwners.delete(event.stream_id);
       }
+      this.setState(next);
       if (hook) {
         const afterCount = this.countEventsForStream(event.stream_id);
         const persistedDelta = afterCount - beforeCount;
