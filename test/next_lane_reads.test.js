@@ -424,3 +424,35 @@ test('subscribers are notified for loading, held, failed, and retry transitions'
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(notifications, before);
 });
+
+test('presence pushes do not restart an in-flight paged read', async () => {
+  const calls = [];
+  const reads = createLaneReads({ show: (_laneId, options) => {
+    const item = deferred(); calls.push({ options, ...item }); return item.promise;
+  } });
+  reads.updateInventory(inventory(lane(REV_A, { working: 0 })));
+  const pending = reads.requestMembers(LANE_ID);
+  const first = member('spec_fixture__a');
+  calls[0].resolve(reply({ members: [first], total: 2, next: first.spec_id }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 2);
+  for (let push = 1; push <= 4; push++) reads.updateInventory(inventory(lane(REV_A, { working: push })));
+  assert.equal(calls.length, 2, 'unchanged detail does not start page one again');
+  calls[1].resolve(reply({ members: [member('spec_fixture__b')], total: 2 }));
+  const state = await pending;
+  assert.equal(state.status, 'held');
+  assert.deepEqual(state.reply.members.map(item => item.spec_id), ['spec_fixture__a', 'spec_fixture__b']);
+});
+
+test('presence pushes preserve a reply waiting for its matching revision', async () => {
+  let calls = 0;
+  const reads = createLaneReads({ show: async () => { calls++; return reply({ revision: REV_B, members: [member('spec_fixture__b')] }); } });
+  reads.updateInventory(inventory(lane(REV_A, { working: 0 })));
+  const pending = reads.requestMembers(LANE_ID);
+  await new Promise(resolve => setImmediate(resolve));
+  reads.updateInventory(inventory(lane(REV_A, { working: 1 })));
+  assert.equal(calls, 1, 'unchanged detail continues waiting');
+  reads.updateInventory(inventory(lane(REV_B, { working: 2 })));
+  assert.equal((await pending).detailRevision, REV_B);
+  assert.equal(calls, 1);
+});
