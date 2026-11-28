@@ -1,0 +1,10 @@
+ Ready to code?
+
+ Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+ ❯ 1. Yes, clear context and bypass permissions
+   2. Yes, and bypass permissions
+   3. Yes, manually approve edits
+   4. Type here to tell Claude what to change
+
+ Esc to cancel
