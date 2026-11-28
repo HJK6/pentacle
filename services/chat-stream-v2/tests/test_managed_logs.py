@@ -239,6 +239,32 @@ def test_hourly_includes_send_and_ingest_records(tmp_path):
     assert [line.split(' ', 3)[-1] for line in lines] == messages
 
 
+def test_hourly_includes_formatted_send_records(tmp_path):
+    cfg = config(tmp_path, 4096)
+    script = '''
+import asyncio, logging, sys
+import managed_logs, send_timing
+managed_logs.install()
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+async def main():
+ counter = send_timing.SendTiming(clock=lambda: 0)
+ for name in ("send_start", "send_attempt", "outside_tuple"):
+  counter.emit(name, {"fixture": 1})
+ done = asyncio.get_running_loop().create_future()
+ asyncio.get_running_loop().call_soon(done.set_result, None)
+ await done
+ counter.flush(0, force=True)
+ logging.getLogger("chat_streamd_v2.store").info("store_call_top {}")
+asyncio.run(main())
+'''
+    env = {**os.environ, **env_for(cfg), 'PYTHONPATH': str(SERVICE)}
+    result = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    lines = (tmp_path / 'hourly.log').read_text().splitlines()
+    names = [line.split(' ', 4)[3] for line in lines]
+    assert names == ['send_start', 'send_attempt', 'send_latency', 'store_call_top']
+
+
 def test_malformed_hourly_records_still_reach_general_log(tmp_path):
     cfg = config(tmp_path, 4096)
     script = '''
