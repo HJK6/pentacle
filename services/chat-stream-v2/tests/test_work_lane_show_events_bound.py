@@ -52,7 +52,7 @@ def test_show_reply_carries_the_newest_events_and_fits_the_frame():
 
 @pytest.mark.timeout(30)
 def test_a_refused_show_is_logged(caplog):
-    async def get_work_lane(lane_id):
+    async def get_work_lane(lane_id, **_):
         return {"_projection_row": {"bound_stream_id": None}}
     server = SimpleNamespace(_work_lanes_reader=lambda msg: None, store=SimpleNamespace(get_work_lane=get_work_lane),
                              sessions=SimpleNamespace(list_open=lambda: []), work_lanes=None)

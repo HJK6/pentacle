@@ -9,6 +9,7 @@ emitter beside ``InventoryEmitter``.  Wire contract:
 from __future__ import annotations
 
 import asyncio
+from contextvars import copy_context; from store_host_transfer import actor_context
 import math
 import json
 import logging
@@ -539,7 +540,8 @@ class WorkLanesInventory:
 
     def _start_drain(self) -> None:
         if (self._running or self.specs is None) and (self._task is None or self._task.done()):
-            self._task = asyncio.create_task(self._drain())
+            context = copy_context(); context.run(actor_context.set, None)
+            self._task = asyncio.create_task(self._drain(), context=context)
 
     async def _drain(self) -> None:
         while (self._running or self.specs is None) and (self._dirty or self._emit_dirty):
@@ -668,15 +670,15 @@ class WorkLanesInventory:
             log.exception("work lanes question attribution unavailable")
             return None
 
-    async def _source_snapshot(self, *, include_done=False):
+    async def _source_snapshot(self, *, include_done=False, read=False):
         snapshot = getattr(self.store, "work_lane_snapshot", None)
         if snapshot is not None:
-            return await snapshot(include_done=include_done)
+            return await snapshot(include_done=include_done, read=read)
         # Compatibility for consumers implementing the older Store protocol.
         return await self.store.work_lane_rows(include_done=include_done), await self.store.work_index_status()
 
-    async def current(self) -> dict[str, Any]:
-        rows, work_index = await self._source_snapshot()
+    async def current(self, *, read=False) -> dict[str, Any]:
+        rows, work_index = await self._source_snapshot(read=read)
         return build_frame(rows, presence_index(self.sessions.list_open()),
                            work_index=work_index,
                            worked_by_spec=self.worked.values,
@@ -710,7 +712,7 @@ class WorkLanesInventory:
 
     async def emit_if_changed(self) -> bool:
         async with self._lock:
-            frame = await self.current()
+            frame = await self.current(read=True)
             signature = frame_signature(json.loads(json.dumps(frame, default=str)))
             if signature == self._last_signature:
                 return False
