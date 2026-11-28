@@ -173,16 +173,50 @@ def test_hourly_line_group_totals(caplog):
     diag.record("_WorkLanesStoreMixin.get_work_lane.locals.read", False, None, 0, 0, 0.125)
     diag.record("_WorkLanesStoreMixin.work_lane_snapshot.locals.read", False, None, 1, 1, 1.25)
     diag.record("AdvisorSessions.tick.locals.read", False, None, 2, 2, 2.5)
-    diag.record("unrelated", False, None, 3, 3, 3.75)
+    for name in (
+        "Store.consent_expire.locals._op", "Store.consent_push_due.locals._op",
+        "QueuedSendNow._tick.locals.pending", "WorkLaneEpisodesStoreMixin.reconcile_work_lane_episodes.locals.evaluate",
+        "Store.resolve_closed_awaiters.locals._op", "ErrorAlerts.advisory_snapshot",
+        "ErrorAlerts.notice_rows.locals.read", "Store.fetch_session_event_page.locals._op", "unrelated",
+    ):
+        diag.record(name, False, None, 3, 3, 3.125)
     diag.record("unrelated", False, None, 3601, 3601, 3601)
     [line] = lines(caplog, "store_call_top")
     assert line["groups"] == {
         "lane_reads": {"calls": 2, "execution_ms": 375.0},
         "rulings_loop": {"calls": 0, "execution_ms": 0.0},
         "advisor_checks": {"calls": 1, "execution_ms": 500.0},
-        "alert_notice_reads": {"calls": 0, "execution_ms": 0.0},
-        "history_pages": {"calls": 0, "execution_ms": 0.0},
+        "alert_notice_reads": {"calls": 1, "execution_ms": 125.0},
+        "alert_snapshot": {"calls": 1, "execution_ms": 125.0},
+        "consent_timers": {"calls": 2, "execution_ms": 250.0},
+        "queued_send_now": {"calls": 1, "execution_ms": 125.0},
+        "lane_episodes": {"calls": 1, "execution_ms": 125.0},
+        "closed_awaiters": {"calls": 1, "execution_ms": 125.0},
+        "history_pages": {"calls": 1, "execution_ms": 125.0},
     }
+    assert line["feature_total"] == {"calls": 10, "execution_ms": 1750.0}
+    assert line["all_calls"] == {"calls": 13, "execution_ms": 2000.0}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_and_other_notice_reads_are_named_separately(store, caplog, monkeypatch):
+    from error_alerts import ErrorAlerts
+
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    monkeypatch.setattr(store_call_diag, "SLOW_LINE_S", -1)
+    alerts = ErrorAlerts.__new__(ErrorAlerts)
+    alerts.store = store
+
+    async def empty_facts():
+        return []
+
+    alerts._error_rows = empty_facts
+    await alerts._notice_snapshot()
+    await alerts.notice_rows(notice_ids=())
+    await finish_prior_store_calls(store)
+    names = [line["name"] for line in lines(caplog, "store_call_slow")]
+    assert names.count("ErrorAlerts.advisory_snapshot") == 1
+    assert names.count("ErrorAlerts.notice_rows.locals.read") == 1
 
 
 def test_hourly_line_lists_top_five_by_total_execution(caplog):

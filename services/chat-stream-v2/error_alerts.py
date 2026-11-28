@@ -626,7 +626,7 @@ class ErrorAlerts:
         return await db._run(read)
 
     async def notice_rows(self, *, notice_ids=None, notification_ids=(), pending=False,
-                          predecessor_ids=(), dependencies=True):
+                          predecessor_ids=(), dependencies=True, snapshot=False):
         """Indexed notice/proof inputs plus their explicit dependency closure.
 
         No-argument inventory remains for existing inspection consumers. Every
@@ -677,6 +677,7 @@ class ErrorAlerts:
                         break
                     by_ids(wanted)
             return list(rows.values())
+        if snapshot: read.__qualname__ = "ErrorAlerts.advisory_snapshot"
         return await self.store.submit(read)
 
     async def reconcile(self, now=None):
@@ -753,7 +754,7 @@ class ErrorAlerts:
         notice_ids = list(dict.fromkeys(nid for fact in facts
                                         for nid in (fact.get("error_context") or {}).get("notice_ids", ())))
         rows = {r["notice_id"]: r for r in await self.notice_rows(
-            notice_ids=notice_ids, notification_ids=nids)}
+            notice_ids=notice_ids, notification_ids=nids, snapshot=True)}
         by_fact = {}
         for notice_id, notice in rows.items():
             owner = metadata(notice).get("notification_id")
