@@ -840,7 +840,7 @@ class _WorkLanesStoreMixin:
         return await self.submit(check)
 
 
-    async def get_work_lane(self, lane_id: str) -> dict[str, Any] | None:
+    async def get_work_lane(self, lane_id: str, *, read: bool = False) -> dict[str, Any] | None:
         def _op(conn):
             # Match the base early-out: an absent lane returns before any global
             # read, so a fault reading unrelated index state cannot turn a missing
@@ -872,7 +872,7 @@ class _WorkLanesStoreMixin:
         def coherent(conn):
             with hue_transaction(conn, begin="BEGIN"):
                 return _op(conn)
-        return await self.submit(coherent)
+        return await (self.read if read else self.submit)(coherent)
 
     async def work_item_lane_membership(self, spec_id: str) -> dict:
         """Admission uses effective membership in every state, in one store read."""
@@ -911,13 +911,13 @@ class _WorkLanesStoreMixin:
         """Spec IDs the due worked-time census reads; no enriched projection."""
         return await self.submit(work_lane_census_ids_conn)
 
-    async def work_lane_snapshot(self, *, include_done: bool = False):
+    async def work_lane_snapshot(self, *, include_done: bool = False, read: bool = False):
         """Read rows and index status in one coherent transaction."""
         def _op(conn):
             with hue_transaction(conn, begin="BEGIN"):
                 rows = work_lane_rows_conn(conn, include_done=include_done, external_config=getattr(self, "external_work_config", None))
                 return rows, index_status_conn(conn)
-        return await self.submit(_op)
+        return await (self.read if read else self.submit)(_op)
 
     async def work_lane_handoff(self, predecessor: str, successor: str) -> list[dict[str, Any]]:
         """Decision D-2: lanes led by ``predecessor`` follow the handoff successor; state unchanged."""

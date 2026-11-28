@@ -379,3 +379,83 @@ def test_parked_shared_fixture_and_order():
     rows.append({**parked, "updated_at": "2026-01-02T00:00:00Z"})
     projected = project_lanes(rows, {}, "2026-01-03T00:00:00Z")
     assert [row["lane_id"] for row in projected] == ["blocked", "active", parked["lane_id"], "paused"]
+
+
+def test_reader_routes_show_and_emission(tmp_path, monkeypatch):
+    from test_store_reader import record_calls, rendezvous, queue_read
+    import store_host_transfer as transfer
+    seen = record_calls(monkeypatch)
+    async def body(env):
+        lid = (await env.adopt(key="stream:reader", state="paused", owner="operator"))["lane"]["lane_id"]
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
+        await sessions.refresh()
+        server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
+        server.work_lanes = WorkLanesInventory(env.store, sessions, env._broadcast, refresh_min_s=0)
+        auth = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+        await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+        await server.work_lanes.emit_if_changed()
+        assert any("get_work_lane" in name for name in seen[env.store.read_diag])
+        assert any("work_lane_snapshot" in name for name in seen[env.store.read_diag])
+        guard = transfer.require_active
+        checked = []
+        monkeypatch.setattr(transfer, "require_active", lambda conn, *actor: (checked.append(actor), guard(conn, *actor))[1])
+        token = transfer.actor_context.set((FD, env.gen))
+        try:
+            await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+        finally:
+            transfer.actor_context.reset(token)
+        assert checked and any("get_work_lane" in name for name in seen[env.store.call_diag])
+        await env.store.submit(lambda conn: (conn.execute("UPDATE v2_assistant_composite_lanes SET title='New title' WHERE lane_id=?", (lid,)), conn.commit()))
+        entered, release, pause = rendezvous()
+        held = asyncio.create_task(env.store.read(lambda conn: pause()))
+        waiting = []
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            for _ in range(4):
+                waiting.append(await queue_read(env.store, lambda conn: None))
+            with pytest.raises(VerbError, match="Lane details are busy; retry") as exc:
+                await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+            assert exc.value.code == "work_lanes_busy"
+            assert exc.value.extra == {"retryable": True, "action_committed": False}
+            assert await env.store.get_work_lane(lid) and await server.work_lanes.current() and await server.work_lanes.list()
+            count = len(env.broadcasts)
+            server.work_lanes.request_emit()
+            await server.work_lanes._task
+            assert len(env.broadcasts) == count
+        finally:
+            release.set()
+            await held
+            await asyncio.gather(*waiting)
+        server.work_lanes.request_emit()
+        await server.work_lanes._task
+        assert len(env.broadcasts) == count + 1
+        await env.store.submit(lambda c: (c.execute("INSERT INTO v2_host_transfer_retirements VALUES (?,?,?,?)", (FD, env.gen, "fixture", 1.0)), c.execute("UPDATE v2_assistant_composite_lanes SET title='Retired actor' WHERE lane_id=?", (lid,)), c.commit()))
+        with pytest.raises(transfer.TransferError): await env.store.submit(lambda c: transfer.require_active(c, FD, env.gen))
+        seen[env.store.read_diag].clear()
+        count = len(env.broadcasts)
+        token = transfer.actor_context.set((FD, env.gen))
+        try:
+            server.work_lanes.request_emit()
+            await server.work_lanes._task
+        finally:
+            transfer.actor_context.reset(token)
+        assert any("work_lane_snapshot" in name for name in seen[env.store.read_diag])
+        assert len(env.broadcasts) == count + 1 and env.broadcasts[-1]["type"] == "work_lanes.inventory"
+    run(body, path=str(tmp_path / "routing.db"))
+
+
+def test_reader_front_desk_projection_matches_writer(tmp_path):
+    from store_work_lanes import work_lane_rows_conn
+    async def body(env):
+        lead = await env.seat("reader-fd", role="lead", parent_stream_id=FD)
+        await env.adopt(key="stream:reader-fd", state="paused", owner="operator", lead=lead)
+        def projected(conn):
+            return project_lanes(work_lane_rows_conn(conn), {})[0]["lead"]
+        assert (await env.store.submit(projected))["qualifies"] is True
+        env.store.lifecycle_front_desk = {"name": env.composite.config.name,
+                                          "env_binding": {"stream_id": lead[0], "generation": lead[1]}}
+        writer = await env.store.submit(projected)
+        reader = await env.store.read(projected)
+        assert writer["qualifies"] is False
+        assert (reader["qualifies"], reader["eta_stale"]) == (writer["qualifies"], writer["eta_stale"])
+    run(body, path=str(tmp_path / "parity.db"))
