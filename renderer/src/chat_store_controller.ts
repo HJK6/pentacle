@@ -16,6 +16,7 @@ import {
   markOptimisticAckedByRequestId,
   markOptimisticFailedByRequestId,
   markOptimisticIndeterminateByRequestId,
+  recordOptimisticSendAcceptanceByRequestId,
   markOptimisticCancelledByOptimisticId,
   pruneOptimisticSend,
   reconcileOptimisticSendWithServerEvent,
@@ -221,6 +222,10 @@ export class ChatStoreController {
   private sendBridge: ChatSendBridge | null = null;
   private receiptBridge: ((args: { streamId: string; requestId: string; originalRequest?: unknown }) => Promise<any>) | null = null;
   private receiptTracking = new Map<string, { optimisticId: string; committedAt?: number; assumedSent: boolean; timer?: ReturnType<typeof setTimeout>; step: number; inFlight: boolean; reconnectPending: boolean }>();
+  // Follow-up I/O is bounded separately from known commitment and its proof deadline.
+  private proofBoundTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // A local Sent caption survives its own correlated USER echo.
+  private echoedSentCaptions = new Map<string, { streamId: string; latestUserKey: string }>();
   private originalRequests = new Map<string, unknown>();
   private sendDispatches = new Set<string>();
   private reconcilingDispatches = new Set<string>();
@@ -275,7 +280,48 @@ export class ChatStoreController {
     this.receiptTracking.delete(requestId);
   }
 
+  private scheduleExpiredProof(requestId: string, optimisticId: string, proofAt: number): void {
+    const send = this.state.optimisticSends?.[optimisticId];
+    if (this.proofBoundTimers.has(requestId) || !send || send.request_id !== requestId
+        || send.action_committed !== true || send.status !== 'indeterminate') return;
+    const finish = () => {
+      const current = this.state.optimisticSends?.[optimisticId];
+      if (this.disposed || !current || current.request_id !== requestId || current.action_committed !== true
+          || current.status !== 'indeterminate') { this.proofBoundTimers.delete(requestId); return; }
+      const remaining = proofAt - Date.now();
+      if (remaining > 0) { this.proofBoundTimers.set(requestId, setTimeout(finish, remaining)); return; }
+      this.proofBoundTimers.delete(requestId);
+      this.setState(markOptimisticAckedByRequestId(this.state, requestId, Date.now()));
+    };
+    this.proofBoundTimers.set(requestId, setTimeout(finish, Math.max(1, proofAt - Date.now())));
+  }
+
+  private expireReceiptTracking(requestId: string): void {
+    const tracking = this.receiptTracking.get(requestId);
+    const send = tracking && this.state.optimisticSends?.[tracking.optimisticId];
+    const proofAt = tracking?.committedAt === undefined ? undefined : tracking.committedAt + 20000;
+    this.stopReceiptTracking(requestId);
+    if (!tracking || !send || send.request_id !== requestId || send.action_committed !== true
+        || tracking.assumedSent || send.status !== 'indeterminate' || proofAt === undefined) return;
+    this.scheduleExpiredProof(requestId, tracking.optimisticId, proofAt);
+  }
+
   private trackReceipt(requestId: string, optimisticId: string, committed = false): void {
+    const send = this.state.optimisticSends?.[optimisticId];
+    if (!send || send.request_id !== requestId) return;
+    // Never restart receipt I/O after its age bound, but a newly learned
+    // commitment still owns its independent 20-second display deadline.
+    if (Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) {
+      if (committed) {
+        const tracking = this.receiptTracking.get(requestId);
+        const committedAt = tracking?.committedAt ?? Date.now();
+        if (tracking && tracking.committedAt === undefined) tracking.committedAt = committedAt;
+        if (send.action_committed !== true) this.setState(recordOptimisticSendAcceptanceByRequestId(this.state, requestId, { action_committed: true }));
+        if (tracking && this.receiptTracking.get(requestId) === tracking) this.expireReceiptTracking(requestId);
+        else this.scheduleExpiredProof(requestId, optimisticId, committedAt + 20000);
+      }
+      return;
+    }
     let tracking = this.receiptTracking.get(requestId);
     if (!tracking) {
       tracking = { optimisticId, assumedSent: false, step: 0, inFlight: false, reconnectPending: false };
@@ -285,6 +331,7 @@ export class ChatStoreController {
       tracking.committedAt = Date.now();
       if (tracking.timer) clearTimeout(tracking.timer);
       tracking.timer = undefined; tracking.step = 0;
+      if (send.action_committed !== true) this.setState(recordOptimisticSendAcceptanceByRequestId(this.state, requestId, { action_committed: true }));
     }
     if (!tracking.timer) this.scheduleReceipt(requestId);
     void this.queryReceipt(requestId, false);
@@ -297,7 +344,7 @@ export class ChatStoreController {
     const send = this.state.optimisticSends?.[tracking.optimisticId];
     if (!send || send.request_id !== requestId) { this.stopReceiptTracking(requestId); return; }
     const remaining = send.created_at + RECONNECT_REPLAY_MAX_AGE_MS - Date.now();
-    if (remaining <= 0) { this.stopReceiptTracking(requestId); return; }
+    if (remaining <= 0) { this.expireReceiptTracking(requestId); return; }
     const backoff = delays[Math.min(tracking.step, delays.length - 1)];
     const proofRemaining = tracking.committedAt !== undefined && !tracking.assumedSent
       ? Math.max(1, tracking.committedAt + 20000 - Date.now()) : Infinity;
@@ -308,7 +355,7 @@ export class ChatStoreController {
       tracking.timer = undefined;
       const send = this.state.optimisticSends?.[tracking.optimisticId];
       if (!send || send.request_id !== requestId || Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) {
-        this.stopReceiptTracking(requestId); return;
+        this.expireReceiptTracking(requestId); return;
       }
       if (tracking.committedAt !== undefined && Date.now() - tracking.committedAt >= 20000 && !tracking.assumedSent) {
         tracking.assumedSent = true;
@@ -325,13 +372,32 @@ export class ChatStoreController {
     if (reconnect) tracking.reconnectPending = true;
     if (tracking.inFlight || this.sendDispatches.has(requestId) || this.reconcilingDispatches.has(requestId)) return;
     const send = this.state.optimisticSends?.[tracking.optimisticId];
-    if (!send || send.request_id !== requestId || Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) { this.stopReceiptTracking(requestId); return; }
+    if (!send || send.request_id !== requestId || Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) { this.expireReceiptTracking(requestId); return; }
     const afterReconnect = tracking.reconnectPending;
     tracking.reconnectPending = false;
     tracking.inFlight = true;
     try {
       const result = await this.receiptBridge({ streamId: send.stream_id, requestId, originalRequest: this.originalRequests.get(tracking.optimisticId) });
-      if (this.receiptTracking.get(requestId) !== tracking || this.disposed) return;
+      if (this.disposed) return;
+      if (this.receiptTracking.get(requestId) !== tracking) {
+        // A read issued inside the follow-up window can finish after expiry.
+        // It may still establish commitment, but cannot restart polling or
+        // apply absence/failure to a replacement attempt.
+        const current = this.state.optimisticSends?.[tracking.optimisticId];
+        const receipt = result?.ok !== false && result?.found === true && Array.isArray(result.receipts)
+          && result.receipts.length === 1 ? result.receipts[0] : null;
+        const status = receipt?.state || receipt?.receipt_state || receipt?.delivery;
+        if (!this.receiptTracking.has(requestId) && current?.request_id === requestId
+            && current.status === 'indeterminate' && Date.now() - current.created_at >= RECONNECT_REPLAY_MAX_AGE_MS
+            && receipt?.request_id === requestId && receipt?.to_stream_id === current.stream_id
+            && receipt?.delivery !== 'not_landed' && receipt?.receipt_state !== 'not_landed'
+            && (status === 'accepted' || status === 'committed_pending_proof')) {
+          const committedAt = tracking.committedAt ?? Date.now();
+          this.setState(recordOptimisticSendAcceptanceByRequestId(this.state, requestId, { action_committed: true }));
+          this.scheduleExpiredProof(requestId, tracking.optimisticId, committedAt + 20000);
+        }
+        return;
+      }
       if (result?.ok === false) return;
       if (result?.found === false && afterReconnect && !this.sendDispatches.has(requestId) && !this.reconcilingDispatches.has(requestId)) {
         this.failOptimisticSend(requestId, 'receipt_not_found'); this.stopReceiptTracking(requestId); return;
@@ -350,7 +416,9 @@ export class ChatStoreController {
         if (tracking.committedAt === undefined) {
           tracking.committedAt = Date.now();
           if (tracking.timer) clearTimeout(tracking.timer);
-          tracking.timer = undefined; tracking.step = 0; this.scheduleReceipt(requestId);
+          tracking.timer = undefined; tracking.step = 0;
+          this.setState(recordOptimisticSendAcceptanceByRequestId(this.state, requestId, { action_committed: true }));
+          this.scheduleReceipt(requestId);
         }
       }
     } catch { /* A failed lookup is not evidence of non-delivery. */ }
@@ -513,7 +581,8 @@ export class ChatStoreController {
     return { ...detail, transcriptItems: detail.transcriptItems.map(item => {
       const voice = voices.get(item.eventKey || '');
       const send = item.optimisticId && this.state.optimisticSends?.[item.optimisticId];
-      const sent = send?.status === 'acked' && send.provider_queued !== true;
+      const sent = (send?.status === 'acked' && send.provider_queued !== true)
+        || (!!item.optimisticId && this.echoedSentCaptions.get(item.optimisticId)?.streamId === streamId);
       if (!voice && !sent) return item;
       return { ...item,
         ...(sent ? { receiptCaption: 'sent' as const } : {}),
@@ -546,7 +615,41 @@ export class ChatStoreController {
         delete this.workingElapsedAnchors[streamId];
       }
     }
+    // The shared reducer prunes optimistic state on echo. Retain only captions
+    // that were already Sent and now have a correlated local USER row.
+    let nextEvents: ReturnType<typeof selectPentacleDerivedEventIndex> | undefined;
+    const events = () => nextEvents ??= selectPentacleDerivedEventIndex(next);
+    const latestKeys = new Map<string, string | undefined>();
+    const latestUserKey = (streamId: string): string | undefined => {
+      if (!latestKeys.has(streamId)) {
+        const detail = selectSessionDetail(next, streamId);
+        const latest = detail?.transcriptItems.filter(item => item.isUser).at(-1);
+        latestKeys.set(streamId, latest ? (latest.optimisticId ? `optimistic:${latest.optimisticId}` : `event:${latest.eventKey || latest.id}`) : undefined);
+      }
+      return latestKeys.get(streamId);
+    };
+    for (const [id, send] of Object.entries(this.state.optimisticSends ?? {})) {
+      if (send.status !== 'acked' || send.provider_queued || next.optimisticSends?.[id]) continue;
+      const correlated = events().byStream.get(send.stream_id)?.some(event => event.optimistic_id === id
+        && event.client_origin === true && Number.isFinite(event.correlatedDaemonSeq));
+      const latest = correlated && latestUserKey(send.stream_id);
+      if (latest) this.echoedSentCaptions.set(id, { streamId: send.stream_id, latestUserKey: latest });
+    }
+    for (const [id, saved] of this.echoedSentCaptions) {
+      const live = next.optimisticSends?.[id];
+      if ((live && live.status !== 'acked') || saved.latestUserKey !== latestUserKey(saved.streamId)
+          || !events().byStream.get(saved.streamId)?.some(event => event.optimistic_id === id)) {
+        this.echoedSentCaptions.delete(id);
+      }
+    }
     this.state = next;
+    for (const [requestId, timer] of this.proofBoundTimers) {
+      const id = next.optimisticByRequestId?.[requestId];
+      const send = id && next.optimisticSends?.[id];
+      if (!send || send.request_id !== requestId || send.status !== 'indeterminate') {
+        clearTimeout(timer); this.proofBoundTimers.delete(requestId);
+      }
+    }
     for (const [requestId, tracking] of this.receiptTracking) {
       const send = next.optimisticSends?.[tracking.optimisticId];
       if (!send || send.request_id !== requestId || ['echoed', 'reconciled', 'cancelled'].includes(send.status)) this.stopReceiptTracking(requestId);
@@ -757,6 +860,9 @@ export class ChatStoreController {
     this.sendSessionGenerations.clear();
     for (const id of this.receiptTracking.keys()) this.stopReceiptTracking(id);
     this.originalRequests.clear();
+    for (const timer of this.proofBoundTimers.values()) clearTimeout(timer);
+    this.proofBoundTimers.clear();
+    this.echoedSentCaptions.clear();
     this.sendDispatches.clear();
     this.reconcilingDispatches.clear();
     this.webRecovery.clear();
@@ -845,6 +951,8 @@ export class ChatStoreController {
     const sendText = composite ? literal : literal.trim();
     const sendAttachments = Array.isArray(attachments) ? structuredClone(attachments.filter((item) => item && item.key && item.mime)) : [];
     if (!streamId || (!sendText.trim() && sendAttachments.length === 0)) return '';
+    // A genuinely new USER send starts the normal latest-row caption policy.
+    for (const [id, saved] of this.echoedSentCaptions) if (saved.streamId === streamId) this.echoedSentCaptions.delete(id);
 
     // A committed outbound unit the daemon gave back keeps its identity, so receipts coalesce.
     const optimisticId = reply.identity?.optimisticId || this.nextOptimisticId(streamId);
@@ -904,7 +1012,8 @@ export class ChatStoreController {
     if (!send || (send.status !== 'failed' && send.status !== 'indeterminate')) return false;
     const uncertain = send.status === 'indeterminate';
     if (this.sendDispatches.has(send.request_id)) return false;
-    if (uncertain && this.receiptTracking.get(send.request_id)?.committedAt !== undefined) {
+    if (uncertain && send.action_committed === true) {
+      if (!this.receiptTracking.has(send.request_id)) return false;
       void this.queryReceipt(send.request_id, false);
       return true;
     }
@@ -917,6 +1026,7 @@ export class ChatStoreController {
       this.stopReceiptTracking(send.request_id);
       const now = Date.now();
       let next = rearmOptimisticSend(this.state, optimisticId, now);
+      next = recordOptimisticSendAcceptanceByRequestId(next, send.request_id, { action_committed: false });
       next = rotateOptimisticSendRequestId(next, optimisticId, requestId);
       if (session?.session_kind !== 'assistant_composite' && this.getTurnPhase(send.stream_id) === 'idle'
           && !this.hasConfirmedWork(session) && !this.hasProviderQueuedRows(send.stream_id)) {
@@ -969,7 +1079,8 @@ export class ChatStoreController {
     this.voiceMetas.set(optimisticId, { voice });
     const requestId = this.nextRequestId('retry');
     const rearmed = rearmOptimisticSend(this.state, optimisticId, Date.now());
-    this.setState(rotateOptimisticSendRequestId(rearmed, optimisticId, requestId));
+    const fresh = recordOptimisticSendAcceptanceByRequestId(rearmed, send.request_id, { action_committed: false });
+    this.setState(rotateOptimisticSendRequestId(fresh, optimisticId, requestId));
     this.dispatchOptimistic(send.stream_id, optimisticId, requestId, send.text, this.socketGeneration, send.attachments ?? []);
     return true;
   }
@@ -1002,7 +1113,7 @@ export class ChatStoreController {
       if (send.status !== 'indeterminate' || this.webEpoch <= recovery.lostEpoch
           || recovery.attemptedEpoch === this.webEpoch
           || Date.now() - send.created_at >= RECONNECT_REPLAY_MAX_AGE_MS) continue;
-      if (this.receiptTracking.get(requestId)?.committedAt !== undefined) {
+      if (send.action_committed === true) {
         this.webRecovery.delete(requestId);
         void this.queryReceipt(requestId, true);
         continue;
@@ -1022,7 +1133,7 @@ export class ChatStoreController {
   private replayReconnectSurvivors(generation: number): void {
     for (const optimisticId of eligibleReconnectReplayOptimisticIds(this.state, generation)) {
       const send = this.state.optimisticSends?.[optimisticId];
-      if (!send || this.webRecovery.has(send.request_id) || this.receiptTracking.get(send.request_id)?.committedAt !== undefined) continue;
+      if (!send || this.webRecovery.has(send.request_id) || send.action_committed === true) continue;
       this.dispatchOptimistic(send.stream_id, optimisticId, send.request_id, send.text, generation, send.attachments ?? [], false, true);
       logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_OPTIMISTIC_INSERT, {
         stream_id: send.stream_id,
@@ -1046,7 +1157,7 @@ export class ChatStoreController {
         const current = this.state.optimisticSends?.[optimisticId];
         if (this.disposed || !current || current.request_id !== requestId
             || ['acked', 'echoed', 'reconciled', 'cancelled', 'failed'].includes(current.status)
-            || ((reconciling || reconnectReplay) && this.receiptTracking.get(requestId)?.committedAt !== undefined)) return undefined;
+            || ((reconciling || reconnectReplay) && current.action_committed === true)) return undefined;
         return this.sendBridge!({
         streamId,
         text,
@@ -1525,8 +1636,14 @@ export class ChatStoreController {
           this.failOptimisticSend(requestId, String(frame.reason || 'not_landed'));
           this.stopReceiptTracking(requestId);
         } else if (type === 'send.indeterminate' || frame.delivery === 'accepted' || frame.delivery === 'committed_pending_proof' || frame.action_committed === true || frame.confirmation_pending === true) {
-          if (!tracking?.assumedSent) this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
-          this.trackReceipt(requestId, optimisticId!, type === 'send.indeterminate' || frame.delivery === 'accepted' || frame.delivery === 'committed_pending_proof' || frame.action_committed === true);
+          const committed = type === 'send.indeterminate' || frame.delivery === 'accepted'
+            || frame.delivery === 'committed_pending_proof' || frame.action_committed === true;
+          let next = tracking?.assumedSent ? this.state : markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now());
+          // Publish commitment atomically with the unresolved state: listeners
+          // may synchronously invoke retry as soon as they see that state.
+          if (committed) next = recordOptimisticSendAcceptanceByRequestId(next, requestId, { action_committed: true });
+          this.setState(next);
+          this.trackReceipt(requestId, optimisticId!, committed);
         } else {
           this.failOptimisticSend(requestId, String(frame.reason || frame.delivery || 'send_failed'));
           this.stopReceiptTracking(requestId);
