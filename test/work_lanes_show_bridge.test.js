@@ -173,16 +173,17 @@ test('resolved failures and incomplete detail are never cached', async () => {
 });
 
 test('old-tab replay through the real web bridge isolates stable sender objects', async () => {
-  const {createWsBridge}=require('../server/ws_bridge'); const revision='a'.repeat(64);let fingerprint=0,calls=0;
+  const {createWsBridge}=require('../server/ws_bridge'); const revision='a'.repeat(64);let fingerprint=0,calls=0,finishPage;
   const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision,working:fingerprint}]}}),
-    workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}}}};
+    workLanesShow:(_laneId,options)=>{calls++;const reply={type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}};return options.membersAfter ? new Promise(resolve=>{finishPage=()=>resolve(reply);}) : Promise.resolve(reply);}};
   const collector=createCollector();createCcHandlers({CONFIG:{},chatStreamClient:client}).register(collector);
   const bridge=createWsBridge({table:collector.table,logger:{warn(){}}});
   const a={send(){}},b={send(){}};bridge.addSocket(a);bridge.addSocket(b);
   let id=0;const show=(socket,options)=>bridge.handleMessage(socket,JSON.stringify({id:++id,method:'chat-stream:work-lanes-show',args:['lane_fixture',options]}));
-  await show(a,{membersLimit:32});await show(a,{membersLimit:32,membersAfter:'spec_fixture__a'});
+  await show(a,{membersLimit:32});const pageTwo=show(a,{membersLimit:32,membersAfter:'spec_fixture__a'});
   for(let i=0;i<4;i++){fingerprint++;await show(a,{membersLimit:32});}
-  assert.equal(calls,2,'one session reuses its page after inventory churn');
+  assert.equal(calls,2,'one session reuses its page while the next page is in flight');
+  finishPage(); await pageTwo;
   await show(b,{membersLimit:32});assert.equal(calls,3,'a second browser has a separate sender');
   bridge.removeSocket(a);const reopened={send(){}};bridge.addSocket(reopened);
   await show(reopened,{membersLimit:32});assert.equal(calls,4,'a reopened connection is a new session');
