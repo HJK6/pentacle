@@ -250,7 +250,7 @@ function createCcHandlers({
       const key = JSON.stringify([laneId, page.goalId ?? null, page.membersAfter ?? null, page.membersLimit ?? 32]);
       const previous = entries.get(key);
       if (previous?.revision === revision && (previous.pending
-        || (revision !== null && monotonicNow() - previous.completedAt < 300000))) {
+        || (revision !== null && monotonicNow() - previous.completedAt < 1800000))) {
         entries.delete(key); entries.set(key, previous);
         return previous.promise;
       }

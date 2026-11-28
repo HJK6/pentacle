@@ -190,7 +190,7 @@ test('old-tab replay through the real web bridge isolates stable sender objects'
   bridge.closeAll();
 });
 
-test('known replies expire five minutes after completion while in-flight calls keep joining', async t => {
+test('known replies expire thirty minutes after completion while in-flight calls keep joining', async t => {
   let now=0,calls=0,finish; t.mock.method(Date,'now',()=>now); const revision='a'.repeat(64);
   const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision}]}}),
     workLanesShow:()=>{calls++;return new Promise(resolve=>{finish=resolve;});}};
@@ -199,8 +199,8 @@ test('known replies expire five minutes after completion while in-flight calls k
   const first=show(event,'lane_fixture',{});now=600000;
   const joined=show(event,'lane_fixture',{});assert.equal(calls,1,'pending work remains joined even after five minutes');
   finish(detail);await Promise.all([first,joined]);
-  now+=299999;await show(event,'lane_fixture',{});assert.equal(calls,1);
-  now+=1;const refreshed=show(event,'lane_fixture',{});assert.equal(calls,2,'a five-minute-old completed reply is refreshed');
+  now+=1799999;const retained=show(event,'lane_fixture',{});assert.equal(calls,1,'reply remains reusable just before thirty minutes');await retained;
+  now+=1;const refreshed=show(event,'lane_fixture',{});assert.equal(calls,2,'a thirty-minute-old completed reply is refreshed');
   finish(detail);await refreshed;
 });
 
@@ -249,8 +249,8 @@ test('wall-clock steps do not change elapsed expiry or counter rate', async t =>
     workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:rev,lane:{lane_id:lane},projection:{lane_id:lane}};}};
   const table={};createCcHandlers({CONFIG:{},chatStreamClient:client,monotonicNow:()=>elapsed}).register(createCollector(table));
   const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
-  await show(event,lane,{}); wall-=600000; elapsed+=300000;
-  await show(event,lane,{}); assert.equal(calls,2,'elapsed five minutes expire despite a backward wall step');
+  await show(event,lane,{}); wall-=600000; elapsed+=1800000;
+  await show(event,lane,{}); assert.equal(calls,2,'elapsed thirty minutes expire despite a backward wall step');
   await show(event,'missing_lane',{}); wall+=3600000; elapsed+=1000;
   await show(event,'missing_lane',{}); assert.equal(logs.length,1,'forward wall step does not bypass rate limit');
   elapsed+=59000;t.mock.timers.tick(59000);assert.equal(logs.length,2,'trailing counter flushes on elapsed time');
@@ -268,4 +268,21 @@ test('pending page survives eviction of completed pages', async () => {
   const joined=show(event,lane,{membersAfter:'pending'});
   assert.equal(calls,66,'pending page is retained through completed-page eviction');
   finish(detail);await Promise.all([first,joined]);
+});
+
+
+test('a timed-out lane show is dropped and a later call reissues', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const singleton=require('../main/chat_stream_client');const client=new singleton.constructor();
+  const revision='a'.repeat(64), lane='lane_fixture', sent=[];
+  client._ws={readyState:1,send:raw=>sent.push(JSON.parse(raw))};client.connected=true;
+  client.snapshot=()=>({work_lanes:{lanes:[{lane_id:lane,detail_revision:revision}]}});
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
+  let failure=null; const first=show(event,lane,{}).catch(error=>{failure=error;});
+  const joined=show(event,lane,{}).catch(()=>{}); assert.equal(sent.length,1);
+  t.mock.timers.tick(120000); await Promise.resolve(); await Promise.resolve();
+  assert.equal(failure?.error,'timed_out','joined request expires at the bounded timeout');
+  const retried=show(event,lane,{}).catch(()=>{});assert.equal(sent.length,2,'timeout evicts the held entry');
+  client._rejectPending('test cleanup');await Promise.all([first,joined,retried]);
 });
