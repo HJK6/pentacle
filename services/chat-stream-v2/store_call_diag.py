@@ -27,6 +27,7 @@ SLOW_LINE_S = 0.25
 ALERT_S = 2.0
 SUMMARY_INTERVAL_S = 3600.0
 TOP_N = 5
+WIRE_HISTORY_PAGE = "Store.fetch_wire_history_page"
 GROUPS = (
     ("lane_reads", ("_WorkLanesStoreMixin.get_work_lane", "_WorkLanesStoreMixin.work_lane_snapshot")),
     ("rulings_loop", ("AssistantLaneRulings.",)),
@@ -38,6 +39,7 @@ GROUPS = (
     ("lane_episodes", ("WorkLaneEpisodesStoreMixin.",)),
     ("closed_awaiters", ("Store.resolve_closed_awaiters",)),
     ("history_pages", ("Store.fetch_session_event_page",)),
+    ("wire_history_pages", (WIRE_HISTORY_PAGE,)),
     ("proof_reads", ("Store.fetch_session_event_tail_for_proof",)),
 )
 NAME_MAX = 96
@@ -164,7 +166,7 @@ class StoreCallDiag:
                      for name, (calls, total) in top],
              "groups": groups,
              "feature_total": {key: round(sum(value[key] for group, value in groups.items()
-                                               if group not in {"history_pages", "proof_reads"}), 3) for key in ("calls", "execution_ms")},
+                                               if group not in {"history_pages", "wire_history_pages", "proof_reads"}), 3) for key in ("calls", "execution_ms")},
              "all_calls": {"calls": sum(t[0] for t in self._totals.values()),
                            "execution_ms": round(sum(t[1] for t in self._totals.values()) * 1000, 3)},
              "instrumentation_failures": self.failures, "worker": self.worker, "expired": self.expired,

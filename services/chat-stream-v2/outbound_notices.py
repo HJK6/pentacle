@@ -411,6 +411,15 @@ class OutboundNoticeQueue:
         except Exception as exc:  # noqa: BLE001 - durable failure state below
             code = str(getattr(exc, "code", "") or "")
             reason = str(exc)[:400]
+            if code == "provider_prompt_waiting":
+                action = "wait for the seat's terminal approval decision"
+                if exc.extra.get("phase") == "not_started":
+                    await self.store.fail_outbound_notice(
+                        str(row["notice_id"]), owner=self.owner, error=code,
+                        next_attempt_at=time.time() + NOTICE_INTERVAL_S, next_action=action, count_attempt=False,
+                    )
+                    return "retry"
+                return await self._retry(row, code, "retry evidence-only recipient readback", proof_pending=True)
             if code=="pool_notice_deferred":
                 await self.store.fail_outbound_notice(str(row['notice_id']),owner=self.owner,error=code,
                     next_attempt_at=time.time()+NOTICE_INTERVAL_S,next_action='wait for fresh autonomous evidence',count_attempt=False)

@@ -290,7 +290,7 @@ class Store:
             return conn.execute("SELECT * FROM sessions WHERE status='open'").fetchall()
         return await self.submit(op)
 
-    async def fetch_session_event_page(self, stream_id, *, before_daemon_seq, limit, generation=None):
+    async def fetch_session_event_page(self, stream_id, *, before_daemon_seq, limit, generation=None, history=False):
         call = self.calls["history"]
         self.calls["history"] += 1
         if call == SETTINGS.get("history_raises_on"):
