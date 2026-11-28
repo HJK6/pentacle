@@ -228,6 +228,9 @@ class _AuthDiagnostic:
 
 import report_producer
 
+_ProducerConfigs = tuple[report_producer.ReportProducer | None, wmi_brief_producer.BriefProducer | None]
+_ProducerInputs = tuple[_ProducerConfigs, dict[str, str | None], dict[Path, str | None]]
+
 SYSTEM_PRODUCER_STREAM_TOKEN_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN"
 SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"
 SYSTEM_PRODUCER_STREAM_ID_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_ID"
@@ -2862,6 +2865,9 @@ class Server:
                 "credential_id": trust.credential_id,
             })
             return self._diag_auth_result(websocket, msg, context, started)
+        configs = report_producer.load(), wmi_brief_producer.load()
+        file_sources = self._file_token_sources(configs)
+        producer_inputs: _ProducerInputs = (configs, file_sources, {})
         bound_system_actor = self._client_system_producers.get(websocket)
         if bound_system_actor is not None:
             claim = str(msg.get("from_stream_id") or "").strip()
@@ -2869,20 +2875,20 @@ class Server:
             credentials_changed = bool(
                 (claim and claim != bound_system_actor)
                 or (token_was_supplied and not self._verify_system_producer_token(
-                    msg.get("stream_token"), bound_system_actor
+                    msg.get("stream_token"), bound_system_actor, producer_inputs
                 ))
             )
-            if (bound_system_actor in self._file_token_sources()
+            if (bound_system_actor in file_sources
                     or wmi_brief_producer.is_actor(bound_system_actor)):
                 # Re-read the credential even on tokenless bound connections.
                 # Removal/rotation must revoke old sockets as well as new ones.
-                expected = self._system_producer_token(bound_system_actor)
+                expected = self._system_producer_token(bound_system_actor, producer_inputs)
                 credentials_changed = credentials_changed or not expected or (
                     hashlib.sha256(expected.encode("utf-8")).hexdigest()
                     != self._client_token_hashes.get(websocket)
                 )
             if wmi_brief_producer.is_actor(bound_system_actor):
-                configured = wmi_brief_producer.load()
+                configured = configs[1]
                 credentials_changed = credentials_changed or configured is None or (
                     configured != self._client_brief_configs.get(websocket)
                 )
@@ -2899,10 +2905,9 @@ class Server:
         # On asset.list `producer` is a row filter (report boards list a spec
         # by its producer id), not an identity claim.
         producer = "" if msg.get("type") == "asset.list" else str(msg.get("producer") or "").strip()
-        cd_token_matches = self._verify_system_producer_token(msg.get("stream_token"))
-        file_sources = self._file_token_sources()
+        cd_token_matches = self._verify_system_producer_token(msg.get("stream_token"), inputs=producer_inputs)
         file_token_matches = {
-            actor: self._verify_system_producer_token(msg.get("stream_token"), actor)
+            actor: self._verify_system_producer_token(msg.get("stream_token"), actor, producer_inputs)
             for actor in file_sources
         }
         producer_ids = {FIXED_SYSTEM_PRODUCER_STREAM_ID, *file_sources}
@@ -2922,12 +2927,12 @@ class Server:
             authenticated = bool(
                 enabled and claim == configured_id
                 and msg.get("type") == "hello"
-                and self._valid_system_producer_hello(msg, configured_id)
+                and self._valid_system_producer_hello(msg, configured_id, producer_inputs)
             )
             if authenticated:
                 self._client_system_producers[websocket] = configured_id
                 if wmi_brief_producer.is_actor(configured_id):
-                    self._client_brief_configs[websocket] = wmi_brief_producer.load()
+                    self._client_brief_configs[websocket] = configs[1]
                 if configured_id in file_sources:
                     self._client_token_hashes[websocket] = hashlib.sha256(
                         msg["stream_token"].encode("utf-8")
@@ -3069,7 +3074,7 @@ class Server:
         return producer.stream_id if producer is not None else None
 
     @staticmethod
-    def _file_token_sources() -> dict[str, str | None]:
+    def _file_token_sources(configs: _ProducerConfigs | None = None) -> dict[str, str | None]:
         """Fixed principals whose credential is a user-owned 0600 token file,
         re-read on every RPC (removal/rotation revokes bound sockets too)."""
         sources = {
@@ -3081,57 +3086,61 @@ class Server:
         }
         from provider_accounts import watcher_sources
         sources.update(watcher_sources())
-        producer = report_producer.load()
+        producer, brief = configs if configs is not None else (report_producer.load(), wmi_brief_producer.load())
         if producer is not None:
             sources[producer.stream_id] = producer.token_file
-        brief = wmi_brief_producer.load()
         if brief is not None:
             sources[brief.stream_id] = brief.token_file
         return sources
 
     @staticmethod
-    def _system_producer_token(actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID) -> str | None:
+    def _system_producer_token(
+        actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID, inputs: _ProducerInputs | None = None
+    ) -> str | None:
         # Fixed principals only; no registry or generic service authority.
+        if inputs is None:
+            configs = report_producer.load(), wmi_brief_producer.load()
+            inputs = configs, Server._file_token_sources(configs), {}
+        (report, brief), sources, reads = inputs
         if wmi_brief_producer.is_actor(actor):
-            brief = wmi_brief_producer.load()
-            report = report_producer.load()
             if brief is None or brief.stream_id != actor or (report is not None and report.stream_id == actor):
                 return None
-        sources = Server._file_token_sources()
         if actor in sources:
-            expected = Server._read_token_path(sources[actor], strict=True)
+            expected = Server._read_token_path(sources[actor], reads, strict=True)
             if not expected:
                 return None
             # A file principal never shares a credential with the CD producer
             # or with another file principal: a shared value is refused.
-            others = [Server._system_producer_token(FIXED_SYSTEM_PRODUCER_STREAM_ID)]
-            others += [Server._read_token_path(path, strict=False) for other, path in sources.items() if other != actor]
+            others = [Server._system_producer_token(FIXED_SYSTEM_PRODUCER_STREAM_ID, inputs)]
+            others += [Server._read_token_path(path, reads, strict=False) for other, path in sources.items() if other != actor]
             for other in others:
                 if other and hmac.compare_digest(expected.encode("utf-8"), other.encode("utf-8")):
                     return None
             return expected
         if actor == FIXED_SYSTEM_PRODUCER_STREAM_ID:
-            return Server._read_token_path(os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV), strict=False)
+            return Server._read_token_path(os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV), reads, strict=False)
         return None
 
     @staticmethod
-    def _read_token_path(token_file: str | None, *, strict: bool) -> str | None:
+    def _read_token_path(token_file: str | None, reads: dict[Path, str | None], *, strict: bool) -> str | None:
         if not token_file:
             return None
         try:
             path = Path(token_file).expanduser()
             if strict and not report_producer.private_file(path):
                 return None
-            expected = path.read_text(encoding="utf-8").strip()
+            if path not in reads:
+                reads[path] = None  # Remember a failed read too.
+                reads[path] = path.read_text(encoding="utf-8").strip() or None
+            return reads[path]
         except (OSError, ValueError, UnicodeError):
             return None
-        return expected or None
 
     @staticmethod
     def _verify_system_producer_token(
-        token: Any, actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID
+        token: Any, actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID, inputs: _ProducerInputs | None = None
     ) -> bool:
-        expected = Server._system_producer_token(actor)
+        expected = Server._system_producer_token(actor, inputs)
         return bool(expected and isinstance(token, str) and hmac.compare_digest(expected.encode("utf-8"), token.encode("utf-8")))
 
     @staticmethod
@@ -3142,12 +3151,12 @@ class Server:
         return frame
 
     def _valid_system_producer_hello(
-        self, msg: dict[str, Any], actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID
+        self, msg: dict[str, Any], actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID, inputs: _ProducerInputs | None = None
     ) -> bool:
         subscribe = msg.get("subscribe")
         return bool(
             msg.get("from_stream_id") == actor
-            and self._verify_system_producer_token(msg.get("stream_token"), actor)
+            and self._verify_system_producer_token(msg.get("stream_token"), actor, inputs)
             and isinstance(subscribe, dict)
             and subscribe.get("snapshot") is False
             and subscribe.get("mode") == "rpc"
