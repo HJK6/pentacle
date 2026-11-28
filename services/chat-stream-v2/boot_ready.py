@@ -9,6 +9,52 @@ from __future__ import annotations
 
 import re
 
+APPROVAL_SELECTED_OPTION = re.compile(r"^[❯›]\s+\d+\.\s")
+_APPROVAL_OPTION = re.compile(r"^\s*(?:([❯›])\s+)?\d+\.\s")
+_CLAUDE_SHORT_APPROVAL = re.compile(r"^(?:Ready to code\?|Do you want to (?:make this edit|create |overwrite ))")
+_CODEX_APPROVAL_HEADINGS = {
+    "Would you like to run the following command?", "Would you like to make the following edits?",
+}
+
+
+def approval_prompt_visible(pane_text: str) -> bool:
+    """Recognize the pinned approval menus at the bottom of a pane capture."""
+    lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    footer = lines.pop().lstrip()
+    codex = footer == "Press enter to confirm or esc to cancel"
+    if not codex and footer not in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
+        return False
+    marker = "›" if codex else "❯"
+    # A repaint can show a draft above the outgoing menu's last footer.
+    if lines and lines[-1].lstrip().startswith(marker) and not _APPROVAL_OPTION.match(lines[-1]):
+        lines.pop()
+    if lines and lines[-1].strip() in {"↑", "↓", "↑↓", "↕"}:
+        lines.pop()
+    options = 0
+    selected = False
+    while lines:
+        if option := _APPROVAL_OPTION.match(lines[-1]):
+            selected |= option[1] == marker
+            options += 1
+        elif not lines[-1].startswith("     "):
+            break  # wrapped option descriptions are indented
+        lines.pop()
+    if not selected or options < 2:
+        return False
+    if footer == "Esc to cancel · Tab to amend":
+        return True
+    for line in reversed(lines):
+        line = line.lstrip()
+        if line.startswith(("❯", "›")):
+            return False
+        if codex and line in _CODEX_APPROVAL_HEADINGS:
+            return True
+        if not codex and _CLAUDE_SHORT_APPROVAL.match(line):
+            return True
+    return False
+
 
 # A Codex reset interstitial is an operator-only decision point: accepting it
 # consumes provider quota, so automated input stops while that surface replaces

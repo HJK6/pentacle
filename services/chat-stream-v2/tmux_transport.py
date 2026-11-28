@@ -17,6 +17,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from boot_ready import (
+    APPROVAL_SELECTED_OPTION, approval_prompt_visible,
+    claude_prompt_in_active_draft, codex_prompt_in_active_draft,
+)
 from machines import ssh_command, ssh_tmux_command
 from prockill import terminate_and_reap
 from sessions import VerbError
@@ -27,6 +31,15 @@ RECEIPT_TIMEOUT_S = 15.0
 POLL_INTERVAL_S = 0.1
 CAPTURE_LINES = "-200"
 NEEDLE_MAX = 24
+PROVIDER_PROMPT_WAITING = "provider_prompt_waiting"
+_PROMPT_WAITING_MESSAGE = "The seat is waiting on an approval prompt in its terminal"
+
+
+def approval_prompt_refusal(stream_id: str, path: str, phase: str) -> VerbError:
+    stream_hash = hashlib.sha256(stream_id.encode()).hexdigest()[:16]
+    log.info("%s stream_hash=%s path=%s phase=%s", PROVIDER_PROMPT_WAITING, stream_hash, path, phase)
+    detail = " and nothing was sent" if phase == "not_started" else ""
+    return VerbError(PROVIDER_PROMPT_WAITING, _PROMPT_WAITING_MESSAGE + detail, phase=phase)
 
 TRANSCRIPT_DIRS = ("/.claude/projects/", "/.codex/sessions/", "/.gemini/sessions/", "/.cursor/sessions/")
 #: A delayed-restart adoption means the brief was among the LAST things
@@ -469,8 +482,8 @@ class Tmux:
 
     async def paste(self, name: str, text: str, *, reject_mode: bool = False) -> str | None:
         """Human-equivalent injection (ledger req 1): ONE atomic bracketed
-        paste of the whole message, then Enter. No chunking, no readiness
-        gating, no stray control sequences. tmux 3.4 does not treat `-` as a
+        paste of the whole message, then Enter unless an approval menu is focused.
+        No chunking or stray control sequences. tmux 3.4 does not treat `-` as a
         portable stdin path for `load-buffer`, so stage one private local or
         remote file and load that path instead."""
         assert_injectable(text)  # the one chokepoint every injection passes
@@ -513,6 +526,20 @@ class Tmux:
                     "pane_mode_active", "pane mode changed after compaction paste",
                     phase=phase,
                 )
+            try:
+                pane = await self.capture_checked(name)
+            except VerbError as exc:
+                log.warning("pre_enter_capture_failed code=%s", exc.code)
+                pane = ""
+            if approval_prompt_visible(pane):
+                caret = next(line.lstrip() for line in reversed(pane.splitlines())
+                             if line.lstrip().startswith(("❯", "›")))
+                in_draft = not APPROVAL_SELECTED_OPTION.match(caret) and (
+                    claude_prompt_in_active_draft(pane, text)
+                    or codex_prompt_in_active_draft(pane, text, exact=True)
+                )
+                if not in_draft:
+                    raise VerbError(PROVIDER_PROMPT_WAITING, _PROMPT_WAITING_MESSAGE, phase=phase)
             phase = "enter_failed"
             rc, out = await self.run("send-keys", "-t", _target(name), "Enter")
             if rc != 0:

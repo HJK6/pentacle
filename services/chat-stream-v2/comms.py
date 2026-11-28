@@ -55,6 +55,7 @@ from boot_ready import (
     DRAFT_PREDICATES,
     SUBMIT_PREDICATES,
     _last_claude_input_start,
+    approval_prompt_visible,
     claude_command_exactly_in_active_draft,
     claude_composer_empty,
     claude_prompt_ready,
@@ -68,7 +69,10 @@ from boot_ready import (
 from mirror import _extract_live_state
 from outbound_notices import ensure_notice_marker, notice_needle
 from sessions import VerbError
-from tmux_transport import RECEIPT_TIMEOUT_S, assert_injectable, receipt_needle, sanitize_injectable
+from tmux_transport import (
+    PROVIDER_PROMPT_WAITING, RECEIPT_TIMEOUT_S, approval_prompt_refusal,
+    assert_injectable, receipt_needle, sanitize_injectable,
+)
 from submission_events import (
     COMMITTED_PENDING_PROOF,
     DurableUserEventProof,
@@ -939,7 +943,10 @@ class Comms:
         durable_notice = msg.get("_durable_notice_proof") is True
         delivery_status = "delivered"
         reason = None
-        if durable_notice and provider in SUBMIT_PREDICATES and not confirmed:
+        if proof.reason == PROVIDER_PROMPT_WAITING:
+            delivery_status = "pasted_unsubmitted"
+            reason = proof.reason
+        elif durable_notice and provider in SUBMIT_PREDICATES and not confirmed:
             # Durable notice paste committed; async proof is late. Non-fatal,
             # promotable via promote_tell_delivery when the event lands.
             delivery_status = COMMITTED_PENDING_PROOF
@@ -969,6 +976,11 @@ class Comms:
         if durable_notice:
             reply.update(watermark_fields(watermark))
             reply.update(proof.audit_fields())
+        if reason == PROVIDER_PROMPT_WAITING:
+            reply["retry_guidance"] = (
+                "The seat is waiting on an approval prompt. Your text was not submitted "
+                "and may have been discarded. Do not resend this ID."
+            )
         enqueued_at = iso_now()
         delivery = {
             "tell_id": tell_id,
@@ -1559,22 +1571,32 @@ class Comms:
             if provider == "codex":
                 before = await tmux.capture(name)
                 await self._assert_codex_pane_input_safe(stream_id, before)
-        if provider not in SUBMIT_PREDICATES:
-            before = before if before is not None else await tmux.capture(name)
-            async with self._account_input_guard(stream_id,claim=True,recovery_verb=recovery_verb):
+        before = before if before is not None else await tmux.capture(name)
+        path = "notice" if durable_proof else "tell"
+        if approval_prompt_visible(before):
+            raise approval_prompt_refusal(stream_id, path, "not_started")
+        proof_provider = provider in SUBMIT_PREDICATES
+        watermark = (await self._watermark_before_action(stream_id) if proof_provider
+                     else EventWatermark(stream_id, 0, "not_required"))
+        async with self._account_input_guard(stream_id,claim=True,recovery_verb=recovery_verb):
+            if proof_provider and before_paste is not None:
+                await before_paste(watermark)
+            try:
                 await tmux.paste(name, body)
+            except VerbError as exc:
+                if exc.code != PROVIDER_PROMPT_WAITING:
+                    raise
+                refusal = approval_prompt_refusal(stream_id, path, "body_maybe_pasted")
+                if durable_proof:
+                    raise refusal from exc
+                proof = EventProof("pending", stream_id, watermark.daemon_seq, reason=exc.code)
+                return False, 1, False, proof, watermark
+        if not proof_provider:
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(body), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
             )
-            watermark = EventWatermark(stream_id, 0, "not_required")
             proof = EventProof("proven" if confirmed else "pending", stream_id, 0)
             return confirmed, 1, False, proof, watermark
-        before = before if before is not None else await tmux.capture(name)
-        watermark = await self._watermark_before_action(stream_id)
-        async with self._account_input_guard(stream_id,claim=True,recovery_verb=recovery_verb):
-            if before_paste is not None:
-                await before_paste(watermark)
-            await tmux.paste(name, body)
         if durable_proof:
             proof = await self._durable_submission_evidence(
                 stream_id, body, watermark=watermark,
@@ -1597,6 +1619,9 @@ class Comms:
         # only when this exact body (or its exact collapsed placeholder) is
         # still in the editable Codex composer.  It is never a re-paste.
         pane = await tmux.capture(name)
+        if approval_prompt_visible(pane):
+            refusal = approval_prompt_refusal(stream_id, "retry", "enter_failed")
+            return False, 1, False, replace(proof, reason=refusal.code), watermark
         in_draft = (
             codex_prompt_in_active_draft(pane, body, exact=True)
             if provider == "codex" else DRAFT_PREDICATES[provider](pane, body)
@@ -1942,8 +1967,10 @@ class Comms:
                 before = await tmux.capture(name)
                 await self._assert_codex_pane_input_safe(target, before)
 
+        before = before if before is not None else await tmux.capture(name)
+        if approval_prompt_visible(before):
+            raise approval_prompt_refusal(target, "send", "not_started")
         if provider not in SUBMIT_PREDICATES:
-            before = before if before is not None else await tmux.capture(name)
             async with self._account_input_guard(target,claim=True,execution=True,recovery_verb="send"):
                 pane_mode_reason = await measure("paste_ms", tmux.paste, name, plan.wire_text)
             confirmed = await measure("proof_poll_ms", self.spawnctl._await_marker,
@@ -1958,7 +1985,6 @@ class Comms:
             )
             return confirmed, 2, False, provider, pane_mode_reason or enter_mode_reason
 
-        before = before if before is not None else await tmux.capture(name)
         watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
         async with self._account_input_guard(target,claim=True,execution=True,recovery_verb="send"):
             pane_mode_reason = await measure("paste_ms", tmux.paste, name, plan.wire_text)
@@ -1970,6 +1996,8 @@ class Comms:
             return True, 1, False, provider, None
         if provider == "claude":
             pane = await tmux.capture(name)
+            if approval_prompt_visible(pane):
+                raise approval_prompt_refusal(target, "retry", "enter_failed")
             if not claude_prompt_in_active_draft(pane, plan.wire_text):
                 return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
             async with self._account_input_guard(target,phase="enter_failed",execution=True):
@@ -1999,6 +2027,8 @@ class Comms:
                 claude_prompt_in_active_draft(pane, plan.wire_text) if provider == "claude" else False
             ), provider, pane_mode_reason or enter_mode_reason
         pane = await tmux.capture(name)
+        if approval_prompt_visible(pane):
+            raise approval_prompt_refusal(target, "retry", "enter_failed")
         if not codex_prompt_in_active_draft(pane, plan.wire_text, exact=True):
             return False, 1, False, provider, pane_mode_reason
         async with self._account_input_guard(target,phase="enter_failed",execution=True):
@@ -2240,6 +2270,8 @@ class Comms:
                     await queued_policy.bind_receipt_locked(target, current.get("session_generation"), request_id, receipt_id)
         except VerbError as exc:
             phase = str(exc.extra.get("phase") or "body_maybe_pasted")
+            if exc.code == PROVIDER_PROMPT_WAITING and phase == "body_maybe_pasted":
+                approval_prompt_refusal(target, "send", phase)
             if phase == "not_started":
                 plan.meta['pool_input_not_started']=True
                 from account_pool_control import POOL_ERRORS
@@ -2252,7 +2284,7 @@ class Comms:
             return await self._send_result(
                 plan, request_id=request_id, receipt_id=receipt_id,
                 state="accepted", delivery=COMMITTED_PENDING_PROOF, submission_confirmed=False,
-                reason=phase,
+                reason=exc.code if exc.code == PROVIDER_PROMPT_WAITING else phase,
                 action_committed=True, confirmation_pending=True,
             )
         except Exception:  # noqa: BLE001 - body may have reached the pane
