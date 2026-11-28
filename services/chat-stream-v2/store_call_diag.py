@@ -32,6 +32,11 @@ GROUPS = (
     ("rulings_loop", ("AssistantLaneRulings.",)),
     ("advisor_checks", ("AdvisorSessions.",)),
     ("alert_notice_reads", ("ErrorAlerts.notice_rows",)),
+    ("alert_snapshot", ("ErrorAlerts.advisory_snapshot",)),
+    ("consent_timers", ("Store.consent_expire", "Store.consent_push_due")),
+    ("queued_send_now", ("QueuedSendNow.",)),
+    ("lane_episodes", ("WorkLaneEpisodesStoreMixin.",)),
+    ("closed_awaiters", ("Store.resolve_closed_awaiters",)),
     ("history_pages", ("Store.fetch_session_event_page",)),
 )
 NAME_MAX = 96
@@ -138,6 +143,10 @@ class StoreCallDiag:
              "top": [{"name": name, "calls": calls, "execution_ms": round(total * 1000, 3)}
                      for name, (calls, total) in top],
              "groups": groups,
+             "feature_total": {key: round(sum(value[key] for group, value in groups.items()
+                                               if group != "history_pages"), 3) for key in ("calls", "execution_ms")},
+             "all_calls": {"calls": sum(t[0] for t in self._totals.values()),
+                           "execution_ms": round(sum(t[1] for t in self._totals.values()) * 1000, 3)},
              "instrumentation_failures": self.failures}, separators=(",", ":")))
         self._totals, self._window_start = {}, now
 
