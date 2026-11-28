@@ -73,8 +73,9 @@ Assistant uses its own elapsed clock only. The first reported time sets the
 clock, which then counts in whole seconds in the browser. A later report
 moves it only when the two disagree by more than 2.5 seconds; exactly 2.5
 seconds counts as heartbeat delay. Only times on screen count: a pane that is
-covered or off screen, or a card showing its terminal, schedules no redraws,
-and its time is current again when it returns or leaves the terminal. Reduced motion slows the working
+covered or off screen, or a card showing its terminal, stops counting and
+shows no stale time, and its time is current again when it returns or leaves
+the terminal. Reduced motion slows the working
 ring, makes the Assistant's mark still, and stops the send chevrons. The queue
 line only offers Send now when the store permits it for that specific message.
 The shared transcript and ordinary desktop/web send behavior are unchanged.

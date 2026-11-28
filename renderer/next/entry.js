@@ -292,9 +292,12 @@ function paintWorking() {
     draw(working(s), clock.elapsed(s, draftFor(s), s ? store.getTurnState?.(s.stream_id) : undefined,
       s ? store.getWorkingElapsedMs?.(s.stream_id, now) : null, now));
   };
-  // Only times on screen are counted; one a pane covers is brought up to date when it returns.
+  // Only times on screen are counted; a row out of view is cleared, and brought up to date when it returns.
   if (!assistant.hidden) tick(a, showAssistantWorking);
-  for (const card of Object.values(cards)) if (card.workingShown()) tick(card.session(), card.showWorking);
+  for (const card of Object.values(cards)) {
+    if (card.workingShown()) tick(card.session(), card.showWorking);
+    else card.showWorking(false, '');
+  }
   // Wake just past the next whole second of a running time, so it steps evenly.
   window.clearTimeout(workingTimer);
   const wait = clock.untilNextSecond(now);

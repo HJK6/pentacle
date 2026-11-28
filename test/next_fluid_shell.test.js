@@ -329,9 +329,12 @@ test('an earlier-messages request from before a chat switch cannot move the pane
 test('a running time on a card showing its terminal schedules no redraws and is current when the thread returns', async t => {
   const s = openShell(t);
   await flush(); s.choose('a');
+  const clock = controlClock(t, s);
   const a = s.rows[1]; a.working = true;
   s.elapsed[a.stream_id] = 7000;
   s.update();
+  assert.equal(s.$('[data-pane=chat] .next-working').hidden, false, 'the time shows in the thread');
+  clock.advance(5);
   s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
   await flush();
   const realTimeout = s.window.setTimeout;
@@ -339,7 +342,9 @@ test('a running time on a card showing its terminal schedules no redraws and is 
   s.window.setTimeout = (fn, ms, ...rest) => { if (fn?.name === 'paintWorking') scheduled.push(ms); return realTimeout.call(s.window, fn, ms, ...rest); };
   s.update();
   s.window.setTimeout = realTimeout;
+  clock.release();
   assert.deepEqual(scheduled, [], 'the working row is hidden behind the terminal');
+  assert.equal(s.$('[data-pane=chat] .next-working').hidden, true, 'no stale time is left showing beside the terminal');
   s.elapsed[a.stream_id] = 20000;
   s.$('[data-pane=chat] button[aria-label="Terminal"]').click();
   assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '20s', 'leaving the terminal brings the time up to date');
@@ -358,12 +363,24 @@ test('a daemon reconnect reads the open chats again even with no disconnect fram
   assert.deepEqual(reads().slice(2).sort(), ['fixture:a', 'fixture:assistant']);
 });
 
+// A controlled clock for working-time tests: the paint that covers a pane comes
+// a moment after its last visible paint, as it does for a reader.
+function controlClock(t, s) {
+  const realNow = s.window.Date.now;
+  let now = realNow.call(s.window.Date);
+  s.window.Date.now = () => now;
+  t.after(() => { s.window.Date.now = realNow; });
+  return { advance(ms) { now += ms; }, release() { s.window.Date.now = realNow; } };
+}
+
 test('a running time behind a full-screen card schedules no redraws', async t => {
   const s = openShell(t);
   await flush(); s.choose('a'); s.choose('b');
+  const clock = controlClock(t, s);
   const a = s.rows[1]; a.working = true;
   s.elapsed[a.stream_id] = 7000;
   s.update();
+  clock.advance(5);
   s.$('[data-pane=chat2] [aria-label="Full screen"]').click();
   const realTimeout = s.window.setTimeout;
   const scheduled = [];
@@ -371,6 +388,7 @@ test('a running time behind a full-screen card schedules no redraws', async t =>
   s.update();
   assert.deepEqual(scheduled, [], 'nothing on screen is counting');
   s.window.setTimeout = realTimeout;
+  clock.release();
   s.$('[data-pane=chat2] [aria-label="Leave full screen"]').click();
   assert.equal(s.$('[data-pane=chat] .next-working-time').textContent, '7s', 'the time is current when the card returns');
   a.working = false; s.update();
