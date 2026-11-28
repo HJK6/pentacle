@@ -382,19 +382,52 @@ def test_parked_shared_fixture_and_order():
 
 
 def test_reader_routes_show_and_emission(tmp_path, monkeypatch):
-    from test_store_reader import record_calls
+    from test_store_reader import record_calls, rendezvous, queue_read
+    import store_host_transfer as transfer
     seen = record_calls(monkeypatch)
     async def body(env):
         lid = (await env.adopt(key="stream:reader", state="paused", owner="operator"))["lane"]["lane_id"]
         sessions = Sessions(env.store, tmux=None, local_host="host-a")
         await sessions.refresh()
         server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
-        server.work_lanes = WorkLanesInventory(env.store, sessions, env._broadcast)
+        server.work_lanes = WorkLanesInventory(env.store, sessions, env._broadcast, refresh_min_s=0)
         auth = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
         await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
         await server.work_lanes.emit_if_changed()
         assert any("get_work_lane" in name for name in seen[env.store.read_diag])
         assert any("work_lane_snapshot" in name for name in seen[env.store.read_diag])
+        guard = transfer.require_active
+        checked = []
+        monkeypatch.setattr(transfer, "require_active", lambda conn, *actor: (checked.append(actor), guard(conn, *actor))[1])
+        token = transfer.actor_context.set((FD, env.gen))
+        try:
+            await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+        finally:
+            transfer.actor_context.reset(token)
+        assert checked and any("get_work_lane" in name for name in seen[env.store.call_diag])
+        await env.store.submit(lambda conn: (conn.execute("UPDATE v2_assistant_composite_lanes SET title='New title' WHERE lane_id=?", (lid,)), conn.commit()))
+        entered, release, pause = rendezvous()
+        held = asyncio.create_task(env.store.read(lambda conn: pause()))
+        waiting = []
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            for _ in range(4):
+                waiting.append(await queue_read(env.store, lambda conn: None))
+            with pytest.raises(VerbError, match="Lane details are busy; retry") as exc:
+                await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+            assert exc.value.code == "work_lanes_busy"
+            assert await env.store.get_work_lane(lid) and await server.work_lanes.current() and await server.work_lanes.list()
+            count = len(env.broadcasts)
+            server.work_lanes.request_emit()
+            await server.work_lanes._task
+            assert len(env.broadcasts) == count
+        finally:
+            release.set()
+            await held
+            await asyncio.gather(*waiting)
+        server.work_lanes.request_emit()
+        await server.work_lanes._task
+        assert len(env.broadcasts) == count + 1
     run(body, path=str(tmp_path / "routing.db"))
 
 

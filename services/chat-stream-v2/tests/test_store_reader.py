@@ -98,7 +98,7 @@ async def test_next_read_sees_awaited_commit(db):
     assert await db.read(lambda conn: value(conn, "fact")) == "after"
 
 
-async def test_read_keeps_fact_and_dependency_in_one_snapshot(db):
+async def test_read_keeps_fact_and_dependency_in_one_snapshot(db, monkeypatch):
     await put(db, fact="first", dependency="first")
     read = db.read
     entered, release, pause = rendezvous()
@@ -116,6 +116,21 @@ async def test_read_keeps_fact_and_dependency_in_one_snapshot(db):
         release.set()
         observed = await reader
     assert observed == ("first", "first")
+    from work_lane_link import FIXTURE_LANE_ID, link_specs_conn
+    import store_work_lanes
+    await db.submit(lambda conn: link_specs_conn(conn, "spec_fixture"))
+    entered, release, pause = rendezvous()
+    events = store_work_lanes.lane_events_conn
+    monkeypatch.setattr(store_work_lanes, "lane_events_conn", lambda *args: (pause(), events(*args))[1])
+    reader = asyncio.create_task(db.get_work_lane(FIXTURE_LANE_ID, read=True))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        await db.submit(lambda conn: (conn.execute("UPDATE v2_assistant_composite_lanes SET title='Changed' WHERE lane_id=?", (FIXTURE_LANE_ID,)), conn.commit()))
+    finally:
+        release.set()
+        lane = await reader
+    assert lane["lane"]["title"] == lane["_projection_row"]["title"] == "Fixture lane"
+    assert (await db.get_work_lane(FIXTURE_LANE_ID, read=True))["lane"]["title"] == "Changed"
 
 
 def record_calls(monkeypatch):
