@@ -43,4 +43,21 @@ async function revision(root, options = {}) {
   L.atomicJson(path.join(imported.dir, 'manifest.json'), m); L.finalize(imported.dir);
   return { ...imported, manifest: L.readJson(path.join(imported.dir, 'manifest.json')) };
 }
-module.exports = { PNG, HTML, drop, revision };
+// A drop of several views, each its own page; `files` adds shared payload files.
+// Returns the drop directory's helpers for edits that follow a publish.
+function pages(root, { id = 'example', views, files = {}, designs } = {}) {
+  fs.mkdirSync(path.join(root, 'payload'), { recursive: true });
+  for (const [name, text] of Object.entries({ ...Object.fromEntries(Object.entries(views).map(([view, html]) => [view + '.html', html])), ...files })) fs.writeFileSync(path.join(root, 'payload', name), text);
+  const descriptor = { schema: 'design-drop.v1', project_id: id, title: id, source_kind: 'local', source_id: 'fixture', source_revision: 'fixture-v1', exported_at: '2026-01-01T00:00:00Z', exporter: 'test fixture', complete: true, missing_paths: [], files: L.inventory(path.join(root, 'payload')), views: Object.keys(views).map(view => ({ id: view, title: view, entry: view + '.html', surface: 'web', viewport: { width: 800, height: 600 }, approval_ref: null })), flows: [] };
+  if (designs) descriptor.designs = designs;
+  L.atomicJson(path.join(root, 'drop.json'), descriptor); return descriptor;
+}
+const page = text => `<!doctype html><html><body><h1>${text}</h1></body></html>`;
+// Browser work for `publish` and `recordRevision`: no browser is launched, and
+// each capture writes a distinct picture so a reused one is recognizable.
+const PROFILE = { browser: 'fake-1', browser_sha256: 'a'.repeat(64), ffmpeg: 'fake', ffmpeg_sha256: 'b'.repeat(64), launch_sha256: 'c'.repeat(64) };
+function browser(profile = PROFILE) {
+  const captured = [];
+  return { captured, profile, hooks: { captureProfile: async () => structuredClone(profile), capture: async ({ file }) => { captured.push(path.basename(file, '.png')); fs.writeFileSync(file, Buffer.concat([PNG, Buffer.from('capture ' + captured.length)])); } } };
+}
+module.exports = { PNG, HTML, drop, revision, pages, page, browser, PROFILE };

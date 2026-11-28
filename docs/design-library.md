@@ -158,6 +158,23 @@ selects it last. Failed flows preserve current. Incomplete drops remain indexed
 drafts and never select current. An identical input with verified retained
 output is reused. Tool/dependency/output changes produce a new revision.
 
+Preparation runs for every view on every publish; it needs no browser. Only a
+view whose prepared page changed is opened in the browser. Each captured view
+stores `generated.capture_key`, the SHA-256 of its prepared page bytes, viewport,
+ready selector, browser, recorder, launch arguments (`test/e2e/lib/chrome_launch.cjs`)
+and Playwright version. Before opening a page, `publish` looks through the
+project's retained complete, verified revisions, newest first, for a view with
+the same key. It checks that revision's PNG against its manifest, copies it as
+`screenshots/<view id>.png` and records `reused_from` (informational; the named
+revision may be pruned later). Revisions written before keys existed are never
+reused from. A new browser, recorder, launch argument or Playwright version
+changes every key, so the next publish captures every view once. Flows are always
+recorded. `verify` recomputes each stored key and refuses a mismatch.
+
+The result carries `counts: {captured, reused}` for views (`reused` the
+whole-revision flag stays separate) and `timings_ms` per phase. A screen's
+preparation compiles each distinct script once per publish.
+
 For diagnosis, the same CLI exposes `import --drop --staging [--dependencies]`,
 `prepare --dir`, `record --dir [--out]` and `verify --dir`. `record --library
 --project --revision --out` re-records a retained prepared revision into a new
@@ -214,10 +231,72 @@ its own identity/import timestamps and generated self-references. Generated
 bindings identify their containing revision. Files and outputs are hash-checked
 before exposure; raw HTML/JS and arbitrary paths have no public file route.
 
-Keep one project writer. On each execution host, copy source into an unsynced
-task workspace, make only that copy writable, edit there, reindex the drop's file hashes/sizes and send the
-candidate to that writer through existing authenticated SSH. The writer runs
-the full publish operation. Do not edit a synchronized immutable revision.
+Keep one project writer. On each execution host, export the selected revision
+into an unsynced task workspace, edit that writable copy, refresh its file list
+and send the candidate to that writer through existing authenticated SSH. The
+writer runs the full publish operation. Do not edit a synchronized immutable
+revision.
+
+```sh
+node scripts/design-library.cjs export --library /private/design-library \
+  --project example --out /private/design-edit
+# edit /private/design-edit/payload, then
+node scripts/design-library.cjs reindex --drop /private/design-edit
+node scripts/design-library.cjs publish --drop /private/design-edit \
+  --dependencies /private/design-edit/dependencies.json \
+  --staging /private/design-staging --library /private/design-library
+```
+
+`export` writes `drop.json` from the revision's provenance, a writable `payload/`
+from its `source/` and `dependencies.json` (pinned assets and reviewed adapters
+with their replacement text) beside it. It refuses an existing `--out` and checks
+that every pinned asset's recorded cache file exists on this host with its
+recorded SHA-256, failing with the asset's URL otherwise: revisions do not store
+asset bytes. Publishing an unedited export reproduces the selected `input_id`.
+`reindex --drop` rewrites only the `files` list (path, SHA-256, size) from
+`payload/`.
+
+## Board dates and pruning
+
+`publish` records `design_changes` in the revision's manifest: for each board,
+its fingerprint and `changed_at`. A board whose fingerprint matches the revision
+that was selected keeps that revision's date; any other board gets the new
+revision's `imported_at`. The dates are part of the revision identity, so
+removing old revisions cannot move them and a rollback shows the dates recorded
+in the revision it selects. `record --library` and plain `finalize` record none.
+A revision written before this field is read the earlier way, deriving each date
+from whichever ancestors are still retained; after pruning such a kept rollback
+target can show later dates than it did before. That holds only until a project
+has N revisions from this tool.
+
+```sh
+node scripts/design-library.cjs prune --library /private/design-library \
+  --project example [--keep 3] [--apply yes]
+```
+
+`prune` keeps the last N distinct selections whose revision folder exists,
+verifies and is complete (default 3, at least 2, so a reader's previous verified
+selection survives a sync window). It reads the selection order from the
+project's history pointer files in timestamp order, then `current.json`, and
+walks it from the end; the selected revision is first. For publish A, B, C, roll
+back to A, publish D, the order is A, B, C, A, D and N=3 keeps D, A, C and removes
+B. Only complete, verifying revisions that appear in that order are removed;
+incomplete drafts, revisions that do not verify and revisions never selected
+stay. Without `--apply yes` it prints the removal set and its byte total and
+changes nothing. With it each folder is renamed into
+`.design-library-pruned/` beside the library root, outside the synchronized
+tree, and deleted there. History pointer files stay; `rollback` to a pruned
+revision fails saying so. It refuses when the selected revision has no
+`design_changes`, when the project has a sync conflict, or when the selection
+does not verify.
+
+`publish` prunes the project the same way, only after it has selected a new
+revision and read it back verified; a publish that returns `reused` or
+`incomplete` prunes nothing. `--keep N` sets the count and `--keep all` skips
+pruning. A refused prune is reported in the result's `pruned.refused` without
+failing the publish. Deploy every web build that serves the library before the
+first publish with this tool, because older readers derive board dates from
+retained ancestors and would show moved dates.
 
 Reuse a dedicated Syncthing folder for this library: publisher send-only,
 reader peers receive-only. Install immutable bytes first and `current.json`
@@ -240,7 +319,7 @@ node scripts/design-library.cjs rollback --library /private/design-library \
 ```
 
 The command preserves the previous pointer and atomically replaces current.
-Keep failed revisions/evidence. A web build/config rollback is separate from a
+Only retained revisions can be selected; a pruned one cannot. Keep failed revisions/evidence. A web build/config rollback is separate from a
 library pointer rollback; verify the actual authenticated browser journey after
 both. Deploying the chat daemon does not activate a new web build.
 
@@ -260,8 +339,9 @@ and conflict copies never become canonical members, and conflicts remain visible
 Source-relative Copy path is an explicit agent action, never navigation.
 
 The catalog includes resolved `projects[].designs` with a `changed_at` per
-board. The change date tracks board nodes and their screens along the selected
-revision's history. Send the last catalog `ETag` as `If-None-Match` to get a
+board. The change date is the one recorded in the selected revision's
+`design_changes`; a revision without it derives the date from board nodes and
+their screens along the retained history. Send the last catalog `ETag` as `If-None-Match` to get a
 bodyless 304 when the catalog is unchanged. The catalog remains private and
 no-store. The Design viewer opts its live frame in by setting the frame name
 from `lib/design_frame.cjs`. The prepared document then relays Escape and arrow
