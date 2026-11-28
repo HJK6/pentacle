@@ -38,6 +38,7 @@ class RequestTiming:
     closed: bool = False
     owner: asyncio.Task | None = None  # Ingest measures only the awaiting task.
     resume_s: float = 0.0
+    events_appended: int = 0
 
     def add(self, queued: float, started: float, finished: float) -> None:
         if not self.closed:

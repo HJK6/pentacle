@@ -6410,6 +6410,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 raise
 
         inserted, committed_at = await self.submit(_op)
+        # Count committed sequences before post-commit proof reconciliation.
+        timing = request_timing.get()
+        if timing is not None and timing.owner is not None and timing.owner is asyncio.current_task():
+            timing.events_appended += sum(isinstance(result, int) for result in inserted or ())
         if inserted is not None:
             for entry, result in zip(entries, inserted):
                 if result is not ENTRY_DROPPED:
@@ -7114,6 +7118,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 conn.rollback()
                 raise
         event_id = await self.submit(transaction)
+        timing = request_timing.get()
+        if (event_id is not None and timing is not None
+                and timing.owner is not None and timing.owner is asyncio.current_task()):
+            timing.events_appended += 1
         await self._reconcile_ingested_tell(event)
         return event_id
 

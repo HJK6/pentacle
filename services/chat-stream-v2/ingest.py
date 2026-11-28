@@ -83,14 +83,14 @@ ENV_PREFIX = "PENTACLE_INGEST_"
 class _VisitTiming(RequestTiming):
     proof_s: float = 0.0
     replay_bytes: int = 0
-    records_parsed: int = 0
+    records_accepted: int = 0
 
-    def metrics(self, wall_ms, appended):
+    def metrics(self, wall_ms):
         phases = {"proof_ms": self.proof_s * 1000, "store_queue_ms": self.queue_s * 1000,
                   "store_execution_ms": self.execution_s * 1000, "store_resume_ms": self.resume_s * 1000}
         return {"wall_ms": wall_ms, **phases, "residual_ms": wall_ms - sum(phases.values()),
                 "store_calls": self.calls, "replay_bytes": self.replay_bytes,
-                "records_parsed": self.records_parsed, "events_appended": appended}
+                "records_accepted": self.records_accepted, "events_appended": self.events_appended}
 
 
 @dataclass
@@ -664,7 +664,6 @@ class Ingest:
             visit_started = monotonic()
             timing = _VisitTiming(owner=owner)
             token = request_timing.set(timing)
-            n = 0
             try:
                 if now < st.next_attempt_monotonic:
                     backoff_skips += 1
@@ -685,14 +684,14 @@ class Ingest:
                 appended += n
             finally:
                 request_timing.reset(token)
-                visits.append((sid, (monotonic() - visit_started) * 1000, timing, n))
+                visits.append((sid, (monotonic() - visit_started) * 1000, timing))
         finished = monotonic()
         pass_ms = (finished - pass_started) * 1000
         if pass_ms > 5000:
-            totals = Counter(_VisitTiming().metrics(0, 0))
+            totals = Counter(_VisitTiming().metrics(0))
             slowest = []
-            for index, (sid, wall_ms, timing, n) in enumerate(sorted(visits, key=lambda visit: -visit[1])):
-                metrics = timing.metrics(wall_ms, n)
+            for index, (sid, wall_ms, timing) in enumerate(sorted(visits, key=lambda visit: -visit[1])):
+                metrics = timing.metrics(wall_ms)
                 totals.update(metrics)
                 if index < 5:
                     slowest.append({"stream_id": sid, **{key: round(value, 3) for key, value in metrics.items()}})
@@ -1090,7 +1089,7 @@ class Ingest:
             records.append(record)
             record_end_offsets.append(cursor)
         if isinstance(timing, _VisitTiming):
-            timing.records_parsed += len(records)
+            timing.records_accepted += len(records)
 
         # Legacy rows can lack an authoritative provider while the existing
         # chat reader infers one from the session name. Keep that chat path;
