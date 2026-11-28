@@ -428,7 +428,7 @@ function paintRows(element, id) {
   const arrived = stick ? 0 : newTailRows(detail?.transcriptItems, pane.tail);
   if (arrived) { pane.rows += arrived; detail = select(); }
   pane.tail = detail?.transcriptItems?.at(-1)?.id ?? null;
-  const transcript = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true });
+  const transcript = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true, allowFailedDiscard: true });
   const status = historyReads.status(id);
   pane.waiting = !!status.message;
   const note = historyNote(id, detail, status);
@@ -542,6 +542,8 @@ function attachTranscript(transcript, source) {
   }
   const retry = event.target.closest('.slot-chat-send-retry');
   if (retry) store.retryOptimisticSend(retry.dataset.optimisticId);
+  const discard = event.target.closest('.slot-chat-send-discard');
+  if (discard) store.discardFailedOptimisticSend(discard.dataset.optimisticId);
   const sendNow = event.target.closest('.slot-chat-send-now');
   if (sendNow && store.canSendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId)) store.sendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId);
   });

@@ -256,13 +256,13 @@ test('a late receipt wins over a later rejection of the original uncertain RPC',
  assert.equal(controller.retryOptimisticSend(id),false);assert.equal(sends.length,1);
 });
 
-test('uncertain row offers a truthful rendered Retry for same-ID reconciliation',async t=>{
+test('unresolved row renders sending while retaining same-ID reconciliation',async t=>{
  const controller=store(t);let request='';controller.setSendBridge(async args=>{request=args.requestId;return {ok:false,error:'socket closed'};});
  const id=controller.sendTurn(STREAM,'uncertain visible action');await flush();
  assert.equal(controller.getState().optimisticSends?.[id].status,'indeterminate');
  const row=controller.selectSessionDetail(STREAM).transcriptItems.find(row=>row.optimisticId===id)!;
- assert.equal(row.sendState,'indeterminate');const html=renderTranscriptItemHtml(row);
- assert.match(html,/Delivery uncertain/);assert.match(html,/slot-chat-send-retry/);assert.doesNotMatch(html,/Failed to send/);
+ assert.equal(row.sendState,'sending');const html=renderTranscriptItemHtml(row);
+ assert.doesNotMatch(html,/Delivery uncertain|slot-chat-send-retry|Failed to send/);
  controller.applyFrame({type:'send.result',request_id:request,delivery:'landed'});
  const settled=controller.selectSessionDetail(STREAM).transcriptItems.find(row=>row.optimisticId===id)!;
  assert.doesNotMatch(renderTranscriptItemHtml(settled),/slot-chat-send-retry/);
@@ -380,4 +380,119 @@ test('caller attachment and voice mutation cannot change a web recovery payload'
   c.sendTurn(STREAM, 'freeze', attachments, { meta, reply_to_message_id: 'message-1', reply_to_question_id: 'question-1' });
   c.webHostDisconnected(1); await flush(); attachments[0].key = 'mutated'; meta.voice.duration_s = 8;
   c.webHostReady(2); await flush(); assert.deepEqual(calls[1], calls[0]);
+});
+
+test('committed not_landed is failed and can be discarded locally', async t => {
+  const controller = store(t);
+  let request = '';
+  controller.setSendBridge(async args => { request = args.requestId; return { ok: true }; });
+  const id = controller.sendTurn(STREAM, 'draft stuck');
+  await flush();
+  assert.equal((controller as any).discardFailedOptimisticSend(id), false);
+  controller.applyFrame({ type: 'send.result', request_id: request, delivery: 'not_landed', action_committed: true, confirmation_pending: true });
+  assert.equal(controller.getState().optimisticSends?.[id]?.status, 'failed');
+  controller.applyFrame({ type: 'send.indeterminate', request_id: request, action_committed: true });
+  assert.equal(controller.getState().optimisticSends?.[id]?.status, 'failed', 'a weaker late frame cannot rearm a known failure');
+  assert.equal((controller as any).discardFailedOptimisticSend(id), true);
+  assert.equal(controller.getState().optimisticSends?.[id], undefined);
+  assert.equal(controller.selectSessionDetail(STREAM).transcriptItems.some(row => row.optimisticId === id), false);
+});
+
+test('receipt tracking resolves landed and later failure while preserving real landed proof', async t => {
+  const c = store(t); let request = ''; let receipt: any = { found: true, receipts: [] };
+  c.setSendBridge(async args => { request = args.requestId; return { ok: true }; });
+  (c as any).setSendReceiptBridge(async () => receipt);
+  const id = c.sendTurn(STREAM, 'receipt'); await flush();
+  receipt.receipts = [{ request_id: request, to_stream_id: STREAM, state: 'landed' }];
+  c.applyFrame({ type: 'send.result', request_id: request, delivery: 'committed_pending_proof', action_committed: true }); await flush();
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'acked');
+  c.applyFrame({ type: 'send.result', request_id: request, delivery: 'not_landed' });
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'acked');
+});
+
+for (const failure of ['error', 'timed_out', 'disconnect', 'unknown_session', 'scope_denied']) {
+  test(`receipt ${failure} does not fail an unresolved send on reconnect`, async t => {
+    const c = store(t); let request = '';
+    c.setSendBridge(async args => { request = args.requestId; return { ok: true }; });
+    (c as any).setSendReceiptBridge(async () => { throw new Error(failure); });
+    const id = c.sendTurn(STREAM, 'pending receipt'); await flush();
+    c.applyFrame({ type: 'send.indeterminate', request_id: request }); await flush();
+    c.applyFrame({ type: '__reconnect', generation: 0, next_generation: 1 }); await flush();
+    assert.notEqual(c.getState().optimisticSends?.[id]?.status, 'failed');
+  });
+}
+
+test('missing receipt fails only on reconnect and only after dispatch ends', async t => {
+  const c = store(t); let request = ''; let finish: (v: any) => void = () => {};
+  c.setSendBridge(args => { request = args.requestId; return new Promise(resolve => { finish = resolve; }); });
+  (c as any).setSendReceiptBridge(async () => ({ found: false, receipts: [] }));
+  const id = c.sendTurn(STREAM, 'in flight'); await flush();
+  c.applyFrame({ type: 'send.indeterminate', request_id: request }); await flush();
+  c.applyFrame({ type: '__reconnect', generation: 0, next_generation: 1 }); await flush();
+  assert.notEqual(c.getState().optimisticSends?.[id]?.status, 'failed');
+  finish({ ok: true }); await flush();
+  c.applyFrame({ type: '__reconnect', generation: 1, next_generation: 2 }); await flush();
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'failed');
+});
+
+test('accepted receipt remains Sending through the bound and follows a later failure', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1800000000000 });
+  const c = store(t); let request = ''; let state = 'accepted'; let queries = 0;
+  c.setSendBridge(async args => { request = args.requestId; return { ok: true }; });
+  (c as any).setSendReceiptBridge(async ({ streamId, requestId }: any) => {
+    queries++; return { found: true, receipts: [{ to_stream_id: streamId, request_id: requestId, state }] };
+  });
+  const id = c.sendTurn(STREAM, 'bound receipt'); await flush();
+  c.applyFrame({ type: 'send.result', request_id: request, delivery: 'committed_pending_proof' }); await flush();
+  assert.equal(c.selectSessionDetail(STREAM).transcriptItems.find(row => row.optimisticId === id)?.sendState, 'sending');
+  t.mock.timers.tick(19999); await flush();
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'indeterminate');
+  t.mock.timers.tick(1); await flush();
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'acked');
+  assert.ok(queries >= 2);
+  state = 'not_landed';
+  t.mock.timers.tick(15000); await flush();
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'failed');
+});
+
+test('no receipt without reconnect leaves an answered send unresolved', async t => {
+  const c = store(t); let request = ''; let queries = 0;
+  c.setSendBridge(async args => { request = args.requestId; return { ok: true }; });
+  (c as any).setSendReceiptBridge(async () => { queries++; return { found: false, receipts: [] }; });
+  const id = c.sendTurn(STREAM, 'no receipt'); await flush();
+  c.applyFrame({ type: 'send.indeterminate', request_id: request }); await flush();
+  assert.equal(queries, 1);
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'indeterminate');
+});
+
+for (const code of ['unknown_session', 'scope_denied', 'timed_out', 'disconnected']) {
+  test(`unsuccessful ${code} receipt reply cannot mean absent`, async t => {
+    const c = store(t); let request = '';
+    c.setSendBridge(async args => { request = args.requestId; return { ok: true }; });
+    (c as any).setSendReceiptBridge(async () => ({ ok: false, code, found: false }));
+    const id = c.sendTurn(STREAM, 'failed receipt query'); await flush();
+    c.applyFrame({ type: 'send.indeterminate', request_id: request }); await flush();
+    c.applyFrame({ type: '__reconnect', generation: 0, next_generation: 1 }); await flush();
+    assert.equal(c.getState().optimisticSends?.[id]?.status, 'indeterminate');
+  });
+}
+
+test('daemon restart survivor is queried without a replay', async t => {
+  const c = store(t); let request = ''; let sends = 0; let queries = 0;
+  c.setSendBridge(async args => { request = args.requestId; sends++; return { ok: true }; });
+  (c as any).setSendReceiptBridge(async () => { queries++; return { found: true, receipts: [{ request_id: request, to_stream_id: STREAM, state: 'not_landed' }] }; });
+  const id = c.sendTurn(STREAM, 'restart survivor'); await flush();
+  c.applyFrame({ type: '__reconnect', generation: 0, next_generation: 1, daemon_restarted: true }); await flush();
+  assert.equal(sends, 1); assert.ok(queries > 0);
+  assert.equal(c.getState().optimisticSends?.[id]?.status, 'failed');
+});
+
+test('a held original request is supplied to receipt reconciliation', async t => {
+  const c = store(t); let request = ''; let received: any;
+  c.setSendBridge(async args => { request = args.requestId; return { ok: true }; });
+  (c as any).setSendReceiptBridge(async (args: any) => { received = args; return { found: false, receipts: [] }; });
+  const originalRequest = { protocol: 'voice-v1', logical_id: 'fixture', target: STREAM, generation: 'gen', sequence: 1 };
+  c.sendTurn(STREAM, 'voice note', [], { identity: { requestId: 'voice-request', optimisticId: 'voice-id', originalRequest } });
+  await flush(); c.applyFrame({ type: 'send.indeterminate', request_id: request }); await flush();
+  assert.deepEqual(received.originalRequest, originalRequest);
 });

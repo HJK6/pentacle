@@ -776,6 +776,12 @@ try {
     );
   }
 
+  getSendReceipt({ streamId, requestId, originalRequest } = {}) {
+    return this.sendCommand({ type: 'send.receipt.get', to_stream_id: streamId,
+      ...(originalRequest ? { original_request: originalRequest } : {}) },
+    'send.receipt.get', { requestId, rawResponse: true });
+  }
+
   transcribeBlob({ request_id, blob_sha, mime } = {}) {
     return this.sendCommand({ type: 'transcribe_blob', blob_sha, mime }, 'transcribe_blob', { requestId: request_id, timeoutMs: 120000 });
   }
