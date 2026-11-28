@@ -39,6 +39,7 @@ import math
 import os
 import shlex
 import stat as stat_module
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +53,7 @@ from context_adapters import parse_codex_context_reading
 from message_envelopes import annotate_message_envelope
 from prockill import canonical_start, process_tree, process_record, pid_alive
 from error_adapters import ErrorFact
+from loop_watchdog import RequestTiming, request_timing
 from store import ENTRY_DROPPED
 from tell_proof import is_native_input_event
 from tmux_transport import TRANSCRIPT_DIRS, _exec
@@ -75,6 +77,20 @@ DEFAULT_BACKOFF_BASE_S = 1.0
 DEFAULT_BACKOFF_MAX_S = 30.0
 
 ENV_PREFIX = "PENTACLE_INGEST_"
+
+
+@dataclass
+class _VisitTiming(RequestTiming):
+    proof_s: float = 0.0
+    replay_bytes: int = 0
+    records_accepted: int = 0
+
+    def metrics(self, wall_ms):
+        phases = {"proof_ms": self.proof_s * 1000, "store_queue_ms": self.queue_s * 1000,
+                  "store_execution_ms": self.execution_s * 1000, "store_resume_ms": self.resume_s * 1000}
+        return {"wall_ms": wall_ms, **phases, "residual_ms": wall_ms - sum(phases.values()),
+                "store_calls": self.calls, "replay_bytes": self.replay_bytes,
+                "records_accepted": self.records_accepted, "events_appended": self.events_appended}
 
 
 @dataclass
@@ -634,6 +650,8 @@ class Ingest:
         now = asyncio.get_running_loop().time()
         budget = cfg.max_events_per_pass
         appended = 0
+        visits = []
+        owner = asyncio.current_task()
         for row in rows:
             if budget <= 0:
                 break
@@ -643,10 +661,13 @@ class Ingest:
             # advance the frontier, as must zero inserts and handled failures.
             self._last_visited_sid = sid
             st = self._streams.setdefault(sid, _StreamIngest())
-            if now < st.next_attempt_monotonic:
-                backoff_skips += 1
-                continue  # this stream is in its own backoff window
+            visit_started = monotonic()
+            timing = _VisitTiming(owner=owner)
+            token = request_timing.set(timing)
             try:
+                if now < st.next_attempt_monotonic:
+                    backoff_skips += 1
+                    continue  # this stream is in its own backoff window
                 if await self._skip_idle_stream(row, st):
                     idle_skips += 1
                     continue
@@ -661,8 +682,26 @@ class Ingest:
                 st.failures = 0
                 budget -= n
                 appended += n
+            finally:
+                request_timing.reset(token)
+                visits.append((sid, (monotonic() - visit_started) * 1000, timing))
         finished = monotonic()
-        self._pass_durations.append((finished - pass_started) * 1000)
+        pass_ms = (finished - pass_started) * 1000
+        if pass_ms > 5000:
+            totals = Counter(_VisitTiming().metrics(0))
+            slowest = []
+            for index, (sid, wall_ms, timing) in enumerate(sorted(visits, key=lambda visit: -visit[1])):
+                metrics = timing.metrics(wall_ms)
+                totals.update(metrics)
+                if index < 5:
+                    slowest.append({"stream_id": sid, **{key: round(value, 3) for key, value in metrics.items()}})
+            totals["residual_ms"] += pass_ms - totals["wall_ms"]
+            totals["wall_ms"] = pass_ms
+            log.info("ingest_slow_pass %s", json.dumps({
+                "seats": seats, "slowest": slowest,
+                "totals": {key: round(value, 3) for key, value in totals.items()},
+            }, separators=(",", ":")))
+        self._pass_durations.append(pass_ms)
         self._pass_seats.append(seats)
         self._pass_backoff_skips += backoff_skips
         self._pass_idle_skips += idle_skips
@@ -989,6 +1028,9 @@ class Ingest:
                 st.file_id = None
                 return 0
             st.session_id = current_session_id
+        timing = request_timing.get()
+        if isinstance(timing, _VisitTiming) and st.replay_boundary is not None:
+            timing.replay_bytes += min(len(chunk), max(0, st.replay_boundary - st.offset))
         # Consume only up to the last complete line; a partial trailing line is
         # left for the next pass (advance offset by the consumed byte count).
         last_nl = chunk.rfind(b"\n")
@@ -1046,6 +1088,8 @@ class Ingest:
                     return 0
             records.append(record)
             record_end_offsets.append(cursor)
+        if isinstance(timing, _VisitTiming):
+            timing.records_accepted += len(records)
 
         # Legacy rows can lack an authoritative provider while the existing
         # chat reader infers one from the session name. Keep that chat path;
@@ -1258,7 +1302,12 @@ class Ingest:
             # Clear before the call so refusals and raised exceptions both revoke it.
             st.idle_proof_at = None
             st.idle_proof_inputs = None
-        result = await self._prove_provider_root(row, name, observation=observation)
+        try:
+            result = await self._prove_provider_root(row, name, observation=observation)
+        finally:
+            timing = request_timing.get()
+            if isinstance(timing, _VisitTiming):
+                timing.proof_s += monotonic() - started
         if result is not None and st is not None:
             st.idle_proof_at = started
             st.idle_proof_inputs = inputs
