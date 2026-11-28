@@ -2451,6 +2451,7 @@ class Server:
         if verb == "hello" and "protocol_version" in msg:
             peer_protocol = msg.get("protocol_version")
             if (type(peer_protocol) is not int
+                    or peer_protocol == 2
                     or not MIN_PROTOCOL_VERSION <= peer_protocol <= MAX_PROTOCOL_VERSION):
                 return [{
                     "type": "hello.error", "request_id": request_id,
