@@ -154,6 +154,110 @@ def test_async_capture_coalesces_and_bounds_waiters_without_worker_queue(tmp_pat
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('synchronous_owner', [False, True])
+def test_strict_callers_wait_for_one_fresh_walk(tmp_path, monkeypatch, synchronous_owner):
+    path = document(tmp_path)
+    subject = service(tmp_path)
+    scan = subject._scan_folders_by_id
+    first_captured, release_first = threading.Event(), threading.Event()
+    lock = threading.Lock()
+    calls, active, peak = 0, 0, 0
+
+    def observe(*args, **kwargs):
+        nonlocal calls, active, peak
+        with lock:
+            calls += 1
+            active += 1
+            peak = max(peak, active)
+            first = calls == 1
+        try:
+            captured = scan(*args, **kwargs)
+            if first:
+                first_captured.set()
+                assert release_first.wait(5)
+            return captured
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(subject, '_scan_folders_by_id', observe)
+
+    async def run():
+        owner_call = asyncio.to_thread(subject.spec_resolution_snapshot) if synchronous_owner else spec_resolution_view(subject)
+        owner = asyncio.create_task(owner_call)
+        arrivals = [asyncio.Event() for _ in range(6)]
+
+        async def follow(arrived):
+            arrived.set()
+            return await spec_resolution_view(subject)
+
+        try:
+            assert await asyncio.to_thread(first_captured.wait, 5)
+            path.write_text('---\nid: spec_fixture__new\n---\n')
+            followers = [asyncio.create_task(follow(arrived)) for arrived in arrivals]
+            for arrived in arrivals:
+                await arrived.wait()
+        finally:
+            release_first.set()
+        original, *fresh = await asyncio.gather(owner, *followers)
+        assert original.canonical_spec_identity('fixture__one') == 'spec_fixture__one'
+        assert all(view.canonical_spec_identity('fixture__new') == 'spec_fixture__new' for view in fresh)
+
+    asyncio.run(run())
+    assert (calls, peak) == (2, 1)
+
+
+def test_failed_walk_only_fails_its_own_waiters_and_caches_nothing(tmp_path, monkeypatch):
+    document(tmp_path)
+    subject = service(tmp_path)
+    scan, statuses = subject._scan_folders_by_id, subject._capture_statuses_input
+    first_captured, release_first = threading.Event(), threading.Event()
+    attempts = []
+    fail_status_recheck = False
+
+    def observe(*args, **kwargs):
+        nonlocal fail_status_recheck
+        attempts.append((bool(subject._identity_cache), subject._admission_seal is not None))
+        captured = scan(*args, **kwargs)
+        if len(attempts) == 1:
+            first_captured.set()
+            assert release_first.wait(5)
+        fail_status_recheck = len(attempts) <= 2
+        return captured
+
+    def read_statuses():
+        nonlocal fail_status_recheck
+        if fail_status_recheck:
+            fail_status_recheck = False
+            raise OSError('fixture status recheck failed')
+        return statuses()
+
+    monkeypatch.setattr(subject, '_scan_folders_by_id', observe)
+    monkeypatch.setattr(subject, '_capture_statuses_input', read_statuses)
+
+    async def run():
+        first = [asyncio.create_task(spec_resolution_view(subject, admission=True)) for _ in range(2)]
+        arrived = asyncio.Event()
+
+        async def follow():
+            arrived.set()
+            return await spec_resolution_view(subject, admission=True)
+
+        try:
+            assert await asyncio.to_thread(first_captured.wait, 5)
+            next_walk = asyncio.create_task(follow())
+            await arrived.wait()
+        finally:
+            release_first.set()
+        left, right, fresh = await asyncio.gather(*first, next_walk, return_exceptions=True)
+        assert isinstance(left, SpecResolutionUnavailable)
+        assert isinstance(right, SpecResolutionUnavailable)
+        assert fresh.canonical_spec_identity('fixture__one') == 'spec_fixture__one'
+
+    asyncio.run(run())
+    assert attempts == [(False, False)] * 3
+
+
 def test_overlapping_warm_admissions_share_probe_but_read_each_bound_spec(tmp_path, monkeypatch):
     first = document(tmp_path)
     second = document(tmp_path, 'fixture__two', 'spec_fixture__two')

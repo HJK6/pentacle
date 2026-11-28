@@ -44,6 +44,8 @@ log = logging.getLogger(__name__)
 SPEC_ID_RE = re.compile(r"^[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 SPEC_DOCUMENT_PREFIXES = ("spec_", "work_")
 SOURCE_READ_ERRORS = (OSError, ValueError, UnicodeError, yaml.YAMLError)
+# Standalone SpecReaders use the same identity walker with their own roots and policies.
+_IDENTITY_WALK_LOCK = threading.RLock()
 
 
 def _content_digest(content):
@@ -200,6 +202,16 @@ class _AdmissionSeal(NamedTuple):
     precise: bool
 
 
+class _CaptureBatch:
+    def __init__(self):
+        self.ready = Future()
+        self.result = Future()
+        self.started = False
+        self.probing = False
+        self.strict = False
+        self.admission = False
+
+
 class SpecResolutionSnapshot:
     """Answers from one captured identity view, with tokens for later reads."""
     def __init__(self, service: "SpecsSubsystem", catalog, tree, inputs, seal=None) -> None:
@@ -264,34 +276,48 @@ async def spec_resolution_view(specs: Any, *, ids=(), admission=False, tag_view=
     loop = asyncio.get_running_loop()
     state = getattr(specs, "_resolution_async", None)
     if state is None or state[0] is not loop:
-        state = [loop, {}, 0]
+        state = [loop, set(), 0]
         specs._resolution_async = state
     timing = [0., 0., 0.]
 
-    async def run(call, mode=None):
+    async def run(call):
         submitted = time.monotonic()
-        task = state[1].get(mode)
-        if task is not None and not task.done():
-            try:
-                return await asyncio.shield(task)
-            finally:
-                timing[2] += time.monotonic() - submitted
 
         def measured():
-            started, prior_wait = time.monotonic(), timing[2]
+            started = time.monotonic()
             timing[0] += started - submitted
             try:
                 return call()
             finally:
-                timing[1] += time.monotonic() - started - (timing[2] - prior_wait)
+                timing[1] += time.monotonic() - started
 
-        work = asyncio.to_thread(measured if admission else call)
-        if mode is None:
-            return await work
-        task = state[1][mode] = asyncio.create_task(work)
-        # Retrieve abandoned failures without changing shared cancellation.
-        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-        return await asyncio.shield(task)
+        return await asyncio.to_thread(measured if admission else call)
+
+    async def capture(*, strict):
+        joined = time.monotonic()
+        batch, owner = specs._request_capture(strict=strict, admission=admission)
+        if owner:
+            async def drive():
+                if not batch.ready.done():
+                    await asyncio.shield(asyncio.wrap_future(batch.ready))
+                    timing[2] += time.monotonic() - joined
+                await run(lambda: specs._run_capture(batch))
+
+            def drive_finished(task):
+                state[1].discard(task)
+                if task.cancelled() or task.exception() is not None:
+                    specs._cancel_unstarted_capture(batch)
+
+            task = asyncio.create_task(drive())
+            state[1].add(task)
+            task.add_done_callback(drive_finished)
+        result = asyncio.wrap_future(batch.result)
+        result.add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
+        try:
+            return await asyncio.shield(result)
+        finally:
+            if not owner:
+                timing[2] += time.monotonic() - joined
 
     def log_capture(outcome):
         log.info("qa_spec_capture outcome=%s executor_queue_ms=%.3f capture_work_ms=%.3f shared_wait_ms=%.3f",
@@ -304,16 +330,18 @@ async def spec_resolution_view(specs: Any, *, ids=(), admission=False, tag_view=
     state[2] += 1
     outcome = "unavailable"
     try:
-        if not admission or not hasattr(specs, "_admission_capture"):
-            return await run(factory, "ordinary")
-        view, reused = (tag_view, True) if tag_view is not None else await run(
-            lambda: specs._admission_capture(timing), "admission")
+        if not hasattr(specs, "_request_capture"):
+            return await run(factory)
+        if not admission:
+            view, _ = await capture(strict=True)
+            return view
+        view, reused = (tag_view, True) if tag_view is not None else await capture(strict=False)
         try:
             value = await run(read_tags or (lambda: view.verify(ids)))
         except SpecResolutionUnavailable:
             specs._discard_admission_seal(view.admission_seal)
             if reused:
-                view = await run(lambda: factory(admission=True, timing=timing), "strict")
+                view, _ = await capture(strict=True)
                 if tag_view is None:
                     try:
                         await run(lambda: view.verify(ids))
@@ -380,11 +408,10 @@ class SpecsSubsystem:
         self._presentation_cache_lock = threading.Lock()
         self._folder_index_cache: dict[str, list[tuple[str, Path]]] | None = None
         self._status_card_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
-        self._identity_lock = threading.RLock()
         self._identity_cache = {}
         self._work_observation_cache = {}
         self._capture_lock = threading.Lock()
-        self._capture_future = None
+        self._active_capture = self._pending_capture = None
         self._capture_waiters = 0
         self._admission_seal = None
         if self.disabled:
@@ -839,7 +866,7 @@ class SpecsSubsystem:
         Keep only the current tree's inputs. A failed capture never publishes
         partial inputs or falls back to a last-success authorization snapshot.
         """
-        with self._identity_lock:
+        with _IDENTITY_WALK_LOCK:
             folders, identities, cache, inputs, directories = defaultdict(list), {}, {}, {}, {}
             for status_dir in self._work_dirs() if status_dirs is None else status_dirs:
                 try:
@@ -884,7 +911,8 @@ class SpecsSubsystem:
                                 raise SpecResolutionUnavailable("spec_identity_unavailable") from None
                             continue
                         inputs.setdefault(status_dir, {})[path] = token
-                        cache[path] = (fingerprint, declared_id, has_id, digest)
+                        if manifest is None:
+                            cache[path] = (fingerprint, declared_id, has_id, digest)
                         identities[child] = (declared_id, has_id)
                         aliases = set(self._spec_id_aliases(declared_id))
                         if self._folder_name_is_declared_alias(child.name, declared_id):
@@ -917,10 +945,11 @@ class SpecsSubsystem:
                     raise SpecResolutionUnavailable("spec_identity_changed")
             if probe:
                 return
-            self._identity_cache = cache
             index = _IdentityIndex(folders, identities)
             if manifest is not None:
                 index.inputs = MappingProxyType({path: token for paths in inputs.values() for path, token in paths.items()})
+            else:
+                self._identity_cache = cache
             return index
 
     def _folders_by_id(self) -> dict[str, list[tuple[str, Path]]]:
@@ -1033,94 +1062,140 @@ class SpecsSubsystem:
             if self._admission_seal is seal:
                 self._admission_seal = None
 
-    def _admission_capture(self, timing):
-        seal = self._admission_seal
-        if seal and seal.precise and self._monotonic() - seal.captured_at < 600:
-            try:
-                with _bounded_directory(self.memory_root / "work"):
-                    config = self._capture_statuses_input()
-                    if _input_token(config) == seal.status_token:
-                        statuses, _ = self._load_statuses(captured=config)
-                        manifest = {}
-                        self._scan_folders_by_id(status_dirs=self._work_dirs(statuses=statuses),
-                                                 strict=True, manifest=manifest, probe=True)
-                        match = manifest == seal.manifest and _input_token(self._capture_statuses_input()) == seal.status_token
-                    else:
-                        match = False
-                if match and self._admission_seal is seal:
-                    return self._view_from_seal(seal), True
-            except SOURCE_READ_ERRORS:
-                pass
-        self._discard_admission_seal(seal)
-        return self.spec_resolution_snapshot(admission=True, timing=timing), False
-
-    def spec_resolution_snapshot(self, *, admission=False, timing=None) -> "SpecResolutionSnapshot":
-        """One owner rebuilds; at most 16 overlapping synchronous followers."""
+    def _request_capture(self, *, strict, admission=False):
         with self._capture_lock:
-            future = self._capture_future
-            owner = future is None
-            if owner:
-                future = self._capture_future = Future()
-                self._capture_admission = False
-            elif self._capture_waiters >= 16:
+            active = self._active_capture
+            owner = False
+            if active is None:
+                batch = self._active_capture = _CaptureBatch()
+                batch.ready.set_result(None)
+                owner = True
+            elif not active.started or (not strict and active.probing):
+                # Only warm admission callers can join a walk already underway.
+                batch = active
+            else:
+                if self._pending_capture is None:
+                    self._pending_capture = _CaptureBatch()
+                    owner = True
+                batch = self._pending_capture
+            batch.strict |= strict
+            batch.admission |= admission
+            return batch, owner
+
+    def _advance_capture(self):
+        # Called with the queue lock held, after the old batch is finished.
+        self._active_capture, self._pending_capture = self._pending_capture, None
+        if self._active_capture is not None:
+            self._active_capture.ready.set_result(None)
+
+    def _cancel_unstarted_capture(self, batch):
+        with self._capture_lock:
+            if batch.started or batch.result.done():
+                return
+            batch.result.set_exception(SpecResolutionUnavailable("spec_identity_unavailable"))
+            if self._active_capture is batch:
+                self._advance_capture()
+            elif self._pending_capture is batch:
+                self._pending_capture = None
+
+    def _run_capture(self, batch):
+        with _IDENTITY_WALK_LOCK:
+            failure = None
+            try:
+                with self._capture_lock:
+                    if batch.result.done():
+                        return
+                    batch.started = True
+                    seal = self._admission_seal
+                    batch.probing = (not batch.strict and seal is not None and seal.precise
+                                     and self._monotonic() - seal.captured_at < 600)
+                view = self._probe_admission_seal(seal) if batch.probing else None
+                if view is None:
+                    with self._capture_lock:
+                        batch.probing = False
+                    if not batch.strict:
+                        self._discard_admission_seal(seal)
+                    view = self._strict_capture(admission=batch.admission)
+            except BaseException as exc:
+                failure = exc
+            with self._capture_lock:
+                if failure is None:
+                    batch.result.set_result((view, batch.probing))
+                else:
+                    batch.result.set_exception(failure)
+                self._advance_capture()
+
+    def _probe_admission_seal(self, seal):
+        try:
+            with _bounded_directory(self.memory_root / "work"):
+                config = self._capture_statuses_input()
+                if _input_token(config) != seal.status_token:
+                    return None
+                statuses, _ = self._load_statuses(captured=config)
+                manifest = {}
+                self._scan_folders_by_id(status_dirs=self._work_dirs(statuses=statuses),
+                                         strict=True, manifest=manifest, probe=True)
+                match = manifest == seal.manifest and _input_token(self._capture_statuses_input()) == seal.status_token
+            if match and self._admission_seal is seal:
+                return self._view_from_seal(seal)
+        except SOURCE_READ_ERRORS:
+            return None
+
+    def spec_resolution_snapshot(self) -> "SpecResolutionSnapshot":
+        """A synchronous caller joins the same freshness queue as async callers."""
+        with self._capture_lock:
+            if self._capture_waiters >= 16:
                 raise SpecResolutionUnavailable("spec_resolution_overloaded")
-            self._capture_admission |= admission
             self._capture_waiters += 1
         try:
-            if not owner:
-                joined = time.monotonic()
-                try:
-                    return future.result()
-                finally:
-                    if timing is not None:
-                        timing[2] += time.monotonic() - joined
-            try:
-                # One bounded retry for a concurrent filesystem mutation.
-                for attempt in range(2):
-                    try:
-                        if self.memory_root is not None and not (self.memory_root / "work").is_dir():
-                            raise SpecResolutionUnavailable("spec_root_unavailable")
-                        root = self.memory_root / "work" if self.memory_root else None
-                        root_before = root.stat() if root else None
-                        config_before = self._capture_statuses_input() if root else None
-                        statuses, _order = self._load_statuses(captured=config_before)
-                        allowed = {root / status["name"] for status in statuses} if root else set()
-                        manifest = {}
-                        current = self._scan_folders_by_id(status_dirs=self._work_dirs(statuses=statuses),
-                                                           strict=True, manifest=manifest)
-                        tree = _IdentityIndex(
-                            {key: [entry for entry in entries if entry[1].parent in allowed]
-                             for key, entries in current.items()},
-                            {path: identity for path, identity in current.identities.items() if path.parent in allowed})
-                        if root:
-                            root_after = root.stat()
-                            if ((root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns, root_before.st_ctime_ns)
-                                    != (root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns, root_after.st_ctime_ns)
-                                    or _input_token(config_before) != _input_token(self._capture_statuses_input())):
-                                raise SpecResolutionUnavailable("spec_identity_changed")
-                        precise = any(token[0] and token[0][-1] % 1_000_000_000
-                                      for token in (config_before, *current.inputs.values()) if token)
-                        seal = _AdmissionSeal(self._monotonic(), _input_token(config_before) if root else None,
-                                              MappingProxyType(manifest), current, tree, precise)
-                        snapshot = self._view_from_seal(seal)
-                        with self._capture_lock:
-                            if self._capture_admission and root and not config_before[2] and None not in manifest.values():
-                                self._admission_seal = seal
-                            future.set_result(snapshot)
-                            self._capture_future = None
-                        return snapshot
-                    except (OSError, ValueError):
-                        if attempt:
-                            raise SpecResolutionUnavailable("spec_identity_unavailable") from None
-            except BaseException as exc:
-                future.set_exception(exc)
-                raise
+            batch, owner = self._request_capture(strict=True)
+            if owner:
+                batch.ready.result()
+                self._run_capture(batch)
+            view, _ = batch.result.result()
+            return view
         finally:
             with self._capture_lock:
                 self._capture_waiters -= 1
-                if owner and self._capture_future is future:
-                    self._capture_future = None
 
+    def _strict_capture(self, *, admission):
+        # One bounded retry for a concurrent filesystem mutation.
+        for attempt in range(2):
+            try:
+                if self.memory_root is not None and not (self.memory_root / "work").is_dir():
+                    raise SpecResolutionUnavailable("spec_root_unavailable")
+                root = self.memory_root / "work" if self.memory_root else None
+                root_before = root.stat() if root else None
+                config_before = self._capture_statuses_input() if root else None
+                statuses, _order = self._load_statuses(captured=config_before)
+                allowed = {root / status["name"] for status in statuses} if root else set()
+                manifest = {}
+                current = self._scan_folders_by_id(status_dirs=self._work_dirs(statuses=statuses),
+                                                   strict=True, manifest=manifest)
+                tree = _IdentityIndex(
+                    {key: [entry for entry in entries if entry[1].parent in allowed]
+                     for key, entries in current.items()},
+                    {path: identity for path, identity in current.identities.items() if path.parent in allowed})
+                if root:
+                    root_after = root.stat()
+                    if ((root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns, root_before.st_ctime_ns)
+                            != (root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns, root_after.st_ctime_ns)
+                            or _input_token(config_before) != _input_token(self._capture_statuses_input())):
+                        raise SpecResolutionUnavailable("spec_identity_changed")
+                precise = any(token[0] and token[0][-1] % 1_000_000_000
+                              for token in (config_before, *current.inputs.values()) if token)
+                seal = _AdmissionSeal(self._monotonic(), _input_token(config_before) if root else None,
+                                      MappingProxyType(manifest), current, tree, precise)
+                snapshot = self._view_from_seal(seal)
+                self._identity_cache = {path: (token[0], *current.identities[path.parent], token[1])
+                                        for path, token in current.inputs.items()}
+                if admission and root and not config_before[2] and None not in manifest.values():
+                    with self._capture_lock:
+                        self._admission_seal = seal
+                return snapshot
+            except (OSError, ValueError):
+                if attempt:
+                    raise SpecResolutionUnavailable("spec_identity_unavailable") from None
 
     def _matches_for_spec_id(self, spec_id: str | None) -> list[tuple[str, Path]]:
         return self._matches_from_index(self._folders_by_id(), spec_id)
