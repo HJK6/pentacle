@@ -42,7 +42,7 @@ test('ensureChatEventsLoaded fires RPC once per stream while in flight (idempote
   assert.equal(ensureChatEventsLoaded(streamState, 'stream-a', cc, silentLogger), false);
   assert.equal(ensureChatEventsLoaded(streamState, 'stream-a', cc, silentLogger), false);
   assert.equal(cc.calls.length, 1);
-  assert.deepEqual(cc.calls[0], { streamId: 'stream-a' });
+  assert.deepEqual(cc.calls[0], { streamId: 'stream-a', limit: 64 });
   assert.ok(streamState.eventsLoadedFor.has('stream-a'));
 });
 
@@ -120,7 +120,7 @@ test('refetchEventsForActiveChatSlots fires ensureChatEventsLoaded only for chat
   });
   assert.equal(triggered, 1);
   assert.equal(cc.calls.length, 1);
-  assert.deepEqual(cc.calls[0], { streamId: 'stream-a' });
+  assert.deepEqual(cc.calls[0], { streamId: 'stream-a', limit: 64 });
 });
 
 test('clearing eventsLoadedFor lets refetchEventsForActiveChatSlots re-backfill an already-loaded stream (the /cc-reconnect recovery)', () => {
@@ -152,7 +152,7 @@ test('clearing eventsLoadedFor lets refetchEventsForActiveChatSlots re-backfill 
   streamState.historyLoads = {};
   assert.equal(refetchEventsForActiveChatSlots(args), 1);
   assert.equal(cc.calls.length, 2);
-  assert.deepEqual(cc.calls[1], { streamId: 'stream-a' });
+  assert.deepEqual(cc.calls[1], { streamId: 'stream-a', limit: 64 });
 });
 
 test('refetchEventsForActiveChatSlots respects disconnect — no RPCs fire when streamState.connected is false', () => {
@@ -377,4 +377,20 @@ test('a short or empty page marks the history start', async () => {
     assert.equal(historyHasOlder(state, 'a'), false, JSON.stringify(reply));
     assert.equal(cc.calls.length, 1);
   }
+});
+
+test('initial history requests 64 raw events', async () => {
+  const { cc } = await loaded({ received: 64, nextBeforeDaemonSeq: 900 });
+  assert.deepEqual(cc.calls[0], { streamId: 'a', limit: 64 });
+});
+
+test('a full 64-event initial window retains older navigation', async () => {
+  const { state, cc } = await loaded({ received: 64, nextBeforeDaemonSeq: 900 });
+  assert.equal(historyHasOlder(state, 'a'), true);
+  cc.requestStreamEvents = async args => { cc.calls.push(args); return { ok: true, nextBeforeDaemonSeq: null, exhausted: true }; };
+  await requestOlderHistory(state, 'a', cc, silentLogger, { hasNewRows: () => true });
+  assert.deepEqual(cc.calls[1], { streamId: 'a', beforeDaemonSeq: 900, limit: 500 });
+  assert.equal(historyHasOlder(state, 'a'), false);
+  const short = await loaded({ received: 63, nextBeforeDaemonSeq: 900 });
+  assert.equal(historyHasOlder(short.state, 'a'), false);
 });
