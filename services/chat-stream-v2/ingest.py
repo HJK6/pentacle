@@ -53,6 +53,7 @@ from message_envelopes import annotate_message_envelope
 from prockill import canonical_start, process_tree, process_record, pid_alive
 from error_adapters import ErrorFact
 from store import ENTRY_DROPPED
+from tell_proof import is_native_input_event
 from tmux_transport import TRANSCRIPT_DIRS, _exec
 from provider_accounts import transcript_allowed
 from usage_accounting import native_provenance
@@ -275,7 +276,8 @@ async def append_ingested_event(
     commit_gaps_ms: list[float] | None = None,
 ) -> int | None:
     """Append one event under its raw identity, stamping durable receipt metadata."""
-    if not _segments_prepared and hasattr(store, "prepare_native_input_events"):
+    if (not _segments_prepared and hasattr(store, "prepare_native_input_events")
+            and is_native_input_event(payload)):
         segments = await store.prepare_native_input_events([payload])
         last = None
         for segment in segments:
@@ -1110,7 +1112,8 @@ class Ingest:
                 payloads = normalize_codex_rollout_record(
                     record, host=host, session_name=name, session_id=st.session_id,
                 )
-                payloads = await self.store.prepare_native_input_events(payloads)
+                if any(is_native_input_event(payload) for payload in payloads):
+                    payloads = await self.store.prepare_native_input_events(payloads)
                 if payloads and len(entries) + len(payloads) > budget:
                     # Leave this record and the rest of the span for next pass.
                     capped = True
