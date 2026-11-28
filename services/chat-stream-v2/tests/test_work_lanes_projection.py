@@ -416,6 +416,7 @@ def test_reader_routes_show_and_emission(tmp_path, monkeypatch):
             with pytest.raises(VerbError, match="Lane details are busy; retry") as exc:
                 await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
             assert exc.value.code == "work_lanes_busy"
+            assert exc.value.extra == {"retryable": True, "action_committed": False}
             assert await env.store.get_work_lane(lid) and await server.work_lanes.current() and await server.work_lanes.list()
             count = len(env.broadcasts)
             server.work_lanes.request_emit()

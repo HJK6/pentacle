@@ -5426,10 +5426,8 @@ class Server:
     async def _on_work_lanes_show(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg)
         lane_id = str(msg.get("lane_id") or "")
-        try:
-            shown = await self.store.get_work_lane(lane_id, read=True) if lane_id else None
-        except StoreReadBusy:
-            raise VerbError("work_lanes_busy", "Lane details are busy; retry") from None
+        try: shown = await self.store.get_work_lane(lane_id, read=True) if lane_id else None
+        except StoreReadBusy: raise VerbError("work_lanes_busy", "Lane details are busy; retry", retryable=True, action_committed=False) from None
         if shown is None:
             raise VerbError("work_lane_not_found", "no first-class lane with that id")
         from work_lanes_projection import project_lane, presence_index, _iso_now, page_lane_detail
