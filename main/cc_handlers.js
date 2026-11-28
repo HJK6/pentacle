@@ -226,7 +226,7 @@ function createCcHandlers({
       }
       let entries = laneShowsBySender.get(sender);
       if (!entries) { entries = new Map(); laneShowsBySender.set(sender, entries); }
-      const key = JSON.stringify([laneId, page.goalId ?? null, page.membersAfter ?? null, page.membersLimit ?? null]);
+      const key = JSON.stringify([laneId, page.goalId ?? null, page.membersAfter ?? null, page.membersLimit ?? 32]);
       const previous = entries.get(key);
       if (previous?.revision === revision && (revision !== null || previous.pending)) return previous.promise;
       if (revision === null) countUnknownRevision();

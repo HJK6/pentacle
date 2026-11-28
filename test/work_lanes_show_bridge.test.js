@@ -147,3 +147,14 @@ test('unknown revision joins in-flight requests but never reuses completed repli
   assert.equal(logs.length,2);
   assert.equal(logs[1][0].count,2,'the counter includes pass-throughs since the last line');
 });
+
+test('omitted and explicit default page size share one cache entry', async () => {
+  const revision = 'a'.repeat(64); let calls=0;
+  const client={ snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision}]}}),
+    workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:revision};} };
+  const table={}; createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
+  await show(event,'lane_fixture',{});
+  await show(event,'lane_fixture',{membersLimit:32});
+  assert.equal(calls,1,'the daemon defaults an omitted page size to 32');
+});
