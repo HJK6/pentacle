@@ -17,10 +17,41 @@ _CODEX_TRUST_CHOICES = {
     "trust and continue", "quit", "back to agent command center", "keep current directory",
     "yes, continue", "no, quit", "no, exit",
 }
+_CLAUDE_PERMISSION_FOOTERS = ("⏵⏵ bypass permissions", "⏸ manual mode on")
+_CODEX_MODEL_FOOTER = re.compile(
+    r"gpt-[\w.-]+\s+(?:minimal|low|medium|high|xhigh|max|ultra)(?:\s+·\s+[^\n]+)?", re.I,
+)
 
 
-def approval_prompt_visible(pane_text: str) -> bool:
-    """Withhold input when the lowest provider caret selects a numbered choice."""
+def _numbered_paste_matches_composer(lines: list[str], latest: int, text: str) -> bool:
+    """Match the complete draft above known composer chrome, including quoted carets."""
+    end = len(lines) - 1
+    footer = lines[end].strip()
+    if footer.startswith(_CLAUDE_PERMISSION_FOOTERS):
+        caret = "❯"
+        if end and set(lines[end - 1].strip()) == {"─"}:
+            end -= 1
+    elif _CODEX_MODEL_FOOTER.fullmatch(footer):
+        caret = "›"
+    else:
+        return False
+    if latest >= end:
+        return False
+    expected = _normalize_for_claude_pane_match(text)
+    for start in range(latest, -1, -1):
+        marker, *content = lines[start].split(maxsplit=1)
+        if marker != caret:
+            continue
+        visible = _normalize_for_claude_pane_match("\n".join([*content, *lines[start + 1:end]]))
+        if visible == expected:
+            return True
+        if len(visible) >= len(expected):
+            break
+    return False
+
+
+def approval_prompt_visible(pane_text: str, *, pasted_text: str | None = None) -> bool:
+    """Withhold input on a numbered choice unless it is the body just pasted."""
     lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
     carets = (index for index in range(len(lines) - 1, -1, -1)
               if lines[index].lstrip().startswith(("›", "❯")))
@@ -35,7 +66,7 @@ def approval_prompt_visible(pane_text: str) -> bool:
             picker = [*lines[next(carets, -1) + 1:latest], lines[latest].lstrip()[1:], *lines[latest + 1:]]
             if codex_trust_dialog_visible("\n".join(picker)):
                 return False
-        return True
+        return pasted_text is None or not _numbered_paste_matches_composer(lines, latest, pasted_text)
 
     # A clipped Claude approval may retain the heading, choices and footer
     # without rendering its selector. Inspect only rows after the last caret.
@@ -173,10 +204,7 @@ def codex_composer_empty(pane_text: str) -> bool:
     # possible draft. Unknown/footer-wrapped layouts defer automatic input.
     below = [sgr.sub("", line).strip() for line in lines[inputs[-1] + 1:]
              if sgr.sub("", line).strip()]
-    if len(below) != 1 or not re.fullmatch(
-        r"gpt-[\w.-]+\s+(?:minimal|low|medium|high|xhigh|max|ultra)(?:\s+·\s+[^\n]+)?",
-        below[0], re.I,
-    ):
+    if len(below) != 1 or not _CODEX_MODEL_FOOTER.fullmatch(below[0]):
         return False
     return True
 
@@ -250,8 +278,7 @@ def claude_composer_empty(pane_text: str) -> bool:
         if set(content) == {"─"} and not seen_permission_footer:
             seen_lower_divider = True
             continue
-        if (not seen_main
-                and content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on"))):
+        if not seen_main and content.startswith(_CLAUDE_PERMISSION_FOOTERS):
             seen_permission_footer = True
             continue
         if seen_permission_footer and _is_claude_update_footer(content):
@@ -583,7 +610,7 @@ def claude_command_exactly_in_active_draft(pane_text: str, command: str) -> bool
         content = line.strip()
         if not content or set(content) == {"─"}:
             continue
-        if content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on")):
+        if content.startswith(_CLAUDE_PERMISSION_FOOTERS):
             break
         if content.startswith(("✻ ", "✶ ", "✳ ", "⏺ ", "⎿ ", "● ")):
             return False

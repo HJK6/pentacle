@@ -665,6 +665,99 @@ def codex_submitted_screen(body):
     return f"› {body}\n\n• Acknowledged\n\n{CODEX_COMPOSER}"
 
 
+OPERATOR_BODIES = [
+    pytest.param("1. yes\n2. no", id="numbered-list"),
+    pytest.param("1. go ahead", id="numbered-single-line"),
+]
+QUOTED_CHOICES = [
+    pytest.param("I saw these options:\n› 1. First choice", id="quoted-codex-choice"),
+    pytest.param("I saw these options:\n❯ 1. First choice", id="quoted-claude-choice"),
+]
+
+
+def operator_message(body):
+    return message(message=body, _auth_context={"operator_authenticated": True})
+
+
+def numbered_draft(provider, body):
+    composer = CLAUDE_COMPOSER if provider == "claude" else CODEX_COMPOSER
+    footer = composer.splitlines()[-1]
+    if provider == "claude":
+        divider = "─" * 40
+        return f"{divider}\n❯ {body}\n{divider}\n{footer}"
+    return f"› {body}\n\n{footer}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["send", "tell"])
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("body", OPERATOR_BODIES + QUOTED_CHOICES)
+async def test_operator_numbered_body_lands_without_leaving_draft(verb, provider, body):
+    tmux = RecordingTmux(
+        screen=CLAUDE_COMPOSER if provider == "claude" else CODEX_COMPOSER,
+        after_paste=numbered_draft(provider, body),
+        submitted_screen=codex_submitted_screen if provider == "codex" else None,
+    )
+    async with delivery(tmux, provider) as (_, comms, _):
+        result = await getattr(comms, verb)(operator_message(body))
+    assert tmux.body == body
+    assert result.get("delivery_status", result.get("delivery")) in {"delivered", "landed"}
+    assert result["submission_confirmed"] is True
+    assert tmux.actions == ["paste", "Enter"]
+    assert tmux.screen.endswith(CLAUDE_COMPOSER if provider == "claude" else CODEX_COMPOSER)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("verb", "provider"), [
+    ("send", "claude"), ("send", "codex"), ("tell", "codex"), ("send", "cursor"),
+])
+@pytest.mark.parametrize("body", OPERATOR_BODIES)
+async def test_operator_numbered_draft_allows_enter_retry(verb, provider, body, monkeypatch):
+    draft = numbered_draft(provider, body)
+    tmux = RecordingTmux(screen=CLAUDE_COMPOSER if provider == "claude" else CODEX_COMPOSER)
+
+    async def proof_on_retry(*args, observation=None, **kwargs):
+        if tmux.actions.count("Enter") == 2:
+            return True
+        tmux.screen = draft
+        if observation is not None:
+            observation[:] = [draft]
+        return False
+
+    async with delivery(tmux, provider) as (_, comms, _):
+        monkeypatch.setattr(comms, "_submission_evidence", proof_on_retry)
+        result = await getattr(comms, verb)(operator_message(body))
+    assert tmux.body == body
+    assert result.get("delivery_status", result.get("delivery")) in {"delivered", "landed"}
+    assert result["submission_confirmed"] is True
+    assert tmux.actions == ["paste", "Enter", "Enter"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_wrapped_numbered_draft_allows_enter(provider):
+    pane = numbered_draft(provider, "1. go ahead with\n   the proposed change\n  2. no")
+    tmux = RecordingTmux(after_paste=pane)
+    await tmux.paste(NAME, "1. go ahead with the proposed change\n2. no")
+    assert tmux.actions == ["paste", "Enter"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pane", [
+    pytest.param(frame("claude_bash").replace("❯ 1. Yes", "❯ 1. yes"), id="claude-matching-choice"),
+    pytest.param(frame("codex_elided_header"), id="codex-elided-heading"),
+    pytest.param("Choose a workspace\n❯ 1. yes", id="bare-workspace-picker"),
+    pytest.param(numbered_draft("codex", "1. yes\n2. no"), id="extra-numbered-row"),
+])
+async def test_numbered_body_does_not_release_a_real_picker(pane):
+    tmux = RecordingTmux(after_paste=pane)
+    with pytest.raises(VerbError) as error:
+        await tmux.paste(NAME, "1. yes")
+    assert error.value.code == CODE
+    assert error.value.extra["phase"] == "body_maybe_pasted"
+    assert tmux.actions == ["paste"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("provider", "pane"), [
     pytest.param("claude", CLAUDE_COMPOSER, id="claude-idle"),
