@@ -198,7 +198,7 @@ def test_detail_inventory_and_list_are_pure_reads():
     from work_lanes_projection import WorkLanesInventory
     async def body(env):
         lanes = [(await env.adopt(key=f'request:page{i:02}', state='paused', owner='operator'))['lane'] for i in range(66)]
-        colored = lanes[0]['lane_id']
+        colored = min((lane['lane_id'] for lane in lanes if lane['updated_at'] == max(x['updated_at'] for x in lanes)))
         def clear(conn):
             conn.execute('UPDATE v2_assistant_composite_lanes SET hue=NULL WHERE work_state IS NOT NULL AND lane_id!=?', (colored,))
             conn.commit()
@@ -208,17 +208,22 @@ def test_detail_inventory_and_list_are_pure_reads():
         target = next(key for key in before if key != colored)
         shown = await env.store.get_work_lane(target)
         assert shown['lane']['hue'] is None and shown['_projection_row']['hue'] is None
+        shown_colored = await env.store.get_work_lane(colored)
+        assert shown_colored['lane']['hue'] == shown_colored['_projection_row']['hue'] == before[colored]['hue']
         await env.store.work_lane_rows(include_done=True)
         inventory = WorkLanesInventory(env.store, SimpleNamespace(list_open=lambda: []), env._broadcast)
         frame = await inventory.current()
         assert frame['counts']['open'] == 66 and frame['truncated']
+        assert len(frame['lanes']) == 64
         expected = sorted(before, key=lambda key: (-float(0), key))
         expected.sort(key=lambda key: str(before[key]['updated_at']), reverse=True)
         assert {lane['lane_id'] for lane in frame['lanes']} == set(expected[:64])
         assert all(lane['hue'] == before[lane['lane_id']]['hue'] for lane in frame['lanes'])
+        assert next(lane['hue'] for lane in frame['lanes'] if lane['lane_id'] == colored) == before[colored]['hue']
         ordered = sorted(before, key=lambda key: (str(before[key]['updated_at']), key), reverse=True)
         cursor = before[ordered[0]]
         page = await inventory.list(limit=1, before_updated_at=cursor['updated_at'], before_lane_id=ordered[0])
+        assert len(page['lanes']) == 1
         assert {lane['lane_id'] for lane in page['lanes']} == {ordered[1]}
         assert page['lanes'][0]['hue'] == before[ordered[1]]['hue']
         assert await env.store.submit(lambda conn: conn.total_changes) == changes
