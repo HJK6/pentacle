@@ -1061,7 +1061,7 @@ try {
     if (goalId !== undefined && goalId !== null) payload.goal_id = goalId;
     if (membersAfter !== undefined && membersAfter !== null) payload.members_after = membersAfter;
     if (membersLimit !== undefined && membersLimit !== null) payload.members_limit = membersLimit;
-    return this.sendCommand(payload, 'work_lanes.show', { rawResponse: true });
+    return this.sendCommand(payload, 'work_lanes.show', { rawResponse: true, timeoutMs: 120000 });
   }
 
   _mergeStreamEvents(events) {
