@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import comms as comms_module
+import send_timing
 from comms import Comms
 from send_timing import SendTiming
 from sessions import Sessions, VerbError
@@ -146,6 +147,88 @@ async def _open(comms: Comms, sessions: Sessions, host: str = HOST) -> None:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+@pytest.mark.parametrize(("markers", "expected_class", "outcome"), [
+    ({}, "ordinary", "landed"),
+    ({"_auth_context": {"operator_authenticated": True, "credential_id": "fixture",
+                        "operator_principal": "operator:fixture"}}, "operator", "landed"),
+    ({"qa_surface": "fixture"}, "qa_commission", "landed"),
+    ({}, "ordinary", "error"),
+    ({}, "ordinary", "not_landed"),
+    ({}, "backend", "landed"),
+])
+def test_send_attempt_logs(tmp_path, monkeypatch, caplog, markers, expected_class, outcome):
+    request_id = "sensitive-request-fixture"
+    body = "sensitive-message-fixture"
+    token = "sensitive-stream-token-fixture"
+    logger = "chat_streamd_v2.store"
+    caplog.set_level(logging.INFO, logger=logger)
+
+    async def no_qa_admission(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(comms_module.qa_dispatch, "admit", no_qa_admission)
+
+    async def go():
+        tmux = FakeTmux(fail_phase="not_started" if outcome == "not_landed" else None)
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open(comms, sessions)
+            msg = {"stream_id": f"{HOST}:{NAME}", "text": body,
+                   "request_id": request_id, "stream_token": token, **markers}
+            if outcome == "error":
+                with pytest.raises(VerbError):
+                    await comms.send({**msg, "stream_id": f"{HOST}:missing"})
+            elif expected_class == "backend":
+                assert (await comms.send_assistant_backend(msg))["submission_confirmed"] is True
+            else:
+                assert (await comms.send(msg))["delivery"] == outcome
+        finally:
+            store.stop()
+
+    _run(go())
+    lines = [r.message for r in caplog.records if r.name == logger
+             and r.message.startswith(("send_start ", "send_attempt "))]
+    assert [line.split(" ", 1)[0] for line in lines] == ["send_start", "send_attempt"]
+    assert all(secret not in line for line in lines for secret in (request_id, body, token))
+    start, finish = [json.loads(line.split(" ", 1)[1]) for line in lines]
+    assert start["request_hash"] == finish["request_hash"] == hashlib.sha256(request_id.encode()).hexdigest()[:16]
+    assert finish["class"] == expected_class
+    assert finish["outcome"] == outcome
+    assert finish["submission_confirmed"] is (outcome == "landed")
+    assert finish["proof_polls"] == 0
+    assert finish["user_append_to_confirm_ms"] is None
+    assert finish["user_append_to_confirm_reason"]
+
+
+def test_send_attempt_emits_after_comms_returns_and_counts_log_failure(tmp_path, monkeypatch):
+    counter = SendTiming()
+    monkeypatch.setattr(comms_module, "send_counter", counter)
+    log_info = send_timing.log.info
+
+    async def go():
+        emitted = asyncio.Event()
+        comms, store, sessions = _new_comms(FakeTmux(), tmp_path)
+
+        def fail_completion(fmt, *args, **kwargs):
+            if fmt == "%s %s" and args[0] == "send_attempt":
+                emitted.set()
+                raise OSError("fixture logging failure")
+            log_info(fmt, *args, **kwargs)
+
+        monkeypatch.setattr(send_timing.log, "info", fail_completion)
+        try:
+            await _open(comms, sessions)
+            result = await comms.send({"stream_id": f"{HOST}:{NAME}", "text": "fixture message"})
+            assert result["submission_confirmed"] is True
+            assert not emitted.is_set()
+            await asyncio.wait_for(emitted.wait(), timeout=1)
+            assert counter.failures == 1
+        finally:
+            store.stop()
+
+    _run(go())
 
 
 @pytest.mark.parametrize("bootstrap_state", ["queued", "starting", "failed", "ready", None, "started"])

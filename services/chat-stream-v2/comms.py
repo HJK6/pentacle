@@ -49,7 +49,7 @@ from typing import Any
 
 from claude_jsonl_norm import strip_peer_delivery_envelope
 from send_metadata import normalize_send_meta, voice_context_dispatch_block
-from send_timing import send_counter
+from send_timing import SendAttempt, request_timing, send_counter
 from boot_ready import (
     CODEX_RESET_BLOCKED,
     DRAFT_PREDICATES,
@@ -1725,6 +1725,8 @@ class Comms:
         """Preserved non-item4 general send/tell event receipt seam."""
         if not stream_id:
             return False
+        if isinstance(timing := request_timing.get(), SendAttempt):
+            timing.proof_polls += 1
         tail = await self.store.fetch_session_event_tail(
             stream_id, limit=500, after_daemon_seq=watermark,
         )
@@ -1917,6 +1919,7 @@ class Comms:
 
     async def _attempt_send_delivery_bound(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:
         """Submit one prepared plan: one paste, then at most one Enter retry."""
+        measure = request_timing.get().measure
         target = str(plan.route["final_target"])
         host, name = self.sessions.split(target)
         row = self.sessions.get(target) or await self.store.fetch_session(host, name)
@@ -1937,15 +1940,15 @@ class Comms:
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
             async with self._account_input_guard(target,claim=True,execution=True,recovery_verb="send"):
-                pane_mode_reason = await tmux.paste(name, plan.wire_text)
-            confirmed = await self.spawnctl._await_marker(
+                pane_mode_reason = await measure("paste_ms", tmux.paste, name, plan.wire_text)
+            confirmed = await measure("proof_poll_ms", self.spawnctl._await_marker,
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
             )
             if confirmed:
                 return True, 1, False, provider, None
             async with self._account_input_guard(target,phase="enter_failed",execution=True):
                 enter_mode_reason = await self._send_enter(tmux, name)
-            confirmed = await self.spawnctl._await_marker(
+            confirmed = await measure("proof_poll_ms", self.spawnctl._await_marker,
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
             )
             return confirmed, 2, False, provider, pane_mode_reason or enter_mode_reason
@@ -1953,8 +1956,8 @@ class Comms:
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
         async with self._account_input_guard(target,claim=True,execution=True,recovery_verb="send"):
-            pane_mode_reason = await tmux.paste(name, plan.wire_text)
-        confirmed = await self._submission_evidence(
+            pane_mode_reason = await measure("paste_ms", tmux.paste, name, plan.wire_text)
+        confirmed = await measure("proof_poll_ms", self._submission_evidence,
             tmux, name, plan.wire_text, provider, baseline=before,
             stream_id=target, watermark=watermark,
         )
@@ -1966,7 +1969,7 @@ class Comms:
                 return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
             async with self._account_input_guard(target,phase="enter_failed",execution=True):
                 enter_mode_reason = await self._send_enter(tmux, name)
-            confirmed = await self._submission_evidence(
+            confirmed = await measure("proof_poll_ms", self._submission_evidence,
                 tmux, name, plan.wire_text, provider, baseline=before,
                 stream_id=target, watermark=watermark,
             )
@@ -1981,7 +1984,7 @@ class Comms:
         if provider != "codex":
             async with self._account_input_guard(target,phase="enter_failed",execution=True):
                 enter_mode_reason = await self._send_enter(tmux, name)
-            confirmed = await self._submission_evidence(
+            confirmed = await measure("proof_poll_ms", self._submission_evidence,
                 tmux, name, plan.wire_text, provider, baseline=before,
             )
             if confirmed:
@@ -1995,7 +1998,7 @@ class Comms:
             return False, 1, False, provider, pane_mode_reason
         async with self._account_input_guard(target,phase="enter_failed",execution=True):
             enter_mode_reason = await self._send_enter(tmux, name)
-        confirmed = await self._submission_evidence(
+        confirmed = await measure("proof_poll_ms", self._submission_evidence,
             tmux, name, plan.wire_text, provider, baseline=before,
             stream_id=target, watermark=watermark,
         )
@@ -2390,15 +2393,38 @@ class Comms:
 
     async def send(self, msg: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
-        result = await self._send(msg)
-        send_counter.record(started, result, backend=bool(msg.get("_assistant_composite_backend_dispatch")))
+        from account_pool_control import operator
+        request_id = str(msg.get("request_id") or f"send-{uuid.uuid4()}")
+        backend = bool(msg.get("_assistant_composite_backend_dispatch"))
+        kind = ("backend" if backend else "qa_commission" if qa_dispatch.classified(msg, {})
+                else "operator" if operator(msg.get("_auth_context") or {}) else "ordinary")
+        digest = hashlib.sha256(request_id.encode(errors="surrogatepass")).hexdigest()[:16]
+        identity = {"request_hash": digest, "class": kind}
+        send_counter.emit("send_start", identity)
+        timing = SendAttempt()
+        timing.parent = request_timing.get()
+        token = request_timing.set(timing)
+        result = {}
+        try:
+            result = await self._send(msg, request_id)
+            send_counter.record(started, result, backend=backend)
+        finally:
+            request_timing.reset(token)
+            timing.closed = True
+            # Writer time overlaps proof polling on tail reads. proof_polls counts those reads.
+            send_counter.emit("send_attempt", {**identity, **timing.fields(),
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                "outcome": "coalesced" if result.get("coalesced") else result.get("delivery", "error"),
+                "submission_confirmed": result.get("submission_confirmed") is True,
+                "paste_ms": round(timing.paste_ms, 3), "proof_poll_ms": round(timing.proof_poll_ms, 3),
+                "proof_polls": timing.proof_polls, "user_append_to_confirm_ms": None,
+                "user_append_to_confirm_reason": "user_append_time_unavailable"})
         return result
 
-    async def _send(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _send(self, msg: dict[str, Any], request_id: str) -> dict[str, Any]:
         """Append acceptance before materialization, then append the known result."""
         # Wire clients mint this ID. The fallback preserves direct in-process
         # callers during the mobile rollout; it deliberately adds no dedupe.
-        request_id = str(msg.get("request_id") or f"send-{uuid.uuid4()}")
         # Bind the peer-delivery envelope anchor to the receipt identity: the
         # normalized event carries request_id as raw.tell_id, and the receipt
         # projection correlates on it. Without this, a fallback anchor (msg_id)
