@@ -514,3 +514,166 @@ async def test_adopted_staged_brief_refuses_before_refencing_and_never_repastes(
         await spawnctl.reconcile_spawn_intents()
         assert (await store.get_spawn_outcome(HOST, NAME))["state"] == "failed"
     assert tmux.actions == []
+
+
+# Pinned rust-v0.167.1 approval_overlay.rs render snapshots.
+CODEX_CROSS_THREAD_COMMAND = (
+    '\n'
+    '  Would you like to run the following command?\n'
+    '\n'
+    '  Thread: Robie [explorer]\n'
+    '\n'
+    '  $ echo hi\n'
+    '\n'
+    '\n'
+    '› 1. Yes, proceed (y)\n'
+    '  2. No, and tell Codex what to do differently (esc)\n'
+    '\n'
+    '  Press enter to confirm or esc to cancel or o to open thread\n'
+)
+CODEX_COMMAND_WITH_PERMISSION_RULE = (
+    '\n'
+    '  Would you like to run the following command?\n'
+    '\n'
+    '  Reason: need filesystem access\n'
+    '\n'
+    '  Permission rule: network; read `/tmp/readme.txt`; write `/tmp/out.txt`\n'
+    '\n'
+    '  $ cat /tmp/readme.txt\n'
+    '\n'
+    '\n'
+    '› 1. Yes, proceed (y)\n'
+    '  2. No, and tell Codex what to do differently (esc)\n'
+    '\n'
+    '  Press enter to confirm or esc to cancel\n'
+)
+CODEX_NETWORK_COMMAND = (
+    '\n'
+    '  Do you want to approve network access to "example.com"?\n'
+    '\n'
+    '  Reason: network request blocked\n'
+    '\n'
+    '\n'
+    '\n'
+    '› 1. Yes, just this once (y)\n'
+    '  2. Yes, and allow this host for this conversation (a)\n'
+    '  3. Yes, and allow this host in the future (p)\n'
+    '  4. No, and tell Codex what to do differently (esc)\n'
+    '\n'
+    '  Press enter to confirm or esc to cancel'
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pane", [
+    pytest.param(CODEX_CROSS_THREAD_COMMAND, id="pinned-cross-thread-snapshot"),
+    pytest.param(CODEX_COMMAND_WITH_PERMISSION_RULE, id="pinned-extra-permissions-snapshot"),
+    pytest.param(CODEX_NETWORK_COMMAND, id="pinned-network-snapshot"),
+    # The same renderer builds the cross-thread edit header and footer.
+    pytest.param(frame("codex_edit").replace("Description:", "Thread: Worker\n\n  Description:")
+                 .replace("esc to cancel", "esc to cancel or o to open thread"), id="cross-thread-edit"),
+    pytest.param(frame("codex_edit").replace("Apply proposed file edits", "Rename the fixture file")
+                 .replace("Destination: unavailable", "Destination: old.txt\n  Destination: new.txt"),
+                 id="edit-with-destinations"),
+    pytest.param(CODEX_CROSS_THREAD_COMMAND.replace("Press enter to confirm or esc to cancel or o to open thread",
+                                                  "Press o to open thread"), id="only-open-thread-hint"),
+    pytest.param(frame("codex_edit").replace("Press enter to confirm or esc to cancel",
+                                           "Press ctrl+j to confirm"), id="rebound-accept-hint"),
+    pytest.param(frame("codex_command").replace("Press enter to confirm or esc to cancel",
+                                              "Press ctrl+c to cancel"), id="cancel-only-hint"),
+    pytest.param(frame("codex_edit").split("  Press enter", 1)[0], id="no-hints"),
+    pytest.param(CODEX_CROSS_THREAD_COMMAND.split("\n  2.", 1)[0], id="only-selected-row"),
+    pytest.param(CODEX_CROSS_THREAD_COMMAND.replace("cancel or o", "cancel\n  or o"), id="wrapped-thread-hint"),
+    pytest.param(frame("codex_command").replace("Would you like to run the following command?",
+                                              "Would you like to send input to the existing terminal?")
+                 .replace("$ touch marker", 'Input: "fixture"'), id="existing-terminal-input"),
+    pytest.param(frame("codex_command").replace("Would you like to run the following command?",
+                                              "Would you like to send input to terminal 12?")
+                 .replace("$ touch marker", 'Input: "fixture"'), id="identified-terminal-input"),
+])
+async def test_codex_approval_variants_block_enter_independently_of_footer(pane):
+    tmux = RecordingTmux(after_paste=pane)
+    with pytest.raises(VerbError) as error:
+        await tmux.paste(NAME, BODY)
+    assert error.value.code == CODE
+    assert tmux.actions == ["paste"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composer", [CODEX_COMPOSER, "› 1. Yes, proceed\n  gpt-6.2-sol high"])
+async def test_codex_cross_thread_snapshot_above_current_composer_allows_enter(composer):
+    tmux = RecordingTmux(after_paste=f"{CODEX_CROSS_THREAD_COMMAND}\n{composer}")
+    await tmux.paste(NAME, BODY)
+    assert tmux.actions == ["paste", "Enter"]
+
+
+@pytest.mark.asyncio
+async def test_generation_bound_inflight_joiner_gets_prepared_view(monkeypatch):
+    import asyncio
+
+    tmux = RecordingTmux(after_paste=frame("codex_command"))
+    async with delivery(tmux, "codex") as (store, comms, _):
+        target = await store.fetch_session(HOST, NAME)
+        request = message(
+            tell_id="concurrent-approval-answer",
+            _notification_answer_generation=target["session_generation"],
+        )
+        started, joiner_read = asyncio.Event(), asyncio.Event()
+        read_delivery = store.get_tell_delivery
+
+        async def observe_joiner(tell_id):
+            result = await read_delivery(tell_id)
+            if started.is_set() and result is None:
+                joiner_read.set()
+            return result
+
+        async def hold_initiator(*args):
+            started.set()
+            await asyncio.wait_for(joiner_read.wait(), 5)
+
+        monkeypatch.setattr(store, "get_tell_delivery", observe_joiner)
+        monkeypatch.setattr(comms, "_pool_ingress", hold_initiator)
+        initiating = asyncio.create_task(comms.tell(request))
+        await asyncio.wait_for(started.wait(), 5)
+        original, joined = await asyncio.wait_for(asyncio.gather(initiating, comms.tell(request)), 5)
+        prepared = await read_delivery(request["tell_id"])
+    assert original["reason"] == CODE
+    assert original["delivery_status"] == "pasted_unsubmitted"
+    assert joined == {**prepared["reply"], "duplicate": True}
+    assert joined["delivery_status"] == "proof_unavailable"
+    assert tmux.actions == ["paste"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exact", [True, False], ids=["exact-native-tell", "changed-native-text"])
+async def test_refused_retry_reconciles_retained_native_proof_after_finalization(exact, monkeypatch):
+    from codex_rollout_norm import normalize_codex_rollout_record
+
+    tmux = RecordingTmux(screen=CODEX_COMPOSER)
+    async with delivery(tmux, "codex") as (store, comms, _):
+        sender = f"{HOST}:v2-sender"
+        request = message(
+            tell_id="approval-retry-early-proof", from_stream_id=sender,
+            _auth_context={"stream_id": sender, "token_verified": True},
+        )
+
+        async def ingest_before_retry_capture(*args, **kwargs):
+            text = tmux.body if exact else f"{tmux.body} changed"
+            events = normalize_codex_rollout_record({
+                "type": "response_item", "timestamp": "2026-11-28T17:30:00Z",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": text}]},
+            }, host=HOST, session_name=NAME, session_id="fixture-native-session")
+            assert events[0]["kind"] == "TELL"
+            assert await store.append_session_event(TARGET, events[0], identity="early-proof", limit=500)
+            tmux.screen = frame("codex_command")
+            return False
+
+        monkeypatch.setattr(comms, "_submission_evidence", ingest_before_retry_capture)
+        result = await comms.tell(request)
+        saved = await store.get_tell_delivery(request["tell_id"])
+    expected = "delivered" if exact else "committed_pending_proof"
+    assert result["delivery_status"] == saved["reply"]["delivery_status"] == expected
+    assert result["submission_confirmed"] is exact
+    assert result["do_not_resubmit"] is True
+    assert tmux.actions == ["paste", "Enter"]

@@ -9,14 +9,30 @@ from __future__ import annotations
 
 import re
 
-_APPROVAL_OPTION = re.compile(r"^\s*(?:([❯›])\s+)?\d+\.\s")
+_APPROVAL_OPTION = re.compile(r"^\s*(?:([❯›])\s+)?\d+\.(?:\s|$)")
 _CLAUDE_SHORT_APPROVAL = re.compile(r"^(?:Ready to code\?|Do you want to (?:make this edit|create |overwrite ))")
-_CODEX_APPROVAL_FOOTER = re.compile(r"^[ \t]*Press\s+enter\s+to\s+confirm\s+or\s+esc\s+to\s+cancel\Z", re.M)
 _CODEX_APPROVAL_HEADING = re.compile(
-    r"^[ \t]*Would\s+you\s+like\s+to\s+"
-    r"(?:run\s+the\s+following\s+command|make\s+the\s+following\s+edits)\?[ \t]*$",
+    r'^[ \t]*(?:Would\s+you\s+like\s+to\s+(?:run\s+the\s+following\s+command'
+    r'|make\s+the\s+following\s+edits'
+    r'|send\s+input\s+to\s+(?:the\s+existing\s+terminal|terminal\s+[^\s?]+))'
+    r'|Do\s+you\s+want\s+to\s+approve\s+network\s+access\s+to\s+"[^"]+")\?[ \t]*$',
     re.M,
 )
+
+
+def _codex_approval_visible(lines: list[str]) -> bool:
+    # The pinned picker ends the modal header with a selected numbered row.
+    # Its key hints can wrap, change with key bindings, or be omitted.
+    carets = (index for index in range(len(lines) - 1, -1, -1)
+              if lines[index].lstrip().startswith(("›", "❯")))
+    selected = next(carets, None)
+    if selected is None:
+        return False
+    option = _APPROVAL_OPTION.match(lines[selected])
+    if not option or option[1] != "›":
+        return False
+    # Earlier caret-delimited output belongs to a previous view.
+    return bool(_CODEX_APPROVAL_HEADING.search("\n".join(lines[next(carets, -1) + 1:selected])))
 
 
 def approval_prompt_visible(pane_text: str) -> bool:
@@ -24,28 +40,21 @@ def approval_prompt_visible(pane_text: str) -> bool:
     lines = [line.rstrip() for line in (pane_text or "").splitlines() if line.strip()]
     if not lines:
         return False
-    footer = lines[-1].lstrip()
-    codex_footer = _CODEX_APPROVAL_FOOTER.search("\n".join(lines)) if footer.endswith("cancel") else None
-    if codex_footer:
-        del lines[-len(codex_footer[0].splitlines()):]
-    elif footer in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
-        lines.pop()
-    else:
+    if _codex_approval_visible(lines):
+        return True
+    footer = lines.pop().lstrip()
+    if footer not in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
         return False
-    marker = "›" if codex_footer else "❯"
     options = 0
     selected = 0
-    overflow = False
     while lines:
         if option := _APPROVAL_OPTION.match(lines[-1]):
-            selected += option[1] == marker
+            selected += option[1] == "❯"
             options += 1
-        elif codex_footer and lines[-1].strip() in {"↑", "↓", "↑↓", "↕"}:
-            overflow = True
         elif not lines[-1].startswith("     "):
             break  # wrapped option descriptions are indented
         lines.pop()
-    if selected != 1 or (options < 2 and not overflow):
+    if selected != 1 or options < 2:
         return False
     if footer == "Esc to cancel · Tab to amend":
         return True
@@ -54,8 +63,6 @@ def approval_prompt_visible(pane_text: str) -> bool:
         if line.lstrip().startswith(("❯", "›")):
             break
         heading_lines.append(line)
-    if codex_footer:
-        return bool(_CODEX_APPROVAL_HEADING.search("\n".join(reversed(heading_lines))))
     return any(_CLAUDE_SHORT_APPROVAL.match(line.lstrip()) for line in heading_lines)
 
 

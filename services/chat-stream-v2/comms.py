@@ -995,6 +995,9 @@ class Comms:
             )
         if answer is not None:
             # The generation-fenced prepared row remains the replay and proof authority.
+            pending = self._inflight.get(tell_id)
+            if pending is not None and not pending[1].done():
+                pending[1].set_result(("ok", answer["reply"]))
             return {**answer["reply"], **reply}
         enqueued_at = iso_now()
         delivery = {
@@ -1042,7 +1045,7 @@ class Comms:
                 self._assert_same_payload(tell_id, digest, finalized)
             # Ingest may have recorded proof while this was still a preparation
             # row. Finalize its route/exchange metadata before reconciling it.
-            if not refusal_phase and finalized["reply"].get("delivery_status") == COMMITTED_PENDING_PROOF:
+            if finalized["reply"].get("delivery_status") == COMMITTED_PENDING_PROOF:
                 finalized = (await self.store.promote_tell_delivery(tell_id, digest, reconcile=True)) or finalized
             return finalized["reply"]
         reply["ledger_row_id"] = await self.store.put_tell_delivery(tell_id, envelope)
