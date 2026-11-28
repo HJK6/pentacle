@@ -462,7 +462,7 @@ const sendDelivery = isolated(async ctx => {
   const sending = value => `(() => { const line=${lineOf(value)};
     return !!line && line.classList.contains('is-sending') && line.textContent.trim()==='Sending' && ${noUncertain}; })()`;
   const sent = value => `(() => { const row=${userRow(value)}, line=${lineOf(value)};
-    return !!row && (!line || (line.classList.contains('is-sent') && !!line.querySelector('.check'))) && ${noUncertain}; })()`;
+    return !!row && !!line && line.classList.contains('is-sent') && !!line.querySelector('.check') && ${noUncertain}; })()`;
   const failed = value => `(() => { const line=${lineOf(value)}; if (!line?.classList.contains('is-failed')) return false;
     const glyph=line.querySelector('.next-send-glyph.alert'), buttons=[...line.querySelectorAll('button')];
     const retry=line.querySelector('.slot-chat-send-retry'), discard=line.querySelector('.slot-chat-send-discard');
@@ -482,6 +482,17 @@ const sendDelivery = isolated(async ctx => {
     // The web host reconnects by itself; the store hears it as __reconnect.
     await command(ctx, { drop_clients: true });
   }
+  await ctx.session.eval(`(() => {
+    window.__deliveryUncertainSeen = false;
+    const check = value => { if (/delivery uncertain/i.test(value || '')) window.__deliveryUncertainSeen = true; };
+    const observer = new MutationObserver(records => { for (const record of records) {
+      check(record.oldValue); check(record.target?.textContent);
+      for (const node of record.addedNodes) check(node.textContent);
+      for (const node of record.removedNodes) check(node.textContent);
+    } });
+    observer.observe(document.body, {subtree:true,childList:true,characterData:true,characterDataOldValue:true});
+    window.__deliveryUncertainObserver = observer; return true;
+  })()`);
   await select(ctx, A);
 
   // 1. Draft-stuck: not_landed with action_committed is a real failure.
@@ -547,7 +558,8 @@ const sendDelivery = isolated(async ctx => {
   await reconnect();
   await expect(later, 'a later not_landed receipt (after reconnect) turns a Sent row Failed', failed(later));
 
-  await expect(later, 'no row ever shows Delivery uncertain', noUncertain, 1000);
+  await expect(later, 'no row ever shows Delivery uncertain', `${noUncertain} && !window.__deliveryUncertainSeen`, 1000);
+  await ctx.session.eval('window.__deliveryUncertainObserver.disconnect(); true');
   ctx.report.ok('every /next/ send ends Sent or Failed with the agreed affordances', misses.length === 0, misses);
 }, { width: 1440 });
 
