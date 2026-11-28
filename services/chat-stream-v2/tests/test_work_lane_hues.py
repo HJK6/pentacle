@@ -193,57 +193,34 @@ async def raw_lane_identity(store):
         'SELECT lane_id,hue,hue_open_order,version,updated_at FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL')})
 
 
-async def clear_fixture_hues(store):
-    def clear(conn):
-        conn.execute('UPDATE v2_assistant_composite_lanes SET hue=NULL WHERE work_state IS NOT NULL')
-        conn.commit()
-    await store.submit(clear)
-
-
-def test_single_detail_allocates_only_requested_old_null_lane():
-    async def body(env):
-        lanes = [(await env.adopt(key=f'request:lazy{i}', state='paused', owner='operator'))['lane'] for i in range(2)]
-        await clear_fixture_hues(env.store)
-        before = await raw_lane_identity(env.store)
-        target = sorted(before)[-1]
-        shown = await env.store.get_work_lane(target)
-        assert shown['lane']['hue'] == shown['_projection_row']['hue'] == 'violet'
-        after = await raw_lane_identity(env.store)
-        assert {key for key, row in after.items() if row['hue'] is not None} == {target}
-        for key in before:
-            assert {k: v for k, v in after[key].items() if k != 'hue'} == {k: v for k, v in before[key].items() if k != 'hue'}
-    run(body)
-
-
-@pytest.mark.parametrize('surface', ['inventory', 'list'])
-def test_capped_and_cursor_reads_allocate_only_wire_rows(surface):
+def test_detail_inventory_and_list_are_pure_reads():
     from types import SimpleNamespace
     from work_lanes_projection import WorkLanesInventory
     async def body(env):
-        for i in range(66):
-            await env.adopt(key=f'request:page{i:02}', state='paused', owner='operator')
-        await clear_fixture_hues(env.store)
+        lanes = [(await env.adopt(key=f'request:page{i:02}', state='paused', owner='operator'))['lane'] for i in range(66)]
+        colored = lanes[0]['lane_id']
+        def clear(conn):
+            conn.execute('UPDATE v2_assistant_composite_lanes SET hue=NULL WHERE work_state IS NOT NULL AND lane_id!=?', (colored,))
+            conn.commit()
+        await env.store.submit(clear)
         before = await raw_lane_identity(env.store)
-        # Internal aggregation/episode readers must remain read-only too.
+        changes = await env.store.submit(lambda conn: conn.total_changes)
+        target = next(key for key in before if key != colored)
+        shown = await env.store.get_work_lane(target)
+        assert shown['lane']['hue'] is None and shown['_projection_row']['hue'] is None
         await env.store.work_lane_rows(include_done=True)
-        assert all(row['hue'] is None for row in (await raw_lane_identity(env.store)).values())
         inventory = WorkLanesInventory(env.store, SimpleNamespace(list_open=lambda: []), env._broadcast)
-        if surface == 'inventory':
-            frame = await inventory.current()
-            assert frame['counts']['open'] == 66 and frame['truncated']
-            expected = sorted(before, key=lambda key: (-float(0), key))
-            expected.sort(key=lambda key: str(before[key]['updated_at']), reverse=True)
-            expected = set(expected[:64])
-            assert len(frame['lanes']) == 64
-        else:
-            ordered = sorted(before, key=lambda key: (str(before[key]['updated_at']), key), reverse=True)
-            cursor = before[ordered[0]]
-            frame = await inventory.list(limit=1, before_updated_at=cursor['updated_at'], before_lane_id=ordered[0])
-            expected = {ordered[1]}
-            assert len(frame['lanes']) == 1 and frame['lanes'][0]['hue'] == 'violet'
-        assert {lane['lane_id'] for lane in frame['lanes']} == expected
-        after = await raw_lane_identity(env.store)
-        assert {key for key, row in after.items() if row['hue'] is not None} == expected
-        for key in before:
-            assert {k: v for k, v in after[key].items() if k != 'hue'} == {k: v for k, v in before[key].items() if k != 'hue'}
+        frame = await inventory.current()
+        assert frame['counts']['open'] == 66 and frame['truncated']
+        expected = sorted(before, key=lambda key: (-float(0), key))
+        expected.sort(key=lambda key: str(before[key]['updated_at']), reverse=True)
+        assert {lane['lane_id'] for lane in frame['lanes']} == set(expected[:64])
+        assert all(lane['hue'] == before[lane['lane_id']]['hue'] for lane in frame['lanes'])
+        ordered = sorted(before, key=lambda key: (str(before[key]['updated_at']), key), reverse=True)
+        cursor = before[ordered[0]]
+        page = await inventory.list(limit=1, before_updated_at=cursor['updated_at'], before_lane_id=ordered[0])
+        assert {lane['lane_id'] for lane in page['lanes']} == {ordered[1]}
+        assert page['lanes'][0]['hue'] == before[ordered[1]]['hue']
+        assert await env.store.submit(lambda conn: conn.total_changes) == changes
+        assert await raw_lane_identity(env.store) == before
     run(body)
