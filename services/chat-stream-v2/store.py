@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, closing, suppress
 import copy
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import hashlib
 import json
 import logging
@@ -1580,6 +1581,17 @@ class StoreReadBusy(RuntimeError):
     """The reader already has four waiting calls."""
 
 
+class _StoreReadExpired(TimeoutError):
+    """An unscoped history callback expired before its writer turn."""
+
+
+def _materialize_history_result(result):
+    if isinstance(result, sqlite3.Cursor):
+        with closing(result):
+            return result.fetchall()
+    return result
+
+
 class _StoreReader:
     def __init__(self, worker, window_origin):
         self.diag = store_call_diag.StoreCallDiag(
@@ -2170,14 +2182,18 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                             self._history_binding = conn.history_binding = binding or self._history_binding
                     finished = time.monotonic()
                     self.progress.finish()
-                if timing is not None:
+                expired = failed and isinstance(outcome, _StoreReadExpired)
+                if expired:
+                    self.call_diag.expired += 1
+                elif timing is not None:
                     if timing.owner is None:
                         loop.call_soon_threadsafe(timing.add, queued, started, finished)
                     else:
                         # Carry the stamps with this result until its caller resumes.
                         fut.store_timestamps = (queued, started, finished)
                 loop.call_soon_threadsafe(_set_exception if failed else _set_result, fut, outcome)
-                self.call_diag.record(name, quiet, loop, queued, started, finished, caller)
+                if not expired:
+                    self.call_diag.record(name, quiet, loop, queued, started, finished, caller)
                 # A stop that found the queue full queued no sentinel; once
                 # closing, exit when the queue drains. Checked under the lock so
                 # a concurrent stop's sentinel is either queued or not needed.
@@ -2244,6 +2260,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                             else:
                                 conn.execute("BEGIN")
                             outcome = fn(conn)
+                            if history:
+                                outcome = _materialize_history_result(outcome)
                     except BaseException as exc:
                         complete, outcome = _set_exception, exc
                     else:
@@ -2264,8 +2282,21 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     async def read_history(self, fn: Callable[[HistoryConnection], Any], *, deadline: float | None = None) -> Any:
         """Run a materialized history callback with an optional monotonic deadline at dequeue."""
-        if self._history_binding is None:
+        if host_transfer.actor_context.get() is not None:
             return await self.submit(fn)
+        if self._history_binding is None:
+            task = asyncio.current_task()
+            cancellations = task.cancelling() if task is not None else 0
+
+            @wraps(fn)
+            def checked(conn):
+                # Count cancellation requests since admission, even before the await resumes.
+                if ((task is not None and task.cancelling() > cancellations)
+                        or (deadline is not None and time.monotonic() >= deadline)):
+                    raise _StoreReadExpired("store read expired before execution")
+                return _materialize_history_result(fn(conn))
+
+            return await self.submit(checked)
         return await self._read(self._history, fn, deadline=deadline)
 
     async def _read(self, reader, fn, *, deadline):

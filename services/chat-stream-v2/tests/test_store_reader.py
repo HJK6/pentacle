@@ -223,7 +223,7 @@ async def test_file_backed_alert_pass_records_only_advisory_snapshot_on_reader(
         if label in {"store_call_top", "store_read_top"}:
             summaries[label].append(json.loads(body)["groups"])
     [reader_groups] = summaries["store_read_top"]
-    assert reader_groups["alert_snapshot"]["calls"] == 2
+    assert reader_groups["alert_snapshot"]["calls"] == 1
     assert reader_groups["alert_notice_reads"]["calls"] == 0
     assert summaries["store_call_top"]
     assert all(groups["alert_snapshot"]["calls"] == 0 for groups in summaries["store_call_top"])
