@@ -20,7 +20,7 @@ Handler failures retain the requested verb. Expected failures use stable error c
 
 | Version | Introduced | What a client must handle | Status |
 |---|---|---|---|
-| 2 | PR 663, commit `8fa5cf28`, 2026-11-24 | The wire contract described in this guide. | supported |
+| 2 | PR 663, commit `8fa5cf28`, 2026-11-24 | The wire contract described in this guide. | dropped |
 
 Earlier daemons spoke version 2 without advertising a protocol version. To add a
 version, raise the maximum, add a table row and its contract test, and add a
