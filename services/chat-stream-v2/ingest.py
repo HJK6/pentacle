@@ -578,7 +578,7 @@ class Ingest:
                 raise
             except Exception as exc:  # noqa: BLE001 - one bad pass never kills the pump
                 failures += 1
-                delay = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** (failures - 1)))
+                delay = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** min(failures - 1, 1023)))
                 log.warning("ingest pass failed (%d): %s; retrying in %.0fs", failures, exc, delay)
 
     async def run_pass(self) -> int:
