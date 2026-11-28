@@ -233,7 +233,10 @@ function createCcHandlers({
       const entry = { revision, pending: true, promise: null };
       entry.promise = Promise.resolve(chatStreamClient.workLanesShow(laneId, page)).then(reply => {
         entry.pending = false;
-        if (revision === null && entries.get(key) === entry) entries.delete(key);
+        const validDetail = reply?.type === 'work_lanes.show.ok'
+          && typeof reply.detail_revision === 'string' && /^[a-f0-9]{64}$/.test(reply.detail_revision)
+          && reply.lane?.lane_id === laneId && reply.projection?.lane_id === laneId;
+        if ((revision === null || !validDetail) && entries.get(key) === entry) entries.delete(key);
         return reply;
       }, error => {
         if (entries.get(key) === entry) entries.delete(key);

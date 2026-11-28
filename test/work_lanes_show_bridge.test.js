@@ -74,7 +74,7 @@ test('old tab page-one replays join or reuse one daemon request per revision and
   const show = table['chat-stream:work-lanes-show'].handler;
   const firstTab = { sender: {} }, secondTab = { sender: {} };
   const pageOne = { membersLimit: 32 }, pageTwo = { membersLimit: 32, membersAfter: 'spec_fixture__a' };
-  const result = rev => ({type:'work_lanes.show.ok',detail_revision:rev});
+  const result = rev => ({type:'work_lanes.show.ok',detail_revision:rev,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}});
   const first = show(firstTab, 'lane_fixture', pageOne);
   const joined = show(firstTab, 'lane_fixture', pageOne);
   assert.equal(requests.length, 1, 'an in-flight duplicate joins');
@@ -101,8 +101,8 @@ test('failed shows are not cached and an old in-flight result cannot replace a n
   const show=table['chat-stream:work-lanes-show'].handler, event={sender:{}};
   const old=show(event,'lane_fixture',{}); revision=B;
   const fresh=show(event,'lane_fixture',{}); assert.equal(requests.length,2);
-  requests[1].resolve({type:'work_lanes.show.ok',detail_revision:B}); await fresh;
-  requests[0].resolve({type:'work_lanes.show.ok',detail_revision:A}); await old;
+  requests[1].resolve({type:'work_lanes.show.ok',detail_revision:B,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}}); await fresh;
+  requests[0].resolve({type:'work_lanes.show.ok',detail_revision:A,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}}); await old;
   assert.equal((await show(event,'lane_fixture',{})).detail_revision,B);
   const failed=show(event,'other_lane',{}); requests[2].reject(new Error('offline'));
   await assert.rejects(failed,/offline/);
@@ -116,7 +116,7 @@ test('old tab restart storm during a paged read does not reread page one', async
     workLanesShow: (laneId, options) => {
       calls.push({laneId, options});
       if (options.membersAfter) return new Promise(resolve => { finishPage = resolve; });
-      return Promise.resolve({type:'work_lanes.show.ok', detail_revision:revision});
+      return Promise.resolve({type:'work_lanes.show.ok', detail_revision:revision, lane:{lane_id:'lane_fixture'}, projection:{lane_id:'lane_fixture'}});
     },
   };
   const table={}; createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
@@ -125,7 +125,7 @@ test('old tab restart storm during a paged read does not reread page one', async
   const second = show(event,'lane_fixture',{membersLimit:32,membersAfter:'spec_fixture__a'});
   for (let i=0;i<4;i++) { fingerprint++; await show(event,'lane_fixture',{membersLimit:32}); }
   assert.equal(calls.length,2,'the two pages are the only daemon shows');
-  finishPage({type:'work_lanes.show.ok',detail_revision:revision}); await second;
+  finishPage({type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}}); await second;
 });
 
 test('unknown revision joins in-flight requests but never reuses completed replies, and counts pass-throughs', async t => {
@@ -151,10 +151,40 @@ test('unknown revision joins in-flight requests but never reuses completed repli
 test('omitted and explicit default page size share one cache entry', async () => {
   const revision = 'a'.repeat(64); let calls=0;
   const client={ snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision}]}}),
-    workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:revision};} };
+    workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}};} };
   const table={}; createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
   const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
   await show(event,'lane_fixture',{});
   await show(event,'lane_fixture',{membersLimit:32});
   assert.equal(calls,1,'the daemon defaults an omitted page size to 32');
+});
+
+test('resolved failures and incomplete detail are never cached', async () => {
+  const revision='a'.repeat(64), laneId='lane_fixture'; let calls=0;
+  const bad=[null,{type:'work_lanes.show.error',error:'offline'},{type:'work_lanes.show.ok',detail_revision:revision,lane:null},
+    {type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:laneId},projection:null}];
+  const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:laneId,detail_revision:revision}]}}),
+    workLanesShow:async()=>{calls++;return bad.shift() ?? (calls===1 ? null : {type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:laneId},projection:{lane_id:laneId}})}};
+  const table={};createCcHandlers({CONFIG:{},chatStreamClient:client}).register(createCollector(table));
+  const show=table['chat-stream:work-lanes-show'].handler,event={sender:{}};
+  for(let i=0;i<5;i++) await show(event,laneId,{});
+  assert.equal(calls,5,'each bad result permits another daemon request');
+  await show(event,laneId,{}); assert.equal(calls,5,'complete detail is cached');
+});
+
+test('old-tab replay through the real web bridge isolates stable sender objects', async () => {
+  const {createWsBridge}=require('../server/ws_bridge'); const revision='a'.repeat(64);let fingerprint=0,calls=0;
+  const client={snapshot:()=>({work_lanes:{lanes:[{lane_id:'lane_fixture',detail_revision:revision,working:fingerprint}]}}),
+    workLanesShow:async()=>{calls++;return {type:'work_lanes.show.ok',detail_revision:revision,lane:{lane_id:'lane_fixture'},projection:{lane_id:'lane_fixture'}}}};
+  const collector=createCollector();createCcHandlers({CONFIG:{},chatStreamClient:client}).register(collector);
+  const bridge=createWsBridge({table:collector.table,logger:{warn(){}}});
+  const a={send(){}},b={send(){}};bridge.addSocket(a);bridge.addSocket(b);
+  let id=0;const show=(socket,options)=>bridge.handleMessage(socket,JSON.stringify({id:++id,method:'chat-stream:work-lanes-show',args:['lane_fixture',options]}));
+  await show(a,{membersLimit:32});await show(a,{membersLimit:32,membersAfter:'spec_fixture__a'});
+  for(let i=0;i<4;i++){fingerprint++;await show(a,{membersLimit:32});}
+  assert.equal(calls,2,'one session reuses its page after inventory churn');
+  await show(b,{membersLimit:32});assert.equal(calls,3,'a second browser has a separate sender');
+  bridge.removeSocket(a);const reopened={send(){}};bridge.addSocket(reopened);
+  await show(reopened,{membersLimit:32});assert.equal(calls,4,'a reopened connection is a new session');
+  bridge.closeAll();
 });
