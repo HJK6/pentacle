@@ -101,7 +101,7 @@ class StoreCallDiag:
     """Totals and alert state touched only by the Store worker thread."""
 
     def __init__(self, *, today=_utc_day, summary_label="store_call_top", flush_send=True,
-                 worker=None, window_origin=None) -> None:
+                 worker="writer", window_origin=None) -> None:
         #: async callable(ErrorFact); the daemon binds `Alerts.error`.
         self.alert = None
         self.failures = 0
@@ -121,9 +121,18 @@ class StoreCallDiag:
     def record(self, name: str, quiet: bool, loop, queued: float, started: float, finished: float,
                caller: str = UNKNOWN) -> None:
         try:
+            if self._window_start is None:
+                if self._window_origin is None:
+                    self._window_origin = finished
+                self._window_start = self._window_boundary(finished)
+            elif finished - self._window_start >= SUMMARY_INTERVAL_S:
+                self._summarize(finished)
+                if self._flush_send and loop is not None:
+                    loop.call_soon_threadsafe(send_counter.flush, finished)
             execution = max(0.0, finished - started)
             queue_wait = max(0.0, started - queued)
-            self._queue_wait += queue_wait
+            if self.worker != "writer":
+                self._queue_wait += queue_wait
             totals = self._totals.setdefault(name, [0, 0.0])
             totals[0] += 1
             totals[1] += execution
@@ -131,17 +140,9 @@ class StoreCallDiag:
                 log.info("store_call_slow %s", json.dumps(
                     {"name": name, "caller": caller, "queue_ms": round(queue_wait * 1000, 3),
                      "execution_ms": round(execution * 1000, 3),
-                     **({"worker": self.worker} if self.worker else {})}, separators=(",", ":")))
+                     "worker": self.worker}, separators=(",", ":")))
                 if execution > ALERT_S and not quiet:
                     self._hand_off(name, loop)
-            if self._window_start is None:
-                if self._window_origin is None:
-                    self._window_origin = finished
-                self._window_start = self._window_boundary(finished)
-            elif finished - self._window_start >= SUMMARY_INTERVAL_S:
-                self._summarize(finished)
-                if self._flush_send:
-                    loop.call_soon_threadsafe(send_counter.flush, finished)
         except Exception:
             self.failures += 1
 
@@ -166,9 +167,9 @@ class StoreCallDiag:
                                                if group not in {"history_pages", "proof_reads"}), 3) for key in ("calls", "execution_ms")},
              "all_calls": {"calls": sum(t[0] for t in self._totals.values()),
                            "execution_ms": round(sum(t[1] for t in self._totals.values()) * 1000, 3)},
-             "instrumentation_failures": self.failures,
-             **({"worker": self.worker, "expired": self.expired, "queue_ms": round(self._queue_wait * 1000, 3)}
-                if self.worker else {})}, separators=(",", ":")))
+             "instrumentation_failures": self.failures, "worker": self.worker, "expired": self.expired,
+             **({"queue_ms": round(self._queue_wait * 1000, 3)} if self.worker != "writer" else {})},
+            separators=(",", ":")))
         self._totals, self._window_start = {}, self._window_boundary(now)
         self.expired, self._queue_wait = 0, 0.0
 

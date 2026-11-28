@@ -421,6 +421,15 @@ def _attached_history(conn):
         with closing(_open_archive(path, readonly=True)) as archive:
             _archive_schema(conn, archive, initialize=False, pair_id=pair_id)
         conn.execute("ATTACH DATABASE ? AS receipt_archive", (Path(path).absolute().as_uri() + "?mode=ro",))
+        if reader:
+            try:
+                attached_path = conn.execute(
+                    "SELECT file FROM pragma_database_list WHERE name='receipt_archive'").fetchone()[0]
+                if _history_file_identity(attached_path) != previous:
+                    raise RetentionError("history archive replaced during attachment")
+            except RetentionError:
+                conn.execute("DETACH DATABASE receipt_archive")
+                raise
         conn.history_attachment_identity = identity
     version = conn.execute("PRAGMA receipt_archive.schema_version").fetchone()[0]
     if version != getattr(conn, "history_schema_version", None):

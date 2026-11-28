@@ -176,6 +176,7 @@ async def test_reader_wait_and_execution_charged_once(db, monkeypatch, caplog):
         await expired
     assert await kept == 42
     await db.read_history(live)
+    await db.read_history(lambda conn: None)
     await asyncio.wait_for(alerted.wait(), 10)
     lines = [(kind, json.loads(body)) for record in caplog.records
              for kind, _, body in [record.getMessage().partition(" ")]
@@ -299,6 +300,106 @@ async def test_history_refuses_replacement_before_first_attach(db):
         await page(db, history=True)
 
 
+@pytest.mark.parametrize("swap", [False, True], ids=["stable", "stale-same-pair"])
+async def test_history_checks_identity_after_attach(db, monkeypatch, swap):
+    await receipt_page(db)
+    path = await archive_path(db)
+    stale = path.with_suffix(".stale")
+    saved = path.with_suffix(".saved")
+    shutil.copyfile(path, stale)
+    assert (await move(db))["moved"] == 1
+
+    def add_dispatch(conn):
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO v2_session_generations VALUES('fixture','retired','probe-gen')")
+            conn.execute(
+                "INSERT INTO v2_assistant_composite_routes "
+                "(route_id,stream_id,input_identity,payload_digest,input_request_id,body,routing_state,"
+                "dispatch_id,route_target,route_target_generation,route_json,created_at,updated_at) "
+                "VALUES('attach-probe','assistant:primary','probe-input','digest','probe-request',"
+                "'body','resolved','probe-dispatch',?,'probe-gen',?,'2026-10-01','2026-10-01')",
+                (TARGET, json.dumps({"admission_mode": "direct_primary", "direct_envelope": {"wire_body": "body"}})),
+            )
+
+    await db.submit(add_dispatch)
+    expected = await page(db)
+    assert expected[0]["raw"]["input_provenance"]["kind"] == "operator"
+    assert expected[0]["meta"] == {"voice": {"duration_s": 1.5}}
+    original = retention._open_archive
+    opened = False
+
+    def open_after_stat(candidate, **options):
+        nonlocal opened
+        if candidate == path and options.get("readonly") and not opened:
+            opened = True
+            if swap:
+                path.replace(saved)
+                stale.replace(path)
+        return original(candidate, **options)
+
+    monkeypatch.setattr(retention, "_open_archive", open_after_stat)
+    try:
+        observed = await page(db, history=True)
+    except retention.RetentionError as error:
+        observed = error
+    assert opened
+    if swap:
+        assert isinstance(observed, retention.RetentionError), observed
+        assert "replaced" in str(observed)
+        saved.replace(path)
+        assert await page(db, history=True) == expected
+    else:
+        assert observed == expected
+
+
+@pytest.mark.parametrize("path", ["fresh", ":memory:", ""])
+async def test_unscoped_history_fallback_drops_cancelled_and_expired_reads(tmp_path, path):
+    db = Store(str(tmp_path / "fresh.db") if path == "fresh" else path)
+    db.start()
+    entered, release, hold = rendezvous()
+    ran = []
+    writer = asyncio.create_task(db.submit(lambda conn: hold()))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        cancelled = await queued(db.read_history, lambda conn: ran.append("cancelled"))
+        expired = await queued(db.read_history, lambda conn: ran.append("expired"), deadline=0)
+        live = await queued(db.read_history, lambda conn: ran.append("control"))
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+    finally:
+        release.set()
+        await writer
+    try:
+        outcomes = await asyncio.gather(expired, live, return_exceptions=True)
+        assert ran == ["control"], (ran, outcomes)
+        assert isinstance(outcomes[0], TimeoutError)
+        assert db.call_diag.expired == 2
+    finally:
+        assert db.stop()
+
+
+@pytest.mark.parametrize("materialize", [False, True], ids=["cursor-result", "list-control"])
+async def test_history_callback_result_releases_wal_snapshot(db, materialize):
+    await append(db)
+    await put(db, probe_a="a", probe_b="b")
+
+    def history(conn):
+        cursor = conn.execute("SELECT v FROM kv WHERE k LIKE 'probe_%' ORDER BY k")
+        return cursor.fetchall() if materialize else cursor
+
+    observed = await db.read_history(history)
+    try:
+        await put(db, probe_c="c")
+        busy, frames, checkpointed = await db.submit(
+            lambda conn: tuple(conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()))
+        assert busy == 0 and frames > 0 and checkpointed == frames, (busy, frames, checkpointed)
+        assert [row["v"] for row in observed] == ["a", "b"]
+    finally:
+        if isinstance(observed, sqlite3.Cursor):
+            await db.read_history(lambda conn: observed.close())
+
+
 @pytest.mark.parametrize("phase", ["after-main-snapshot", "equal-copy", "conflicting-copy"])
 async def test_page_straddles_archive_move(db, monkeypatch, phase):
     expected = await receipt_page(db)
@@ -373,7 +474,7 @@ async def test_actor_read_orders_after_pending_retirement(db):
         await asyncio.wait_for(entered.wait(), 10)
         token = store_host_transfer.actor_context.set((TARGET, "generation"))
         try:
-            actor_read = await queued(db.read_history, lambda conn: "unauthorized")
+            actor_read = await queued(db.read_history, lambda conn: "unauthorized", deadline=0)
         finally:
             store_host_transfer.actor_context.reset(token)
     finally:
