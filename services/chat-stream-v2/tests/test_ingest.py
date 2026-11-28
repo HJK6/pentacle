@@ -11,10 +11,16 @@ Each assertion covers a stable part of the public ingest contract.
 from __future__ import annotations
 
 import asyncio
+import itertools
+import json
+import logging
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import ingest as ingest_module
 import pytest
+import store as store_module
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 
@@ -29,6 +35,148 @@ def _open_store() -> Store:
     store = Store(":memory:")
     store.start()
     return store
+
+
+@pytest.mark.parametrize("slow", [True, False], ids=["slow", "fast"])
+def test_ingest_slow_pass_accounts_for_real_replay(tmp_path, monkeypatch, caplog, slow):
+    """Component evidence for the local ingest, writer and slow-pass log."""
+    ticks = itertools.count()
+    delay_s = 0
+
+    def clock():
+        return next(ticks) / 1000 + delay_s
+
+    read_bound_span = ingest_module._read_bound_span
+
+    def read_with_simulated_delay(path, *args):
+        nonlocal delay_s
+        if slow:
+            delay_s += int(Path(path).stem[-1])
+        return read_bound_span(path, *args)
+
+    monkeypatch.setattr(ingest_module, "monotonic", clock)
+    store_clock = SimpleNamespace(**vars(time))
+    store_clock.monotonic = clock
+    monkeypatch.setattr(store_module, "time", store_clock)
+    monkeypatch.setattr(ingest_module, "_read_bound_span", read_with_simulated_delay)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.ingest")
+    message = "private fixture message"
+    transcript = (json.dumps({"type": "user", "uuid": "one", "sessionId": "native",
+                              "message": {"role": "user", "content": message}}) + "\n").encode()
+
+    async def go():
+        store = _open_store()
+        sessions = Sessions(store, tmux=None, local_host="h")
+
+        async def broadcast(_frame):
+            pass
+
+        pump = Ingest(store, sessions, None, broadcast, local_host="h", recent_limit=500)
+        try:
+            for index in range(1, 7):
+                name = f"seat{index}"
+                path = tmp_path / f"{name}.jsonl"
+                path.write_bytes(transcript)
+                await sessions.open("h", name, provider="claude", jsonl_path=str(path),
+                                    pane_pid="4321", claude_session_id="native")
+            assert await pump.run_pass() == 6
+        finally:
+            for state in pump._streams.values():
+                ingest_module._close_stream(state)
+            store.stop()
+
+    asyncio.run(go())
+    lines = [rec.getMessage() for rec in caplog.records
+             if rec.getMessage().startswith("ingest_slow_pass ")]
+    if not slow:
+        assert lines == []
+        return
+    assert len(lines) == 1, lines
+    (line,) = lines
+    assert message not in line
+    assert str(tmp_path) not in line
+    metrics = json.loads(line.removeprefix("ingest_slow_pass "))
+    assert metrics["seats"] == 6
+    visits = metrics["slowest"]
+    assert [visit["stream_id"] for visit in visits] == [f"h:seat{i}" for i in range(6, 1, -1)]
+    for stats, seats in [(metrics["totals"], 6), *((visit, 1) for visit in visits)]:
+        assert stats["replay_bytes"] == seats * len(transcript)
+        assert stats["records_accepted"] == stats["events_appended"] == seats
+        timed_fields = ("proof_ms", "store_queue_ms", "store_execution_ms",
+                        "store_resume_ms", "residual_ms")
+        assert stats["wall_ms"] == pytest.approx(sum(stats[field] for field in timed_fields), abs=0.005)
+        assert stats["store_calls"] > 0
+        for field in timed_fields[1:]:
+            assert stats[field] > 0, field
+
+
+def test_ingest_slow_pass_counts_segments_and_commits_before_publication_failure(tmp_path, monkeypatch, caplog):
+    from test_native_input_lookup import WIRE_A, proof
+
+    delay_s = 0
+    monkeypatch.setattr(ingest_module, "monotonic", lambda: time.monotonic() + delay_s)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.ingest")
+    publications_failed = set()
+
+    def claude_user(text):
+        return {"type": "user", "uuid": "input", "sessionId": "native",
+                "message": {"role": "user", "content": text}}
+
+    codex = [{"type": "session_meta", "payload": {"id": "native"}}]
+    for index in range(2):
+        codex.append({"type": "response_item",
+                      "payload": {"type": "message", "id": f"output-{index}", "role": "assistant",
+                                  "content": [{"type": "output_text", "text": f"output {index}"}]}})
+    transcripts = [
+        ("segmented", "claude", [claude_user(f"before\n{WIRE_A}\nafter")]),
+        ("claude-error", "claude", [claude_user("plain input")]),
+        ("codex-error", "codex", codex),
+    ]
+
+    async def go():
+        store = _open_store()
+        sessions = Sessions(store, tmux=None, local_host="h")
+
+        async def broadcast(frame):
+            nonlocal delay_s
+            stream_id = frame["event"]["stream_id"]
+            if stream_id != "h:segmented":
+                delay_s += 6
+                publications_failed.add(stream_id)
+                raise OSError("fixture publication failure")
+
+        pump = Ingest(store, sessions, None, broadcast, local_host="h", recent_limit=500)
+        try:
+            for name, provider, records in transcripts:
+                path = tmp_path / f"{name}.jsonl"
+                path.write_text("".join(json.dumps(record) + "\n" for record in records))
+                row = await sessions.open("h", name, provider=provider, jsonl_path=str(path),
+                                          pane_pid="4321", claude_session_id="native",
+                                          session_generation="generation")
+                if name == "segmented":
+                    def seed(conn):
+                        proof(conn, WIRE_A, "a", target=row["stream_id"], birth=row["created_at"])
+                        conn.commit()
+                    await store.submit(seed)
+            assert await pump.run_pass() == 1
+            durable = {}
+            for name, _, _ in transcripts:
+                stream_id = f"h:{name}"
+                durable[stream_id] = len(await store.fetch_session_event_tail(stream_id, limit=500))
+            return durable
+        finally:
+            for state in pump._streams.values():
+                ingest_module._close_stream(state)
+            store.stop()
+
+    durable = asyncio.run(go())
+    assert publications_failed == {"h:claude-error", "h:codex-error"}
+    assert durable == {"h:segmented": 3, "h:claude-error": 1, "h:codex-error": 2}
+    (line,) = [rec.getMessage() for rec in caplog.records
+               if rec.getMessage().startswith("ingest_slow_pass ")]
+    metrics = json.loads(line.removeprefix("ingest_slow_pass "))
+    assert {visit["stream_id"]: visit["events_appended"] for visit in metrics["slowest"]} == durable
+    assert metrics["totals"]["events_appended"] == sum(durable.values())
 
 
 async def _count_user_and_tell(store: Store, stream_id: str) -> int:

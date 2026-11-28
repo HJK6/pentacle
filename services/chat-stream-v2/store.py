@@ -2151,7 +2151,11 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                     finished = time.monotonic()
                     self.progress.finish()
                 if timing is not None:
-                    loop.call_soon_threadsafe(timing.add, queued, started, finished)
+                    if timing.owner is None:
+                        loop.call_soon_threadsafe(timing.add, queued, started, finished)
+                    else:
+                        # Carry the stamps with this result until its caller resumes.
+                        fut.store_timestamps = (queued, started, finished)
                 loop.call_soon_threadsafe(_set_exception if failed else _set_result, fut, outcome)
                 self.call_diag.record(name, quiet, loop, queued, started, finished, caller)
                 # A stop that found the queue full queued no sentinel; once
@@ -2261,6 +2265,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 return operation(conn)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
+        timing = request_timing.get()
+        if timing is not None and timing.owner is not None and timing.owner is not asyncio.current_task():
+            timing = None
         with self._lock:
             if self._thread is None or self._closing:
                 # Nothing will ever drain this future, so it would hang for the
@@ -2272,12 +2279,19 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 # Never block the event loop: past the cap fail fast rather than
                 # wait for the worker to drain (QA #8).
                 self.progress.enqueue(self._queue.put_nowait,
-                                      (fn, fut, loop, time.monotonic(), request_timing.get(), name, quiet, caller))
+                                      (fn, fut, loop, time.monotonic(), timing, name, quiet, caller))
             except queue.Full as exc:
                 raise RuntimeError("store overloaded: pending write queue is full") from exc
-        if settle_on_cancel:
-            return await attachment_locks.settle_future(fut)
-        return await fut
+        try:
+            if settle_on_cancel:
+                return await attachment_locks.settle_future(fut)
+            return await fut
+        finally:
+            if timing is not None and timing.owner is not None and fut.done() and not fut.cancelled():
+                stamps = getattr(fut, "store_timestamps", None)
+                if stamps is not None:
+                    timing.add(*stamps)
+                    timing.resume_s += time.monotonic() - stamps[2]
 
     async def transfer_authority_state(self, stream_id, generation):
         return await self.submit(lambda conn: host_transfer.authority_state(conn, stream_id, generation))
@@ -6396,6 +6410,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 raise
 
         inserted, committed_at = await self.submit(_op)
+        # Count committed sequences before post-commit proof reconciliation.
+        timing = request_timing.get()
+        if timing is not None and timing.owner is not None and timing.owner is asyncio.current_task():
+            timing.events_appended += sum(isinstance(result, int) for result in inserted or ())
         if inserted is not None:
             for entry, result in zip(entries, inserted):
                 if result is not ENTRY_DROPPED:
@@ -7100,6 +7118,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 conn.rollback()
                 raise
         event_id = await self.submit(transaction)
+        timing = request_timing.get()
+        if (event_id is not None and timing is not None
+                and timing.owner is not None and timing.owner is asyncio.current_task()):
+            timing.events_appended += 1
         await self._reconcile_ingested_tell(event)
         return event_id
 
