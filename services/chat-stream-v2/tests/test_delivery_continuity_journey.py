@@ -101,6 +101,7 @@ class MobileShaped:
         self.harness, self.port, self.mode = harness, port, mode
         self.rows, self.received = [], []
         self.last_inbound = asyncio.Event()
+        self.pongs = 0
 
     def apply(self, event):
         if event.get('stream_id') != self.harness['target']:
@@ -131,6 +132,8 @@ class MobileShaped:
             async for raw in self.socket:
                 self.last_inbound.set()
                 frame = json.loads(raw)
+                if frame.get('type') == 'pong':
+                    self.pongs += 1
                 if frame.get('type') == 'chat.event':
                     self.apply(frame['event'])
                 if frame.get('type') in ('request_stream_events.chunk', 'request_stream_events.ok'):
@@ -212,11 +215,13 @@ def test_mobile_shaped_bounded_focused_delivery_continuity(mode, caplog):
                              'last_text': secrets.token_hex(100)} for _ in range(1500)]
                     await harness['server'].broadcast({'type': 'session.inventory', 'sessions': rows})
                     await proxy.backlog.wait()
-                    await publish('in-flight')
+                    flight = await publish('in-flight')
                     conn_id = client.conn_id
                     await proxy.cut()
                     close = await records.close_for(conn_id)
                     await client.stop()
+                    prior_pongs = client.pongs
+                    assert flight not in client.received, 'in-flight marker was received before cut'
                     await publish('offline')
                     await client.open(stack)
                     await client.history()
@@ -231,10 +236,10 @@ def test_mobile_shaped_bounded_focused_delivery_continuity(mode, caplog):
                     reason = close.get('close_reason')
                     evidence['drop'] = reason if reason in ('focused_heartbeat_timeout', 'keepalive_ping_timeout') else 'proxy_cut'
                     evidence['outcomes'] = {
-                        'heartbeat': 'fired(' + reason + ')' if reason == 'focused_heartbeat_timeout' else ('not_fired' if mode == 'combined' else 'not_observed'),
+                        'heartbeat': 'fired(' + reason + ')' if reason == 'focused_heartbeat_timeout' else ('not_fired' if prior_pongs else 'not_observed'),
                         'keepalive': 'fired(' + reason + ')' if reason == 'keepalive_ping_timeout' else 'not_observed'}
                     expected_ids = [row['id'] for row in evidence['expected']]
-                    selected = [row for row in evidence['applied'] if row['id'] in expected_ids]
+                    selected = [row for row in evidence['applied'] if 'continuity-' in str(row.get('text') or '')]
                     counts = Counter(row['id'] for row in selected)
                     assert [row['id'] for row in selected] == expected_ids and all(counts[i] == 1 for i in expected_ids) and all(
                         row['text'] == expected['text'] and row['stream'] == harness['target']
