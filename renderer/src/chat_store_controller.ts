@@ -1117,7 +1117,10 @@ export class ChatStoreController {
       let restoredAt = Date.parse(String(restored.last_event_at || ''));
       for (const event of selectPentacleDerivedEventIndex(next).byStream.get(send.stream_id) ?? []) {
         const at = Date.parse(String(event.timestamp || ''));
-        if (event.kind === 'DRAFT' || !event.text || !Number.isFinite(at)
+        // Local optimistic rows are not history until correlated with a daemon
+        // event. A surviving failed row must never become a summary fallback.
+        if ((event.client_origin === true && !Number.isFinite(event.correlatedDaemonSeq))
+            || event.kind === 'DRAFT' || !event.text || !Number.isFinite(at)
             || (Number.isFinite(restoredAt) && (at < restoredAt || (at === restoredAt && !!restored.last_text)))) continue;
         restored = { ...restored, last_text: event.text, last_kind: event.kind, last_event_at: event.timestamp };
         restoredAt = at;

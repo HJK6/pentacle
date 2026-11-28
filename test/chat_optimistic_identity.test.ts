@@ -834,6 +834,37 @@ test('discard preserves the confirmed summary when history was not loaded', asyn
   assert.equal(c.getState().sessions.find(s=>s.stream_id===STREAM)?.last_text,known.last_text,'render selection does not lose the summary');
 });
 
+for (const confirmed of [false, true]) for (const firstDiscard of ['A', 'B'] as const) {
+  test(`discard failures after reconnect (${confirmed ? 'confirmed summary' : 'empty summary'}, ${firstDiscard} first)`, async t => {
+    t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+    const c=store(t), calls:string[]=[];
+    const known={last_text:'Confirmed server summary',last_kind:'AGENT',last_event_at:'2020-01-15T07:00:00.000Z'};
+    const snapshotSessions=c.getState().sessions.map(s=>s.stream_id===STREAM && confirmed?{...s,...known}:s);
+    c.applyFrame({type:'snapshot',connected:true,events:[],sessions:snapshotSessions});
+    c.setSendBridge(async ({requestId})=>{calls.push(requestId);return {ok:true};});
+    c.setSendReceiptBridge(async ()=>{calls.push('receipt');return {found:false,receipts:[]};});
+    const a=c.sendTurn(STREAM,'failed A'); await flush();
+    c.applyFrame({type:'send.result',request_id:calls[0],delivery:'not_landed'});
+    c.applyFrame({type:'snapshot',connected:true,events:[],sessions:snapshotSessions});
+    c.applyFrame({type:'__reconnect',generation:0,next_generation:1}); await flush();
+    if (!confirmed) assert.ok(!c.getState().sessions.find(s=>s.stream_id===STREAM)?.last_text);
+    t.mock.timers.tick(1000);
+    const b=c.sendTurn(STREAM,'failed B'); await flush();
+    c.applyFrame({type:'send.result',request_id:calls[1],delivery:'not_landed'});
+    const beforeDiscard=[...calls];
+    assert.equal(c.discardFailedOptimisticSend(firstDiscard==='A'?a:b),true);
+    assert.equal(c.discardFailedOptimisticSend(firstDiscard==='A'?b:a),true); await flush();
+    assert.deepEqual(calls,beforeDiscard,'discard sends no RPC');
+    const summary=c.getState().sessions.find(s=>s.stream_id===STREAM)!;
+    if (confirmed) assert.deepEqual({last_text:summary.last_text,last_kind:summary.last_kind,last_event_at:summary.last_event_at},known);
+    else assert.ok(!summary.last_text,'empty server summary stays empty');
+    const rows=c.selectSessionDetail(STREAM)!.transcriptItems;
+    assert.equal(rows.some(row=>row.isUser),false,'no discarded send appears in the next render');
+    assert.equal(rows.some(row=>row.text==='failed A'||row.text==='failed B'),false);
+    assert.equal(c.getState().sessions.find(s=>s.stream_id===STREAM)?.last_text,confirmed?known.last_text:summary.last_text);
+  });
+}
+
 test('a buffered send frame after dispose cannot rearm receipt work', async t => {
   t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
   const c=store(t); let request='',queries=0;
