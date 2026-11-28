@@ -11,10 +11,16 @@ Each assertion covers a stable part of the public ingest contract.
 from __future__ import annotations
 
 import asyncio
+import itertools
+import json
+import logging
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import ingest as ingest_module
 import pytest
+import store as store_module
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 
@@ -29,6 +35,78 @@ def _open_store() -> Store:
     store = Store(":memory:")
     store.start()
     return store
+
+
+@pytest.mark.parametrize("slow", [True, False], ids=["slow", "fast"])
+def test_ingest_slow_pass_accounts_for_real_replay(tmp_path, monkeypatch, caplog, slow):
+    ticks = itertools.count()
+    delay_s = 0
+
+    def clock():
+        return next(ticks) / 1000 + delay_s
+
+    read_bound_span = ingest_module._read_bound_span
+
+    def read_with_simulated_delay(path, *args):
+        nonlocal delay_s
+        if slow:
+            delay_s += int(Path(path).stem[-1])
+        return read_bound_span(path, *args)
+
+    monkeypatch.setattr(ingest_module, "monotonic", clock)
+    store_clock = SimpleNamespace(**vars(time))
+    store_clock.monotonic = clock
+    monkeypatch.setattr(store_module, "time", store_clock)
+    monkeypatch.setattr(ingest_module, "_read_bound_span", read_with_simulated_delay)
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.ingest")
+    message = "private fixture message"
+    transcript = (json.dumps({"type": "user", "uuid": "one", "sessionId": "native",
+                              "message": {"role": "user", "content": message}}) + "\n").encode()
+
+    async def go():
+        store = _open_store()
+        sessions = Sessions(store, tmux=None, local_host="h")
+
+        async def broadcast(_frame):
+            pass
+
+        pump = Ingest(store, sessions, None, broadcast, local_host="h", recent_limit=500)
+        try:
+            for index in range(1, 7):
+                name = f"seat{index}"
+                path = tmp_path / f"{name}.jsonl"
+                path.write_bytes(transcript)
+                await sessions.open("h", name, provider="claude", jsonl_path=str(path),
+                                    pane_pid="4321", claude_session_id="native")
+            assert await pump.run_pass() == 6
+        finally:
+            for state in pump._streams.values():
+                ingest_module._close_stream(state)
+            store.stop()
+
+    asyncio.run(go())
+    lines = [rec.getMessage() for rec in caplog.records
+             if rec.getMessage().startswith("ingest_slow_pass ")]
+    if not slow:
+        assert lines == []
+        return
+    assert len(lines) == 1, lines
+    (line,) = lines
+    assert message not in line
+    assert str(tmp_path) not in line
+    metrics = json.loads(line.removeprefix("ingest_slow_pass "))
+    assert metrics["seats"] == 6
+    visits = metrics["slowest"]
+    assert [visit["stream_id"] for visit in visits] == [f"h:seat{i}" for i in range(6, 1, -1)]
+    for stats, seats in [(metrics["totals"], 6), *((visit, 1) for visit in visits)]:
+        assert stats["replay_bytes"] == seats * len(transcript)
+        assert stats["records_parsed"] == stats["events_appended"] == seats
+        timed_fields = ("proof_ms", "store_queue_ms", "store_execution_ms",
+                        "store_resume_ms", "residual_ms")
+        assert stats["wall_ms"] == pytest.approx(sum(stats[field] for field in timed_fields), abs=0.005)
+        assert stats["store_calls"] > 0
+        for field in timed_fields[1:]:
+            assert stats[field] > 0, field
 
 
 async def _count_user_and_tell(store: Store, stream_id: str) -> int:
