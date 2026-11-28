@@ -30,7 +30,7 @@ const { createQuestions } = require('./questions');
 const { createQuestionNotifications } = require('./question_notifications');
 const { mountLanesCard, renderLaneIcon } = require('./lanes');
 const { applyVersionedConnectionState } = require('../chat_stream_connection_state');
-const { mountChatList } = require('./chat_list');
+const { mountChatList, PENCIL, TRASH } = require('./chat_list');
 const { isProtectedAssistant } = require('../chat_presentation');
 const { configuredAssistantRole } = require('../assistant_role');
 const { isWorking, hasConfirmedWork, workingClock, createSeenMarks, mountWorkingRow, decorateSendLines, decorateAgentRows } = require('./chat_status');
@@ -95,6 +95,8 @@ const seen = createSeenMarks(storage);
 const clock = workingClock();
 const pendingNames = new Map();
 const pendingDeletes = new Set();
+const closingCards = new Set();
+let inventoryIds = null;
 const hiddenClosed = new Set();
 const role = configuredAssistantRole(config.features);
 const isProtected = session => isProtectedAssistant([session], role);
@@ -113,6 +115,9 @@ const icons = {
   update: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>',
   close: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   full: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 9V4h5m6 0h5v5M20 15v5h-5M9 20H4v-5"/></svg>',
+  unfull: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 4v5H4m11-5v5h5M9 20v-5H4m11 5v-5h5"/></svg>',
+  rename: PENCIL,
+  trash: TRASH,
   terminal: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="4.5" width="17" height="15" rx="1"/><path d="m7 9 3 3-3 3m5 0h4"/></svg>',
   status: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 6 1.5 1.5L7 5m3 1h10M3 12l1.5 1.5L7 11m3 1h10M4.5 18h.1M10 18h10"/></svg>'
 };
@@ -143,6 +148,9 @@ const cards = Object.fromEntries(['chat', 'chat2'].map((key, slot) => [key, moun
   paintTranscript, attachTranscript, transcriptPlace, catalogLoader, hostPresentation,
   terminalDeps: { Terminal, FitAddon, Unicode11Addon, WebglAddon },
   onClose: closeCard, onFullScreen: toggleChatFullScreen, onStarted: admitChat, onUse: usePane,
+  // The header offers only what renameChat and deleteChat will act on.
+  onRename: renameChat, onDelete: deleteChat, canEdit: s => !isProtected(s) && visibleChats().some(row => row.stream_id === s.stream_id),
+  isPending: id => pendingNames.has(id) || pendingDeletes.has(id),
   onSwitch: openChatSwitch, nameFor: chatName, recorderOptions: microphone.recorderOptions, onMode: () => paintWorking(),
 })]));
 // The bridge keeps one listener per event, so both cards' terminals are fed from here.
@@ -204,9 +212,10 @@ function closePopover() {
   unmountQuestionList?.(); unmountQuestionList = null; limitsControl?.destroy(); limitsControl = null; state.popover = null; popover.hidden = true; dashboardsButton.classList.remove('open'); dashboardsButton.setAttribute('aria-expanded', 'false'); chatsButton.classList.remove('open'); questionsButton.classList.remove('open'); limitsButton.classList.remove('open'); settingsButton.classList.remove('open'); }
 function togglePopover(name) { if (state.popover === name) { closePopover(); return; } closePopover(); state.popover = name; popover.hidden = false; popover.classList.remove('chat-switch'); ({ dashboards: dashboardsButton, chats: chatsButton, questions: questionsButton, limits: limitsButton, settings: settingsButton })[name].classList.add('open'); popover.classList.toggle('bottom', name === 'limits' || name === 'settings'); popover.classList.toggle('questions-popover', name === 'questions'); popover.classList.toggle('limits-popover', name === 'limits'); renderPopover(); anchorPopover(); }
 function sessions() { return store.getState().sessions || []; }
+const isClosed = s => !!s.closed || s.status === 'closed' || s.session_state === 'closed' || s.state === 'closed';
 function visibleChats() {
   return filterSidebarSessions(sessions()).filter(s => s.session_kind !== 'assistant_composite' &&
-    !hiddenClosed.has(s.stream_id) && !s.closed && s.status !== 'closed' && s.session_state !== 'closed' && s.state !== 'closed');
+    !hiddenClosed.has(s.stream_id) && !isClosed(s));
 }
 function chatName(s) { return pendingNames.get(s.stream_id)?.name || s.display_name || s.title || s.session_name; }
 function draftFor(s) { return s ? store.getState().drafts?.[s.stream_id] : undefined; }
@@ -253,11 +262,26 @@ async function deleteChat(id) {
   }
 }
 function beforeStoreFrame(frame) {
+  // A new or lost connection can see a different scope of sessions (for example the
+  // opener filter), so absence only counts between inventories on one connection.
+  // Every snapshot, with or without sessions, starts a fresh view; only inventories compare.
+  if (frame && (frame.connected === false || frame.type === '__reconnect' || frame.type === 'snapshot')) inventoryIds = null;
   if (!frame || frame.connected === false || !Array.isArray(frame.sessions) ||
       !['snapshot', 'session.inventory'].includes(frame.type)) return;
   const rows = frame.sessions;
   const ids = new Set(rows.map(s => s.stream_id));
   for (const id of hiddenClosed) if (!ids.has(id)) hiddenClosed.delete(id);
+  // A chat closed anywhere leaves the screen: its row says closed, or it drops out of the
+  // daemon's open inventory between two inventories on the same connection. A snapshot
+  // starts a fresh view, and a chat not listed yet (just started) stays.
+  const closed = new Set(rows.filter(isClosed).map(s => s.stream_id));
+  const inventory = frame.type === 'session.inventory';
+  for (const key of Object.keys(cards)) {
+    const id = state.layout[key];
+    if (id && id !== NEW_CHAT && (closed.has(id) || (inventory && inventoryIds?.has(id) && !ids.has(id)))) closingCards.add(key);
+  }
+  if (inventory) inventoryIds = ids;
+  if (closingCards.size) queueMicrotask(closeGoneCards);
   for (const s of rows) {
     const p = pendingNames.get(s.stream_id);
     if (p && (s.display_name || s.title || s.session_name) === p.name) {
@@ -404,7 +428,7 @@ function paintRows(element, id) {
   const arrived = stick ? 0 : newTailRows(detail?.transcriptItems, pane.tail);
   if (arrived) { pane.rows += arrived; detail = select(); }
   pane.tail = detail?.transcriptItems?.at(-1)?.id ?? null;
-  const transcript = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true });
+  const transcript = view.renderTranscriptTimelineHtml(detail, undefined, { showDashboardLinks: true, pictureCards: true, streamId: id, allowQueuedSendNow: true, allowFailedDiscard: true });
   const status = historyReads.status(id);
   pane.waiting = !!status.message;
   const note = historyNote(id, detail, status);
@@ -518,6 +542,8 @@ function attachTranscript(transcript, source) {
   }
   const retry = event.target.closest('.slot-chat-send-retry');
   if (retry) store.retryOptimisticSend(retry.dataset.optimisticId);
+  const discard = event.target.closest('.slot-chat-send-discard');
+  if (discard) store.discardFailedOptimisticSend(discard.dataset.optimisticId);
   const sendNow = event.target.closest('.slot-chat-send-now');
   if (sendNow && store.canSendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId)) store.sendQueuedNow(sendNow.dataset.streamId, sendNow.dataset.optimisticId);
   });
@@ -637,7 +663,7 @@ function syncLayout(admitted = null) {
   for (const [key, card] of Object.entries(cards)) {
     const id = state.layout[key];
     card.setStream(id, id && admitted?.stream_id === id ? admitted : null);
-    card.setVisible(visible.cards.includes(key), state.layout.solo === key);
+    card.setVisible(visible.cards.includes(key), state.layout.solo === key, overlay);
   }
   designCard.hidden = !visible.cards.includes('dash') || !state.layout.dash.startsWith('design:');
   const melodyVisible = visible.cards.includes('dash') && state.layout.dash === 'melody';
@@ -799,6 +825,11 @@ function admitChat(key, id, session) {
   cards[state.layout.last]?.focus();
   render();
 }
+function closeGoneCards() {
+  const keys = [...closingCards];
+  closingCards.clear();
+  for (const key of keys) if (state.layout[key] && state.layout[key] !== NEW_CHAT) closeCard(key);
+}
 function closeCard(key) {
   state.layout = layout.shut(state.layout, key, innerWidth);
   syncLayout();
@@ -907,6 +938,7 @@ async function loadSnapshot() {
 }
 cc.onDisconnect?.(({ epoch }) => {
   recoveryEpoch = null;
+  inventoryIds = null;
   laneInventoryCurrent = false;
   laneConnection.connected = false;
   laneConnection.stateVersion = null;
@@ -914,7 +946,7 @@ cc.onDisconnect?.(({ epoch }) => {
   lanesControl?.render();
   store.webHostDisconnected?.(epoch);
 });
-cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; void loadSnapshot().catch(() => {}); checkForUpdate(); });
+cc.onReconnect?.(({ epoch }) => { recoveryEpoch = epoch; inventoryIds = null; void loadSnapshot().catch(() => {}); checkForUpdate(); });
 const designRoute = initialDesignRoute(window, 'workspace');
 if (designRoute) openDesign(designRoute.target);
 else if (location.hash === '#melody') openMelody();

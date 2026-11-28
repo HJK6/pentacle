@@ -93,7 +93,7 @@ function createVoiceTake({ streamId, blob, durationS, id, levels = [], interrupt
       audio: { sha256: await sha256Hex(await blob.arrayBuffer()), mime: blob.type, bytes: blob.size }, durationS });
     const reply = await io.commit(unit);
     if (reply?.ok && reply.server_send === true) {
-      identity = { requestId: unit.send_mandate.request_id, optimisticId: unit.send_mandate.optimistic_id };
+      identity = { requestId: unit.send_mandate.request_id, optimisticId: unit.send_mandate.optimistic_id, originalRequest: unit.send_mandate.original_request };
       return true;
     }
     if (reply == null || NOT_COMMITTED.has(reply.error_code)) return false; // null: no bridge, no frame

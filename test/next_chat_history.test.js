@@ -196,3 +196,23 @@ test('a daemon reconnect with no disconnect in between reads every open chat aga
   s.history.focus(['a:1', 'a:2']);
   assert.equal(s.calls.length, 4, 'each chat is read once per connection');
 });
+
+test('a positively complete zero-event page settles as an empty conversation', async () => {
+  const s = open({ reply: () => ({ ok: true, complete: true, received: 0 }), rows: () => false });
+  s.history.setConnected(true);
+  s.history.focus(['a:1']);
+  await flush();
+  s.history.focus(['a:1']);
+  assert.deepEqual(s.history.status('a:1'), { message: '', retry: false });
+  assert.equal(s.timers.length, 0);
+});
+
+test('an empty page without positive completion still retries', async () => {
+  const s = open({ reply: () => ({ ok: true, received: 0 }), rows: () => false });
+  s.history.setConnected(true);
+  s.history.focus(['a:1']);
+  await flush();
+  s.history.focus(['a:1']);
+  assert.equal(s.history.status('a:1').message, 'Loading messages…');
+  assert.equal(s.timers.length, 1);
+});

@@ -132,8 +132,38 @@ function createCcHandlers({
   micRequest = null,
   buildId = null,
   hostedDashboardAuthMode = 'unknown',
+  monotonicNow = () => performance.now(),
 }) {
   const telemetry = [];
+  const laneShowsBySender = new WeakMap();
+  let unknownRevisionCount = 0;
+  let unknownRevisionLastLog = -Infinity;
+  let unknownRevisionTimer = null;
+  function flushUnknownRevisions() {
+    unknownRevisionTimer = null;
+    if (!unknownRevisionCount) return;
+    console.info({ subsystem: 'work_lanes', event: 'unknown_revision_passthrough', count: unknownRevisionCount });
+    unknownRevisionCount = 0;
+    unknownRevisionLastLog = monotonicNow();
+  }
+  function countUnknownRevision() {
+    unknownRevisionCount += 1;
+    const remaining = 60000 - (monotonicNow() - unknownRevisionLastLog);
+    if (remaining <= 0) {
+      if (unknownRevisionTimer !== null) clearTimeout(unknownRevisionTimer);
+      flushUnknownRevisions();
+    } else if (unknownRevisionTimer === null) {
+      unknownRevisionTimer = setTimeout(flushUnknownRevisions, remaining);
+      unknownRevisionTimer.unref?.();
+    }
+  }
+  function trimLaneShows(entries) {
+    let completed = [...entries.values()].filter(entry => !entry.pending).length;
+    for (const [key, entry] of entries) {
+      if (completed <= 64) break;
+      if (!entry.pending) { entries.delete(key); completed -= 1; }
+    }
+  }
 
   function publicConfig() {
     const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
@@ -202,9 +232,49 @@ function createCcHandlers({
         return { ...receipt, ok: receipt.delivery === 'landed' || receipt.action_committed === true,
           ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
       }));
+    target.handle('chat-stream:send-receipt', (_event, streamId, requestId, originalRequest) =>
+      command(() => chatStreamClient.getSendReceipt({ streamId, requestId, originalRequest })));
     target.handle('chat-stream:request-stream-events', (_event, args) => command(() => chatStreamClient.requestStreamEvents(args)));
-    target.handle('chat-stream:work-lanes-show', (_event, laneId, options = {}) =>
-      chatStreamClient.workLanesShow(laneId, options || {}));
+    target.handle('chat-stream:work-lanes-show', (event, laneId, options = {}) => {
+      const page = options || {};
+      const sender = event?.sender;
+      const value = chatStreamClient.snapshot?.({ includeEvents: false }).work_lanes?.lanes
+        ?.find(lane => lane.lane_id === laneId)?.detail_revision;
+      const revision = typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null;
+      if (!sender || (typeof sender !== 'object' && typeof sender !== 'function')) {
+        if (revision === null) countUnknownRevision();
+        return chatStreamClient.workLanesShow(laneId, page);
+      }
+      let entries = laneShowsBySender.get(sender);
+      if (!entries) { entries = new Map(); laneShowsBySender.set(sender, entries); }
+      const key = JSON.stringify([laneId, page.goalId ?? null, page.membersAfter ?? null, page.membersLimit ?? 32]);
+      const previous = entries.get(key);
+      if (previous?.revision === revision && (previous.pending
+        || (revision !== null && monotonicNow() - previous.completedAt < 300000))) {
+        entries.delete(key); entries.set(key, previous);
+        return previous.promise;
+      }
+      if (revision === null) countUnknownRevision();
+      const entry = { revision, pending: true, completedAt: null, promise: null };
+      entries.delete(key);
+      entry.promise = Promise.resolve(chatStreamClient.workLanesShow(laneId, page)).then(reply => {
+        entry.pending = false;
+        entry.completedAt = monotonicNow();
+        const validDetail = reply?.type === 'work_lanes.show.ok'
+          && typeof reply.detail_revision === 'string' && /^[a-f0-9]{64}$/.test(reply.detail_revision)
+          && reply.lane?.lane_id === laneId && reply.projection?.lane_id === laneId;
+        if (entries.get(key) === entry) {
+          if (revision === null || !validDetail) entries.delete(key);
+          else { entries.delete(key); entries.set(key, entry); trimLaneShows(entries); }
+        }
+        return reply;
+      }, error => {
+        if (entries.get(key) === entry) entries.delete(key);
+        throw error;
+      });
+      entries.set(key, entry);
+      return entry.promise;
+    });
     target.handle('chat-stream:queued-send-now', (_event, host, sessionName, originalRequestId, optimisticId, expectedSessionGeneration) =>
       command(() => chatStreamClient.queuedSendNow({ host, sessionName, originalRequestId, optimisticId, expectedSessionGeneration })));
     target.handle('chat-stream:interrupt', (_event, host, sessionName, expectedSessionGeneration) =>

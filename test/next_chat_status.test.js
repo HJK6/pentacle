@@ -81,8 +81,8 @@ edge('seen marks key by stream, survive temporary absence and reload, collapse i
 edge('send states have exactly the approved words, glyph and queued-only gate', () => {
   const {sendLine}=status;
   for (const [state,label,glyph] of [['sending','Sending','stream'],['sent','Sent','check'],
-    ['queued','Queued','chevron'],['cancelled','Cancelled',null],['failed','Failed to send',null],
-    ['indeterminate','Delivery uncertain',null]]) {
+    ['queued','Queued','chevron'],['cancelled','Cancelled',null],['failed','Failed sending','alert'],
+    ['indeterminate','Sending','stream']]) {
     assert.deepEqual(sendLine(state,true),{label,glyph,sendNow:state==='queued'});
     assert.deepEqual(sendLine(state,false),{label,glyph,sendNow:false});
   }

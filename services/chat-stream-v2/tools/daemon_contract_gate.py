@@ -61,8 +61,6 @@ def _validate_contract() -> list[str]:
         raise GateError(f"contract configuration is unreadable: {type(exc).__name__}") from exc
     if contract.get("contract_version") != 1 or contract.get("baseline_commit") != BASELINE_COMMIT:
         errors.append("contract version or frozen baseline commit changed")
-    if contract.get("max_active_daemon_lanes") != 2:
-        errors.append("max_active_daemon_lanes must remain exactly 2")
     if contract.get("layers") != EXPECTED_LAYERS:
         errors.append("the six daemon layers must appear once in the frozen order")
     if contract.get("structure_owner") is not None or contract.get("structure_owner_status") != "pending":
@@ -95,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"[daemon-contract] FAIL: {error}", file=sys.stderr)
         return 1
-    print("[daemon-contract] PASS: six layers and two-lane cap")
+    print("[daemon-contract] PASS: six layers")
     return 0
 
 

@@ -209,7 +209,7 @@ test('P6: only the exact invalid-and-failed combination changes the existing sen
   for (const sendState of [undefined, 'sending', 'queued', 'cancelled', 'indeterminate']) {
     container.innerHTML = renderTranscriptItemHtml(userItem({ sendState, voiceAnswersInvalid: true }), CHROME);
     assert.equal(container.querySelector('[data-question-voice-plain], [data-voice-answers-status]'), null, String(sendState));
-    assert.equal(!!container.querySelector('.slot-chat-send-retry'), sendState === 'indeterminate');
+    assert.equal(!!container.querySelector('.slot-chat-send-retry'), false);
   }
 });
 

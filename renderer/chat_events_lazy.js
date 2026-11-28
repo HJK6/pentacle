@@ -12,6 +12,8 @@
 // A lane's closed chat is read at its exact generation (stream_id alone is refused by the
 // daemon). Only the lane-history slot passes `options.generation`; every other read of the
 // same stream id omits it.
+const INITIAL_HISTORY_EVENTS = 64;
+
 function generationOf(options) {
   return options && options.generation ? { generation: String(options.generation) } : {};
 }
@@ -38,12 +40,13 @@ function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, opt
       logger.warn?.('[ChatStream] requestStreamEvents failed:', id, request.error);
     } else {
       request.status = 'loaded';
+      request.completeEmpty = reply.complete === true && reply.received === 0;
       recordInitialPaging(streamState, id, reply);
     }
     options.onChange?.(id);
   };
   try {
-    Promise.resolve(cc.requestStreamEvents({ streamId: id, ...generationOf(options) }))
+    Promise.resolve(cc.requestStreamEvents({ streamId: id, limit: INITIAL_HISTORY_EVENTS, ...generationOf(options) }))
       .then(complete, error => complete({ ok: false, error: error?.message || error }));
   } catch (error) {
     complete({ ok: false, error: error?.message || error });
@@ -57,7 +60,7 @@ function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, opt
 const HISTORY_PAGE_EVENTS = 500;
 
 // Seed the older-history cursor from the newest-window load. A window shorter
-// than a page means the stream has nothing older. Refetches keep an existing
+// than the requested initial window means the stream has nothing older. Refetches keep an existing
 // cursor, which may be deeper: the store still holds those older rows. A seed
 // that found nothing older before any page was read is replaced, so an empty
 // first reply cannot hide a boundary a retry finds.
@@ -69,7 +72,7 @@ function recordInitialPaging(streamState, id, reply) {
   const cursor = Number.isFinite(reply?.nextBeforeDaemonSeq) ? reply.nextBeforeDaemonSeq : null;
   paging[id] = {
     cursor,
-    exhausted: cursor === null || (received !== null && received < HISTORY_PAGE_EVENTS),
+    exhausted: cursor === null || (received !== null && received < INITIAL_HISTORY_EVENTS),
     loading: false,
     paged: false,
   };

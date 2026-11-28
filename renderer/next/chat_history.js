@@ -23,7 +23,7 @@ function newTailRows(items, previousTail) {
 
 // History for the chats on screen, under the current web's rules: the shared
 // store keeps a focused stream's events, a load starts once connected, a failed
-// or empty load retries on a bounded backoff, and older pages come on request.
+// or incomplete load retries on a bounded backoff, and older pages come on request.
 function createChatHistory({ cc, store, onChange, logger = console, setTimer }) {
   const state = { connected: false, eventsLoadedFor: new Set(), historyLoads: {}, historyPaging: {} };
   let focused = [];
@@ -49,7 +49,7 @@ function createChatHistory({ cc, store, onChange, logger = console, setTimer }) 
     const load = state.historyLoads[id];
     if (!load || load.status === 'loading' || load.settled) return;
     const rows = held(id);
-    if (load.status === 'loaded' && rows) { load.settled = true; return; }
+    if (load.status === 'loaded' && (rows || load.completeEmpty)) { load.settled = true; return; }
     lazy.scheduleHistoryRetry(state, id, cc, logger, {
       hasRows: rows, onChange, setTimer,
       stillNeeded: stream => focused.includes(stream) && (state.historyLoads[stream]?.status === 'error' || !held(stream)),
@@ -85,7 +85,7 @@ function createChatHistory({ cc, store, onChange, logger = console, setTimer }) 
       lazy.ensureChatEventsLoaded(state, id, cc, logger, { retry: true, onChange });
     },
     status(id) {
-      if (state.connected && state.historyLoads[id]?.settled) return { message: '', retry: false };
+      if (state.connected && (state.historyLoads[id]?.settled || state.historyLoads[id]?.completeEmpty)) return { message: '', retry: false };
       const rows = held(id);
       const status = lazy.chatHistoryStatus({ connected: state.connected, load: state.historyLoads[id], hasRows: rows, hasRendered: true });
       return rows && !status.retry ? { message: '', retry: false } : status;
