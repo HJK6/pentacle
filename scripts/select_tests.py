@@ -294,7 +294,9 @@ def check_coverage(repo: Path, base: str, head: str, *, python: str, timeout: fl
         for path in scopes:
             if path in common:
                 suites.update((*roots, "npm"))
-            if path in {"pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py", "services/conftest.py"}:
+            if path in {"pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py", "services/conftest.py",
+                        "services/chat-stream-v2/native_input_lookup.py",
+                        "services/chat-stream-v2/retention.py"}:
                 suites.update(roots)
             for suite, root in roots.items():
                 if path.startswith(root + "tests/") or path in {root + name for name in
