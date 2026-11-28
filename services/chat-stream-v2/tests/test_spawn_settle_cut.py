@@ -609,3 +609,15 @@ def test_existing_store_gains_the_request_index_on_open(tmp_path) -> None:
         assert conn.execute("SELECT sql FROM sqlite_master WHERE name='v2_spawn_cancellations_request'"
                             ).fetchone() == ("CREATE INDEX v2_spawn_cancellations_request "
                                              "ON v2_spawn_cancellations (host, request_id) WHERE request_id != ''",)
+
+
+def test_pane_commit_without_birth_preserves_null_intent():
+    async def check(store):
+        await seed_row(store)
+        assert await store.commit_tmux_created_fenced(HOST, SEAT, request_id="req", nonce="n-a",
+                                                     pane_pid="123", pane_started_at="start")
+        result = await rows(store, "SELECT payload FROM v2_stream_reservations")
+        assert result[0]["payload"] is None
+        assert not await store.owns_spawn_intent(HOST, SEAT, "req", "n-a")
+        assert await settle(store) == "untouched"
+    run(check)

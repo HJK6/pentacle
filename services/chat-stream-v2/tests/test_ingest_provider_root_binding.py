@@ -378,3 +378,104 @@ def test_claude_root_binding_preserves_history_without_new_engagement(tmp_path,m
             assert len(await store.fetch_session_event_tail("h:v2-root",limit=500))==2
         finally:_close_stream(state);store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("case, observed, expected", [
+    ("clock_shift", ["boot-a", 501], 1),
+    ("changed_ticks", ["boot-a", 502], 0),
+    ("changed_boot", ["boot-b", 501], 0),
+    ("observation_unavailable", None, 0),
+    ("legacy_shift", ["boot-a", 501], 0),
+])
+def test_first_bind_uses_stable_birth_not_printed_time(tmp_path, monkeypatch, case, observed, expected):
+    from spawnctl import SpawnCtl
+    from types import SimpleNamespace
+
+    async def run():
+        store = Store(":memory:"); store.start(); state = _StreamIngest()
+        try:
+            path = tmp_path / ".codex" / "sessions" / "a.jsonl"
+            write_log(path)
+            h = Harness(store, monkeypatch, path)
+            record = module.process_record
+            async def captured(pid):
+                return {**await record(pid), **({"birth": ["boot-a", 501]} if case != "legacy_shift" else {})}
+            monkeypatch.setattr("prockill.process_record", captured)
+            assert await store.reserve_stream_id("h", "v2-root", ttl_s=60, request_id="spawn", nonce="nonce")
+            assert await store.record_spawn_intent("h", "v2-root", {"open_fields": {"session_generation": "gen-a"}},
+                                                   request_id="spawn", nonce="nonce")
+            ctl = SimpleNamespace(sessions=h.sessions, hosts=None, store=store)
+            ctl._pane_started_at = lambda *args, **kwargs: SpawnCtl._pane_started_at(ctl, *args, **kwargs)
+            assert await SpawnCtl._commit_pane_bound(ctl, "h", "v2-root", "spawn", h, nonce="nonce")
+            await h.sessions.open("h", "v2-root", fence="spawn", provider="codex", pane_pid=PID,
+                                  created_at="2026-09-09T16:19:32Z", session_generation="gen-a",
+                                  observer_binding={"executable": EXE})
+            durable = await store.fetch_session("h", "v2-root")
+            stored_birth = durable["observer_binding"].get("birth")
+            h.birth = "Wed Sep 9 11:00:10 2026" if case in {"clock_shift", "legacy_shift"} else BIRTH
+            async def after(pid):
+                return {**await record(pid), **({"birth": observed} if observed is not None else {})}
+            monkeypatch.setattr(module, "process_record", after)
+            assert await h.run(h.ingest(), state) == expected
+            assert len(await store.fetch_session_event_tail("h:v2-root", limit=500)) == expected
+            assert stored_birth == (None if case == "legacy_shift" else ["boot-a", 501])
+            if expected:
+                assert await h.run(h.ingest(), state) == 0
+        finally:
+            _close_stream(state); store.stop()
+    asyncio.run(run())
+
+
+def test_anchored_claude_cannot_rebind_reused_pid_with_new_birth(tmp_path, monkeypatch):
+    async def run():
+        store = Store(":memory:"); store.start()
+        try:
+            path = tmp_path / "claude.jsonl"
+            path.write_text(json.dumps({"type": "user", "sessionId": "native-a", "uuid": "one",
+                                       "message": {"role": "user", "content": "hello"}}) + "\n")
+            h = Harness(store, monkeypatch, path, provider="claude")
+            await h.open()
+            anchored = {**h.sessions.get("h:v2-root")["observer_binding"], "birth": ["boot-a", 501],
+                        "transcript": {"path": str(path), "session_id": "native-a", "provider": "claude",
+                                       "file_id": [path.stat().st_dev, path.stat().st_ino]}}
+            await store.update_session("h", "v2-root", observer_binding=anchored,
+                                       jsonl_path=str(path), claude_session_id="native-a")
+            await h.sessions.refresh()
+            h.birth = "Wed Sep 9 11:00:10 2026"
+            original = module.process_record
+            async def after(pid):
+                return {**await original(pid), "birth": ["boot-a", 502]}
+            monkeypatch.setattr(module, "process_record", after)
+            row = h.sessions.get("h:v2-root")
+            assert await h.ingest()._maybe_rebind_observer_pane(row, "v2-root") == row
+            assert (await store.fetch_session("h", "v2-root"))["observer_binding"] == anchored
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("ending", [501, 502, None], ids=["stable", "changed", "unavailable"])
+def test_process_record_brackets_ps_with_linux_birth_observations(monkeypatch, ending):
+    import prockill
+
+    values = iter([["boot-a", 501], ["boot-a", ending] if ending is not None else None])
+    monkeypatch.setattr(prockill.sys, "platform", "linux")
+    monkeypatch.setattr(prockill, "_linux_birth", lambda pid: next(values))
+
+    class FakePS:
+        returncode = 0
+
+        async def communicate(self):
+            return f"{PID} {os.getuid()} {BIRTH} {EXE}".encode(), b""
+
+    async def fake_ps(*args, **kwargs):
+        assert args[0] == "ps"
+        return FakePS()
+
+    monkeypatch.setattr(prockill.asyncio, "create_subprocess_exec", fake_ps)
+    record = asyncio.run(prockill.process_record(PID))
+    if ending == 501:
+        assert record["birth"] == ["boot-a", 501]
+        assert record["start_id"] == BIRTH
+    else:
+        assert record is None

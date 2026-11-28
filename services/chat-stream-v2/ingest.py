@@ -1343,7 +1343,8 @@ class Ingest:
         if observation is not None:
             observation["start"] = canonical_start(record.get("start_id")) if record else ""
         if (not record or record["uid"] != os.getuid()
-                or canonical_start(record["start_id"]) != started
+                or (record.get("birth") != binding["birth"]
+                    if "birth" in binding else canonical_start(record["start_id"]) != started)
                 or not _provider_command_matches(record["command"], str(binding.get("executable") or ""), binding.get("cursor") if row.get("provider") == "cursor" else None)):
             return None
         return pid, canonical_start(record["start_id"])
@@ -1391,8 +1392,12 @@ class Ingest:
         prior_start = canonical_start(binding.get("pane_started_at"))
         if not started or not prior_start:
             return row
-        if binding.get("pane_pid") == pid and started == prior_start:
-            return row  # presentation equality cannot repair another failed predicate
+        birth = record.get("birth")
+        if "birth" in binding and birth is None:
+            return row
+        same_process = birth == binding["birth"] if "birth" in binding else started == prior_start
+        if binding.get("pane_pid") == pid and same_process:
+            return row  # equality cannot repair another failed predicate
         if not isinstance(transcript, dict):
             observation["reason"] = "start_mismatch" if started != prior_start else "proof_unavailable"
             return row  # recorded/first-bind paths cannot seed recovery authority
@@ -1404,8 +1409,8 @@ class Ingest:
             # Claude Code need not keep its transcript open, so there is no
             # writer to census. Only the SAME process may resume its anchored,
             # launch-recorded transcript (a shifted start presentation).
-            if binding.get("pane_pid") != pid:
-                return row
+            if binding.get("pane_pid") != pid or "birth" in binding:
+                return row  # a differing durable birth token cannot use this shortcut
             if (transcript.get("path") != row.get("jsonl_path")
                     or transcript.get("session_id") != row.get("claude_session_id")):
                 observation["reason"] = "foreign_identity"
@@ -1447,12 +1452,14 @@ class Ingest:
         current = await process_record(pid)
         if (not current or current.get("pid") != record.get("pid")
                 or current.get("pid") != int(pid) or current.get("uid") != record.get("uid")
-                or canonical_start(current.get("start_id")) != started
+                or (current.get("birth") != birth if birth is not None
+                    else canonical_start(current.get("start_id")) != started)
                 or not _provider_command_matches(current.get("command", ""), str(binding.get("executable") or ""))):
             return row
         rebound = await self.store.rebind_observer_pane(
             row["stream_id"], generation=str(generation or ""), pane_pid=pid,
             pane_started_at=started, expected=binding,
+            **({"pane_birth": birth} if birth is not None else {}),
         )
         if not rebound:
             observation["reason"] = "cas_changed"
