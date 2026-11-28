@@ -100,13 +100,18 @@ def _utc_day() -> str:
 class StoreCallDiag:
     """Totals and alert state touched only by the Store worker thread."""
 
-    def __init__(self, *, today=_utc_day, summary_label="store_call_top", flush_send=True) -> None:
+    def __init__(self, *, today=_utc_day, summary_label="store_call_top", flush_send=True,
+                 worker=None, window_origin=None) -> None:
         #: async callable(ErrorFact); the daemon binds `Alerts.error`.
         self.alert = None
         self.failures = 0
         self._today = today
         self._summary_label = summary_label
         self._flush_send = flush_send
+        self.worker = worker
+        self.expired = 0
+        self._queue_wait = 0.0
+        self._window_origin: float | None = window_origin
         self._totals: dict[str, list] = {}
         self._window_start: float | None = None
         self._alert_day: str | None = None
@@ -117,23 +122,33 @@ class StoreCallDiag:
                caller: str = UNKNOWN) -> None:
         try:
             execution = max(0.0, finished - started)
+            queue_wait = max(0.0, started - queued)
+            self._queue_wait += queue_wait
             totals = self._totals.setdefault(name, [0, 0.0])
             totals[0] += 1
             totals[1] += execution
             if execution > SLOW_LINE_S:
                 log.info("store_call_slow %s", json.dumps(
-                    {"name": name, "caller": caller, "queue_ms": round(max(0.0, started - queued) * 1000, 3),
-                     "execution_ms": round(execution * 1000, 3)}, separators=(",", ":")))
+                    {"name": name, "caller": caller, "queue_ms": round(queue_wait * 1000, 3),
+                     "execution_ms": round(execution * 1000, 3),
+                     **({"worker": self.worker} if self.worker else {})}, separators=(",", ":")))
                 if execution > ALERT_S and not quiet:
                     self._hand_off(name, loop)
             if self._window_start is None:
-                self._window_start = finished
+                if self._window_origin is None:
+                    self._window_origin = finished
+                self._window_start = self._window_boundary(finished)
             elif finished - self._window_start >= SUMMARY_INTERVAL_S:
                 self._summarize(finished)
                 if self._flush_send:
                     loop.call_soon_threadsafe(send_counter.flush, finished)
         except Exception:
             self.failures += 1
+
+    def _window_boundary(self, now):
+        if SUMMARY_INTERVAL_S:
+            return now - (now - self._window_origin) % SUMMARY_INTERVAL_S
+        return now
 
     def _summarize(self, now: float) -> None:
         top = sorted(self._totals.items(), key=lambda item: item[1][1], reverse=True)[:TOP_N]
@@ -151,8 +166,11 @@ class StoreCallDiag:
                                                if group not in {"history_pages", "proof_reads"}), 3) for key in ("calls", "execution_ms")},
              "all_calls": {"calls": sum(t[0] for t in self._totals.values()),
                            "execution_ms": round(sum(t[1] for t in self._totals.values()) * 1000, 3)},
-             "instrumentation_failures": self.failures}, separators=(",", ":")))
-        self._totals, self._window_start = {}, now
+             "instrumentation_failures": self.failures,
+             **({"worker": self.worker, "expired": self.expired, "queue_ms": round(self._queue_wait * 1000, 3)}
+                if self.worker else {})}, separators=(",", ":")))
+        self._totals, self._window_start = {}, self._window_boundary(now)
+        self.expired, self._queue_wait = 0, 0.0
 
     def _hand_off(self, name: str, loop) -> None:
         # Schedule only; the worker never waits on, re-enters or networks for the alert.

@@ -43,7 +43,8 @@ import uuid
 from retention import (HistoryConnection, prepare_history_schema, history_query,
                        next_receipt_rowid, bind_history_archive, default_archive_path,
                        migrate_route_batch_archive, DELIVERY_PROOF_VALID,
-                       DELIVERY_PROOF_TARGET, DELIVERY_PROOF_WIRE)
+                       DELIVERY_PROOF_TARGET, DELIVERY_PROOF_WIRE, RetentionError,
+                       committed_history_binding, _history_identity_conflict)
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
 import store_call_diag
@@ -1579,6 +1580,15 @@ class StoreReadBusy(RuntimeError):
     """The reader already has four waiting calls."""
 
 
+class _StoreReader:
+    def __init__(self, worker, window_origin):
+        self.diag = store_call_diag.StoreCallDiag(
+            summary_label="store_read_top", flush_send=False, worker=worker, window_origin=window_origin)
+        self.queue = deque()
+        self.thread = None
+        self.active = False
+
+
 class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """Worker-owned SQLite connections; async callers use await."""
 
@@ -1617,7 +1627,8 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         # without limit. Past the cap `submit` fails fast rather than growing.
         self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=max_pending)
         self.progress = StoreProgress()
-        self.call_diag = store_call_diag.StoreCallDiag()
+        window_origin = time.monotonic()
+        self.call_diag = store_call_diag.StoreCallDiag(window_origin=window_origin)
         self._caller_store_classes = frozenset(cls.__name__ for cls in type(self).__mro__)
         self._thread: threading.Thread | None = None
         # Serializes the start/stop transition against `submit` so no callable is
@@ -1628,9 +1639,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         self._ready = threading.Event()
         self._shareable = path not in (":memory:", "")
         self._read_ready = threading.Condition(self._lock)
-        self._read_queue: deque[tuple] = deque()
-        self._read_thread: threading.Thread | None = None
-        self.read_diag = store_call_diag.StoreCallDiag(summary_label="store_read_top", flush_send=False)
+        self._advisory = _StoreReader("advisory", window_origin)
+        self._history = _StoreReader("history", window_origin)
+        self.read_diag, self.history_read_diag = self._advisory.diag, self._history.diag
+        self._history_binding = None
         self._start_error: BaseException | None = None
         self._columns: set[str] = set()
         # Written and read on the store thread after the composite projection
@@ -1686,10 +1698,12 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 if self._closing:
                     raise RuntimeError("store is still stopping: its worker still owns the database")
             else:
-                if self._read_thread is not None and self._read_thread.is_alive():
-                    raise RuntimeError("store is still stopping: its reader still owns a connection")
+                for reader in (self._advisory, self._history):
+                    if reader.thread is not None and reader.thread.is_alive():
+                        raise RuntimeError("store is still stopping: its reader still owns a connection")
+                    reader.thread = None
                 self._closing = False
-                self._read_thread = None
+                self._history_binding = None
                 self._ready.clear()
                 self._start_error = None
                 thread = self._thread = threading.Thread(target=self._run, name="store", daemon=True)
@@ -1725,7 +1739,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             return False
         try:
             thread = self._thread
-            reader = self._read_thread
+            workers = [thread, self._advisory.thread, self._history.thread]
             if thread is None:
                 return True
             if not self._closing:
@@ -1738,21 +1752,20 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                         self._queue.put_nowait(None)
                 except queue.Full:
                     pass
-            self._read_ready.notify()
+            self._read_ready.notify_all()
         finally:
             self._lock.release()
-        if thread is not threading.current_thread():
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        if reader is not None and reader is not threading.current_thread():
-            reader.join(timeout=max(0.0, deadline - time.monotonic()))
-        if thread.is_alive() or (reader is not None and reader.is_alive()):
+        for worker in workers:
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        if any(worker is not None and worker.is_alive() for worker in workers):
             log.warning("store stop deadline (%.2fs) expired; worker still owns the database, still stopping", timeout)
             return False
         if self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             try:
                 if self._thread is thread:
                     self._thread = None
-                    self._read_thread = None
+                    self._advisory.thread = self._history.thread = None
                     self._closing = False
             finally:
                 self._lock.release()
@@ -2118,6 +2131,9 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             self._columns = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
             from tell_proof import DeliveryLookup
             conn.delivery_lookup = DeliveryLookup(conn)
+            if self._shareable:
+                with suppress(RetentionError, sqlite3.Error):
+                    self._history_binding = committed_history_binding(conn, validate=conn.history_binding is None)
         except BaseException as exc:
             # Callers may have queued work while initialization ran; it will
             # never run, so close admission and fail it before reporting.
@@ -2148,6 +2164,10 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 else:
                     outcome, failed = result, False
                 finally:
+                    if conn.history_binding is not self._history_binding and not conn.in_transaction:
+                        with suppress(sqlite3.Error):
+                            binding = committed_history_binding(conn)
+                            self._history_binding = conn.history_binding = binding or self._history_binding
                     finished = time.monotonic()
                     self.progress.finish()
                 if timing is not None:
@@ -2166,7 +2186,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             # queued after the drain below, so a restart never inherits one.
             with self._lock:
                 self._closing = True
-                self._read_ready.notify()
+                self._read_ready.notify_all()
             try:
                 conn.close()
             finally:
@@ -2176,41 +2196,55 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 # must never be left pending.
                 self._fail_pending("store stopped before this callable ran")
 
-    def _run_reads(self) -> None:
+    def _run_reads(self, reader: _StoreReader) -> None:
         # The writer publishes its database URI and initializes WAL and schema first.
         self._ready.wait()
         conn = None
+        history = reader is self._history
         try:
             while True:
                 with self._read_ready:
-                    self._read_ready.wait_for(lambda: self._read_queue or self._closing)
-                    if not self._read_queue:
+                    reader.active = False
+                    self._read_ready.wait_for(lambda: reader.queue or self._closing)
+                    if not reader.queue:
                         return
-                    fn, fut, loop, queued, name, quiet, caller = self._read_queue.popleft()
+                    fn, fut, loop, queued, name, quiet, caller, deadline = reader.queue.popleft()
+                    reader.active = True
                     closing = self._closing
-                if closing:
+                started = time.monotonic()
+                if fut.cancelled() or (deadline is not None and started >= deadline):
+                    reader.diag.expired += 1
+                    complete, outcome = _set_exception, TimeoutError("store read expired before execution")
+                elif closing:
                     complete, outcome = _set_exception, RuntimeError("store stopped before this read ran")
                 else:
-                    started = time.monotonic()
                     try:
                         if conn is None:
-                            # Both connections use sqlite3's default busy timeout.
-                            conn = sqlite3.connect(self._database + "?mode=ro", uri=True)
+                            conn = sqlite3.connect(self._database + "?mode=ro", uri=True, factory=HistoryConnection)
                             try:
                                 conn.row_factory = sqlite3.Row
                                 conn.execute("PRAGMA query_only=1")
+                                if history:
+                                    from tell_proof import TellDeliveryParseCache
+                                    conn.history_reader = True
+                                    conn.delivery_parse_cache = TellDeliveryParseCache()
+                                    conn.create_function("history_identity_conflict", 0, _history_identity_conflict)
                             except BaseException:
                                 conn.close()
                                 conn = None
                                 raise
                         with conn:
-                            conn.execute("BEGIN")
+                            conn.lifecycle_front_desk = self.lifecycle_front_desk
+                            if history:
+                                conn.begin_history_read(self._history_binding)
+                            else:
+                                conn.execute("BEGIN")
                             outcome = fn(conn)
                     except BaseException as exc:
                         complete, outcome = _set_exception, exc
                     else:
                         complete = _set_result
-                    self.read_diag.record(name, quiet, loop, queued, started, time.monotonic(), caller)
+                    reader.diag.record(name, quiet, loop, queued, started, time.monotonic(), caller)
                 # A caller can cancel its future and close its loop mid-read.
                 with suppress(RuntimeError):
                     loop.call_soon_threadsafe(complete, fut, outcome)
@@ -2222,7 +2256,16 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
 
     async def read(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
         """Run an advisory main-database read and return materialized results."""
-        if not self._shareable:
+        return await self._read(self._advisory, fn, deadline=None)
+
+    async def read_history(self, fn: Callable[[HistoryConnection], Any], *, deadline: float | None = None) -> Any:
+        """Run a materialized history callback with an optional monotonic deadline at dequeue."""
+        if self._history_binding is None:
+            return await self.submit(fn)
+        return await self._read(self._history, fn, deadline=deadline)
+
+    async def _read(self, reader, fn, *, deadline):
+        if not self._shareable or host_transfer.actor_context.get() is not None:
             return await self.submit(fn)
         name, quiet = store_call_diag.admit(fn)
         caller = store_call_diag.capture_caller(self._caller_store_classes)
@@ -2231,14 +2274,16 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         with self._read_ready:
             if self._thread is None or self._closing:
                 raise RuntimeError("store is not running")
-            if len(self._read_queue) >= 4:
+            # Reserve the head for execution even before an idle worker pops it.
+            if reader is self._advisory and len(reader.queue) >= 4 + (not reader.active):
                 raise StoreReadBusy("store reader queue is full")
-            if self._read_thread is None:
-                reader = threading.Thread(target=self._run_reads, name="store-reader", daemon=True)
-                reader.start()
-                self._read_thread = reader
-            self._read_queue.append((fn, fut, loop, time.monotonic(), name, quiet, caller))
-            self._read_ready.notify()
+            if reader.thread is None:
+                thread = threading.Thread(target=self._run_reads, args=(reader,),
+                                          name=f"store-{reader.diag.worker}", daemon=True)
+                thread.start()
+                reader.thread = thread
+            reader.queue.append((fn, fut, loop, time.monotonic(), name, quiet, caller, deadline))
+            self._read_ready.notify_all()
         return await fut
 
     async def submit(self, fn: Callable[[sqlite3.Connection], Any], *, settle_on_cancel: bool = False) -> Any:
@@ -7233,6 +7278,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
         limit: int,
         generation: str | None = None,
         after_daemon_seq: int | None = None,
+        history: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch one newest-first cursor page, returned oldest-first.
 
@@ -7259,7 +7305,18 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
                 newest_first = read(conn)
                 if newest_first is None:
                     return []
-                deliveries = self._history_deliveries(conn, shared)
+                if conn.history_reader:
+                    from tell_proof import ProjectionDeliveries, ProjectionReuse
+                    version = conn.execute("PRAGMA main.data_version").fetchone()[0]
+                    if getattr(conn, "projection_version", None) != version:
+                        conn.projection_deliveries = ProjectionDeliveries()
+                        conn.projection_version = version
+                    deliveries = conn.projection_deliveries
+                    deliveries.reuse = deliveries.reuse or ProjectionReuse()
+                    deliveries.reuse.enable_dispatch()
+                    deliveries.reuse.enable_exact_anchors()
+                else:
+                    deliveries = self._history_deliveries(conn, shared)
                 try:
                     return list(reversed(_project_session_events_conn(
                         conn, newest_first, deliveries=deliveries)))
@@ -7268,7 +7325,7 @@ class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStore
             finally:
                 conn.execute("RELEASE session_history_snapshot")
 
-        return await self.submit(snapshot)
+        return await (self.read_history if history else self.submit)(snapshot)
 
     def _session_event_page_reader(
         self,
