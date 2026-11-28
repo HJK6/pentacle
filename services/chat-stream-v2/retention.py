@@ -31,6 +31,7 @@ an asyncio background task is a `BaseException` that bypasses ordinary handling.
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import logging
 import os
@@ -86,10 +87,22 @@ class HistoryConnection(sqlite3.Connection):
     history_archive_path: Path | None = None
     history_attachment_identity: tuple[int, int] | None = None
     history_schema_version: int | None = None
+    history_binding: tuple[Path, str, tuple[int, int]] | None = None
+    history_reader = False
     # Front-desk binding coordinates (store_lifecycle_authority.configured).
     lifecycle_front_desk: dict | None = None
     # Connection-scoped v2_tell_deliveries reply parse memo (tell_proof).
     delivery_parse_cache: Any = None
+
+    def begin_history_read(self, binding):
+        self.execute("BEGIN")
+        key = _binding_key(_sequence(self))  # Pin main before touching the archive.
+        if self.history_binding != binding:
+            if self.history_attachment_identity is not None:
+                self.execute("DETACH DATABASE receipt_archive")
+                self.history_attachment_identity = self.history_schema_version = None
+            self.history_binding = binding
+        self.history_archive_path = binding[0] if key == binding[:2] else None
 
 
 def _columns(conn, table, schema="main"):
@@ -283,6 +296,33 @@ def _open_archive(path: Path, *, create=False, readonly=False):
         raise RetentionError("required history archive unavailable") from exc
 
 
+def _binding_key(row):
+    if row and row["archive_ready"] and row["archive_path"]:
+        return Path(row["archive_path"]), row["pair_id"]
+    return None
+
+
+def committed_history_binding(conn, *, validate=False):
+    key = _binding_key(_sequence(conn))
+    if validate and key is not None:
+        path, pair_id = key
+        identity = _history_file_identity(path)
+        with closing(_open_archive(path, readonly=True)) as archive:
+            _archive_schema(conn, archive, initialize=False, pair_id=pair_id)
+        if _history_file_identity(path) == identity:
+            conn.history_binding = (*key, identity)
+    binding = conn.history_binding
+    return binding if binding is not None and key == binding[:2] else None
+
+
+def _history_file_identity(path):
+    try:
+        stat = Path(path).stat()
+        return stat.st_dev, stat.st_ino
+    except OSError as exc:
+        raise RetentionError("history archive path unavailable") from exc
+
+
 def initialize_history_pair(conn) -> None:
     """Seed within the caller's transaction; never commit a composite admission."""
     import uuid
@@ -297,6 +337,7 @@ def initialize_history_pair(conn) -> None:
     pair_id = row["pair_id"] if row else None
     archive = _open_archive(path, create=bool(row and not row["archive_ready"]))
     try:
+        identity = _history_file_identity(path)
         if pair_id is None:
             marker = archive.execute("SELECT 1 FROM sqlite_master WHERE name='v2_receipt_route_archive'").fetchone()
             pair_id = (archive.execute("SELECT pair_id FROM v2_receipt_route_archive WHERE singleton=1").fetchone()[0]
@@ -310,6 +351,7 @@ def initialize_history_pair(conn) -> None:
                          (maximum, pair_id, str(path)))
         else:
             conn.execute("UPDATE v2_send_receipt_sequence SET high_water=?,archive_ready=1 WHERE singleton=1", (maximum,))
+        conn.history_binding = (Path(path), pair_id, identity)
     finally:
         archive.close()
 
@@ -358,39 +400,47 @@ def bind_history_archive(conn, path: Path) -> None:
 
 
 def _attached_history(conn):
-    initialize_history_pair(conn)
+    reader = getattr(conn, "history_reader", False)
+    if not reader:
+        initialize_history_pair(conn)
     path = getattr(conn, "history_archive_path", None)
     if path is None:
+        if reader:
+            raise RetentionError("history archive binding not validated")
         return None
     # Check the name as well as the open SQLite handle: an unlinked inode is an
     # outage, not an indefinitely healthy historical snapshot.
-    try:
-        stat = Path(path).stat()
-        identity = (stat.st_dev, stat.st_ino)
-    except OSError as exc:
-        raise RetentionError("history archive path unavailable") from exc
-    previous = getattr(conn, "history_attachment_identity", None)
+    identity = _history_file_identity(path)
+    pair_id = _sequence(conn)["pair_id"]
+    binding = getattr(conn, "history_binding", None)
+    attached = getattr(conn, "history_attachment_identity", None)
+    previous = binding[2] if reader else attached
     if previous is not None and previous != identity:
         raise RetentionError("history archive replaced; reopen the Store after validating the pair")
-    if previous is None:
-        archive = _open_archive(path, readonly=True)
-        try:
-            _archive_schema(conn, archive, initialize=False, pair_id=_sequence(conn)["pair_id"])
-        finally:
-            archive.close()
+    if attached is None:
+        with closing(_open_archive(path, readonly=True)) as archive:
+            _archive_schema(conn, archive, initialize=False, pair_id=pair_id)
         conn.execute("ATTACH DATABASE ? AS receipt_archive", (Path(path).absolute().as_uri() + "?mode=ro",))
+        if reader:
+            try:
+                attached_path = conn.execute(
+                    "SELECT file FROM pragma_database_list WHERE name='receipt_archive'").fetchone()[0]
+                if _history_file_identity(attached_path) != previous:
+                    raise RetentionError("history archive replaced during attachment")
+            except RetentionError:
+                conn.execute("DETACH DATABASE receipt_archive")
+                raise
         conn.history_attachment_identity = identity
     version = conn.execute("PRAGMA receipt_archive.schema_version").fetchone()[0]
     if version != getattr(conn, "history_schema_version", None):
-        archive = _open_archive(path, readonly=True)
-        try:
-            _archive_schema(conn, archive, initialize=False, pair_id=_sequence(conn)["pair_id"])
-        finally:
-            archive.close()
+        with closing(_open_archive(path, readonly=True)) as archive:
+            _archive_schema(conn, archive, initialize=False, pair_id=pair_id)
         conn.history_schema_version = version
     marker = conn.execute("SELECT version,pair_id FROM receipt_archive.v2_receipt_route_archive WHERE singleton=1").fetchone()
-    if marker is None or tuple(marker) != (1, _sequence(conn)["pair_id"]):
+    if marker is None or tuple(marker) != (1, pair_id):
         raise RetentionError("history archive pair mismatch")
+    if isinstance(conn, HistoryConnection) and not reader and binding is None:
+        conn.history_binding = (path, pair_id, identity)
     return "receipt_archive"
 
 
