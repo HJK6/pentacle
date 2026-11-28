@@ -428,6 +428,18 @@ def test_reader_routes_show_and_emission(tmp_path, monkeypatch):
         server.work_lanes.request_emit()
         await server.work_lanes._task
         assert len(env.broadcasts) == count + 1
+        await env.store.submit(lambda c: (c.execute("INSERT INTO v2_host_transfer_retirements VALUES (?,?,?,?)", (FD, env.gen, "fixture", 1.0)), c.execute("UPDATE v2_assistant_composite_lanes SET title='Retired actor' WHERE lane_id=?", (lid,)), c.commit()))
+        with pytest.raises(transfer.TransferError): await env.store.submit(lambda c: transfer.require_active(c, FD, env.gen))
+        seen[env.store.read_diag].clear()
+        count = len(env.broadcasts)
+        token = transfer.actor_context.set((FD, env.gen))
+        try:
+            server.work_lanes.request_emit()
+            await server.work_lanes._task
+        finally:
+            transfer.actor_context.reset(token)
+        assert any("work_lane_snapshot" in name for name in seen[env.store.read_diag])
+        assert len(env.broadcasts) == count + 1 and env.broadcasts[-1]["type"] == "work_lanes.inventory"
     run(body, path=str(tmp_path / "routing.db"))
 
 
