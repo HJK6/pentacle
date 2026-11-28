@@ -23,6 +23,7 @@ log = logging.getLogger("chat_streamd_v2.queued_send_now")
 
 PREFIX = "queued-send-now.operation."
 CONTINUE_RETRY_DELAY_S = 5.0
+IDLE_SCAN_INTERVAL_S = 30.0
 PINS = {
     "claude": ("2.1.312 (Claude Code)", "6b5ec691195e551b02c41df9f7d723f4ea61eaa03c2df90acefe3736f1aeb620"),
     "codex": ("codex-cli 0.160.0", "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b"),
@@ -148,6 +149,8 @@ class QueuedSendNow:
         self.closed = False
         self.tick_lock = asyncio.Lock()
         self.scan_offset = 0
+        self.may_have_work = True
+        self.next_scan_at = 0.0
 
     async def _peer_tmux(self, row):
         if row["host"] == self.sessions.local_host:
@@ -262,7 +265,10 @@ class QueuedSendNow:
                     conn.execute("UPDATE kv SET v=? WHERE k=?", (json.dumps(value), PREFIX + key))
                     return value, True
                 return value, False
-        return await self.store.submit(operation)
+        value, changed = await self.store.submit(operation)
+        if changed and value["state"] not in TERMINAL:
+            self.may_have_work = True
+        return value, changed
 
     async def _events(self, sid):
         # Query retained authoritative history, not a bounded arrival-order tail.
@@ -483,6 +489,7 @@ class QueuedSendNow:
         """Coalesce native-event notifications; never block the ingest pump."""
         if self.closed:
             return
+        self.may_have_work = True
         self.dirty = True
         if self.reconcile_task is not None and not self.reconcile_task.done():
             return
@@ -501,11 +508,28 @@ class QueuedSendNow:
                 await self._tick()
 
     async def _tick(self):
+        now = self.clock()
+        if not self.may_have_work and now < self.next_scan_at:
+            return
+
         def pending(conn):
             values = [json.loads(row[0]) for row in conn.execute("SELECT v FROM kv WHERE k LIKE ?", (PREFIX + "%",))]
             return [v for v in values if v["state"] not in TERMINAL | {"queued"}
                     or (v["state"] == "indeterminate" and v.get("reason") in {"key_dispatch_uncertain", "key_dispatch_crash"})]
-        waiting = await self.store.submit(pending)
+
+        # Consume the wake before yielding so writes and events during the scan survive.
+        self.may_have_work = False
+        try:
+            waiting = await self.store.submit(pending)
+        except BaseException:
+            self.may_have_work = True
+            raise
+        self.next_scan_at = now + IDLE_SCAN_INTERVAL_S
+        for operation in waiting:
+            if operation["state"] == "continue_retry_wait":
+                self.next_scan_at = min(self.next_scan_at, operation["next_retry_at"])
+            else:
+                self.may_have_work = True
         start = self.scan_offset % len(waiting) if waiting else 0
         selected = (waiting[start:] + waiting[:start])[:8]
         self.scan_offset = start + len(selected)
