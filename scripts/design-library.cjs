@@ -13,9 +13,9 @@ function parse(argv) {
   }
   return { command, options };
 }
-async function run(argv) {
+async function run(argv, hooks = {}) {
   const { command, options: o } = parse(argv);
-  if (!o.library && ['publish', 'record', 'verify', 'rollback', 'link-preview'].includes(command)) o.library = process.env.PENTACLE_DESIGN_LIBRARY_ROOT || path.join(os.homedir(), 'agent-workspace', 'design-library');
+  if (!o.library && ['publish', 'record', 'verify', 'rollback', 'link-preview', 'export', 'prune'].includes(command)) o.library = process.env.PENTACLE_DESIGN_LIBRARY_ROOT || path.join(os.homedir(), 'agent-workspace', 'design-library');
   const need = key => { if (!o[key]) throw new Error(`--${key} is required`); return path.resolve(o[key]); };
   if (command === 'import') {
     const result = library.importDrop({ drop: need('drop'), staging: need('staging'), dependencies: o.dependencies ? library.readJson(need('dependencies')) : {}, library: o.library ? need('library') : null });
@@ -78,28 +78,63 @@ async function run(argv) {
     return { verified: true, project_id: r.manifest.project_id, revision_id: r.manifest.revision_id, files: r.manifest.files.length };
   }
   if (command === 'publish') {
-    const root = need('library');
+    const keep = o.keep === undefined ? 3 : o.keep === 'all' ? null : Number(o.keep);
+    if (keep !== null && (!Number.isInteger(keep) || keep < 2)) throw new Error('--keep must be "all" or a whole number of at least 2');
+    const root = need('library'), recorder = require('../lib/design_record.cjs');
+    const timings = {}; let lap = Date.now();
+    const phase = name => { const now = Date.now(); timings[name] = now - lap; lap = now; };
     const imported = library.importDrop({ drop: need('drop'), staging: need('staging'), dependencies: o.dependencies ? library.readJson(need('dependencies')) : {}, library: root });
-    imported.manifest.profile.capture = await require('../lib/design_record.cjs').captureProfile();
+    const project = imported.manifest.project_id;
+    imported.manifest.profile.capture = await (hooks.captureProfile || recorder.captureProfile)();
     imported.input_id = imported.manifest.input_id = library.inputIdentity(imported.manifest.provenance, imported.manifest.profile);
     library.atomicJson(path.join(imported.dir, 'manifest.json'), imported.manifest);
+    phase('import');
     // Idempotence requires verification, never just trusting input_id on disk.
-    const reader = library.createLibraryReader(root), catalog = reader.catalog();
-    for (const r of catalog.projects.find(p => p.id === imported.manifest.project_id)?.revisions || []) {
-      const existing = reader.revision(imported.manifest.project_id, r.revision_id);
+    const reader = library.createLibraryReader(root), catalog = reader.catalog(), retained = [];
+    for (const r of catalog.projects.find(p => p.id === project)?.revisions || []) {
+      const existing = reader.revision(project, r.revision_id);
       if (existing.manifest.input_id === imported.input_id) {
         if (!existing.manifest.complete) return { revision_id: r.revision_id, current: false, incomplete: true, reused: true };
-        if (reader.selected(imported.manifest.project_id).manifest?.revision_id !== r.revision_id) library.rollback({ library: root, project: imported.manifest.project_id, revision: r.revision_id });
+        if (reader.selected(project).manifest?.revision_id !== r.revision_id) library.rollback({ library: root, project, revision: r.revision_id });
         return { revision_id: r.revision_id, current: true, reused: true };
       }
+      if (existing.manifest.complete) retained.push(existing);
     }
+    retained.sort((a, b) => b.manifest.imported_at.localeCompare(a.manifest.imported_at) || b.manifest.revision_id.localeCompare(a.manifest.revision_id));
+    phase('verify');
     await require('../lib/design_prepare.cjs').prepareRevision(imported.dir);
-    await require('../lib/design_record.cjs').recordRevision(imported.dir, { out: o.out ? need('out') : imported.dir });
-    library.finalize(imported.dir);
-    return library.publishRevision({ dir: imported.dir, library: root });
+    phase('prepare');
+    const recorded = await recorder.recordRevision(imported.dir, { out: o.out ? need('out') : imported.dir, retained, capture: hooks.capture, profile: imported.manifest.profile.capture });
+    phase('record');
+    library.finalize(imported.dir, { selected: reader.selected(project), library: root });
+    phase('finalize');
+    const result = library.publishRevision({ dir: imported.dir, library: root });
+    phase('install');
+    const generated = recorded.views.map(view => view.generated).filter(Boolean);
+    const outcome = { ...result, counts: { captured: generated.filter(g => !g.reused_from).length, reused: generated.filter(g => g.reused_from).length } };
+    if (result.current && !result.reused && !result.incomplete && keep !== null) {
+      // Pruning follows only a selection this process has just read back verified.
+      try {
+        if (library.createLibraryReader(root).selected(project).manifest?.revision_id !== result.revision_id) throw new Error('the new selection did not verify');
+        const pruned = library.pruneProject({ library: root, project, keep, apply: true });
+        outcome.pruned = { removed: pruned.remove.map(r => r.revision_id), bytes: pruned.bytes };
+      } catch (error) { outcome.pruned = { refused: error.message }; }
+      phase('prune');
+    }
+    return { ...outcome, timings_ms: timings };
+  }
+  if (command === 'export') {
+    if (!o.project) throw new Error('--project is required');
+    return library.exportDrop({ library: need('library'), project: o.project, out: need('out') });
+  }
+  if (command === 'reindex') return { drop: need('drop'), files: library.reindexDrop(need('drop')) };
+  if (command === 'prune') {
+    if (!o.project) throw new Error('--project is required');
+    if (o.apply !== undefined && o.apply !== 'yes') throw new Error('--apply takes only yes');
+    return library.pruneProject({ library: need('library'), project: o.project, keep: o.keep === undefined ? 3 : Number(o.keep), apply: o.apply === 'yes' });
   }
   if (command === 'rollback') return library.rollback({ library: need('library'), project: o.project, revision: o.revision });
-  throw new Error('usage: design-library.cjs import|board|prepare|record|verify|publish|rollback|link-preview --name value; see docs/design-library.md');
+  throw new Error('usage: design-library.cjs import|board|prepare|record|verify|publish|export|reindex|prune|rollback|link-preview --name value; see docs/design-library.md');
 }
 if (require.main === module) run(process.argv.slice(2)).then(result => console.log(JSON.stringify(result))).catch(error => { console.error(error.message); process.exitCode = 1; });
 module.exports = { parse, run };
