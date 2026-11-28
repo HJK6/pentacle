@@ -99,11 +99,13 @@ def _utc_day() -> str:
 class StoreCallDiag:
     """Totals and alert state touched only by the Store worker thread."""
 
-    def __init__(self, *, today=_utc_day) -> None:
+    def __init__(self, *, today=_utc_day, summary_label="store_call_top", flush_send=True) -> None:
         #: async callable(ErrorFact); the daemon binds `Alerts.error`.
         self.alert = None
         self.failures = 0
         self._today = today
+        self._summary_label = summary_label
+        self._flush_send = flush_send
         self._totals: dict[str, list] = {}
         self._window_start: float | None = None
         self._alert_day: str | None = None
@@ -127,7 +129,8 @@ class StoreCallDiag:
                 self._window_start = finished
             elif finished - self._window_start >= SUMMARY_INTERVAL_S:
                 self._summarize(finished)
-                loop.call_soon_threadsafe(send_counter.flush, finished)
+                if self._flush_send:
+                    loop.call_soon_threadsafe(send_counter.flush, finished)
         except Exception:
             self.failures += 1
 
@@ -138,7 +141,7 @@ class StoreCallDiag:
             matching = [totals for name, totals in self._totals.items() if name.startswith(prefixes)]
             groups[group] = {"calls": sum(t[0] for t in matching),
                              "execution_ms": round(sum(t[1] for t in matching) * 1000, 3)}
-        log.info("store_call_top %s", json.dumps(
+        log.info(self._summary_label + " %s", json.dumps(
             {"window_s": round(now - self._window_start, 3),
              "top": [{"name": name, "calls": calls, "execution_ms": round(total * 1000, 3)}
                      for name, (calls, total) in top],
