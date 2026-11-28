@@ -16,6 +16,17 @@ Malformed input produces a transport error:
 
 Handler failures retain the requested verb. Expected failures use stable error codes; unexpected failures use `internal_error`.
 
+## Protocol versions
+
+| Version | Introduced | What a client must handle | Status |
+|---|---|---|---|
+| 2 | PR 663, commit `8fa5cf28`, 2026-11-24 | The wire contract described in this guide. | supported |
+
+Earlier daemons spoke version 2 without advertising a protocol version. To add a
+version, raise the maximum, add a table row and its contract test, and add a
+CHANGELOG line in one PR. To drop one, raise the minimum, mark its row `dropped`,
+remove its contract test, and add a CHANGELOG line in one PR.
+
 ## Handshake
 
 The server sends `welcome` first:
@@ -24,6 +35,10 @@ The server sends `welcome` first:
 {
   "type": "welcome",
   "runtime_sha": "<checkout-sha-or-empty>",
+  "schema_version": 2,
+  "protocol_version": 2,
+  "min_protocol_version": 2,
+  "max_protocol_version": 2,
   "auth_required": false,
   "auth": {"operator": {
     "protocol_version": 2, "scheme": "hmac-sha256-v2",
