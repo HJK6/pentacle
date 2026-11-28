@@ -363,6 +363,7 @@ async def run(args: argparse.Namespace) -> int:
     tmux = Tmux(args.tmux_bin)
     alerts = Alerts(store)
     store.call_diag.alert = alerts.error
+    store.read_diag.alert = store.history_read_diag.alert = alerts.error
     watchdog = LoopWatchdog.from_env(store, alerts)
     # Peers come from `machines.json` (lifted v1 config: PENTACLE_MACHINES_JSON /
     # PENTACLE_MACHINES_FILE / ~/.config/pentacle-stream/machines.json). Every
