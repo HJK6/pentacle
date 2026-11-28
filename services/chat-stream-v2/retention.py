@@ -1693,7 +1693,7 @@ class RetentionJob:
                 raise
             except Exception as exc:
                 failures += 1
-                delay = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** (failures - 1)))
+                delay = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** min(failures - 1, 1023)))
                 log.warning("retention pass failed (%d): %s; retrying in %.0fs", failures, exc, delay)
 
     # -- store-thread plumbing --------------------------------------------

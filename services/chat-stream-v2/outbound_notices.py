@@ -588,6 +588,6 @@ class OutboundNoticeQueue:
                 failures += 1
                 delay = min(
                     NOTICE_BACKOFF_MAX_S,
-                    NOTICE_BACKOFF_BASE_S * (2 ** max(0, failures - 1)),
+                    NOTICE_BACKOFF_BASE_S * (2 ** min(failures - 1, 1023)),
                 )
                 log.exception("outbound notice sweep failed; retrying in %.1fs", delay)

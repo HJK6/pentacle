@@ -322,7 +322,7 @@ class Hosts:
             else:
                 st.reason = "unreachable_after_online" if st.ever_online else "unreachable"
             over = max(0, st.consecutive_failures - self.cfg.breaker_threshold)
-            backoff = min(self.cfg.backoff_cap_s, self.cfg.backoff_base_s * (2 ** over))
+            backoff = min(self.cfg.backoff_cap_s, self.cfg.backoff_base_s * (2 ** min(over, 1023)))
             st.next_probe_at = now + backoff
         if (
             was_online is not st.online
