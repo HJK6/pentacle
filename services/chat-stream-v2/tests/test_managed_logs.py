@@ -190,6 +190,46 @@ def env_for(cfg):
             'PENTACLE_DAEMON_LOG_MAX_BYTES': str(cfg.max_bytes), 'PENTACLE_DAEMON_LOG_BACKUPS': str(cfg.backups)}
 
 
+def run_hourly(cfg, messages, hourly_max=1024, hourly_backups=3):
+    script = '''
+import logging, sys
+import managed_logs
+managed_logs.DEFAULT_MAX_BYTES = int(sys.argv[1])
+managed_logs.DEFAULT_BACKUPS = int(sys.argv[2])
+managed_logs.install()
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+log = logging.getLogger("chat_streamd_v2.store")
+for message in sys.argv[3:]: log.info("%s", message)
+'''
+    env = {**os.environ, **env_for(cfg), 'PYTHONPATH': str(SERVICE)}
+    result = subprocess.run([sys.executable, '-c', script, str(hourly_max), str(hourly_backups), *messages],
+                            env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+def test_hourly_records_survive_general_rotation_and_restart(tmp_path):
+    cfg = config(tmp_path, 80, 1)
+    messages = ['store_call_top first', 'store_read_top second', 'send_latency third']
+    run_hourly(cfg, messages + ['chatter ' + 'x' * 50] * 8)
+    assert all(message.encode() not in retained(cfg, cfg.stderr) for message in messages)
+    hourly = tmp_path / 'hourly.log'
+    lines = hourly.read_text().splitlines()
+    assert [line.split(' chat_streamd_v2.store ', 1)[-1] for line in lines] == messages
+    run_hourly(cfg, ['send_latency after-restart'])
+    assert hourly.read_text().splitlines()[:3] == lines
+    assert hourly.read_text().splitlines()[-1].endswith('send_latency after-restart')
+    cfg.validate((io.StringIO(), io.StringIO()))
+
+
+def test_hourly_rotation_obeys_its_own_cap(tmp_path):
+    cfg = config(tmp_path, 1024, 1)
+    run_hourly(cfg, ['send_latency ' + str(i) * 20 for i in range(12)], 128, 2)
+    files = [tmp_path / name for name in ('hourly.log', 'hourly.log.1', 'hourly.log.2')]
+    assert all(path.exists() and path.stat().st_size <= 128 for path in files)
+    assert 'send_latency ' + '11' * 20 in files[0].read_text()
+    cfg.validate((io.StringIO(), io.StringIO()))
+
+
 def test_deployment_reads_both_managed_streams_and_retained_boot_boundary(tmp_path, monkeypatch):
     cfg = config(tmp_path, 128)
     cfg.stdout.touch(); cfg.stderr.touch()
