@@ -248,6 +248,102 @@ const deleting = isolated(async ctx => {
   ctx.report.ok('deleted chat absent from surviving title list', await ctx.session.eval(`!${query(row(A))}`));
 });
 
+const headerTools = isolated(async ctx => {
+  await command(ctx, { settings: { rows: { [C]: { role: 'web-gate-chat-tools-protected' } } } });
+  await select(ctx, A); await select(ctx, B);
+  const hb = (seat, label) => `${card(seat)} .card-head [aria-label="${label}"]`;
+  ctx.report.ok('open chat header shows Rename and Delete beside full screen and close',
+    await ctx.session.eval(`${shown(hb('chat', 'Rename'))} && ${shown(hb('chat', 'Delete'))} && ${shown(hb('chat', 'Full screen'))} && ${shown(hb('chat', 'Close'))}`));
+  const fits = seat => `(() => { const h=${query(card(seat) + ' .card-head')}, c=${query(card(seat))}.getBoundingClientRect();
+    return h.scrollWidth <= h.clientWidth && [...h.querySelectorAll('button')].filter(b => b.getClientRects().length).every(b => { const r=b.getBoundingClientRect(); return r.left >= c.left && r.right <= c.right; }); })()`;
+  const askFits = async seat => {
+    await ctx.session.click(hb(seat, 'Delete'));
+    await wait(ctx, shown(card(seat) + ' .next-chat-question'), 'question open for fit');
+    const ok = await ctx.session.eval(fits(seat));
+    await ctx.session.click(card(seat) + ' .next-chat-cancel');
+    return ok;
+  };
+  ctx.report.ok('header and Delete question fit two side-by-side cards', await ctx.session.eval(fits('chat')) && await ctx.session.eval(fits('chat2'))
+    && await askFits('chat') && await askFits('chat2'));
+  const enterIcon = await ctx.session.eval(`${query(hb('chat2', 'Full screen'))}.innerHTML`);
+  await ctx.session.click(hb('chat2', 'Full screen'));
+  await wait(ctx, shown(hb('chat2', 'Leave full screen')), 'full screen entered');
+  ctx.report.ok('leaving full screen has its own icon', await ctx.session.eval(`${query(hb('chat2', 'Leave full screen'))}.innerHTML !== ${JSON.stringify(enterIcon)}`));
+  await ctx.session.click(hb('chat2', 'Leave full screen'));
+  await wait(ctx, `${shown(card('chat'))} && ${query(hb('chat2', 'Full screen'))}?.innerHTML === ${JSON.stringify(enterIcon)}`, 'full screen left');
+  const edit = card('chat') + ' .card-title .next-chat-edit';
+  await ctx.session.click(hb('chat', 'Rename'));
+  await wait(ctx, `!!${query(edit)}`, 'header Rename input opens');
+  await ctx.session.eval(`(() => { const el=${query(edit)}; el.value='Header renamed';
+    el.dispatchEvent(new KeyboardEvent('keydown',{ key:'Enter', bubbles:true, cancelable:true })); return true; })()`);
+  await wait(ctx, `${text(title('chat'))}==='Header renamed'`, 'header rename visible');
+  await waitCall(ctx, r => r.verb === 'rename' && r.session_name === A && r.display_name === 'Header renamed');
+  await ctx.session.click(rail);
+  await wait(ctx, `${text(row(A))}==='Header renamed'`, 'header rename reaches the list');
+  await ctx.session.click(rail);
+  await wait(ctx, `!${shown(menu)}`, 'chat list closed');
+  await wait(ctx, `${query(hb('chat', 'Delete'))}?.disabled === false`, 'header Delete enabled after the rename settles');
+  await ctx.session.click(hb('chat', 'Delete'));
+  await wait(ctx, `${text(card('chat') + ' .next-chat-question')}==='Delete chat?'`, 'header confirmation');
+  await ctx.session.click(card('chat') + ' .next-chat-cancel');
+  ctx.report.ok('header Cancel restores every control and focus without a close request',
+    !calls(ctx).some(r => r.verb === 'close') && await ctx.session.eval(`${['Rename', 'Delete', 'Full screen', 'Close'].map(l => shown(hb('chat', l))).join(' && ')}
+      && !${query(card('chat') + ' .next-chat-question')} && document.activeElement === ${query(hb('chat', 'Delete'))}`));
+  await ctx.session.click(hb('chat', 'Delete'));
+  await ctx.session.click(card('chat') + ' .next-chat-confirm');
+  const close = await waitCall(ctx, r => r.verb === 'close' && r.session_name === A);
+  ctx.report.ok('header delete sends the confirmed, forced close', close.operator_confirm === true && close.force === true);
+  await wait(ctx, `${query(card('chat'))}.hidden && ${shown(card('chat2'))}`, 'deleted chat leaves the screen');
+  await select(ctx, C, title('chat2'));
+  await wait(ctx, `${query(card('chat2') + ' .thread-inner')}.dataset.streamId==='local:${C}'`, 'protected chat open');
+  ctx.report.ok('protected chat header has no Rename or Delete', await ctx.session.eval(`!${shown(hb('chat2', 'Rename'))} && !${shown(hb('chat2', 'Delete'))}`));
+  await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await select(ctx, B);
+  await wait(ctx, `[...document.querySelectorAll('.chat-card:not([hidden]) .thread-inner')].some(el => el.dataset.streamId==='local:${B}')`, 'phone chat open');
+  const seat = await ctx.session.eval(`document.querySelector('.chat-card:not([hidden])').dataset.pane`);
+  ctx.report.ok('phone header shows Rename and Delete and fits, with and without the question',
+    await ctx.session.eval(`${shown(hb(seat, 'Rename'))} && ${shown(hb(seat, 'Delete'))}`) && await ctx.session.eval(fits(seat)) && await askFits(seat));
+});
+
+// Advisor ruling 4a0ab377: coverage by the Assistant overlay cancels a Delete question,
+// a snapshot never lets the first inventory omission close an open card, and a genuine
+// close still closes only its own card. One reproduction per scenario, so each can fail alone.
+const seatOf = name => `[...document.querySelectorAll('.chat-card')].find(c => c.querySelector('.thread-inner')?.dataset.streamId==='local:${name}')`;
+const isOpen = name => `(!!(${seatOf(name)}) && !(${seatOf(name)}).hidden)`;
+const headerCover = isolated(async ctx => {
+  await select(ctx, A); await select(ctx, B);
+  await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 900, deviceScaleFactor: 1, mobile: false });
+  await wait(ctx, isOpen(A), 'chat A on screen at 900 px');
+  const seatA = await ctx.session.eval(`(${seatOf(A)}).dataset.pane`);
+  await ctx.session.click(`${card(seatA)} .card-head [aria-label="Delete"]`);
+  await wait(ctx, shown(card(seatA) + ' .next-chat-question'), 'Delete question armed in A');
+  await ctx.session.click('.rail .brand');
+  await wait(ctx, `!!document.querySelector('.assistant-overlay:not([hidden])')`, 'Assistant overlay over A');
+  await ctx.session.click('.rail .brand');
+  await wait(ctx, `!document.querySelector('.assistant-overlay:not([hidden])') && ${isOpen(A)}`, 'overlay dismissed');
+  ctx.report.ok('Assistant overlay coverage cancels the Delete question', await ctx.session.eval(
+    `!${query(card(seatA) + ' .next-chat-question')} && ${shown(card(seatA) + ' .card-head [aria-label="Delete"]')}`));
+  ctx.report.ok('the overlay round trip sends no close', !calls(ctx).some(r => r.verb === 'close'));
+});
+const snapshotThenOmission = kind => isolated(async ctx => {
+  await select(ctx, A); await select(ctx, B);
+  await wait(ctx, `${isOpen(A)} && ${isOpen(B)}`, 'two chats open');
+  await command(ctx, {});
+  await command(ctx, { snapshot: kind });
+  await command(ctx, { settings: { omit: [A] } });
+  await sleep(1500);
+  ctx.report.ok(`after a ${kind === 'full' ? 'populated snapshot' : 'snapshot without sessions'} the first omission keeps the open card`,
+    await ctx.session.eval(`${isOpen(A)} && ${isOpen(B)}`));
+  // A genuine close, seen by two comparable inventories, closes only its own card.
+  await command(ctx, { settings: { omit: [] } });
+  await command(ctx, {});
+  await command(ctx, { close: A });
+  await wait(ctx, `!${isOpen(A)} && ${isOpen(B)}`, 'genuine close dismisses only the matching card');
+  ctx.report.ok('a genuine close dismisses only the matching card, with no close request', !calls(ctx).some(r => r.verb === 'close'));
+});
+const headerSnapshot = snapshotThenOmission('full');
+const headerBareSnapshot = snapshotThenOmission('bare');
+
 const unread = isolated(async ctx => {
   await select(ctx, A);
   await command(ctx, { settings:{ rows:{[B]: {last_kind:'ASSIST',last_text:'New offstage answer'} } } });
@@ -362,4 +458,4 @@ const phone = isolated(async ctx => {
   await wait(ctx, shown('[data-pane=chat] .slot-chat-send-status .stream'), 'phone send status visible');
 }, { width: 440 });
 
-module.exports = { switching, head, renaming, deleting, unread, work, sendStatus, phone };
+module.exports = { switching, head, renaming, deleting, headerTools, headerCover, headerSnapshot, headerBareSnapshot, unread, work, sendStatus, phone };

@@ -1,12 +1,33 @@
 """In-process reply and confirmation totals for completed chat sends."""
 
+import asyncio
 import json
 import logging
 import math
 import time
 
+from loop_watchdog import RequestTiming, request_timing
+
 log = logging.getLogger("chat_streamd_v2.store")
 SUMMARY_INTERVAL_S = 3600.0
+
+
+class SendAttempt(RequestTiming):
+    paste_ms = proof_poll_ms = 0.0
+    proof_polls = 0
+    parent = None
+
+    def add(self, queued, started, finished):
+        super().add(queued, started, finished)
+        if self.parent is not None:
+            self.parent.add(queued, started, finished)
+
+    async def measure(self, field, action, *args, **kwargs):
+        started = time.monotonic()
+        try:
+            return await action(*args, **kwargs)
+        finally:
+            setattr(self, field, getattr(self, field) + (time.monotonic() - started) * 1000)
 
 
 class SendTiming:
@@ -22,6 +43,15 @@ class SendTiming:
             "backend_attempts": 0, "backend_proof_under_1s": 0, "backend_pending_proof": 0, "backend_worst_ms": 0,
         }
         self.failures = 0
+
+    def emit(self, name, fields):
+        """Schedule the line without waiting. It may precede the socket write."""
+        def write():
+            try:
+                log.info("%s %s", name, json.dumps(fields, separators=(",", ":")))
+            except Exception:
+                self.failures += 1
+        asyncio.get_running_loop().call_soon(write)
 
     def record(self, started: float, result: dict, *, backend: bool = False) -> None:
         try:

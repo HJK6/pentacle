@@ -56,9 +56,26 @@ Lanes. The phone layout still shows one section at a time and does not change.
 Use a chat's title to switch it in place. Picking the chat already in the
 other card swaps the two sessions without moving their seats. The rail still
 opens chats with its existing placement rules. Both lists show working and
-unread state and reveal Rename and Delete on hover or keyboard focus. Rename
-saves on Enter or blur; Escape cancels. Delete asks in the row before closing
-the actual session, and the configured assistant cannot be renamed or deleted.
+unread state and reveal Rename and Delete on hover or keyboard focus. An open
+chat's header also shows Rename and Delete, beside Status, Terminal, full screen
+and close. Rename edits the title in place. It saves on Enter or blur, and
+Escape cancels. Delete asks in the row or the header before closing the actual
+session, and the configured assistant cannot be renamed or deleted. Full screen
+and Leave full screen have different icons: arrows pointing out, and arrows
+pointing in.
+
+A chat closed anywhere else (another client, the agent itself, or the daemon)
+leaves the screen too. Its card closes when the daemon's open inventory marks the
+chat closed, or when the chat drops out between two inventories on the same
+connection. Every snapshot, with or without sessions, and every reconnect start a
+fresh view: only a later inventory sets the baseline, because a new view can see a
+different set of chats. A chat
+that was just started, and is not listed yet, stays open.
+
+An open Delete question closes if the card is covered (including by the
+Assistant overlay), hidden or changes full screen, and Escape answers it before
+anything else. Rename and Delete show only
+for a listed chat that the list could also rename or delete.
 
 An unread chat has a latest non-operator message different from the one last
 displayed while the page and the card were visible. The Assistant has the same
