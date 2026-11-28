@@ -182,16 +182,27 @@ def _stage_timeout(nbytes: int) -> float:
     return min(STAGE_TIMEOUT_CEILING_S, scaled)
 
 
-# The daemon's own assistant configuration. tmux takes its global environment
-# from the first client that starts the server and every pane inherits it, so
-# these must not travel with the daemon's local tmux calls.
+# tmux takes its global environment from the client that starts the server.
+# Keep daemon-only settings out of the environment inherited by its panes.
 _ASSISTANT_CONFIG_PREFIX = "PENTACLE_ASSISTANT_"
+_DAEMON_ENV_KEYS = (
+    "PENTACLE_DAEMON_PROGRESS_PATH",
+    "PENTACLE_DAEMON_INSTANCE_ID",
+    "PENTACLE_DAEMON_STDOUT_PATH",
+    "PENTACLE_DAEMON_STDERR_PATH",
+    "PENTACLE_DOT_TLS_PORT",
+    "PENTACLE_DOT_TLS_BINDS",
+    "PENTACLE_DOT_TLS_CERT",
+    "PENTACLE_DOT_TLS_KEY",
+)
 
 
 def _local_tmux_env() -> dict[str, str]:
-    """A copy of the daemon environment without its assistant configuration."""
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith(_ASSISTANT_CONFIG_PREFIX)}
+    """Copy the environment without daemon-only settings."""
+    return {
+        key: value for key, value in os.environ.items()
+        if key not in _DAEMON_ENV_KEYS and not key.startswith(_ASSISTANT_CONFIG_PREFIX)
+    }
 
 
 class Tmux:
